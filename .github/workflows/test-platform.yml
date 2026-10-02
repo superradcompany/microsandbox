@@ -66,6 +66,14 @@ jobs:
           rustup target add --toolchain stable ${{ inputs.agentd_target }}
           cargo +stable test --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }}
 
+      - name: Test privileged agentd resource limits (Linux)
+        if: inputs.os == 'linux'
+        run: |
+          cargo +stable test --manifest-path crates/agentd/Cargo.toml \
+            --target ${{ inputs.agentd_target }} \
+            --config 'target.${{ inputs.agentd_target }}.runner = ["bash", "${{ github.workspace }}/scripts/ci/run-agentd-privileged-tests.sh"]' \
+            --lib nonroot_rlimits -- --ignored
+
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
         uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0

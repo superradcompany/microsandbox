@@ -50,6 +50,8 @@ use super::{device::SmoltcpDevice, shared::SharedState};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 #[cfg(windows)]
 const TX_WAKE_TOKEN: u64 = 1;
 
@@ -669,7 +671,7 @@ pub fn smoltcp_poll_loop(
 
         // Periodic cleanup is the idle fallback. TCP creation also reclaims
         // completed flows when the table is full, before rejecting a new SYN.
-        if last_cleanup.elapsed() >= std::time::Duration::from_secs(1) {
+        if last_cleanup.elapsed() >= CLEANUP_INTERVAL {
             conn_tracker.cleanup_closed(&mut sockets);
             conn_tracker.trace_stats(&sockets);
             port_publisher.cleanup_closed(&mut sockets);
@@ -698,16 +700,14 @@ pub fn smoltcp_poll_loop(
             .poll_delay(now, &sockets)
             .map(|delay| std::time::Duration::from_millis(delay.total_millis()));
 
-        let timeout_ms = [
+        // Packet/proxy events wake us immediately. Otherwise sleep to the next
+        // actual deadline, including cleanup even when the stack timer is later.
+        let timeout_ms = poll_timeout_ms(
             stack_delay,
             conn_tracker.deferred_close_delay(),
             port_publisher.deferred_close_delay(),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .map(|delay| delay.as_millis().min(i32::MAX as u128) as i32)
-        .unwrap_or(100); // 100ms fallback when no timers pending.
+            CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
+        );
 
         #[cfg(unix)]
         sleep_until_stack_wake(&shared, timeout_ms, &mut poll_fds);
@@ -719,6 +719,22 @@ pub fn smoltcp_poll_loop(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Bound sleep by every maintenance deadline without polling an idle stack.
+fn poll_timeout_ms(
+    stack_delay: Option<std::time::Duration>,
+    connection_close_delay: Option<std::time::Duration>,
+    port_close_delay: Option<std::time::Duration>,
+    cleanup_delay: std::time::Duration,
+) -> i32 {
+    let delay = [stack_delay, connection_close_delay, port_close_delay]
+        .into_iter()
+        .flatten()
+        .fold(cleanup_delay, std::cmp::min);
+    // Round up fractional milliseconds to avoid spinning just before cleanup.
+    // A deadline that is already due still requests an immediate poll.
+    delay.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32
+}
 
 #[cfg(unix)]
 fn sleep_until_stack_wake(shared: &SharedState, timeout_ms: i32, poll_fds: &mut [libc::pollfd; 2]) {
@@ -1322,6 +1338,30 @@ mod tests {
         .emit(&mut ArpPacket::new_unchecked(&mut frame[14..]));
 
         frame
+    }
+
+    #[test]
+    fn poll_sleep_honors_cleanup_and_earlier_transport_deadlines() {
+        use std::time::Duration;
+
+        let second = Duration::from_secs(1);
+        assert_eq!(poll_timeout_ms(None, None, None, second), 1000);
+        assert_eq!(poll_timeout_ms(Some(second * 60), None, None, second), 1000);
+        for index in 0..3 {
+            let mut timers = [None; 3];
+            timers[index] = Some(Duration::from_millis(25));
+            assert_eq!(poll_timeout_ms(timers[0], timers[1], timers[2], second), 25);
+            assert_eq!(
+                poll_timeout_ms(timers[0], timers[1], timers[2], Duration::ZERO),
+                0
+            );
+        }
+        assert_eq!(poll_timeout_ms(Some(Duration::ZERO), None, None, second), 0);
+        assert_eq!(
+            poll_timeout_ms(None, None, None, Duration::from_nanos(1)),
+            1
+        );
+        assert_eq!(poll_timeout_ms(None, None, None, Duration::MAX), i32::MAX);
     }
 
     #[test]

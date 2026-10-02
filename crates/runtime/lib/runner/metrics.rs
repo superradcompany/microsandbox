@@ -84,6 +84,8 @@ pub struct MetricsSamplerSpec {
     pub max_cpus: u8,
     /// VMM metrics source.
     pub krun_metrics: msb_krun::MetricsHandle,
+    /// VM execution state used to omit expensive residency scans while paused.
+    pub vm_control: msb_krun::VmControl,
     /// Optional runtime network byte counters.
     pub network_metrics: Option<Box<dyn NetworkMetrics>>,
     /// Host path of the writable upper image, when one exists.
@@ -104,12 +106,13 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         interval_ms,
         max_cpus,
         krun_metrics,
+        vm_control,
         network_metrics,
         upper_host_path,
     } = spec;
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
-    let mut previous = paired_snapshot(&krun_metrics);
+    let mut previous = paired_snapshot(&krun_metrics, &vm_control);
     let upper_host_path = upper_host_path.as_deref();
     let mut last_cpu_percent: Option<f32> = None;
 
@@ -138,7 +141,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
     loop {
         tokio::time::sleep(interval).await;
 
-        let current = paired_snapshot(&krun_metrics);
+        let current = paired_snapshot(&krun_metrics, &vm_control);
         let wall_secs = current
             .at
             .checked_duration_since(previous.at)
@@ -212,9 +215,23 @@ struct PairedSnapshot {
     uncertainty: Duration,
 }
 
-fn paired_snapshot(krun_metrics: &msb_krun::MetricsHandle) -> PairedSnapshot {
+fn paired_snapshot(
+    krun_metrics: &msb_krun::MetricsHandle,
+    vm_control: &msb_krun::VmControl,
+) -> PairedSnapshot {
+    // Use the completed VMM boundary, including checkpoint pauses. A transition
+    // racing this observation may permit one final scan or defer one until the
+    // next tick; it never blocks pause/resume or caches unrelated counters.
+    let paused = matches!(
+        vm_control.execution_state(),
+        Some(msb_krun::VmExecutionState::Paused(_))
+    );
     let before = Instant::now();
-    let metrics = krun_metrics.aggregate_snapshot();
+    let metrics = if paused {
+        krun_metrics.aggregate_snapshot_without_host_residency()
+    } else {
+        krun_metrics.aggregate_snapshot()
+    };
     let after = Instant::now();
     let uncertainty = after.saturating_duration_since(before);
     PairedSnapshot {
@@ -505,6 +522,51 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].upper_used_bytes, None);
         assert_eq!(snapshot[0].upper_free_bytes, None);
+        cleanup_shm(&name);
+    }
+
+    #[test]
+    fn write_sample_clears_unavailable_residency_and_restores_it_after_resume() {
+        let name = unique_shm_name("residency");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 10,
+                name: "residency",
+                memory_limit_bytes: 4096,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 11,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let mut krun = msb_krun::VmMetrics::default();
+
+        // The pause sample must clear validity, not retain the last value or
+        // publish zero resident bytes. Subsequent running samples restore it.
+        for residency in [Some(4096), None, None, Some(2048)] {
+            krun.memory.host_resident_bytes = residency;
+            assert!(
+                write_sample(
+                    &writer,
+                    Some(0.0),
+                    &krun,
+                    None,
+                    None,
+                    Duration::from_secs(3)
+                )
+                .is_ok()
+            );
+            assert_eq!(
+                registry.snapshot().unwrap()[0].memory_host_resident_bytes,
+                residency
+            );
+        }
         cleanup_shm(&name);
     }
 

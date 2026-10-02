@@ -3896,17 +3896,9 @@ async fn combined_ring_reader_task(
         }
         #[cfg(windows)]
         {
-            let shared_for_wait = Arc::clone(&shared);
-            let woke = tokio::task::spawn_blocking(move || {
-                shared_for_wait
-                    .tx_wake
-                    .wait_timeout(std::time::Duration::from_millis(100))
-            })
-            .await
-            .unwrap_or(false);
-            if !woke {
-                continue;
-            }
+            // Every producer signals the same wake primitive. Await its stored
+            // permit directly so idle readers and cancelled tasks need no worker.
+            shared.tx_wake.notified().await;
         }
 
         shared.tx_wake.drain();
@@ -3992,17 +3984,9 @@ async fn lane_reader_task(
         }
         #[cfg(windows)]
         {
-            let shared_for_wait = Arc::clone(&shared);
-            let woke = tokio::task::spawn_blocking(move || {
-                shared_for_wait
-                    .tx_wake
-                    .wait_timeout(std::time::Duration::from_millis(100))
-            })
-            .await
-            .unwrap_or(false);
-            if !woke {
-                continue;
-            }
+            // Every producer signals the same wake primitive. Await its stored
+            // permit directly so idle readers and cancelled tasks need no worker.
+            shared.tx_wake.notified().await;
         }
 
         shared.tx_wake.drain();

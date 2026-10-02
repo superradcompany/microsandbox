@@ -20,7 +20,7 @@ use microsandbox_types::{
 };
 use msb_krun::backends::net::NetBackend;
 
-use crate::config::{ConnectionLimit, ResolvedNetworkConfig};
+use crate::config::{ConnectionLimit, PortProtocol, ResolvedNetworkConfig};
 use crate::engine::tls::state::{TlsState, TlsStateError};
 use crate::netstack::{
     backend::SmoltcpBackend,
@@ -65,7 +65,7 @@ pub struct SmoltcpNetwork {
     gateway_mac: [u8; 6],
     mtu: u16,
     // IPv4 / IPv6 are `Some` when active for this sandbox: the user supplied
-    // an explicit address, or the host has a route for that family.
+    // an explicit address, the host has a route, or published ports need that family.
     guest_ipv4: Option<Ipv4Addr>,
     gateway_ipv4: Option<Ipv4Addr>,
     guest_ipv6: Option<Ipv6Addr>,
@@ -230,9 +230,28 @@ impl SmoltcpNetwork {
         let gateway_mac = derive_gateway_mac(slot);
         let mtu = config.interface.mtu.unwrap_or(1500);
 
+        // Preserve existing family selection, including IPv6-only TCP targets. If
+        // startup would leave the guest without any IP, supply the private addresses
+        // needed for published ports: TCP can bridge families and uses IPv4, while
+        // UDP needs the host bind's family. Neither requires an external host route.
+        let no_guest_address = !host_routes.ipv4
+            && !host_routes.ipv6
+            && config.interface.ipv4_address.is_none()
+            && config.interface.ipv6_address.is_none();
+        let published_ipv4 = no_guest_address
+            && config
+                .ports
+                .iter()
+                .any(|port| port.protocol == PortProtocol::Tcp || port.host_bind.is_ipv4());
+        let published_ipv6 = no_guest_address
+            && config
+                .ports
+                .iter()
+                .any(|port| port.protocol == PortProtocol::Udp && port.host_bind.is_ipv6());
+
         let guest_ipv4 = match config.interface.ipv4_address {
             Some(address) => Some(address),
-            None if host_routes.ipv4 => Some(derive_guest_ipv4(
+            None if host_routes.ipv4 || published_ipv4 => Some(derive_guest_ipv4(
                 config
                     .interface
                     .ipv4_pool
@@ -244,7 +263,7 @@ impl SmoltcpNetwork {
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
         let guest_ipv6 = match config.interface.ipv6_address {
             Some(address) => Some(address),
-            None if host_routes.ipv6 => Some(derive_guest_ipv6(
+            None if host_routes.ipv6 || published_ipv6 => Some(derive_guest_ipv6(
                 config
                     .interface
                     .ipv6_pool
@@ -768,6 +787,10 @@ fn host_has_ipv6_route() -> bool {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "network/published_ports_tests.rs"]
+mod published_ports_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
@@ -1196,6 +1219,97 @@ mod tests {
             .find(|(k, _)| k == ENV_NET_IPV6)
             .expect("explicit ipv6 should publish env var even without host route");
         assert!(v6.1.contains("fd42:6d73:62:99::2/64"));
+    }
+
+    #[test]
+    fn published_ports_preserve_existing_address_families() {
+        for (host_routes, explicit_address, profile, expected_ipv4, expected_ipv6) in [
+            (
+                routes(true, false),
+                None,
+                DeploymentProfile::SingleTenant,
+                true,
+                false,
+            ),
+            (
+                routes(false, true),
+                None,
+                DeploymentProfile::SingleTenant,
+                false,
+                true,
+            ),
+            (
+                routes(true, true),
+                None,
+                DeploymentProfile::SingleTenant,
+                true,
+                true,
+            ),
+            (
+                routes(false, false),
+                Some("fd42:6d73:62:99::2"),
+                DeploymentProfile::SingleTenant,
+                false,
+                true,
+            ),
+            (
+                routes(false, false),
+                Some("172.20.0.2"),
+                DeploymentProfile::SingleTenant,
+                true,
+                false,
+            ),
+            (
+                routes(false, false),
+                None,
+                DeploymentProfile::MultiTenant,
+                false,
+                false,
+            ),
+        ] {
+            let mut config = NetworkConfig::default();
+            config.tls.enabled = false;
+            let explicit_address = explicit_address.map(|address| address.parse().unwrap());
+            match explicit_address {
+                Some(std::net::IpAddr::V4(address)) => {
+                    config.interface.ipv4_address = Some(address)
+                }
+                Some(std::net::IpAddr::V6(address)) => {
+                    config.interface.ipv6_address = Some(address)
+                }
+                None => {}
+            }
+            config.ports.push(PublishedPort {
+                host_port: 8080,
+                guest_port: 8000,
+                protocol: PortProtocol::Tcp,
+                host_bind: Ipv4Addr::UNSPECIFIED.into(),
+            });
+            // Adding a missing UDP family must not switch an existing TCP target
+            // from IPv6 to IPv4, or otherwise change an already-addressed guest.
+            for host_bind in [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()] {
+                config.ports.push(PublishedPort {
+                    host_port: 8081,
+                    guest_port: 8001,
+                    protocol: PortProtocol::Udp,
+                    host_bind,
+                });
+            }
+            let network = SmoltcpNetwork::build(resolved(config), 7, profile, host_routes).unwrap();
+            let bootstrap = network.guest_bootstrap_network();
+
+            assert_eq!(bootstrap.ipv4.is_some(), expected_ipv4);
+            assert_eq!(bootstrap.ipv6.is_some(), expected_ipv6);
+            match explicit_address {
+                Some(std::net::IpAddr::V4(address)) => {
+                    assert_eq!(bootstrap.ipv4.unwrap().address, address);
+                }
+                Some(std::net::IpAddr::V6(address)) => {
+                    assert_eq!(bootstrap.ipv6.unwrap().address, address);
+                }
+                None => {}
+            }
+        }
     }
 
     #[test]

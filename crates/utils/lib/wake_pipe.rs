@@ -41,6 +41,7 @@ pub struct WakePipe {
 #[cfg(windows)]
 pub struct WakePipe {
     handle: HANDLE,
+    async_wake: tokio::sync::Notify,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -85,7 +86,10 @@ impl WakePipe {
         if handle.is_null() {
             panic!("CreateEventW failed: {}", std::io::Error::last_os_error());
         }
-        Self { handle }
+        Self {
+            handle,
+            async_wake: tokio::sync::Notify::new(),
+        }
     }
 
     /// Signal the reader. Safe to call from any thread, multiple times.
@@ -107,6 +111,21 @@ impl WakePipe {
         unsafe {
             SetEvent(self.handle);
         }
+        // Keep an async permit even when the reader has not started waiting yet.
+        // Native waiters still use the manual-reset event independently.
+        self.async_wake.notify_one();
+    }
+
+    /// Wait asynchronously for a wake without occupying a blocking worker.
+    ///
+    /// Intended for one async queue reader. Signals coalesce into one permit;
+    /// dropping this future is cancellation-safe. This does not drain the native
+    /// event: drain it before inspecting the queue, just as with a blocking wait.
+    /// Native drains do not consume async permits, so a reader must tolerate a
+    /// notification whose queued work has already been consumed.
+    #[cfg(windows)]
+    pub async fn notified(&self) {
+        self.async_wake.notified().await;
     }
 
     /// Drain all pending wake signals. Call after processing to reset the
@@ -269,6 +288,68 @@ fn wait_timeout(pipe: &WakePipe, timeout: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn async_wake_survives_cancellation_and_native_drain() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct Flag(AtomicBool);
+        impl Wake for Flag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        let waker = Waker::from(flag.clone());
+        let mut context = Context::from_waker(&waker);
+        let pipe = WakePipe::new();
+
+        // Pre-registration wakes coalesce, and a native drain cannot steal the
+        // async notification. Neither waiting mechanism consumes the other's signal.
+        pipe.wake();
+        pipe.wake();
+        pipe.drain();
+        assert_eq!(
+            Box::pin(pipe.notified()).as_mut().poll(&mut context),
+            Poll::Ready(())
+        );
+        let mut cancelled = Box::pin(pipe.notified());
+        assert!(cancelled.as_mut().poll(&mut context).is_pending());
+        drop(cancelled);
+
+        let mut waiting = Box::pin(pipe.notified());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        pipe.wake();
+        assert!(flag.0.load(Ordering::SeqCst));
+        // Cancellation after notification must also leave the permit available.
+        drop(waiting);
+        assert_eq!(
+            Box::pin(pipe.notified()).as_mut().poll(&mut context),
+            Poll::Ready(())
+        );
+        assert!(pipe.wait_timeout(Duration::ZERO));
+        pipe.drain();
+        assert!(
+            Box::pin(pipe.notified())
+                .as_mut()
+                .poll(&mut context)
+                .is_pending()
+        );
+
+        // Repeated waits exercise reset/wake ordering without periodic polling.
+        for _ in 0..100 {
+            let mut waiting = Box::pin(pipe.notified());
+            assert!(waiting.as_mut().poll(&mut context).is_pending());
+            pipe.wake();
+            assert!(waiting.as_mut().poll(&mut context).is_ready());
+            pipe.drain();
+        }
+    }
 
     #[test]
     fn wake_and_drain() {
