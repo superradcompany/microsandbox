@@ -29,7 +29,12 @@ msb create --name jetbrains-agent -c 2 -m 4G \
 
 msb exec jetbrains-agent --no-tty -- \
   npm install -g opencode-ai@1.18.32 </dev/null
+
+msb exec jetbrains-agent --no-tty -- sh -c \
+  'mkdir -p "$HOME/.config/opencode" && printf "%s\n" "{\"model\": \"opencode/mimo-v2.5-free\"}" > "$HOME/.config/opencode/opencode.json"' </dev/null
 ```
+
+The last command writes OpenCode's configuration to `~/.config/opencode/opencode.json` inside the sandbox. OpenCode loads this file on its own, so nothing about the model needs to live in the IDE's configuration. Edit it there, or copy in an existing `opencode.json` or `opencode.jsonc`, when you need more than a model name.
 
 Open this project in JetBrains using the same absolute path. The project must have the same path inside and outside the sandbox so the agent can find it.
 
@@ -57,18 +62,16 @@ command -v msb
       "command": "/absolute/path/to/msb",
       "args": [
         "exec", "jetbrains-agent", "--stream",
-        "-e", "OPENCODE_CONFIG_CONTENT",
         "--", "opencode", "acp"
-      ],
-      "env": {
-        "OPENCODE_CONFIG_CONTENT": "{\"model\":\"opencode/mimo-v2.5-free\"}"
-      }
+      ]
     }
   }
 }
 ```
 
 Keep `--stream`: it lets the IDE and agent exchange messages while the agent runs. Do not replace it with `--no-tty` or disconnect its stdin.
+
+`msb exec` runs as the sandbox's default user and sets `HOME` to that user's home directory. If your OpenCode configuration belongs to a different user, add `"-u", "<user>"` before `"--"`.
 
 The two MCP settings disable IDE and custom MCP tools, which may run outside the sandbox. These defaults also affect other agents that inherit them. Check that your sandbox agent does not override either setting to `true`.
 
@@ -81,7 +84,7 @@ Select **OpenCode in microsandbox** and send:
 
 Check that `hello.txt` appears in your project and the shell reports `Linux`.
 
-The example model was used with test data. Before opening a real project, choose a provider and model approved for your data, log in inside the sandbox, and replace the model name in the configuration:
+The example model was used with test data. Before opening a real project, choose a provider and model approved for your data, log in inside the sandbox, and replace the model name in the sandbox's `opencode.json`:
 
 ```bash
 msb exec jetbrains-agent -- opencode auth login
@@ -92,15 +95,86 @@ Your login is saved in the sandbox's home volume. Do not commit credentials.
 </Step>
 </Steps>
 
+## Work on more than one project
+
+`agent_servers` is an object keyed by the name shown in AI Chat, so it takes any number of named entries. It cannot be an array. You have two ways to cover several projects.
+
+**One sandbox for all projects.** The IDE sends each project's path to the agent when a chat starts, so a single entry works for every project that is mounted at its host path. Mounts are set when the sandbox is created, so add one `-v` per project:
+
+```bash
+REPO_A="$(cd /path/to/repo-a && pwd -P)"
+REPO_B="$(cd /path/to/repo-b && pwd -P)"
+
+msb create --name jetbrains-agent -c 2 -m 4G \
+  -v "$REPO_A:$REPO_A" \
+  -v "$REPO_B:$REPO_B" \
+  -v jetbrains-agent-home:/root \
+  -w "$REPO_A" node:22-bookworm </dev/null
+```
+
+The agent can reach every mounted project, whichever one the IDE has open. A project-level `opencode.json` still applies only to its own project.
+
+A parent directory mounted at its host path, such as `-v "$HOME/Dev:$HOME/Dev"`, covers every project under it with one mount. The agent can then reach everything in that directory.
+
+**One sandbox per project.** Create a sandbox for each project and add one entry per sandbox. The entries differ only in the sandbox name:
+
+```json
+{
+  "agent_servers": {
+    "OpenCode: repo-a": {
+      "command": "/absolute/path/to/msb",
+      "args": ["exec", "agent-repo-a", "--stream", "--", "opencode", "acp"]
+    },
+    "OpenCode: repo-b": {
+      "command": "/absolute/path/to/msb",
+      "args": ["exec", "agent-repo-b", "--stream", "--", "opencode", "acp"]
+    }
+  }
+}
+```
+
+Use this when projects must not see each other's files.
+
+In scripted tests, one OpenCode 1.18.32 process kept a separate working directory and project configuration for each session. Opening several projects from the JetBrains GUI has not been verified.
+
+## Share settings across entries
+
+JetBrains supports `env` only inside an agent entry; there is no global `env`. Keep shared settings in the sandbox so there is nothing to copy:
+
+- OpenCode settings go in the sandbox's `~/.config/opencode/opencode.json`.
+- Environment variables go on the sandbox: pass `-e KEY=value` to `msb create`. To change one on a running sandbox, run `msb modify jetbrains-agent -e KEY=value --restart` to apply it now, or use `--next-start` to save it for the next start.
+
 ## What the sandbox protects
 
 The agent can edit the shared project. ACP also allows agents to ask the IDE to read files or run commands on the host, so running an agent in a sandbox does not automatically keep every tool inside it. The MCP settings above do not disable those ACP requests. Review any MCP servers configured in the agent, too.
+
+Do not mount `~/.jetbrains` into the sandbox. The IDE reads `acp.json` on your computer, and the agent does not need it. That file sets the commands the IDE runs on the host, so an agent that can write to it can change what runs outside the sandbox.
 
 Scripted tests of OpenCode 1.18.32 kept file and shell operations inside the sandbox and could not read an unmounted host file. Recheck this behavior when changing agents or versions. The JetBrains GUI flow has not been verified, and the IDE can still send project context to the model.
 
 ## Other options
 
 <AccordionGroup>
+<Accordion title="Override OpenCode settings for one entry">
+
+`OPENCODE_CONFIG_CONTENT` holds OpenCode configuration as a JSON string and takes precedence over the configuration files. Use it when one entry needs a different setting, such as a second entry with another model:
+
+```json
+{
+  "args": [
+    "exec", "jetbrains-agent", "--stream",
+    "-e", "OPENCODE_CONFIG_CONTENT",
+    "--", "opencode", "acp"
+  ],
+  "env": {
+    "OPENCODE_CONFIG_CONTENT": "{\"model\":\"opencode/mimo-v2.5-free\"}"
+  }
+}
+```
+
+The `-e` flag forwards the variable into the sandbox. To load a configuration file from a non-default path instead, forward a path with `"-e", "OPENCODE_CONFIG=/path/in/sandbox/opencode.json"`.
+
+</Accordion>
 <Accordion title="Use Claude Code instead">
 
 Install the adapter and Claude Code in the same sandbox, then log in:
