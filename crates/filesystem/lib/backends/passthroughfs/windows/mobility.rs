@@ -592,8 +592,19 @@ fn restore_aliases(
             continue;
         }
         let path = path_from_components(fs, &alias.components)?;
-        fs.safe_metadata(&path)?;
         let data = prepared.inodes.by_inode[&alias.inode].clone();
+        if let Err(error) = fs.safe_metadata(&path) {
+            // Linked snapshots follow the live host namespace. An extra name
+            // may disappear while the canonical path still reaches the file.
+            // External checkpoints retain their strict/relaxed validation above.
+            if fs.cfg.external_checkpoint.is_none()
+                && path != data.path()
+                && error.raw_os_error() == Some(super::LINUX_ENOENT)
+            {
+                continue;
+            }
+            return Err(error);
+        }
         if fs.path_identity(&path)? != data.identity {
             return Err(invalid_state("alias no longer names its captured inode"));
         }
@@ -1052,6 +1063,43 @@ mod tests {
                 std::fs::read(temp.path().join("alias")).unwrap(),
                 b"contents"
             );
+        }
+    }
+
+    #[test]
+    fn linked_restore_tolerates_only_missing_noncanonical_hardlinks() {
+        for (removed, replace, succeeds) in [
+            ("alias", false, true),
+            ("alias", true, false),
+            ("first", false, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("first"), b"contents").unwrap();
+            std::fs::hard_link(temp.path().join("first"), temp.path().join("alias")).unwrap();
+            let source = backend(temp.path(), false, false);
+            let first = source.lookup(context(), 1, c"first").unwrap();
+            source.lookup(context(), 1, c"alias").unwrap();
+            let bytes = capture(&source).unwrap();
+            std::fs::remove_file(temp.path().join(removed)).unwrap();
+            if replace {
+                std::fs::write(temp.path().join(removed), b"replacement").unwrap();
+            }
+
+            let destination = backend(temp.path(), false, false);
+            let result = restore(&destination, &bytes);
+            if !succeeds {
+                assert!(
+                    result.is_err(),
+                    "restore accepted {removed}, replace={replace}"
+                );
+                continue;
+            }
+            result.expect("a missing extra hardlink must not block linked restore");
+            let stat = destination.getattr(context(), first.inode, None).unwrap().0;
+            assert_eq!((stat.st_size, stat.st_nlink), (8, 1));
+            assert!(destination.lookup(context(), 1, c"alias").is_err());
+            destination.unlink(context(), 1, c"first").unwrap();
+            assert!(destination.getattr(context(), first.inode, None).is_err());
         }
     }
 
