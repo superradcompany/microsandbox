@@ -116,17 +116,21 @@ fn published_ports_work_without_host_routes() {
 }
 
 async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
-    let host_port = match protocol {
-        PortProtocol::Tcp => std::net::TcpListener::bind((bind, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port(),
-        PortProtocol::Udp => std::net::UdpSocket::bind((bind, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port(),
+    let host_address = match protocol {
+        PortProtocol::Tcp => {
+            std::net::TcpListener::bind((bind, 0)).and_then(|listener| listener.local_addr())
+        }
+        PortProtocol::Udp => {
+            std::net::UdpSocket::bind((bind, 0)).and_then(|socket| socket.local_addr())
+        }
+    };
+    let host_port = match host_address {
+        Ok(address) => address.port(),
+        Err(error) if bind.is_ipv6() => {
+            eprintln!("skipping published {protocol:?} on {bind}: host cannot bind IPv6: {error}");
+            return;
+        }
+        Err(error) => panic!("binding published {protocol:?} on {bind}: {error}"),
     };
     let mut config = NetworkConfig::default();
     config.tls.enabled = false;
