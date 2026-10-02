@@ -114,6 +114,8 @@ msb create --name jetbrains-agent -c 2 -m 4G \
 
 The agent can reach every mounted project, whichever one the IDE has open. A project-level `opencode.json` still applies only to its own project.
 
+A parent directory mounted at its host path, such as `-v "$HOME/Dev:$HOME/Dev"`, covers every project under it with one mount. The agent can then reach everything in that directory.
+
 **One sandbox per project.** Create a sandbox for each project and add one entry per sandbox. The entries differ only in the sandbox name:
 
 ```json
@@ -145,6 +147,8 @@ JetBrains supports `env` only inside an agent entry; there is no global `env`. K
 ## What the sandbox protects
 
 The agent can edit the shared project. ACP also allows agents to ask the IDE to read files or run commands on the host, so running an agent in a sandbox does not automatically keep every tool inside it. The MCP settings above do not disable those ACP requests. Review any MCP servers configured in the agent, too.
+
+Do not mount `~/.jetbrains` into the sandbox. The IDE reads `acp.json` on your computer, and the agent does not need it. That file sets the commands the IDE runs on the host, so an agent that can write to it can change what runs outside the sandbox.
 
 Scripted tests of OpenCode 1.18.32 kept file and shell operations inside the sandbox and could not read an unmounted host file. Recheck this behavior when changing agents or versions. The JetBrains GUI flow has not been verified, and the IDE can still send project context to the model.
 
