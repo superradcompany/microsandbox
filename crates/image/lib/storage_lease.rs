@@ -225,6 +225,8 @@ mod tests {
 
     #[test]
     fn descriptor_pins_allow_reads_and_exclude_retirement() {
+        use std::time::{Duration, Instant};
+
         let directory = tempfile::tempdir().unwrap();
         let descriptor = directory.path().join("snapshot.json");
         std::fs::write(&descriptor, b"descriptor").unwrap();
@@ -245,9 +247,16 @@ mod tests {
                 .is_none()
         );
         drop(clone);
-        let deletion = StorageLease::descriptor(&descriptor, true)
-            .unwrap()
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let deletion = loop {
+            if let Some(lease) = StorageLease::descriptor(&descriptor, true).unwrap() {
+                break lease;
+            }
+            // Parallel tests may fork while this descriptor is live. The child retains
+            // the flock briefly until exec closes its inherited descriptor.
+            assert!(Instant::now() < deadline, "descriptor remained busy");
+            std::thread::sleep(Duration::from_millis(1));
+        };
         // Windows must reserve a marker beyond the JSON bytes, not a mandatory lock
         // over bytes that the deleting operation still needs to inspect.
         assert_eq!(std::fs::read(&descriptor).unwrap(), b"descriptor");
