@@ -2672,6 +2672,7 @@ mod tests {
             kind: CoreErrorKind::CapabilityUnavailable,
             message: "missing freezer".into(),
             offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+            init_failure: None,
             workload_failure: None,
         };
         let check = |error: &CoreError| {
@@ -3079,6 +3080,7 @@ mod tests {
                 kind: CoreErrorKind::CapabilityUnavailable,
                 message: "freezer unavailable".into(),
                 offending_type: Some(MessageType::WorkloadFreeze.as_str().into()),
+                init_failure: None,
                 workload_failure: None,
             },
         )

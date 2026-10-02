@@ -8,6 +8,7 @@
 //! `error:` header, a white cause line tagged with the stage, and any
 //! number of dim-cyan hint lines mapped from the stage + errno.
 
+use microsandbox_protocol::core::InitFailureReason;
 use microsandbox_runtime::boot_error::{BootError, BootErrorStage};
 
 use crate::ui::{self, ErrorLine};
@@ -55,11 +56,30 @@ fn stage_label(stage: BootErrorStage) -> &'static str {
     }
 }
 
-/// Map a `(stage, errno, message)` tuple to an actionable hint, when
-/// one is known. Returns `None` if no specific hint applies — the
+/// Map a typed guest failure or stage and errno to an actionable hint
+/// when one is known. Returns `None` if no specific hint applies — the
 /// `error_with_lines` rendering will then show only the cause line and
 /// the always-on log pointer.
 fn stage_hint(err: &BootError) -> Option<String> {
+    match err.reason {
+        Some(InitFailureReason::UserNotFound) => {
+            return Some(
+                "user selects an existing account; remove the user \
+                override to use the image default, or create that account \
+                in the image"
+                    .into(),
+            );
+        }
+        Some(InitFailureReason::GroupNotFound) => {
+            return Some(
+                "the requested group must exist in the image; correct the group \
+            override or create that group in the image"
+                    .into(),
+            );
+        }
+        _ => {}
+    }
+
     match (err.stage, err.errno) {
         // Mount + ENOENT → host path doesn't exist.
         (BootErrorStage::Mount, Some(2)) => Some(extract_mount_hint(&err.message)),
@@ -103,10 +123,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guest_hints_use_typed_reasons_not_diagnostic_wording() {
+        for (reason, expected_hint) in [
+            (
+                serde_json::json!("user_not_found"),
+                Some("user selects an existing account"),
+            ),
+            (
+                serde_json::json!("group_not_found"),
+                Some("the requested group must exist"),
+            ),
+            (serde_json::json!("a_future_reason"), None),
+            (serde_json::Value::Null, None),
+        ] {
+            for message in [
+                "new diagnostic wording",
+                "guest initialization failed: guest user not found: iggy",
+            ] {
+                let mut record = serde_json::json!({
+                    "t": "2026-10-02T00:00:00Z",
+                    "stage": "other",
+                    "errno": null,
+                    "message": message,
+                });
+                if !reason.is_null() {
+                    record["reason"] = reason.clone();
+                }
+                let error: BootError = serde_json::from_value(record).unwrap();
+                let hint = stage_hint(&error);
+                match expected_hint {
+                    Some(expected) => assert!(hint.unwrap().starts_with(expected)),
+                    None => assert!(hint.is_none()),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mount_enoent_has_hint() {
         let err = BootError {
             t: "2026-04-30T20:32:59.690Z".into(),
             stage: BootErrorStage::Mount,
+            reason: None,
             errno: Some(2),
             message: "mount foo: No such file or directory (os error 2)".into(),
         };
@@ -118,6 +176,7 @@ mod tests {
         let err = BootError {
             t: "2026-04-30T20:32:59.690Z".into(),
             stage: BootErrorStage::Other,
+            reason: None,
             errno: None,
             message: "weird".into(),
         };
@@ -129,6 +188,7 @@ mod tests {
         let err = BootError {
             t: "x".into(),
             stage: BootErrorStage::Network,
+            reason: None,
             errno: Some(48), // macOS EADDRINUSE
             message: "bind: in use".into(),
         };
@@ -137,6 +197,7 @@ mod tests {
         let err2 = BootError {
             t: "x".into(),
             stage: BootErrorStage::Network,
+            reason: None,
             errno: Some(98), // linux EADDRINUSE
             message: "bind: in use".into(),
         };

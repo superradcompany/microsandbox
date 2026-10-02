@@ -1316,6 +1316,7 @@ impl LocalBackend {
                             t: chrono::Utc::now()
                                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                             stage: microsandbox_runtime::boot_error::BootErrorStage::Other,
+                            reason: None,
                             errno: None,
                             message: format!(
                                 "sandbox process exited ({status}) before agent relay became available"

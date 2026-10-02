@@ -721,6 +721,8 @@ fn run(
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    relay = relay.with_boot_error_log_dir(config.log_dir.clone());
+
     let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
         Ok(disk_paths) => disk_paths,
         Err(error) => {

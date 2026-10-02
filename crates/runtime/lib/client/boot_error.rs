@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use microsandbox_protocol::core::InitFailureReason;
 use serde::{Deserialize, Serialize};
 
 use crate::RuntimeError;
@@ -72,6 +73,10 @@ pub struct BootError {
     /// `errno` if the underlying failure was a syscall, else `None`.
     pub errno: Option<i32>,
 
+    /// Typed guest startup failure used for actionable hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<InitFailureReason>,
+
     /// Human-readable message — the same string that goes to `runtime.log`.
     pub message: String,
 }
@@ -86,10 +91,20 @@ impl BootError {
     pub fn from_runtime_error(err: &RuntimeError) -> Self {
         let message = err.to_string();
         let errno = extract_errno(err);
-        let stage = classify_stage(&message);
+        let reason = match err {
+            RuntimeError::GuestInitialization { reason, .. } => *reason,
+            _ => None,
+        };
+        let stage = match reason {
+            Some(InitFailureReason::UserNotFound | InitFailureReason::GroupNotFound) => {
+                BootErrorStage::Config
+            }
+            _ => classify_stage(&message),
+        };
         Self {
             t: now_rfc3339(),
             stage,
+            reason,
             errno,
             message,
         }
@@ -262,6 +277,7 @@ mod tests {
         let err = BootError {
             t: "2026-04-30T20:32:59.690Z".to_string(),
             stage: BootErrorStage::Mount,
+            reason: None,
             errno: Some(2),
             message: "mount foo: No such file or directory (os error 2)".to_string(),
         };

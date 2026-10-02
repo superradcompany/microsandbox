@@ -24,12 +24,13 @@ use microsandbox_protocol::bulk::{
 };
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched, WORKLOAD_TRANSPORT_BARRIER_VERSION,
-    WORKLOAD_TRANSPORT_BULK_BYTES, WORKLOAD_TRANSPORT_BULK_FRAMES,
-    WORKLOAD_TRANSPORT_CONTROL_BYTES, WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure,
-    WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
-    WorkloadTransportCredit, WorkloadTransportPosition,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitFailureReason, InitResolved, Ping, Pong,
+    Ready, RelayClientDisconnected, ResolvedUser, Touch, Touched,
+    WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
+    WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
+    WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
+    WorkloadFrozen, WorkloadThaw, WorkloadThawed, WorkloadTransportCredit,
+    WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
@@ -1734,6 +1735,52 @@ pub fn report_init_context(
     wait_for_init_ack(fd, boot_console, deadline)
 }
 
+/// Reports a fatal startup error before exiting the guest.
+///
+/// The host acknowledges only after saving the diagnostic for CLI and SDK
+/// callers. Older hosts discard this report, so waiting is bounded.
+pub fn report_init_failure(
+    port_file: &File,
+    boot_console: &mut BootConsoleState,
+    message: &str,
+    error: &AgentdError,
+) -> AgentdResult<()> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let fd = port_file.as_raw_fd();
+    set_nonblocking(fd)?;
+    let msg = Message::with_payload(
+        MessageType::CoreError,
+        0,
+        &CoreError {
+            kind: CoreErrorKind::InitializationFailed,
+            message: message.to_owned(),
+            offending_type: None,
+            init_failure: match error {
+                AgentdError::UserNotFound(_) => Some(InitFailureReason::UserNotFound),
+                AgentdError::GroupNotFound(_) => Some(InitFailureReason::GroupNotFound),
+                _ => None,
+            },
+            workload_failure: None,
+        },
+    )?;
+    let mut out = Vec::new();
+    codec::encode_to_buf(&msg, &mut out)?;
+    write_all_to_fd(fd, &out, deadline)?;
+
+    loop {
+        let ack = read_boot_message(fd, boot_console, deadline, "init failure ack")?;
+        if ack.t != MessageType::InitAck || ack.id != 0 || ack.flags != 0 {
+            return Err(AgentdError::Init(
+                "expected init failure acknowledgement".into(),
+            ));
+        }
+        if ack.payload::<InitAck>()?.failure {
+            return Ok(());
+        }
+        // A late success acknowledgement must not release a failing guest.
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
@@ -2466,6 +2513,7 @@ async fn handle_message_with_charge(
                         kind: CoreErrorKind::CapabilityUnavailable,
                         message,
                         offending_type: Some(msg.t.as_str().into()),
+                        init_failure: None,
                         workload_failure: None,
                     },
                 ),
@@ -3637,6 +3685,7 @@ fn encode_core_error(
             kind,
             message,
             offending_type,
+            init_failure: None,
             workload_failure: None,
         },
     )
@@ -3677,6 +3726,7 @@ fn encode_workload_error(
             kind,
             message: error.to_string(),
             offending_type: Some(source.t.as_str().to_string()),
+            init_failure: None,
             workload_failure: Some(WorkloadFailure {
                 attempt_id: attempt_id.to_string(),
                 disposition,
@@ -4778,11 +4828,62 @@ mod tests {
     }
 
     #[test]
+    fn init_failure_waits_for_failure_ack_after_late_success_ack() {
+        use std::io::{Read, Write};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        for ack_failure in [false, true] {
+            let (guest, mut host) = UnixStream::pair().unwrap();
+            host.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let guest = File::from(OwnedFd::from(guest));
+            let worker = std::thread::spawn(move || {
+                report_init_failure(
+                    &guest,
+                    &mut BootConsoleState::default(),
+                    "missing guest user",
+                    &AgentdError::UserNotFound("iggy".into()),
+                )
+            });
+            let mut header = [0u8; 4];
+            host.read_exact(&mut header).unwrap();
+            let mut frame = vec![0; u32::from_be_bytes(header) as usize];
+            host.read_exact(&mut frame).unwrap();
+            let mut input = header.to_vec();
+            input.extend_from_slice(&frame);
+            let report = codec::try_decode_from_buf(&mut input).unwrap().unwrap();
+            assert_eq!(report.t, MessageType::CoreError);
+            assert_eq!(
+                report.payload::<CoreError>().unwrap().init_failure,
+                Some(InitFailureReason::UserNotFound)
+            );
+            assert_eq!(
+                report.payload::<CoreError>().unwrap().message,
+                "missing guest user"
+            );
+
+            let mut acks = Vec::new();
+            for failure in [false].into_iter().chain(ack_failure.then_some(true)) {
+                codec::encode_to_buf(
+                    &Message::with_payload(MessageType::InitAck, 0, &InitAck { failure }).unwrap(),
+                    &mut acks,
+                )
+                .unwrap();
+            }
+            host.write_all(&acks).unwrap();
+            host.shutdown(std::net::Shutdown::Write).unwrap();
+            assert_eq!(worker.join().unwrap().is_ok(), ack_failure);
+        }
+    }
+
+    #[test]
     fn coalesced_bootstrap_and_init_ack_retain_the_second_frame() {
         let bootstrap = GuestBootstrap::default();
         let bootstrap_message =
             Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
-        let ack_message = Message::with_payload(MessageType::InitAck, 0, &InitAck {}).unwrap();
+        let ack_message =
+            Message::with_payload(MessageType::InitAck, 0, &InitAck::default()).unwrap();
         let mut state = BootConsoleState::default();
         codec::encode_to_buf(&bootstrap_message, &mut state.input).unwrap();
         codec::encode_to_buf(&ack_message, &mut state.input).unwrap();
