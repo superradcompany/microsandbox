@@ -31,8 +31,8 @@ pub unsafe extern "C" fn msb_sandbox_shell_path(
     })
 }
 
-/// Retain legacy text fields for older Go readers; raw bytes use the same
-/// base64 representation as streaming Collect, including empty streams.
+/// Retain legacy text fields for older Go readers. Only non-UTF-8 streams
+/// need the additive base64 representation used by streaming Collect.
 pub(crate) fn collected_output_json(output: &microsandbox::sandbox::ExecOutput) -> String {
     collected_streams_json(
         output.stdout_bytes(),
@@ -42,14 +42,26 @@ pub(crate) fn collected_output_json(output: &microsandbox::sandbox::ExecOutput) 
 }
 
 fn collected_streams_json(stdout: &[u8], stderr: &[u8], exit_code: i32) -> String {
-    serde_json::json!({
-        "stdout": std::str::from_utf8(stdout).unwrap_or_default(),
-        "stderr": std::str::from_utf8(stderr).unwrap_or_default(),
-        "stdout_b64": base64::engine::general_purpose::STANDARD.encode(stdout),
-        "stderr_b64": base64::engine::general_purpose::STANDARD.encode(stderr),
+    let stdout_text = std::str::from_utf8(stdout);
+    let stderr_text = std::str::from_utf8(stderr);
+    let mut payload = serde_json::json!({
+        "stdout": stdout_text.unwrap_or_default(),
+        "stderr": stderr_text.unwrap_or_default(),
         "exit_code": exit_code,
-    })
-    .to_string()
+    });
+    // Valid UTF-8, including NUL, round-trips through JSON without loss. Sending
+    // a second copy would reduce the output that fits older callers' 1 MiB buffer.
+    for (field, bytes, needs_base64) in [
+        ("stdout_b64", stdout, stdout_text.is_err()),
+        ("stderr_b64", stderr, stderr_text.is_err()),
+    ] {
+        if needs_base64 {
+            payload[field] = base64::engine::general_purpose::STANDARD
+                .encode(bytes)
+                .into();
+        }
+    }
+    payload.to_string()
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -89,6 +101,37 @@ mod tests {
                 .decode(fields[field].as_str().unwrap())
                 .unwrap();
             assert_eq!(bytes, expected);
+        }
+    }
+
+    #[test]
+    fn large_text_keeps_legacy_buffer_capacity() {
+        let mut buffer = vec![0; 1 << 20];
+        // Exercise both plain text near the limit and JSON-escaped text. Both
+        // fit the old response but would overflow if also encoded as base64.
+        for stdout in [vec![b'a'; (1 << 20) - 128], vec![0; 160 << 10]] {
+            let payload = collected_streams_json(&stdout, b"error", 7);
+            let legacy = serde_json::json!({
+                "stdout": std::str::from_utf8(&stdout).unwrap(),
+                "stderr": "error",
+                "exit_code": 7,
+            })
+            .to_string();
+            assert_eq!(payload, legacy);
+            assert!(crate::write_output(buffer.as_mut_ptr(), buffer.len(), &payload).is_ok());
+        }
+    }
+
+    #[test]
+    fn mixed_streams_only_encode_the_non_utf8_stream() {
+        for (stdout, stderr, encoded, text) in [
+            (&b"text\0"[..], &b"\xff"[..], "stderr_b64", "stdout_b64"),
+            (&b"\xff"[..], &b"text\0"[..], "stdout_b64", "stderr_b64"),
+        ] {
+            let payload: serde_json::Value =
+                serde_json::from_str(&collected_streams_json(stdout, stderr, 0)).unwrap();
+            assert_eq!(payload[encoded], "/w==");
+            assert!(payload.get(text).is_none());
         }
     }
 }

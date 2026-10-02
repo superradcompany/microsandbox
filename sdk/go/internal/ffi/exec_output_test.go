@@ -12,6 +12,21 @@ func TestCollectedOutputPreservesBinary(t *testing.T) {
 	}
 }
 
+func TestCollectedOutputAcceptsMixedTextAndBinary(t *testing.T) {
+	for _, tc := range []struct{ payload, stdout, stderr string }{
+		{`{"stdout":"text\u0000","stderr":"","stderr_b64":"/w==","exit_code":7}`, "text\x00", "\xff"},
+		{`{"stdout":"","stdout_b64":"/w==","stderr":"text\u0000","exit_code":7}`, "\xff", "text\x00"},
+	} {
+		out, err := decodeCollectedOutput(tc.payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Stdout != tc.stdout || out.Stderr != tc.stderr || out.ExitCode != 7 {
+			t.Fatalf("mixed output changed: %#v", out)
+		}
+	}
+}
+
 func TestCollectedOutputAcceptsLegacyNativeResponse(t *testing.T) {
 	out, err := decodeCollectedOutput(`{"stdout":"hello","stderr":"error","exit_code":null}`)
 	if err != nil {

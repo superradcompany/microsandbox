@@ -85,3 +85,28 @@ func TestCollectedExecTextCompatibility(t *testing.T) {
 		}
 	}
 }
+
+// The two streams together fit the legacy 1 MiB FFI buffer, but duplicating
+// them as base64 would exceed it. Exercise both collected execution entrypoints.
+func TestLargeCollectedExecTextCompatibility(t *testing.T) {
+	ctx := integrationCtx(t)
+	name := "go-sdk-large-text-compat"
+	script := `head -c 307200 /dev/zero | tr '\000' a; head -c 307200 /dev/zero | tr '\000' b >&2; exit 7`
+	sb, err := createSandbox(t, ctx, name, microsandbox.WithImage(goIntegrationImage), microsandbox.WithEntrypoint("sh"), microsandbox.WithCmd("-c", script))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sb.Stop(ctx); _ = sb.Close(); _ = microsandbox.RemoveSandbox(ctx, name) }()
+	for _, run := range []func() (*microsandbox.ExecOutput, error){
+		func() (*microsandbox.ExecOutput, error) { return sb.Exec(ctx, "sh", []string{"-c", script}) },
+		func() (*microsandbox.ExecOutput, error) { return sb.ExecDefault(ctx) },
+	} {
+		out, err := run()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(out.StdoutBytes(), bytes.Repeat([]byte{'a'}, 307200)) || !bytes.Equal(out.StderrBytes(), bytes.Repeat([]byte{'b'}, 307200)) || out.ExitCode() != 7 {
+			t.Fatalf("large text output changed: stdout=%d bytes stderr=%d bytes exit=%d", len(out.StdoutBytes()), len(out.StderrBytes()), out.ExitCode())
+		}
+	}
+}

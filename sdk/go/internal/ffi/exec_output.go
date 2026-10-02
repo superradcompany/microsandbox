@@ -7,7 +7,7 @@ import (
 )
 
 // Decode the additive byte fields when present. Their presence (including an
-// empty string) matters: only old native libraries require the legacy text path.
+// empty string) matters. Valid UTF-8 streams and old native libraries use text.
 func decodeCollectedOutput(payload string) (*ExecResult, error) {
 	var raw struct {
 		Stdout    string  `json:"stdout"`
