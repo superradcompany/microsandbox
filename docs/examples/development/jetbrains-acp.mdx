@@ -102,6 +102,9 @@ Your login is saved in the sandbox's home volume. Do not commit credentials.
 **One sandbox for all projects.** The IDE sends each project's path to the agent when a chat starts, so a single entry works for every project that is mounted at its host path. Mounts are set when the sandbox is created, so add one `-v` per project:
 
 ```bash
+REPO_A="$(cd /path/to/repo-a && pwd -P)"
+REPO_B="$(cd /path/to/repo-b && pwd -P)"
+
 msb create --name jetbrains-agent -c 2 -m 4G \
   -v "$REPO_A:$REPO_A" \
   -v "$REPO_B:$REPO_B" \
@@ -137,7 +140,7 @@ In scripted tests, one OpenCode 1.18.32 process kept a separate working director
 JetBrains supports `env` only inside an agent entry; there is no global `env`. Keep shared settings in the sandbox so there is nothing to copy:
 
 - OpenCode settings go in the sandbox's `~/.config/opencode/opencode.json`.
-- Environment variables go on the sandbox, with `-e KEY=value` on `msb create` or `msb modify jetbrains-agent -e KEY=value` later.
+- Environment variables go on the sandbox: pass `-e KEY=value` to `msb create`. To change one on a running sandbox, run `msb modify jetbrains-agent -e KEY=value --restart` to apply it now, or use `--next-start` to save it for the next start.
 
 ## What the sandbox protects
 
