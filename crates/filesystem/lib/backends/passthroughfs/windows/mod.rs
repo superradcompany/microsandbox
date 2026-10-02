@@ -37,9 +37,8 @@ mod owned_metadata;
 mod remove_ops;
 mod stat_store;
 
-use super::window::WindowMapping;
+use dax::{DaxFiles, DaxWindows};
 use inode::{DirHandle, DirSnapshotEntry, HandleData, InodeData, InodeTable};
-use memory_mapping::WindowsFileMappingView;
 pub(super) use owned_metadata::{
     capture_owned_metadata, clear_owned_payload_metadata, owned_component, restore_owned_metadata,
 };
@@ -166,7 +165,9 @@ pub struct PassthroughFs {
     quota: Option<super::quota::DirQuota>,
     invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
     /// Installed DAX mappings, keyed by guest address.
-    map_windows: Mutex<BTreeMap<u64, WindowMapping<Arc<WindowsFileMappingView>>>>,
+    map_windows: Mutex<DaxWindows>,
+    /// Host-file coordination shared by hardlink aliases, separate from worker waits.
+    dax_files: DaxFiles,
 }
 
 #[repr(C, packed)]

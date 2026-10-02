@@ -151,14 +151,7 @@ impl DynFileSystem for PassthroughFs {
             return Err(linux_error(LINUX_EISDIR));
         }
 
-        let retained = self.prepare_owned_unlink(&path)?;
-        std::fs::remove_file(&path).map_err(host_error)?;
-        self.retain_owned_unlink(retained);
-        self.remove_inode_path(&path);
-        if let Some(store) = &self.stat_store {
-            store.remove(&path)?;
-        }
-        Ok(())
+        self.unlink_file(&path)
     }
 
     fn rmdir(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
@@ -204,26 +197,13 @@ impl DynFileSystem for PassthroughFs {
         }
         if new_path.exists() {
             self.safe_metadata(&new_path)?;
-            if self.cfg.owned_checkpoint.is_some()
-                && self.owned_identity(&old_path)? == self.owned_identity(&new_path)?
-            {
+            if self.path_identity(&old_path)? == self.path_identity(&new_path)? {
                 // POSIX rename of two aliases of one inode is a namespace no-op.
                 return Ok(());
             }
         }
 
-        let retained = if old_path != new_path && new_path.exists() {
-            self.prepare_owned_unlink(&new_path)?
-        } else {
-            None
-        };
-        std::fs::rename(&old_path, &new_path).map_err(host_error)?;
-        self.retain_owned_unlink(retained);
-        if let Some(store) = &self.stat_store {
-            store.rename(&old_path, &new_path)?;
-        }
-        self.rename_inode_path(&old_path, &new_path);
-        Ok(())
+        self.rename_file(&old_path, &new_path)
     }
 
     fn link(&self, _ctx: Context, inode: u64, newparent: u64, newname: &CStr) -> io::Result<Entry> {
@@ -306,6 +286,10 @@ impl DynFileSystem for PassthroughFs {
         }
 
         let data = self.inode(inode)?;
+        // Query identity without holding the handle lock while waiting for the
+        // host-file lock (another alias may already be operating on this file).
+        let state = self.dax_files.get(&handle.file.lock().unwrap())?;
+        let _operation = state.operation.lock().unwrap_or_else(|p| p.into_inner());
         let old_len = self.inode_metadata(&data)?.len();
         let file = handle.file.lock().unwrap();
         let offset = if handle.flags & LINUX_O_APPEND as u32 != 0 {
@@ -314,13 +298,27 @@ impl DynFileSystem for PassthroughFs {
             offset
         };
         self.quota_charge_growth(old_len, offset.saturating_add(size as u64))?;
-        let written = r
-            .read_to(&file, size as usize, offset)
-            .map_err(host_error)?;
-        if kill_priv {
-            self.clear_priv_bits(data.as_ref())?;
-        }
-        Ok(written)
+        let result = r.read_to(&file, size as usize, offset).map_err(host_error);
+        // Even a failed write may have extended the file before reporting an
+        // error. Keep existing DAX readers coherent in either case.
+        drop(file);
+        let privileges = if kill_priv {
+            self.clear_priv_bits(data.as_ref())
+        } else {
+            Ok(())
+        };
+        let refresh = if state.has_mappings() {
+            self.map_windows
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .refresh_file(&state)
+        } else {
+            Ok(())
+        };
+        // Attempt both cleanup and refresh even after a partially failed write.
+        privileges?;
+        refresh?;
+        result
     }
 
     fn flush(&self, _ctx: Context, inode: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
@@ -615,8 +613,7 @@ impl DynFileSystem for PassthroughFs {
             crossbeam_channel::Sender<msb_krun_utils::worker_message::WorkerMessage>,
         >,
     ) -> io::Result<()> {
-        dax::do_setupmapping(
-            self,
+        self.do_setupmapping(
             inode,
             foffset,
             len,
@@ -638,6 +635,6 @@ impl DynFileSystem for PassthroughFs {
             crossbeam_channel::Sender<msb_krun_utils::worker_message::WorkerMessage>,
         >,
     ) -> io::Result<()> {
-        dax::do_removemapping(self, &requests, host_shm_base, shm_size, map_sender)
+        self.do_removemapping(&requests, host_shm_base, shm_size, map_sender)
     }
 }

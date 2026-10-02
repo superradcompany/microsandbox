@@ -50,7 +50,7 @@ pub(crate) fn decode<T: DeserializeOwned>(kind: &[u8; 8], bytes: &[u8]) -> io::R
     if &bytes[..8] != kind || u16::from_le_bytes(bytes[8..10].try_into().unwrap()) != SCHEMA {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "unsupported backend state format",
+            "unsupported snapshot filesystem format; if this snapshot was created with a newer microsandbox runtime, upgrade to that version or newer to restore it",
         ));
     }
 
