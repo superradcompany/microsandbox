@@ -1026,6 +1026,13 @@ impl ExecSession {
                 unsafe { libc::_exit(1) };
             }
 
+            // Apply limits while privileged so non-root commands can raise hard limits.
+            for (resource, limit) in &parsed_rlimits {
+                if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
+                    unsafe { libc::_exit(1) };
+                }
+            }
+
             if let Some(ref user) = resolved_user
                 && apply_resolved_user(user).is_err()
             {
@@ -1035,13 +1042,6 @@ impl ExecSession {
             if let (Some(key), Some(home)) = (&home_key, &default_home) {
                 unsafe {
                     libc::setenv(key.as_ptr(), home.as_ptr(), 1);
-                }
-            }
-
-            // Apply resource limits.
-            for (resource, limit) in &parsed_rlimits {
-                if unsafe { libc::setrlimit(*resource as _, limit) } != 0 {
-                    unsafe { libc::_exit(1) };
                 }
             }
 
@@ -1151,13 +1151,14 @@ impl ExecSession {
                     return Err(std::io::Error::last_os_error());
                 }
                 apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
-                if let Some(ref user) = resolved_user {
-                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
-                }
+                // Apply limits before dropping the privilege needed to raise hard limits.
                 for (resource, limit) in &parsed_rlimits {
                     if libc::setrlimit(*resource as _, limit) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
+                }
+                if let Some(ref user) = resolved_user {
+                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
                 }
                 Ok(())
             });
@@ -2380,6 +2381,92 @@ mod tests {
                 .expect("wait for piped process exit")
         });
         assert_eq!(code, 63);
+    }
+
+    // Run on Linux as root with CAP_SYS_RESOURCE and a finite memlock hard limit.
+    // For Docker: --cap-add SYS_RESOURCE --ulimit memlock=8388608:8388608.
+    #[tokio::test]
+    #[ignore = "requires root, CAP_SYS_RESOURCE, and a finite memlock hard limit"]
+    async fn test_piped_nonroot_can_raise_memlock() {
+        assert_nonroot_can_raise_memlock(false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root, CAP_SYS_RESOURCE, and a finite memlock hard limit"]
+    async fn test_pty_nonroot_can_raise_memlock() {
+        assert_nonroot_can_raise_memlock(true).await;
+    }
+
+    async fn assert_nonroot_can_raise_memlock(tty: bool) {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "requires guest root");
+        let mut baseline = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut baseline) },
+            0
+        );
+        assert_ne!(
+            baseline.rlim_max,
+            libc::RLIM_INFINITY,
+            "requires a finite baseline"
+        );
+        let raised = baseline.rlim_max.checked_add(1024 * 1024).unwrap();
+        assert_eq!(raised % 1024, 0);
+
+        for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let req = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "test \"$(id -u)\" = 65534 && test \"$(ulimit -S -l)\" = {0} && test \"$(ulimit -H -l)\" = {0}",
+                        raised / 1024,
+                    ),
+                ],
+                env: vec!["PATH=/usr/local/bin:/usr/bin:/bin".into()],
+                cwd: None,
+                user: Some("65534:65534".into()),
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![microsandbox_protocol::exec::ExecRlimit {
+                    resource: "memlock".into(),
+                    soft: raised,
+                    hard: raised,
+                }],
+            };
+            let session = ExecSession::spawn(7, &req, tx, None, profile, None)
+                .expect("spawn non-root command with raised memlock");
+            let result = time::timeout(Duration::from_secs(10), async {
+                while let Some(envelope) = rx.recv().await {
+                    if let SessionOutput::Exited(code) = envelope.output {
+                        return code;
+                    }
+                }
+                panic!("session closed without an exit status");
+            })
+            .await;
+            if result.is_err() {
+                let _ = session.send_signal(libc::SIGKILL);
+            }
+            assert_eq!(result.expect("non-root command timed out"), 0);
+        }
+
+        let mut after = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut after) },
+            0
+        );
+        assert_eq!(
+            (after.rlim_cur, after.rlim_max),
+            (baseline.rlim_cur, baseline.rlim_max)
+        );
     }
 
     #[tokio::test]
