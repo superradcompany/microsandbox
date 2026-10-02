@@ -4286,6 +4286,7 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
+ "tokio",
  "ureq",
  "windows-sys 0.61.2",
 ]

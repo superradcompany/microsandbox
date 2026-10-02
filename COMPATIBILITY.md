@@ -288,6 +288,8 @@ The finalized private transport-credit contract charges stdin, inline filesystem
 
 Routine host clock maintenance is independent of unrelated correlation input, but stays ordered with other clocks and true global lifecycle fences. Its timestamp is sampled at console admission, not when queued; disconnect cleanup signals fence their own session only. Maintenance remains subject to the pause gate. This bounds host-queue timestamp age, not subsequent aging of already-admitted bytes during arbitrary host suspension or the kernel-only pause fallback when the workload freezer is unavailable.
 
+On Windows, console readers await in-process wake notifications instead of scheduling a blocking wait every 100 ms. The native manual-reset event remains available to synchronous consumers; cancellation drops the async wait without leaving a blocked worker. This changes no launch, console framing, agent capability, or SDK/runtime wire contract in either direction.
+
 Evolution rules:
 
 - Do not make semantically harmless serialization changes to identity-bearing bytes without treating them as an identity format change.
@@ -352,6 +354,8 @@ Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate r
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
+Network idle sleep is bounded by the existing one-second cleanup deadline and any earlier stack or deferred-close deadline, with packet and proxy events still waking it immediately.
+
 Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/network/lib/engine/network.rs`](crates/network/lib/engine/network.rs), and the remaining modules under [`crates/network/lib`](crates/network/lib).
 
 Address or MAC changes can create collisions or silently alter policy identity. Protocol changes should be tested with real TCP, UDP, DNS, TLS, HTTP CONNECT, published-port, and secret-substitution clients, including fragmentation, half-close, cancellation, and denied-destination cases.
@@ -373,6 +377,8 @@ Metrics use a binary shared-memory structure across independently executing proc
 Sources: [`crates/metrics/lib/layout.rs`](crates/metrics/lib/layout.rs), [`crates/metrics/lib/registry.rs`](crates/metrics/lib/registry.rs), and [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs).
 
 Do not reorder fields, change widths or alignment, weaken atomic ordering, or redefine slot states under the same ABI. Incompatible changes must bump the registry version or ABI so old and new processes do not map the same object. Prefer checked-in offset and binary-layout fixtures in addition to total-size assertions.
+
+Paused runtimes omit the host-residency scan and clear the existing `SAMPLE_FLAG_MEMORY_HOST_RESIDENT` validity bit. The field retains its meaning as a current observation; no cached value is presented as current. Slot layout, registry ABI, timestamps, and other counter sampling remain unchanged. Historical v0.6 readers already interpret this cleared bit as unavailable, and newer readers continue to accept residency values from older runtimes that still scan while paused. This runtime change requires the additive libkrun selective-snapshot API; it does not change SDK launch or control protocols.
 
 ## 16. Heartbeats, Boot Errors, Logs, and Runtime Diagnostics
 
