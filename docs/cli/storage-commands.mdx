@@ -55,7 +55,7 @@ JSON includes `entries`, `files_removed`, `logical_bytes_removed`, and `physical
 
 ## Automatic branch cleanup
 
-Branch backing is reclaimed best-effort after its last tracked SDK or baseline owner releases it, provided no other pin or handoff remains. Paused sandboxes retain their backing. Runtime process exit and abrupt termination release kernel pins; bounded background sweeps scheduled after stop or before a subsequent branch reclaim leftovers. The pre-branch sweep is limited to once every 30 seconds within one SDK process and examines at most 256 directory entries per pass, advancing its cursor across passes.
+Branch backing is reclaimed best-effort after its last tracked SDK or baseline owner releases it, provided no other pin or handoff remains. Paused sandboxes retain their backing. Runtime process exit and abrupt termination release kernel pins. After a graceful stop, cleanup tries the stopped branch's exact backing file and then traverses the branch cache in bounded passes without pauses between them; CLI commands wait for that traversal after the graceful-stop result, while SDK callers can continue without waiting. A subsequent branch also triggers a bounded sweep for leftovers, limited to once every 30 seconds within one SDK process.
 
 Automatic cleanup targets branch memory. Unused snapshot RAM realizations remain available for warm restores until explicitly pruned. Neither path changes memory bytes, snapshot formats, or checkpoint sparsity.
 

@@ -29,7 +29,7 @@ mod restore;
 
 pub use cache_storage::{
     MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
-    inspect_memory_cache, prune_memory_cache,
+    MemoryPruneSession, inspect_memory_cache, prune_memory_cache,
 };
 pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]

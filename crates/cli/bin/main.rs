@@ -661,6 +661,7 @@ fn run_async_command_anyhow(
     let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
+        let mut cleanup_backend = None;
         // Stale-sandbox reaping and ephemeral cleanup are owned by host
         // runtime processes (`msb machine`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
@@ -675,10 +676,11 @@ fn run_async_command_anyhow(
             {
                 local.prepare_cli_catalog().await?;
             }
+            cleanup_backend = Some(backend.clone());
             microsandbox::set_default_backend(backend);
         }
 
-        match command {
+        let result = match command {
             Commands::Machine(_) | Commands::LaunchProtocol => {
                 unreachable!("handled before Tokio starts")
             }
@@ -727,7 +729,16 @@ fn run_async_command_anyhow(
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
             Commands::Completion(args) => completion::run(args, Cli::command()),
+        };
+        // A CLI runtime would cancel the deferred worker when this function returns.
+        // Drain after dispatch so graceful-stop deadlines still cover only VM teardown.
+        if let Some(local) = cleanup_backend
+            .as_ref()
+            .and_then(|backend| backend.as_local())
+        {
+            local.finish_stopped_memory_cleanup().await;
         }
+        result
     })
 }
 

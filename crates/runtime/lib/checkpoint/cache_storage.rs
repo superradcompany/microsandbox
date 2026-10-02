@@ -40,6 +40,15 @@ pub struct MemoryPruneOptions {
     pub branches_only: bool,
 }
 
+/// Independent bounded traversal for a caller that must visit the whole cache.
+/// The opportunistic global cursor remains available to one-off prune calls.
+#[derive(Default)]
+pub struct MemoryPruneSession {
+    cursor: SweepCursor,
+    root: Option<PathBuf>,
+    branches_only: bool,
+}
+
 /// Namespace of a complete, immutable RAM realization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +139,31 @@ struct MemoryCandidate {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl MemoryPruneSession {
+    /// Run one bounded pass, retaining this session's directory position for the next pass.
+    pub fn prune(
+        &mut self,
+        root: &Path,
+        options: &MemoryPruneOptions,
+    ) -> io::Result<MemoryCacheReport> {
+        // A session may be reused, but a cursor belongs to one root and namespace
+        // selection. Unbounded requests always start an independent full scan.
+        if self.root.as_deref() != Some(root)
+            || self.branches_only != options.branches_only
+            || options.max_entries.is_none()
+        {
+            self.cursor = SweepCursor::default();
+            self.root = Some(root.to_path_buf());
+            self.branches_only = options.branches_only;
+        }
+        prune_memory_cache_with_cursor(root, options, Some(&mut self.cursor))
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -152,6 +186,14 @@ pub fn prune_memory_cache(
     root: &Path,
     options: &MemoryPruneOptions,
 ) -> io::Result<MemoryCacheReport> {
+    prune_memory_cache_with_cursor(root, options, None)
+}
+
+fn prune_memory_cache_with_cursor(
+    root: &Path,
+    options: &MemoryPruneOptions,
+    cursor: Option<&mut SweepCursor>,
+) -> io::Result<MemoryCacheReport> {
     let mut report = MemoryCacheReport {
         dry_run: options.dry_run,
         ..Default::default()
@@ -167,6 +209,7 @@ pub fn prune_memory_cache(
         &root_handle,
         options.max_entries,
         options.branches_only,
+        cursor,
     )?;
     report.truncated = truncated;
     for candidate in candidates {
@@ -223,8 +266,11 @@ fn candidates(
     root_handle: &fs::File,
     limit: Option<usize>,
     branches_only: bool,
+    mut session_cursor: Option<&mut SweepCursor>,
 ) -> io::Result<(Vec<MemoryCandidate>, bool)> {
-    let mut cursor = if limit.is_some() {
+    let mut cursor = if let Some(cursor) = session_cursor.as_deref_mut() {
+        std::mem::take(cursor)
+    } else if limit.is_some() {
         SWEEP_CURSORS
             .lock()
             .map_err(|_| io::Error::other("memory sweep cursor lock poisoned"))?
@@ -268,14 +314,18 @@ fn candidates(
         }
         loop {
             if limit.is_some_and(|limit| examined >= limit) {
-                let mut cursors = SWEEP_CURSORS
-                    .lock()
-                    .map_err(|_| io::Error::other("memory sweep cursor lock poisoned"))?;
-                // Keep descriptors bounded even when embedding clients use many backend roots.
-                if cursors.len() >= 64 {
-                    cursors.clear();
+                if let Some(session) = session_cursor {
+                    *session = cursor;
+                } else {
+                    let mut cursors = SWEEP_CURSORS
+                        .lock()
+                        .map_err(|_| io::Error::other("memory sweep cursor lock poisoned"))?;
+                    // Keep descriptors bounded even when embedding clients use many backend roots.
+                    if cursors.len() >= 64 {
+                        cursors.clear();
+                    }
+                    cursors.insert((root.to_path_buf(), branches_only), cursor);
                 }
-                cursors.insert((root.to_path_buf(), branches_only), cursor);
                 return Ok((paths, true));
             }
             let directory = cursor.directory.as_mut().expect("opened namespace");
@@ -752,6 +802,42 @@ mod tests {
         assert!(!snapshot.exists());
     }
 
+    #[test]
+    fn complete_session_starts_at_the_beginning_despite_an_opportunistic_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        for id in 0..5 {
+            branch(root.path(), &format!("child{id}"));
+        }
+        let preview = MemoryPruneOptions {
+            dry_run: true,
+            branches_only: true,
+            max_entries: Some(1),
+            ..Default::default()
+        };
+        // Leave the ordinary one-off scanner partway through the namespace.
+        loop {
+            let report = prune_memory_cache(root.path(), &preview).unwrap();
+            assert!(report.truncated);
+            if !report.entries.is_empty() {
+                break;
+            }
+        }
+        let apply = MemoryPruneOptions {
+            dry_run: false,
+            ..preview
+        };
+        let mut session = MemoryPruneSession::default();
+        let mut removed = 0;
+        loop {
+            let report = session.prune(root.path(), &apply).unwrap();
+            removed += report.files_removed;
+            if !report.truncated {
+                break;
+            }
+        }
+        assert_eq!(removed, 5);
+    }
+
     #[cfg(unix)]
     #[test]
     fn bounded_cursor_rejects_a_namespace_replaced_by_a_symlink() {
@@ -805,7 +891,8 @@ mod tests {
         branch(root.path(), "selected");
         let foreign = branch(outside.path(), "selected");
         let root_handle = open_directory(root.path()).unwrap();
-        let (selected, truncated) = candidates(root.path(), &root_handle, None, true).unwrap();
+        let (selected, truncated) =
+            candidates(root.path(), &root_handle, None, true, None).unwrap();
         assert!(!truncated);
         assert_eq!(selected.len(), 1);
 

@@ -69,6 +69,7 @@ def run(args):
                 'test "$(cat /root/storage-marker)" = disk-state; test "$(cat /ram/storage-marker)" = ram-state')
         command("stop-source", "stop", "source")
         command("stop-branch", "stop", "branch")
+        assert report("usage-after-stops", "df")["branch_memory"]["count"] == 0
         assert report("prune-stopped-image", "image", "prune", "--yes")["image_refs_removed"] == 0
         command("remove-source", "remove", "source")
         command("remove-branch", "remove", "branch")
