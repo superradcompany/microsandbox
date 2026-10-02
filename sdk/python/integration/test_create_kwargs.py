@@ -143,12 +143,20 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
 @pytest.mark.parametrize(
     ("kwargs", "error_type", "message"),
     [
-        ({"max_duration": -1.0}, ValueError, "max_duration must be non-negative"),
-        ({"idle_timeout": -1.0}, ValueError, "idle_timeout must be non-negative"),
+        (
+            {"max_duration": -1.0},
+            ValueError,
+            "max_duration must be finite, non-negative, and fit in seconds",
+        ),
+        (
+            {"idle_timeout": -1.0},
+            ValueError,
+            "idle_timeout must be finite, non-negative, and fit in seconds",
+        ),
         (
             {"replace_with_timeout": -1.0},
             ValueError,
-            "replace_with_timeout must be non-negative",
+            "replace_with_timeout must be finite, non-negative, and fit in a duration",
         ),
         ({"pull_policy": "sometimes"}, TypeError, "PullPolicy"),
         ({"log_level": "verbose"}, TypeError, "LogLevel"),
