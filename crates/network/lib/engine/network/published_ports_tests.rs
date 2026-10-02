@@ -126,7 +126,7 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
     };
     let host_port = match host_address {
         Ok(address) => address.port(),
-        Err(error) if bind.is_ipv6() => {
+        Err(error) if bind.is_ipv6() && ipv6_loopback_unavailable(&error) => {
             eprintln!("skipping published {protocol:?} on {bind}: host cannot bind IPv6: {error}");
             return;
         }
@@ -275,4 +275,16 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     client.await.unwrap();
+}
+
+fn ipv6_loopback_unavailable(error: &std::io::Error) -> bool {
+    match error.raw_os_error() {
+        #[cfg(unix)]
+        Some(libc::EAFNOSUPPORT | libc::EPROTONOSUPPORT) => true,
+        // Winsock WSAEPROTONOSUPPORT / WSAEAFNOSUPPORT. Keep this test-only check
+        // independent of the optional windows-sys WinSock feature.
+        #[cfg(windows)]
+        Some(10043 | 10047) => true,
+        _ => error.kind() == std::io::ErrorKind::AddrNotAvailable,
+    }
 }
