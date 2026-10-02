@@ -303,10 +303,9 @@ impl Drop for StopMemorySweepRegistration {
         if sweeps
             .get(&self.root)
             .is_some_and(|sweep| Arc::ptr_eq(&sweep.token, &self.token))
+            && let Some(sweep) = sweeps.remove(&self.root)
         {
-            if let Some(sweep) = sweeps.remove(&self.root) {
-                sweep.finished.send_replace(true);
-            }
+            sweep.finished.send_replace(true);
         }
     }
 }
