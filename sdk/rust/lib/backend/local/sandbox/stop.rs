@@ -1,6 +1,11 @@
 //! Graceful stop completion for one persisted sandbox and runtime generation.
 
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::Duration,
+};
 
 use microsandbox_runtime::ipc::try_acquire_lifecycle_guard;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
@@ -10,6 +15,30 @@ use crate::sandbox::SandboxStatus;
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 use super::LocalBackend;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const STOP_MEMORY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+static STOP_MEMORY_SWEEPS: LazyLock<Mutex<HashMap<PathBuf, StopMemorySweep>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct StopMemorySweep {
+    // The token distinguishes this worker from one registered after it has exited.
+    token: Arc<()>,
+    pending: bool,
+}
+
+struct StopMemorySweepRegistration {
+    root: PathBuf,
+    token: Arc<()>,
+}
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -220,19 +249,7 @@ impl LocalBackend {
                 drop(_disk_guards);
                 drop(_ownership);
                 drop(transition);
-                let root = self.cache_dir().join("memory");
-                tokio::task::spawn_blocking(move || {
-                    let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
-                        branches_only: true,
-                        max_entries: Some(256),
-                        ..Default::default()
-                    };
-                    if let Err(error) =
-                        microsandbox_runtime::checkpoint::prune_memory_cache(&root, &options)
-                    {
-                        tracing::debug!(%error, "deferred stopped sandbox memory cleanup");
-                    }
-                });
+                schedule_stopped_memory_sweep(self.cache_dir().join("memory"));
                 return Ok(());
             }
             drop(transition);
@@ -242,16 +259,295 @@ impl LocalBackend {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for StopMemorySweepRegistration {
+    fn drop(&mut self) {
+        // Also clear the registration if its Tokio runtime shuts down during the
+        // cooldown. Never remove a newer worker registered for the same root.
+        let mut sweeps = STOP_MEMORY_SWEEPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if sweeps
+            .get(&self.root)
+            .is_some_and(|sweep| Arc::ptr_eq(&sweep.token, &self.token))
+        {
+            sweeps.remove(&self.root);
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn schedule_stopped_memory_sweep(root: PathBuf) {
+    schedule_stopped_memory_sweep_with(root, STOP_MEMORY_SWEEP_INTERVAL, |root| {
+        let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
+            branches_only: true,
+            max_entries: Some(256),
+            ..Default::default()
+        };
+        match microsandbox_runtime::checkpoint::prune_memory_cache(root, &options) {
+            Ok(report) => report.truncated,
+            Err(error) => {
+                tracing::debug!(%error, "deferred stopped sandbox memory cleanup");
+                false
+            }
+        }
+    });
+}
+
+fn schedule_stopped_memory_sweep_with(
+    root: PathBuf,
+    interval: Duration,
+    sweep: impl Fn(&Path) -> bool + Send + Sync + 'static,
+) {
+    let token = {
+        let mut sweeps = STOP_MEMORY_SWEEPS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(active) = sweeps.get_mut(&root) {
+            // Coalesce stops during an active scan or cooldown into one
+            // follow-up pass, while the worker also drains truncated scans.
+            active.pending = true;
+            return;
+        }
+        let token = Arc::new(());
+        sweeps.insert(
+            root.clone(),
+            StopMemorySweep {
+                token: Arc::clone(&token),
+                pending: false,
+            },
+        );
+        token
+    };
+    let sweep = Arc::new(sweep);
+    tokio::spawn(async move {
+        let _registration = StopMemorySweepRegistration {
+            root: root.clone(),
+            token,
+        };
+        loop {
+            let scan_root = root.clone();
+            let scan = Arc::clone(&sweep);
+            let truncated = match tokio::task::spawn_blocking(move || scan(&scan_root)).await {
+                Ok(truncated) => truncated,
+                Err(error) => {
+                    tracing::debug!(%error, "stopped sandbox memory cleanup worker failed");
+                    false
+                }
+            };
+            // Follow the bounded directory cursor until it completes a full
+            // traversal. Delaying each pass keeps filesystem pressure bounded.
+            tokio::time::sleep(interval).await;
+            let mut sweeps = STOP_MEMORY_SWEEPS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(active) = sweeps.get_mut(&root)
+                && (active.pending || truncated)
+            {
+                active.pending = false;
+                continue;
+            }
+            sweeps.remove(&root);
+            break;
+        }
+    });
+}
+
+//--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Condvar,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use sea_orm::Set;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::db::entity::sandbox;
     use crate::sandbox::SandboxConfig;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_memory_sweeps_coalesce_without_blocking_other_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("first");
+        let other_root = home.path().join("second");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let unexpected = Arc::new(AtomicUsize::new(0));
+        schedule_stopped_memory_sweep_with(root.clone(), Duration::from_millis(10), {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            let scans = Arc::clone(&scans);
+            move |_| {
+                let number = scans.fetch_add(1, Ordering::SeqCst);
+                started.notify_one();
+                if number == 0 {
+                    let (lock, ready) = &*release;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = ready.wait(released).unwrap();
+                    }
+                }
+                false
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+
+        // A burst while the first scan is blocked must request only one trailing pass.
+        for _ in 0..100 {
+            schedule_stopped_memory_sweep_with(root.clone(), Duration::from_millis(10), {
+                let unexpected = Arc::clone(&unexpected);
+                move |_| {
+                    unexpected.fetch_add(1, Ordering::SeqCst);
+                    false
+                }
+            });
+        }
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+
+        // The per-root limit must not serialize an unrelated cache root.
+        let other_started = Arc::new(Notify::new());
+        schedule_stopped_memory_sweep_with(other_root, Duration::from_millis(10), {
+            let other_started = Arc::clone(&other_started);
+            move |_| {
+                other_started.notify_one();
+                false
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), other_started.notified())
+            .await
+            .unwrap();
+
+        let (lock, ready) = &*release;
+        *lock.lock().unwrap() = true;
+        ready.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert_eq!(scans.load(Ordering::SeqCst), 2);
+        assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !STOP_MEMORY_SWEEPS.lock().unwrap().contains_key(&root) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(scans.load(Ordering::SeqCst), 2);
+
+        // A later stop starts a fresh worker after the previous cooldown ends.
+        let fresh = Arc::new(Notify::new());
+        schedule_stopped_memory_sweep_with(root, Duration::from_millis(10), {
+            let fresh = Arc::clone(&fresh);
+            move |_| {
+                fresh.notify_one();
+                false
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), fresh.notified())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_memory_sweep_finishes_a_large_bounded_traversal() {
+        use microsandbox_utils::process_lock::lock_shared;
+
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("memory");
+        let branches = root.join("branches");
+        std::fs::create_dir_all(&branches).unwrap();
+        let mut pins = Vec::new();
+        for id in 0..611 {
+            let path = branches.join(format!("branch-{id:04}-4096.ram"));
+            std::fs::write(&path, [7_u8]).unwrap();
+            std::fs::File::create(path.with_extension("handoff-lock")).unwrap();
+            if id < 10 {
+                let pin = std::fs::File::open(&path).unwrap();
+                lock_shared(&pin).unwrap();
+                pins.push(pin);
+            }
+        }
+
+        let passes = Arc::new(AtomicUsize::new(0));
+        schedule_stopped_memory_sweep_with(root.clone(), Duration::from_millis(1), {
+            let passes = Arc::clone(&passes);
+            move |root| {
+                let report = microsandbox_runtime::checkpoint::prune_memory_cache(
+                    root,
+                    &microsandbox_runtime::checkpoint::MemoryPruneOptions {
+                        branches_only: true,
+                        max_entries: Some(256),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                passes.fetch_add(1, Ordering::SeqCst);
+                report.truncated
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !STOP_MEMORY_SWEEPS.lock().unwrap().contains_key(&root) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // The first 512 directory positions cannot cover 611 RAM files, let alone
+        // their lock files. A full traversal removes every unpinned generation.
+        assert!(passes.load(Ordering::SeqCst) >= 5);
+        for id in 0..611 {
+            let path = branches.join(format!("branch-{id:04}-4096.ram"));
+            assert_eq!(path.exists(), id < 10, "{}", path.display());
+        }
+        assert_eq!(pins.len(), 10);
+    }
+
+    #[test]
+    fn stopped_memory_sweep_registration_clears_on_runtime_shutdown() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("memory");
+        let started = Arc::new(Notify::new());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            schedule_stopped_memory_sweep_with(root.clone(), Duration::from_secs(30), {
+                let started = Arc::clone(&started);
+                move |_| {
+                    started.notify_one();
+                    false
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(2), started.notified())
+                .await
+                .unwrap();
+        });
+        drop(runtime);
+        assert!(!STOP_MEMORY_SWEEPS.lock().unwrap().contains_key(&root));
+    }
 
     async fn fixture(name: &str) -> (tempfile::TempDir, LocalBackend, i32, i32) {
         let home = tempfile::tempdir().unwrap();
