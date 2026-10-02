@@ -70,7 +70,7 @@ try:
     run("snapshot", "create", "one", "--group", "volumes", "--from-sandbox", "source", "--full")
     verify("source", 1)
     for child, forked in [("eager", False), ("forked", True)]:
-        create(child, "--from-snapshot", "volumes:one", *(["--forked"] if forked else []))
+        create(child, "--from-snapshot", "volumes:one", *(["--cow-mem"] if forked else []))
         verify(child, 1)
         run("exec", child, "--", "sh", "-ec", "echo child > /data/generation; echo child > /other/generation; sync")
         verify("source", 1)
@@ -86,7 +86,7 @@ try:
     # offline, rather than accidentally reusing the source's image/materialization cache.
     offline = dict(env, MSB_HOME=str(root / "offline-home"))
     run("snapshot", "load", str(root / "two.msb"), str(root / "one.msb"), "--group", "loaded", environment=offline)
-    create("imported", "--from-snapshot", "loaded", "--forked", "--pull", "never", environment=offline)
+    create("imported", "--from-snapshot", "loaded", "--cow-mem", "--pull", "never", environment=offline)
     verify("imported", 2, environment=offline)
     create("disk-only", "--from-snapshot", "volumes:two", "--disk-only")
     verify("disk-only", 2)
@@ -96,7 +96,7 @@ try:
     direct = root / "direct.msb"
     run("snapshot", "create", "direct", "--from-sandbox", "source", "--full", "-o", str(direct))
     assert sorted(str(p) for p in (root / "home" / "snapshots").rglob("snapshot.json")) == installed_before
-    create("direct", "--from-snapshot", str(direct), "--forked")
+    create("direct", "--from-snapshot", str(direct), "--cow-mem")
     verify("direct", 2)
     stop_remove("direct")
     names.append(("branch", None))

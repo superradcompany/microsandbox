@@ -113,9 +113,17 @@ mod tests {
 
     async fn prior_database() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, Some((Migrator::migrations().len() - 1) as u32))
-            .await
-            .unwrap();
+        Migrator::up(
+            &db,
+            Some(
+                Migrator::migrations()
+                    .iter()
+                    .position(|migration| migration.name() == Migration.name())
+                    .unwrap() as u32,
+            ),
+        )
+        .await
+        .unwrap();
         db.execute_unprepared("INSERT INTO snapshot_index (digest, snapshot_id, descriptor_digest, name, scope, state_kind, image_ref, image_manifest_digest, artifact_path, created_at, indexed_at) VALUES ('sha256:original', 'snap_original', 'sha256:original', 'baseline', 'disk', 'file', 'example', 'sha256:image', '/old/baseline', '2026-09-10 00:00:00', '2026-09-10 00:00:00')").await.unwrap();
         db
     }
@@ -123,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn preserves_old_rows_and_round_trips_ungrouped_database() {
         let db = prior_database().await;
-        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(&db, Some(1)).await.unwrap();
         let row = db
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -162,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn permits_duplicate_imports_and_refuses_lossy_downgrade() {
         let db = prior_database().await;
-        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(&db, Some(1)).await.unwrap();
         for group in ["first", "second"] {
             db.execute_unprepared(&format!("INSERT INTO snapshot_index ({SHARED_COLUMNS}, group_name, group_path) SELECT digest, snapshot_id, descriptor_digest, name, parent_digest, scope, state_kind, image_ref, image_manifest_digest, format, fstype, checkpoint_manifest_digest, '/snapshots/{group}/baseline', size_bytes, locality, storage_binding_id, availability, migration_state, migration_error_code, created_at, indexed_at, child_count, '{group}', '/snapshots/{group}' FROM snapshot_index WHERE artifact_path = '/old/baseline'")).await.unwrap();
         }

@@ -33,6 +33,7 @@ use crate::db::entity::{
     sandbox_rootfs as sandbox_rootfs_entity,
 };
 use crate::runtime::handle::StartupProcess;
+use crate::runtime::launch_contract;
 use crate::runtime::spawn::EnsuredNamedVolumes;
 use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
@@ -209,6 +210,7 @@ impl LocalBackend {
                 .map(|image| crate::SandboxConfigPatch::from_image(&image.pull_result.config)),
         )?;
         config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
+        super::super::host_paths::resolve_host_paths(&mut config)?;
         // Compatibility callers can supply a snapshot reference alongside an image.
         // Resolve it with this backend before replacement or child reservation can mutate state.
         if let Some(reference) = config.snapshot_reference.take() {
@@ -244,7 +246,7 @@ impl LocalBackend {
         let db = self.db().await?;
         // Runtime compatibility is independent of the upgraded catalog. Keep
         // unsupported requests from deleting a replace target before launch.
-        crate::db::writing::validate_runtime_config(&config, self.config()).await?;
+        launch_contract::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Preserve only the installed-snapshot source that existed on entry. Direct archive
         // materialization below installs its checkpoint closure directly into child staging, so
@@ -280,6 +282,7 @@ impl LocalBackend {
             if config.spec.runtime.user.is_none() {
                 config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
             }
+            crate::sandbox::apply_snapshot_guest_clock(&mut config, &materialized.manifest)?;
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
@@ -337,7 +340,7 @@ impl LocalBackend {
             // before admitting it or touching the replacement target.
             config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
             // Keep launch-time restore intent in this check, not just cold-start state.
-            crate::db::writing::validate_runtime_config(&config, self.config()).await?;
+            launch_contract::validate_runtime_config(&config, self.config()).await?;
             archive_stage = Some(stage);
         }
 
@@ -416,12 +419,30 @@ impl LocalBackend {
             }
         }
         crate::sandbox::resolve_external_mounts(self, &mut config).await?;
+        // Resource inheritance may add legacy relative bindings after initial admission.
+        // This is a new child: pin its launch inputs without rewriting the saved source.
+        super::super::host_paths::resolve_host_paths(&mut config)?;
+        // After external-mount admission, so a relaxed restore can still mark a vanished
+        // mount unavailable, and before the sandbox row is inserted. Earlier work (image
+        // pull, archive decode, child materialization, a `--replace` deletion) has already
+        // happened, as with the runtime's own boot-time failure. Older runtimes follow
+        // root symlinks, so only a runtime that refuses them is checked.
+        let enforce = match crate::setup::resolve_runtime(self.config()) {
+            Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
+                .await?
+                .refuses_symlinked_bind_roots(),
+            Err(crate::MicrosandboxError::RuntimeNotInstalled(_)) => true,
+            Err(error) => return Err(error),
+        };
+        if enforce {
+            super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
+        }
 
         // Archive descriptors are resolved here, after the builder's initial validation.
         // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
         if config.forked && config.checkpoint_restore.is_none() {
             return Err(crate::MicrosandboxError::InvalidConfig(
-                "forked requires a full snapshot restore".into(),
+                "copy-on-write memory requires a full snapshot restore".into(),
             ));
         }
         if !installed_file_sources.is_empty() {
@@ -471,6 +492,22 @@ impl LocalBackend {
                 .root_disk
                 .clone()
                 .unwrap_or(RootDisk::Managed { size_mib: None });
+            // Reject incompatible snapshot + patch combinations before image resolution and
+            // before the sandbox directory exists. A rejected run must leave no on-disk state,
+            // because the leftover directory blocks retries under the same name (see #1550).
+            // Flat roots bake patches into a private tree and are compatible with both paths.
+            if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
+                if config.snapshot_upper_source.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with from_snapshot".into(),
+                    ));
+                }
+                if !config.snapshot_upper_layers.is_empty() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "patches cannot be combined with full snapshot restore".into(),
+                    ));
+                }
+            }
             let image_materialization = if matches!(root_disk, RootDisk::Flat { .. }) {
                 RootfsMaterialization::Flat
             } else {
@@ -691,21 +728,14 @@ impl LocalBackend {
                     *size_mib = Some(target_mib);
                 }
             } else if !config.snapshot_upper_layers.is_empty() {
-                if upper_tree.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with full snapshot restore".into(),
-                    ));
-                }
+                // Restored upper layers are attached by the runtime, so there is no writable
+                // disk to provision here.
             } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
                 // Booting from a snapshot: copy the captured upper into
                 // place, preserving sparseness. Patches are not
                 // compatible with this path because they'd need to be
                 // re-baked into the snapshot's upper, which we don't do.
-                if upper_tree.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with from_snapshot".into(),
-                    ));
-                }
+                // That combination is rejected before this directory exists.
                 if snap_upper != writable_disk_path {
                     let dst = writable_disk_path.clone();
                     tokio::task::spawn_blocking(move || {
@@ -898,7 +928,6 @@ impl LocalBackend {
             write_db,
             sandbox_id,
             &sandbox.config().clone_for_persistence(),
-            Some(self.config()),
         )
         .await
         {
@@ -1932,11 +1961,11 @@ impl LocalBackend {
 
     /// Insert the sandbox record in the database and return its ID.
     #[cfg(test)]
-    pub(super) async fn insert_sandbox_record(
+    pub(in crate::backend::local) async fn insert_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
     ) -> MicrosandboxResult<i32> {
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running, None).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
     }
 
     /// Insert a provisional local create record that remains non-connectable until ready.
@@ -1949,9 +1978,9 @@ impl LocalBackend {
         // Recheck at create admission, not in shared configuration persistence:
         // editing a stopped sandbox must not require an installed runtime.
         if let Some(runtime) = runtime {
-            crate::db::writing::validate_runtime_config(config, runtime).await?;
+            launch_contract::validate_runtime_config(config, runtime).await?;
         }
-        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting, runtime).await
+        Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Starting).await
     }
 
     /// Insert the sandbox record with an explicit initial lifecycle status.
@@ -1959,9 +1988,8 @@ impl LocalBackend {
         db: &DbWriteConnection,
         config: &SandboxConfig,
         status: SandboxStatus,
-        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<i32> {
-        let config_json = crate::db::writing::encode_new(db, config, runtime).await?;
+        let config_json = serde_json::to_string(config)?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {
@@ -2907,7 +2935,6 @@ mod tests {
             pools.write(),
             &config,
             SandboxStatus::Stopped,
-            None,
         )
         .await
         .unwrap();
@@ -2979,6 +3006,56 @@ mod tests {
             "{error}"
         );
         assert!(!backend.sandboxes_dir().join("missing-snapshot").exists());
+    }
+
+    #[tokio::test]
+    async fn test_create_local_rejects_snapshot_patches_before_creating_directory() {
+        // Keep Unix socket paths short; Windows uses named pipes instead.
+        let temp_root = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            std::path::PathBuf::from("/tmp")
+        };
+        let temp = tempfile::Builder::new()
+            .prefix("msb")
+            .tempdir_in(temp_root)
+            .unwrap();
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let mut config = test_config_with_rootfs(
+            "patched-snapshot",
+            RootfsSource::oci("registry.invalid/review-never-pulled:missing"),
+        );
+        // A regression would either pull this uncached image or create the sandbox
+        // directory before rejecting the incompatible combination.
+        config.spec.pull_policy = PullPolicy::Never;
+        config.spec.patches = vec![microsandbox_types::Patch::Text {
+            path: "/etc/motd".to_string(),
+            content: "hello".to_string(),
+            mode: None,
+            replace: true,
+        }];
+        config.snapshot_upper_source = Some(temp.path().join("upper.ext4"));
+
+        let error = match backend
+            .create_sandbox(backend.clone(), config, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("patches must be rejected when combined with from_snapshot"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "invalid config: patches cannot be combined with from_snapshot"
+        );
+        // A rejected create must leave no sandbox name behind, otherwise retries under
+        // the same name fail with "sandbox already exists" (see #1550).
+        assert!(!backend.sandboxes_dir().join("patched-snapshot").exists());
     }
 
     #[tokio::test]
@@ -3361,7 +3438,7 @@ mod tests {
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
-        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config, None)
+        LocalBackend::update_sandbox_active_config(pools.write(), sandbox_id, &config)
             .await
             .unwrap();
 

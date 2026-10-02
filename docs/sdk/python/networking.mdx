@@ -20,12 +20,15 @@ Network(
     deny_domain_suffixes: tuple[str, ...] = (),
     dns: DnsConfig | None = None,
     tls: TlsConfig | None = None,
-    strict: bool = False,
+    strict: bool = True,
     ipv4_pool: str | None = None,
     ipv6_pool: str | None = None,
+    nat64_prefixes: tuple[str, ...] = ("64:ff9b::/96",),
     max_tcp_connections: int | None = None,
     max_udp_connections: int | None = None,
+    tcp_accept_queue_size: int | None = None,
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
+    http: HttpConfig | None = None,
 )
 ```
 
@@ -67,7 +70,7 @@ TLS interception configuration
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict</span>
 
-`bool` · Default: `False`
+`bool` · Default: `True`
 
 Require hostname-based policy allows to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
@@ -82,6 +85,20 @@ IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`
 `str \| None` · Default: `None`
 
 IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size</span>
+
+`int \| None` · Default: `None` (1,024)
+
+How many not-yet-accepted connections each published TCP port's host listener queues, from 1 to 2,147,483,647. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(..., tcp_accept_queue_size=n)` applies it to the listeners a restored child publishes.
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">nat64_prefixes</span>
+
+`tuple[str, ...]` · Default: `("64:ff9b::/96",)`
+
+NAT64 `/96` prefixes for policy classification. Destinations inside these prefixes are also evaluated by their embedded IPv4 address.
+
+Pass this field by keyword. Custom or empty prefix lists are supported only for local sandboxes; cloud creation rejects them.
 
 #### max_udp_connections
 
@@ -118,6 +135,18 @@ Ingress and egress rate limits
 [`ViolationAction`](/sdk/python/secrets#violationaction) · Default: `BLOCK_AND_LOG`
 
 Sandbox-wide action when a secret placeholder reaches a disallowed host
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">http</span>
+
+`HttpConfig | None` · Default: `None`
+
+Denial responses are disabled by default. Set `HttpConfig(deny_response=True)` to enable readable `403` responses. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. When enabled, `None` uses the built-in message and an empty string sends no body. Requires a supporting local runtime; cloud rejects enabling it.
+
+```python
+from microsandbox import HttpConfig, Network
+
+network = Network(http=HttpConfig(deny_response=True, deny_message="Blocked: {host}"))
+```
 
 #### <span className="msb-recv">Network.</span><span className="msb-hn">none()</span>
 

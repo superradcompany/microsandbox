@@ -12,7 +12,7 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Use `.guest_flush(GuestFlush::Required)` on snapshot, branch, or branch-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`. The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `Skip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Use `.guest_flush(GuestFlush::Required)` on snapshot, fork, or fork-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`. The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `Skip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Static methods
 
@@ -136,6 +136,8 @@ println!("{}", snap.manifest().image.reference);
 </Accordion>
 
 Open an existing artifact by group head, `group:member`, or path. This is a fast metadata operation: it verifies the manifest structure, recomputes the manifest digest, and checks that the upper file exists with the recorded size. It does **not** read the full upper contents; use [`verify()`](#snap-verify) for that.
+
+For the local backend, relative artifact paths are resolved when the operation begins, and the returned snapshot retains that absolute location. Changing the process working directory later does not retarget an opened or listed snapshot. Local import, export, copy, and capture destinations are also resolved before asynchronous work starts. Group names and snapshot IDs continue to resolve through the snapshot store.
 
 <p className="msb-label">Parameters</p>
 
@@ -1004,7 +1006,7 @@ Restore into a new detached sandbox. Disk boots fresh; full resumes execution. S
 ```rust
 let child = Sandbox::restore("api:baseline")
     .name("api-restored")
-    .forked()
+    .cow_memory()
     .restore()
     .await?;
 ```
@@ -1013,7 +1015,8 @@ let child = Sandbox::restore("api:baseline")
 
 | Control | Purpose |
 | --- | --- |
-| `forked()` | Share unchanged full-snapshot memory. |
+| `cow_memory()` | Share unchanged full-snapshot memory. |
+| `.forked()` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
 | `disk_only()` | Boot only the saved disk. |
 | `snapshot_base(base)` | Supply an archive dependency. |
 | `restore()` | Return the restored sandbox. |
@@ -1032,6 +1035,7 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `max_connections()` | Concurrent TCP limit; zero means unlimited. |
 | `disable_network()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `guest_clock()` | Override the snapshot's clock setting with `Sync` or `Off`. Supports full restores. |
 | `max_duration(), idle_timeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
 | `volume()` | Map host volumes or select captured private volumes. |
 | `port(), port_bind(), port_udp(), port_udp_bind()` | Bind destination TCP or UDP ports. |

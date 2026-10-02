@@ -1,12 +1,12 @@
 ---
 title: Proxies
-description: Route outbound sandbox traffic through a SOCKS proxy
+description: Route outbound sandbox traffic through an HTTP CONNECT or SOCKS proxy
 icon: "route"
 ---
 
 <Tooltip tip="Outbound proxies are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox traffic. The guest connects to its normal destination; microsandbox routes eligible traffic through the proxy on the host.
+Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox traffic. The guest connects to its normal destination; microsandbox routes eligible traffic through the proxy on the host.
 
 Set `sandbox_defaults.outbound_proxy` in [global configuration](/configuration#sandbox_defaults) for a shared default. Administrators can enforce or clear it through [managed configuration](/enterprise/corporate-networking#route-sandbox-traffic), which takes precedence over per-sandbox CLI and SDK options.
 
@@ -14,6 +14,7 @@ Set `sandbox_defaults.outbound_proxy` in [global configuration](/configuration#s
 
 | Proxy | Authentication | Traffic | Availability |
 |-------|----------------|---------|--------------|
+| HTTP CONNECT | None | TCP | SDKs and CLI |
 | SOCKS4 | None | TCP | SDKs and CLI |
 | SOCKS4 | Optional user ID | TCP | SDKs and CLI |
 | SOCKS5 | None | TCP and non-DNS UDP | SDKs and CLI |
@@ -62,12 +63,41 @@ sb, err := m.CreateSandbox(ctx, "proxied",
 
 ```bash CLI
 # Choose one:
+msb create python --name proxied --proxy http://127.0.0.1:3128
 msb create python --name proxied --proxy socks4://127.0.0.1:1080
 msb create python --name proxied --proxy socks5://127.0.0.1:1080
 ```
 </CodeGroup>
 
-SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy socks4://IP:port` or `--proxy socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; protocol-specific authentication uses separate CLI flags.
+SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--proxy http://IP:port`, `socks4://IP:port`, or `socks5://IP:port`. Proxy URIs reject user information, paths, query parameters, and fragments; SOCKS authentication uses separate CLI flags.
+
+## HTTP CONNECT
+
+HTTP CONNECT opens a TCP tunnel through an HTTP proxy. It does not support proxy authentication or UDP. microsandbox resolves and checks the destination using its normal DNS and egress policy before sending the destination IP and port in the CONNECT request. The proxy address itself must be an IP address with a port.
+
+The selected `msb` runtime must support HTTP CONNECT. When using an older runtime, the SDK requests an upgrade before creating or replacing a sandbox.
+
+<CodeGroup>
+```typescript TypeScript
+.proxy((p) => p.httpConnect("127.0.0.1:3128"))
+```
+
+```rust Rust
+.proxy(|p| p.http_connect("127.0.0.1:3128"))
+```
+
+```python Python
+proxy=OutboundProxy.http_connect("127.0.0.1:3128")
+```
+
+```go Go
+m.WithProxy(m.HTTPConnectProxy("127.0.0.1:3128"))
+```
+
+```bash CLI
+msb run alpine --proxy http://127.0.0.1:3128
+```
+</CodeGroup>
 
 ## SOCKS4 user ID
 
@@ -159,7 +189,7 @@ msb run alpine \
 ## Behavior and limits
 
 - Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.
-- SOCKS4 supports TCP only and cannot reach IPv6 destinations. Non-DNS UDP is blocked while SOCKS4 is configured.
+- HTTP CONNECT and SOCKS4 support TCP only. Non-DNS UDP is blocked while either is configured; SOCKS4 also cannot reach IPv6 destinations.
 - SOCKS5 uses `CONNECT` for TCP and `UDP ASSOCIATE` for non-DNS UDP.
 - DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS.
 - Connections to `host.microsandbox.internal` bypass the proxy and continue to target the microsandbox host.

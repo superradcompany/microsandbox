@@ -6,6 +6,21 @@ keywords: ["Go SDK", "Go volumes", "microsandbox volumes"]
 
 Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
 
+## Local filesystem paths
+
+Local operations stay inside the selected volume directory. Symlinked volume roots and links that ultimately resolve inside that directory remain supported. Each operation pins its root so replacing the root path cannot redirect an operation already in progress.
+
+Go previously cleaned `..` components before filesystem lookup. Paths where a symlink followed by `..` would select a different destination now return an error. Use the destination explicitly:
+
+```go
+// link -> nested/deep; config and nested/config are different files.
+err = fs.Write(ctx, "link/../config", data) // Error: ambiguous destination.
+err = fs.Write(ctx, "config", data)         // Select the original Go destination.
+err = fs.Write(ctx, "nested/config", data)  // Explicitly select the other file.
+```
+
+Ordinary contained `..` paths remain supported. `RemoveAll(ctx, ".")` and `RemoveAll(ctx, "")` delete the local volume directory and its contents. If the root itself is a symlink, they unlink that root link and preserve its target, matching Go's previous behavior. Descendant links never cause deletion outside the volume.
+
 ## Sandbox-owned mounts
 
 Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
@@ -386,6 +401,8 @@ func (h *VolumeHandle) Remove(ctx context.Context) error
 Delete this volume. All sandboxes using it must be stopped. Equivalent to [`RemoveVolume(ctx, h.Name())`](#removevolume).
 
 ## VolumeFs
+
+Local operations follow paths through an opened volume directory, including symlink targets and missing parents. Paths that escape the volume return `ErrPathEscape`; valid in-volume symlinks remain usable. Removing a final symlink unlinks the link itself. `Remove(ctx, ".")` and `Remove(ctx, "")` delete an empty root; `RemoveAll` also deletes its contents. After the root disappears, `Exists` returns `false, nil`, and `Mkdir` can recreate the root and missing parents. Local OS failures retain `*os.PathError` and their native error number, so `errors.Is` checks against `syscall.Errno` and the standard `os` error predicates continue to work. Local operations require the matching updated native SDK library; older libraries return `ErrUnsupportedOperation` with an upgrade instruction.
 
 <p className="msb-backref">Returned by <a href="#v-fs">Volume.FS()</a> · <a href="#h-fs">VolumeHandle.FS()</a></p>
 
@@ -882,7 +899,7 @@ Which mount flavour this is
 var ErrPathEscape = errors.New("microsandbox: path escapes volume root")
 ```
 
-Returned by every [`VolumeFs`](#volumefs) method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or otherwise escapes the volume's directory after `filepath.Clean`.
+Returned by every [`VolumeFs`](#volumefs) method when `relPath` is absolute, contains a `..` sequence that resolves outside the volume root, or traverses a symlink outside the volume's directory.
 
 <p className="msb-backref">Returned by <a href="#volumefs">VolumeFs</a> methods</p>
 

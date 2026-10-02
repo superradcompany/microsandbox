@@ -12,7 +12,7 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.branch`, `source.branchMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, branches, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.fork`, `source.forkMany`, and `source.pause` options. The default `"auto"` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `"skip"` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Snapshot
 
@@ -916,7 +916,7 @@ Restore into a new detached sandbox. Disk boots fresh; full resumes execution. S
 ```typescript
 const child = await Sandbox.restore("api:baseline")
   .name("api-restored")
-  .forked()
+  .cowMemory()
   .restore();
 ```
 
@@ -924,7 +924,8 @@ const child = await Sandbox.restore("api:baseline")
 
 | Control | Purpose |
 | --- | --- |
-| `forked()` | Share unchanged full-snapshot memory. |
+| `cowMemory()` | Share unchanged full-snapshot memory. |
+| `.forked()` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
 | `diskOnly()` | Boot only the saved disk. |
 | `snapshotBase(base)` | Supply an archive dependency. |
 | `restore()` | Return the restored sandbox. |

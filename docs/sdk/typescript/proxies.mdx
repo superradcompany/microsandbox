@@ -3,7 +3,7 @@ title: Proxies
 description: TypeScript SDK - Proxy API reference
 ---
 
-Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder.proxy()`](#proxy). Proxy protocols are mutually exclusive.
+Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder.proxy()`](#proxy). Proxy protocols are mutually exclusive.
 
 See [Proxies](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
 
@@ -25,7 +25,7 @@ await using sandbox = await Sandbox.builder("worker")
 ### <span id="proxy">proxy()</span>
 
 ```typescript
-proxy(configure: (proxy: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
+proxy(configure: (proxy: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
 ```
 
 Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder. Invalid addresses throw while applying the callback.
@@ -33,6 +33,14 @@ Select and configure the single outbound proxy for the sandbox. The callback rec
 ## OutboundProxyBuilder
 
 Protocol selector passed to [`SandboxBuilder.proxy()`](#proxy).
+
+### <span id="http-connect">httpConnect()</span>
+
+```typescript
+httpConnect(address: string): HttpConnectProxyBuilder
+```
+
+Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
 
 ### <span id="socks4">socks4()</span>
 
@@ -92,6 +100,10 @@ Discriminated outbound proxy value stored in the sandbox's durable network speci
 
 ```typescript
 type OutboundProxy =
+  | {
+      readonly protocol: "http_connect";
+      readonly address: string;
+    }
   | {
       readonly protocol: "socks4";
       readonly address: string;

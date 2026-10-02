@@ -7,8 +7,8 @@ icon: "network-wired"
 Connect local sandboxes to your company's existing network. Configure routing, private DNS, and certificate trust, then verify access from the CLI and SDKs.
 
 <Frame>
-  <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
-  <img className="hidden dark:block" src="/images/enterprise/corporate-networking-dark.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional local SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
+  <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional HTTP CONNECT or SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
+  <img className="hidden dark:block" src="/images/enterprise/corporate-networking-dark.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional HTTP CONNECT or SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
 </Frame>
 
 <Note>
@@ -24,10 +24,10 @@ Connect the company network client on the host and confirm an approved service i
 | Company connection | Configure |
 | --- | --- |
 | Host VPN or traffic-steering client | Host routes and sandbox destination rules |
-| SOCKS4 or SOCKS5 proxy | `sandbox_defaults.outbound_proxy` in managed configuration |
-| HTTP proxy or PAC file | Proxy settings in the guest application; no direct managed support |
+| HTTP CONNECT, SOCKS4, or SOCKS5 proxy | `sandbox_defaults.outbound_proxy` in managed configuration |
+| PAC file | Proxy settings in the guest application; no direct managed support |
 
-For a SOCKS proxy, add this to `managed.json`, using your listener's reachable `IP:port`:
+For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's reachable `IP:port`:
 
 ```json
 {
@@ -35,17 +35,17 @@ For a SOCKS proxy, add this to `managed.json`, using your listener's reachable `
   "overrides": {
     "sandbox_defaults": {
       "outbound_proxy": {
-        "protocol": "socks5",
-        "address": "127.0.0.1:1080"
+        "protocol": "http_connect",
+        "address": "127.0.0.1:3128"
       }
     }
   }
 }
 ```
 
-A managed proxy replaces per-sandbox proxy settings, including credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. SOCKS4 carries TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
+A managed proxy replaces per-sandbox proxy settings, including SOCKS credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
 
-Use supported CLI and SDK releases; older releases ignore this global proxy setting.
+Use CLI and SDK releases that support the selected proxy protocol. Older releases reject the HTTP CONNECT protocol as unknown.
 
 <Accordion title="Examples: host VPNs and traffic steering">
   - **Cloudflare WARP:** enroll the host client with the administrator's **Traffic and DNS** profile. Check that [split tunnels and private DNS](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/private-net/cloudflared/private-dns/) cover the required services.

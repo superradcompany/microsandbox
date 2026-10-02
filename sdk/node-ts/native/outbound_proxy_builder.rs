@@ -6,7 +6,8 @@ use napi_derive::napi;
 
 use microsandbox::sandbox::SecretSource;
 use microsandbox_network::{
-    OutboundProxy, OutboundProxyBuilder as RustOutboundProxyBuilder, OutboundProxyConfig,
+    HttpConnectProxyBuilder as RustHttpConnectProxyBuilder, OutboundProxy,
+    OutboundProxyBuilder as RustOutboundProxyBuilder, OutboundProxyConfig,
     Socks4ProxyBuilder as RustSocks4ProxyBuilder, Socks5ProxyBuilder as RustSocks5ProxyBuilder,
 };
 
@@ -24,9 +25,14 @@ pub struct JsOutboundProxyBuilder {
 pub(crate) type SharedOutboundProxySelection = Rc<RefCell<Option<OutboundProxySelection>>>;
 
 pub(crate) enum OutboundProxySelection {
+    HttpConnect(RustHttpConnectProxyBuilder),
     Socks4(RustSocks4ProxyBuilder),
     Socks5(RustSocks5ProxyBuilder),
 }
+
+/// Builds an HTTP CONNECT outbound proxy.
+#[napi(js_name = "HttpConnectProxyBuilder")]
+pub struct JsHttpConnectProxyBuilder {}
 
 /// Builds a SOCKS4 outbound proxy.
 #[napi(js_name = "Socks4ProxyBuilder")]
@@ -65,6 +71,20 @@ impl JsOutboundProxyBuilder {
 
     pub(crate) fn selection(&self) -> SharedOutboundProxySelection {
         Rc::clone(&self.selection)
+    }
+
+    /// Select an HTTP CONNECT proxy at `address`.
+    #[napi]
+    pub fn http_connect(&mut self, address: String) -> Result<JsHttpConnectProxyBuilder> {
+        let builder = self
+            .inner
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("OutboundProxyBuilder already consumed"))?;
+        self.selection
+            .replace(Some(OutboundProxySelection::HttpConnect(
+                builder.http_connect(address),
+            )));
+        Ok(JsHttpConnectProxyBuilder {})
     }
 
     /// Select a SOCKS4 proxy at `address`.
@@ -158,9 +178,12 @@ pub(crate) fn take_selected_proxy(
     selection: &SharedOutboundProxySelection,
 ) -> Result<OutboundProxy> {
     let selection = selection.borrow_mut().take().ok_or_else(|| {
-        napi::Error::from_reason("proxy callback must select a SOCKS4 or SOCKS5 proxy builder")
+        napi::Error::from_reason(
+            "proxy callback must select an HTTP CONNECT, SOCKS4, or SOCKS5 proxy builder",
+        )
     })?;
     match selection {
+        OutboundProxySelection::HttpConnect(builder) => builder.build(),
         OutboundProxySelection::Socks4(builder) => builder.build(),
         OutboundProxySelection::Socks5(builder) => builder.build(),
     }

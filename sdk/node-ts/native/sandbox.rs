@@ -564,7 +564,7 @@ impl Sandbox {
             .collect())
     }
 
-    /// Create an independent local CoW child without a durable full snapshot.
+    /// @deprecated Use fork for live execution duplication.
     #[napi]
     pub async fn branch(
         &self,
@@ -572,19 +572,10 @@ impl Sandbox {
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
     ) -> Result<Sandbox> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        let mut builder = sb
-            .branch(name)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(Sandbox::from_rust(
-            builder.branch().await.map_err(to_napi_error)?,
-        ))
+        self.fork(name, record_integrity, guest_flush).await
     }
 
-    /// Capture once and return individual child startup outcomes.
+    /// @deprecated Use forkMany for live execution duplication.
     #[napi]
     pub async fn branch_many(
         &self,
@@ -592,15 +583,46 @@ impl Sandbox {
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
     ) -> Result<Vec<JsBranchOutcome>> {
+        self.fork_many(names, record_integrity, guest_flush).await
+    }
+
+    /// Create an independent local CoW child without a durable full snapshot.
+    #[napi]
+    pub async fn fork(
+        &self,
+        name: String,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+    ) -> Result<Sandbox> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
         let mut builder = sb
-            .branch_many(names)
+            .fork(name)
+            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        Ok(Sandbox::from_rust(
+            builder.fork().await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Capture once and return individual child startup outcomes.
+    #[napi]
+    pub async fn fork_many(
+        &self,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+    ) -> Result<Vec<JsBranchOutcome>> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        let mut builder = sb
+            .fork_many(names)
             .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
         if record_integrity.unwrap_or(false) {
             builder = builder.record_integrity();
         }
         Ok(branch_outcomes(
-            builder.branch().await.map_err(to_napi_error)?,
+            builder.fork().await.map_err(to_napi_error)?,
         ))
     }
 
@@ -814,7 +836,7 @@ impl Sandbox {
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) fn branch_outcomes(
-    outcomes: Vec<microsandbox::sandbox::BranchOutcome>,
+    outcomes: Vec<microsandbox::sandbox::ForkOutcome>,
 ) -> Vec<JsBranchOutcome> {
     outcomes
         .into_iter()

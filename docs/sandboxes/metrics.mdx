@@ -139,3 +139,9 @@ Metrics reports are currently available only in the Rust SDK.
 ## Reference
 
 For exact per-sandbox metrics APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For local reports and fleet snapshots, see [`msb metrics`](/cli/sandbox-commands#msb-metrics).
+
+## Upgrading with running sandboxes
+
+Upgraded SDK readers search both the registry derived from the normalized home and the legacy registry derived from its original spelling. Existing runtimes keep writing to their current registry and do not need restarting; each newly started run writes only to the normalized-home registry. All metrics APIs validate matches against the catalog and process identity and merge results without duplicate runs.
+
+This uses in-memory reader state only: there is no database migration, sidecar, config rewrite, or change to registry cleanup. Keep the original home spelling available when upgrading. Discovering a legacy registry after that spelling is lost is outside this lookup's scope. Older readers do not automatically gain support for the new registry names.

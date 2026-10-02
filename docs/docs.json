@@ -269,6 +269,7 @@
             "icon": "code",
             "pages": [
               "examples/development/vscode",
+              "examples/development/jetbrains-acp",
               "examples/development/code-server",
               "examples/development/jupyterlab",
               "examples/development/vnc-desktop"

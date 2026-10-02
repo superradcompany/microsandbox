@@ -49,17 +49,17 @@ microsandbox-utils.workspace = true
 humantime = "2"
 
 # OTel exporter (backs the `msb-metrics otel` subcommand).
-opentelemetry = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+opentelemetry = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
     "grpc-tonic",
     "gzip-tonic",
     "http-proto",
     "metrics",
     "reqwest-blocking-client",
-    "tls",
+    "tls-ring",
     "tls-webpki-roots",
 ] }
-opentelemetry_sdk = { version = "0.32", features = [
+opentelemetry_sdk = { version = "0.33", features = [
     "metrics",
     # ManualReader, MetricReader trait, and Pipeline moved behind this
     # flag in 0.32. we need a manual reader because we drive cadence

@@ -509,6 +509,8 @@ fn snapshot_from_cloud(
         labels: snapshot.labels,
         head_update: None,
         reported_size_bytes: Some(snapshot.size_bytes),
+        #[cfg(feature = "local")]
+        previous_upper: None,
     })
 }
 

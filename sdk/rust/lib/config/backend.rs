@@ -52,9 +52,15 @@ impl BackendSelection {
         let backend = std::env::var("MSB_BACKEND").ok();
         let profile = std::env::var("MSB_PROFILE").ok();
         let api_key = std::env::var("MSB_API_KEY").ok();
-        Self::resolve_from(managed, backend, profile, api_key.as_deref(), || {
-            GlobalConfigPatch::load_from(user_path)
-        })
+        let (selection, source, config) =
+            Self::resolve_from(managed, backend, profile, api_key.as_deref(), || {
+                GlobalConfigPatch::load_from(user_path)
+            })?;
+        Ok((
+            selection,
+            source,
+            config.with_source_files(user_path, managed_path)?,
+        ))
     }
 
     fn resolve_from(

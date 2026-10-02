@@ -25,8 +25,8 @@ const RENAME_EXCHANGE: u32 = 2;
 /// Remove a file.
 ///
 /// On macOS, opens an fd to the file before unlinking so that open handles
-/// can still access the data after the directory entry is removed (the
-/// `/.vol/<dev>/<ino>` path becomes invalid after unlink).
+/// can still access the data after the last directory entry is removed (the
+/// `/.vol/<dev>/<ino>` path becomes invalid after the final unlink).
 pub(crate) fn do_unlink(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -69,16 +69,26 @@ pub(crate) fn do_unlink(
         None => None,
     };
 
-    // On macOS, grab an fd before unlink to keep the file data alive.
+    // Preserve writable access when the host allows it. A read-only fallback
+    // still keeps readable files alive without requiring write permission to unlink.
     #[cfg(target_os = "macos")]
     let pre_unlink_fd = {
-        let fd = unsafe {
+        let mut fd = unsafe {
             libc::openat(
                 parent_fd.raw(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             )
         };
+        if fd < 0 {
+            fd = unsafe {
+                libc::openat(
+                    parent_fd.raw(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+        }
         if fd >= 0 { Some(fd) } else { None }
     };
 
@@ -115,7 +125,9 @@ pub(crate) fn do_unlink(
         }
     }
 
-    // Store the fd in InodeData so open_inode_fd can use it.
+    // Keep a fallback even if a hard link remains: the host can remove that
+    // name without another FUSE unlink. open_inode_fd still reopens linked
+    // inodes through /.vol/ with the requested access flags.
     #[cfg(target_os = "macos")]
     if let Some(fd) = pre_unlink_fd {
         // Look up the inode by stat identity from the pre-unlink fd.

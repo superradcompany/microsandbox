@@ -7,6 +7,8 @@ mod command;
 mod domain;
 mod error;
 
+#[doc(hidden)]
+pub mod compat;
 mod guest_flush;
 #[doc(hidden)]
 pub mod helpers;
@@ -41,20 +43,21 @@ pub use domain::{
     Action, CertCacheConfig, CpuPlacement, DEFAULT_METRICS_SAMPLE_INTERVAL_MS,
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, DeploymentProfile, Destination,
     DestinationGroup, Direction, DiskImageFormat, DnsConfig, DnsConfigPatch, EnvVar, FlatClone,
-    HandoffInit, HostPattern, HostPermissions, InterceptCaConfig, InterfaceOverrides,
-    InterfaceOverridesPatch, LogSource, MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement,
-    MountOptions, NamedVolumeCreate, NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection,
-    NetworkRateLimiterConfig, NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch,
-    NumaPlacement, OciRootfsSource, OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile,
-    PortProtocol, PortRange, Protocol, PublishedPortSpec, PullPolicy, RateLimitConfigError,
-    RateLimiterConfig, Rlimit, RlimitResource, RootDisk, RootfsSource, Rule, SandboxLogLevel,
-    SandboxPolicy, SandboxPolicyPatch, SandboxResources, SandboxResourcesPatch,
-    SandboxRuntimeOptions, SandboxRuntimeOptionsPatch, SandboxSpec, SandboxSpecPatch,
-    ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError, SecretEntry, SecretSubstitution,
-    SecretViolationAction, SecretsConfig, SecretsConfigPatch, SecurityProfile, SnapshotSpec,
-    Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
-    TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
-    VsockSocketType, VsockSpec, VsockSpecPatch, canonicalize_volume_mounts, owned_volume_mount_id,
+    GuestClockPolicy, HandoffInit, HostPattern, HostPermissions, HttpConfig, HttpConfigPatch,
+    InterceptCaConfig, InterfaceOverrides, InterfaceOverridesPatch, LogSource,
+    MAX_SECRET_PLACEHOLDER_BYTES, MemoryPlacement, MountOptions, NamedVolumeCreate,
+    NamedVolumeMode, NetworkPolicy, NetworkRateLimitDirection, NetworkRateLimiterConfig,
+    NetworkRateLimiterConfigPatch, NetworkSpec, NetworkSpecPatch, NumaPlacement, OciRootfsSource,
+    OutboundProxy, OwnedVolumeStorage, Patch, PlacementProfile, PortProtocol, PortRange, Protocol,
+    PublishedPortSpec, PullPolicy, RateLimitConfigError, RateLimiterConfig, Rlimit, RlimitResource,
+    RootDisk, RootfsSource, Rule, SandboxLogLevel, SandboxPolicy, SandboxPolicyPatch,
+    SandboxResources, SandboxResourcesPatch, SandboxRuntimeOptions, SandboxRuntimeOptionsPatch,
+    SandboxSpec, SandboxSpecPatch, ScopedUpstreamCaCert, ScopedVerifyUpstream, SecretConfigError,
+    SecretEntry, SecretSubstitution, SecretViolationAction, SecretsConfig, SecretsConfigPatch,
+    SecurityProfile, SnapshotSpec, Socks5Credentials, StatVirtualization, TlsConfig,
+    TlsConfigPatch, TokenBucketConfig, TransparentHugePagePolicy, VolumeKind, VolumeMount,
+    VolumeSpec, VsockRouteSpec, VsockSocketType, VsockSpec, VsockSpecPatch,
+    WELL_KNOWN_NAT64_PREFIX, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
 pub use guest_flush::GuestFlush;

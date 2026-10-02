@@ -31,6 +31,7 @@ use microsandbox_image::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
 };
 use microsandbox_runtime::launch::RootfsUpperLayerConfig;
+use microsandbox_types::snapshot::GUEST_CLOCK_EXTENSION;
 use microsandbox_utils::extent::{self, ExtentMap};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -842,7 +843,7 @@ where
         },
         entries,
         extensions: BTreeMap::new(),
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(manifest)?,
     };
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
@@ -963,7 +964,7 @@ where
         },
         entries,
         extensions: BTreeMap::new(),
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(manifest)?,
     };
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
@@ -1180,6 +1181,16 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             "archive head descriptor identity mismatch".into(),
         ));
     }
+    let unsupported = manifest.unsupported_requires();
+    if !unsupported.is_empty() {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(format!(
+                "snapshot requires unsupported runtime capabilities: {}",
+                unsupported.join(", ")
+            )),
+        ));
+    }
     boot_overrides.validate_scope(
         manifest.scope,
         if disk_only {
@@ -1343,16 +1354,25 @@ where
     // payload needs a preparatory content pass.
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
-        let descriptor = snapshot.path().join(DESCRIPTOR_FILENAME);
+        // The reader may project a previous descriptor without rewriting its
+        // source file. Export the same canonical representation the inventory hashes.
+        let descriptor = snapshot.manifest().to_canonical_bytes()?;
         let descriptor_name = format!("snapshots/{snapshot_id}/{DESCRIPTOR_FILENAME}");
-        let written = append_artifact_file(
-            builder,
-            &descriptor,
+        let size = descriptor.len() as u64;
+        let mut hasher =
+            archive_transport_hasher("snapshot-descriptor", &descriptor_name, size, size, &[]);
+        hasher.update(&descriptor);
+        append_bytes(builder, &descriptor_name, &descriptor).await?;
+        set_archive_transport(
+            &mut inventory,
             &descriptor_name,
-            "snapshot-descriptor",
-        )
-        .await?;
-        set_archive_transport(&mut inventory, &descriptor_name, written)?;
+            WrittenArchiveMember {
+                encoded_size: size,
+                apparent_size: size,
+                transport_integrity: finish_archive_transport(hasher),
+                sparse_ranges: Vec::new(),
+            },
+        )?;
         if !snapshot.labels().is_empty() {
             let metadata_name = format!(
                 "snapshots/{snapshot_id}/{}",
@@ -1511,9 +1531,7 @@ async fn build_archive_inventory(
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
         let descriptor_path = format!("snapshots/{snapshot_id}/{DESCRIPTOR_FILENAME}");
-        let descriptor_size = tokio::fs::metadata(snapshot.path().join(DESCRIPTOR_FILENAME))
-            .await?
-            .len();
+        let descriptor_size = snapshot.manifest().to_canonical_bytes()?.len() as u64;
         require_json_safe_size(descriptor_size, &descriptor_path)?;
         snapshot_members.push(ArchiveSnapshot {
             snapshot_id: snapshot_id.to_string(),
@@ -1675,8 +1693,24 @@ async fn build_archive_inventory(
         },
         entries,
         extensions,
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(head.manifest())?,
     })
+}
+
+/// Released SDKs restore archives without checking descriptor `requires`, but they
+/// refuse unknown archive requirements, so a non-default clock is lifted to both.
+fn archive_requires(
+    head: &microsandbox_image::snapshot::Manifest,
+) -> MicrosandboxResult<Vec<String>> {
+    let mut requires = Vec::with_capacity(2);
+    let guest_clock = head
+        .guest_clock()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if !guest_clock.is_sync() {
+        requires.push(GUEST_CLOCK_EXTENSION.into());
+    }
+    requires.push(ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into());
+    Ok(requires)
 }
 
 fn collect_checkpoint_archive_members(
@@ -2364,7 +2398,7 @@ where
                 (snapshots_dir.join(digest).join(name), true, false)
             }
             ["files", digest, name]
-                if valid_archive_digest_hex(digest) && *name == "upper.ext4" =>
+                if valid_archive_digest_hex(digest) && valid_archive_filename(name) =>
             {
                 (snapshots_dir.join(digest).join(name), false, false)
             }
@@ -2596,7 +2630,12 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
-    let mut file = tokio::fs::File::create(target).await?;
+    // Lexically distinct archive paths can alias on case-insensitive filesystems.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .await?;
     let mut source = TransportHashingReader {
         inner: (&mut *reader).take(size),
         hasher: archive_transport_hasher(kind, archive_path, size, size, &[]),
@@ -2714,8 +2753,7 @@ where
     let std_file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .open(target)?;
     // Allocation-only optimizations: content is correct without them,
     // so a filesystem that rejects either just loads dense.
@@ -2979,7 +3017,9 @@ async fn validate_archive_inventory(
     }
     if inventory.requires.windows(2).any(|pair| pair[0] >= pair[1])
         || inventory.requires.iter().any(|requirement| {
-            requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM && requirement != delta::REQUIREMENT
+            requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM
+                && requirement != delta::REQUIREMENT
+                && requirement != GUEST_CLOCK_EXTENSION
         })
     {
         return Err(MicrosandboxError::unsupported(
@@ -3769,7 +3809,7 @@ async fn install_staged_cache(
     leased_paths.push(cache.image_metadata_path(&image_ref));
     cache.lease_paths_async(leased_paths).await?;
 
-    let expected_files = expected_cache_files(
+    let mut expected_files = expected_cache_files(
         &staged_cache,
         &image_ref,
         &metadata,
@@ -3777,11 +3817,26 @@ async fn install_staged_cache(
         manifest.root_disk.clone(),
     )?;
     ensure_only_expected_cache_files(cache_stage, &expected_files)?;
+    // The staged VMDK lists the exporter's extent paths; it is rewritten below for this cache.
+    let rewrite_vmdk = expected_files.remove(&staged_cache.vmdk_path(&pinned_digest));
     ensure_cache_targets_compatible(&expected_files, cache_stage, cache_dir).await?;
 
     let metadata_path = staged_cache.image_metadata_path(&image_ref);
     for source in expected_files.iter().filter(|path| **path != metadata_path) {
         install_cache_file(source, cache_stage, cache_dir).await?;
+    }
+    if rewrite_vmdk {
+        let diff_ids = metadata
+            .layers
+            .iter()
+            .map(|layer| layer.diff_id.parse())
+            .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
+            .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
+        // Keep the imported cache paths pinned while the blocking rewrite completes.
+        let rewrite_cache = cache.clone();
+        tokio::task::spawn_blocking(move || rewrite_cache.rewrite_vmdk(&pinned_digest, &diff_ids))
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
     }
     cache
         .write_image_metadata_async(&image_ref, &metadata)
@@ -4264,6 +4319,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extraction_never_overwrites_an_existing_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("disk.ext4");
+        std::fs::write(&target, b"retained").unwrap();
+        let mut bytes = b"replaced".as_slice();
+        assert!(
+            unpack_dense_entry(
+                &mut bytes,
+                8,
+                &target,
+                "file-payload",
+                "files/digest/disk.ext4"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(target).unwrap(), b"retained");
+    }
+
+    #[tokio::test]
+    async fn released_archive_uses_the_descriptors_payload_filename() {
+        let temporary = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temporary.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let descriptor = serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "artifact": "snapshot", "scope": "disk",
+            "created_at": "2026-05-01T12:00:00Z", "parent": null,
+            "image": {"ref": "alpine:3.21", "manifest_digest": format!("sha256:{}", "a".repeat(64))},
+            "source_sandbox": "previous", "labels": {},
+            "state": {"kind": "file", "format": "raw", "fstype": "ext4",
+                "upper": {"file": "disk.ext4", "size_bytes": 7, "integrity": null}},
+            "extensions": {}, "requires": []
+        })).unwrap();
+        let manifest =
+            microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(&descriptor)
+                .unwrap();
+        let digest = manifest.digest().unwrap();
+        let digest = digest.strip_prefix("sha256:").unwrap();
+        for payload_name in ["disk.ext4", "upper.ext4"] {
+            let archive = temporary.path().join(format!("{payload_name}.tar"));
+            let mut builder = tar::Builder::new(std::fs::File::create(&archive).unwrap());
+            for (name, bytes) in [
+                (
+                    format!("snapshots/{digest}/snapshot.json"),
+                    descriptor.as_slice(),
+                ),
+                (
+                    format!("files/{digest}/{payload_name}"),
+                    b"payload".as_slice(),
+                ),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o600);
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, name, bytes).unwrap();
+            }
+            builder.finish().unwrap();
+            drop(builder);
+            let result = load_snapshot(&local, &archive, None).await;
+            if payload_name == "disk.ext4" {
+                let loaded = result.unwrap();
+                let snapshot = store::open_snapshot(&local, &loaded.path().to_string_lossy())
+                    .await
+                    .unwrap();
+                let layer = &snapshot.manifest().state.as_file().unwrap().layers[0];
+                assert_eq!(
+                    std::fs::read(snapshot.layer_path(layer)).unwrap(),
+                    b"payload"
+                );
+            } else {
+                assert!(
+                    result.is_err(),
+                    "a conventional filename must not replace the declared one"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn direct_materialization_future_has_bounded_stack_footprint() {
         let temporary = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(temporary.path().join("home"))
@@ -4614,31 +4751,21 @@ mod tests {
         assert!(!temp_out.exists());
     }
 
-    #[tokio::test]
-    async fn direct_archive_capture_and_child_restore_do_not_install_snapshot_artifacts() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        let source = directory.path().join("upper.ext4");
-        let child_stage = directory.path().join("child");
-        let mut payload = b"direct archive payload".to_vec();
-        payload.resize(4096, 0);
-        std::fs::write(&source, &payload).unwrap();
-
-        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+    fn direct_disk_manifest(snapshot_id: &SnapshotId, size: u64) -> Manifest {
         let layer_id = DiskLayerId::new("layer_00000000000000000000000000000001").unwrap();
-        let manifest = Manifest {
+        Manifest {
             schema: SCHEMA.into(),
             snapshot_id: snapshot_id.clone(),
             scope: SnapshotScope::Disk,
             state: SnapshotState::File(FileSnapshotState {
                 disk_format: SnapshotFormat::Raw,
                 filesystem: "ext4".into(),
-                virtual_size: payload.len() as u64,
+                virtual_size: size,
                 head: layer_id.clone(),
                 layers: vec![DiskLayer {
                     layer_id,
                     format: SnapshotFormat::Raw,
-                    virtual_size: payload.len() as u64,
+                    virtual_size: size,
                     backing: None,
                     payload: LayerPayload {
                         file_kind: LayerFileKind::Regular,
@@ -4661,7 +4788,21 @@ mod tests {
             parent: None,
             extensions: BTreeMap::new(),
             requires: Vec::new(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_archive_capture_and_child_restore_do_not_install_snapshot_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let source = directory.path().join("upper.ext4");
+        let child_stage = directory.path().join("child");
+        let mut payload = b"direct archive payload".to_vec();
+        payload.resize(4096, 0);
+        std::fs::write(&source, &payload).unwrap();
+
+        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+        let manifest = direct_disk_manifest(&snapshot_id, payload.len() as u64);
         let local = crate::test_support::local_backend_builder(&home)
             .build()
             .await
@@ -4704,6 +4845,75 @@ mod tests {
                 assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn direct_archive_lifts_guest_clock_and_refuses_unknown_descriptor_requirements() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("upper.ext4");
+        std::fs::write(&source, vec![0; 4096]).unwrap();
+        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let save_and_restore = |manifest: Manifest, name: &'static str| {
+            let archive = directory.path().join(format!("{name}.msb"));
+            let child_stage = directory.path().join(name);
+            let source = source.clone();
+            let local = &local;
+            async move {
+                save_direct_file_snapshot(
+                    &manifest,
+                    &BTreeMap::new(),
+                    "test-snapshot",
+                    std::slice::from_ref(&source),
+                    None,
+                    &archive,
+                    false,
+                    false,
+                )
+                .await
+                .unwrap();
+                materialize_archive_for_child(local, &archive, &child_stage, false).await
+            }
+        };
+
+        let mut off = direct_disk_manifest(&snapshot_id, 4096);
+        off.set_guest_clock(microsandbox_types::GuestClockPolicy::Off)
+            .unwrap();
+        // Released readers accept only these archive requirements; anything else must refuse.
+        let released = [ARCHIVE_MEMBER_TRANSPORT_ALGORITHM, delta::REQUIREMENT];
+        let requires = archive_requires(&off).unwrap();
+        assert!(requires.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            requires
+                .iter()
+                .any(|value| !released.contains(&value.as_str()))
+        );
+        assert_eq!(
+            archive_requires(&direct_disk_manifest(&snapshot_id, 4096)).unwrap(),
+            vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.to_string()]
+        );
+        let restored = save_and_restore(off, "off").await.unwrap();
+        assert_eq!(
+            restored.manifest.guest_clock().unwrap(),
+            microsandbox_types::GuestClockPolicy::Off
+        );
+
+        let mut future = direct_disk_manifest(&snapshot_id, 4096);
+        future.extensions.insert(
+            "microsandbox.future-extension".into(),
+            serde_json::json!({}),
+        );
+        future.requires.push("microsandbox.future-extension".into());
+        let Err(error) = save_and_restore(future, "future").await else {
+            panic!("an unknown descriptor requirement must refuse the restore");
+        };
+        assert!(
+            error.to_string().contains("microsandbox.future-extension"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

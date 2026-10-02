@@ -807,7 +807,7 @@ sb.fs().copy_to_host("/app/out/report.pdf", "./report.pdf").await?;
 
 </Accordion>
 
-Copy a file from the sandbox to the host machine.
+Copy a file from the sandbox to the host machine. A relative host destination is resolved when the copy begins, so a working-directory change during the transfer cannot move the completed file.
 
 <p className="msb-label">Parameters</p>
 

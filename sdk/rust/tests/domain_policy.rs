@@ -80,7 +80,8 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
         .image("mirror.gcr.io/library/alpine")
         .cpus(1)
         .memory(512)
-        .network(|n| n.policy(policy))
+        // These cases exercise DNS/SNI policy without TLS interception.
+        .network(|n| n.policy(policy).strict(false))
         .replace()
         .create()
         .await
@@ -96,7 +97,7 @@ async fn setup_alpine(name: &str, policy: NetworkPolicy) -> Sandbox {
 /// This is useful for policy modes that intentionally make
 /// hostname-only HTTPS allows fail closed before TLS interception is
 /// configured.
-async fn setup_curl(name: &str, policy: NetworkPolicy, strict: bool) -> Sandbox {
+async fn setup_curl(name: &str, policy: NetworkPolicy, strict: Option<bool>) -> Sandbox {
     Sandbox::builder(name)
         .image(CURL_IMAGE)
         .cpus(1)
@@ -104,7 +105,10 @@ async fn setup_curl(name: &str, policy: NetworkPolicy, strict: bool) -> Sandbox 
         .user("0")
         .network(|n| {
             let n = n.policy(policy);
-            if strict { n.strict(true) } else { n }
+            match strict {
+                Some(enabled) => n.strict(enabled),
+                None => n,
+            }
         })
         .replace()
         .create()
@@ -486,7 +490,7 @@ async fn domain_policy_strict_blocks_unintercepted_hostname_allow_https() {
     };
 
     let baseline_name = "net-domain-policy-strict-off";
-    let baseline = setup_curl(baseline_name, policy.clone(), false).await;
+    let baseline = setup_curl(baseline_name, policy.clone(), Some(false)).await;
     let baseline_dns = dns_lookup(&baseline, ALLOWED_HOST).await;
     assert!(
         !baseline_dns.is_empty(),
@@ -501,7 +505,7 @@ async fn domain_policy_strict_blocks_unintercepted_hostname_allow_https() {
     stop_and_remove(baseline_name).await;
 
     let strict_name = "net-domain-policy-strict-on";
-    let strict = setup_curl(strict_name, policy, true).await;
+    let strict = setup_curl(strict_name, policy, None).await;
     let strict_dns = dns_lookup(&strict, ALLOWED_HOST).await;
     assert!(
         !strict_dns.is_empty(),

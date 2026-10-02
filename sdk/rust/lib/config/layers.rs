@@ -1,7 +1,7 @@
 //! Own backend configuration sources and combine typed operation patches.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -23,6 +23,10 @@ pub(crate) struct BackendConfig {
     defaults: GlobalConfigPatch,
     managed: GlobalConfigPatch,
     resolved: OnceLock<Arc<GlobalConfig>>,
+    defaults_file: Option<PathBuf>,
+    managed_file: Option<PathBuf>,
+    #[cfg(feature = "local")]
+    pub(crate) legacy_metrics_registry: Option<String>,
 }
 
 /// Forward to each SDK patch's generated overlay implementation.
@@ -64,6 +68,10 @@ impl BackendConfig {
             defaults,
             managed,
             resolved: OnceLock::new(),
+            defaults_file: None,
+            managed_file: None,
+            #[cfg(feature = "local")]
+            legacy_metrics_registry: None,
         }
     }
 
@@ -74,23 +82,72 @@ impl BackendConfig {
 
     /// Tests can supply a managed path instead of reading the machine's policy.
     pub(crate) fn load_from(path: &Path, managed_path: Option<&Path>) -> MicrosandboxResult<Self> {
-        Ok(Self::new(
+        Self::new(
             GlobalConfigPatch::load_from(path)?,
             ManagedConfig::load(managed_path)?.overrides,
-        ))
+        )
+        .with_source_files(path, managed_path)
+    }
+
+    /// Retain provenance until local construction; cloud settings need no local path capture.
+    pub(crate) fn with_source_files(
+        mut self,
+        path: &Path,
+        managed: Option<&Path>,
+    ) -> MicrosandboxResult<Self> {
+        self.defaults_file = Some(path.to_path_buf());
+        self.managed_file = Some(match managed {
+            Some(path) => path.to_path_buf(),
+            None => ManagedConfig::path()?,
+        });
+        Ok(self)
     }
 
     /// Prepare local settings once, then validate and cache the complete result.
     /// Cloud profile lookup does not prepare local runtime paths or validate local defaults.
     pub(crate) fn prepare_for_local_backend(
         mut self,
-        builder: GlobalConfigPatch,
+        mut builder: GlobalConfigPatch,
     ) -> MicrosandboxResult<Self> {
-        let builtins = GlobalConfigPatch::from_present_fields(GlobalConfig::default());
-        let runtime_paths = PathsConfigPatch::from_env_or_sdk();
-        self.defaults = Self::compose_defaults(builtins, self.defaults, builder, runtime_paths);
-        self.resolved.take();
-        self.resolved_config().validate_sandbox_defaults()?;
+        let mut builtins = GlobalConfigPatch::from_present_fields(GlobalConfig::default());
+        let mut runtime =
+            GlobalConfigPatch::new().paths(PathsConfigPatch::from_env_or_sdk(&self.managed.paths)?);
+        // Capture the old effective spelling before anchoring individual source layers.
+        // Existing runtimes keep writing there; new writers use only the captured home.
+        #[cfg(feature = "local")]
+        let legacy = Self::compose_defaults(
+            builtins.clone(),
+            self.defaults.clone(),
+            builder.clone(),
+            runtime.paths.clone(),
+        )
+        .overlay(self.managed.clone())
+        .into_config();
+        #[cfg(feature = "local")]
+        {
+            self.legacy_metrics_registry = Some(legacy.metrics_registry_shm_name());
+        }
+        // Resolve only winning values. A shadowed relative input must not require
+        // a usable cwd or invalidate an absolute administrator override.
+        let mut higher = GlobalConfigPatch::new();
+        for (patch, file) in [
+            (&mut builtins, None),
+            (&mut self.defaults, self.defaults_file.as_deref()),
+            (&mut builder, None),
+            (&mut runtime, None),
+            (&mut self.managed, self.managed_file.as_deref()),
+        ]
+        .into_iter()
+        .rev()
+        {
+            super::runtime_paths::resolve_patch(patch, file, &higher)?;
+            higher = patch.clone().overlay(higher);
+        }
+        self.defaults = Self::compose_defaults(builtins, self.defaults, builder, runtime.paths);
+        let mut resolved = self.global_layers().build().into_config();
+        super::runtime_paths::resolve(&mut resolved)?;
+        resolved.validate_sandbox_defaults()?;
+        self.resolved = OnceLock::from(Arc::new(resolved));
         Ok(self)
     }
 
@@ -209,6 +266,55 @@ mod tests {
     use super::*;
     use crate::config::SandboxDefaultsPatch;
     use microsandbox_types::{RootDisk, SandboxResourcesPatch, SandboxSpecPatch};
+
+    #[test]
+    fn file_path_layers_keep_their_bases_and_managed_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().join("user");
+        let admin_dir = dir.path().join("admin");
+        std::fs::create_dir(&user_dir).unwrap();
+        std::fs::create_dir(&admin_dir).unwrap();
+        let user = user_dir.join("config.json");
+        let admin = admin_dir.join("managed.json");
+        std::fs::write(
+            &user,
+            r#"{"home":"./user-state","paths":{"cache":"./cache","logs":"./user-logs"}}"#,
+        )
+        .unwrap();
+        std::fs::write(&admin, r#"{"overrides":{"home":"./admin-state","paths":{"logs":"./logs","secrets":null},"registries":{"ca_certs":"./company.pem"}}}"#).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&admin_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let before = std::fs::read(&user).unwrap();
+        let config = BackendConfig::load_from(&user, Some(&admin)).unwrap()
+            .prepare_for_local_backend(serde_json::from_str(r#"{"home":"./builder-state","paths":{"volumes":"./builder-volumes","secrets":"./builder-secrets"}}"#).unwrap()).unwrap();
+        let resolved = config.resolved_config();
+        assert_eq!(resolved.home(), admin_dir.join("admin-state"));
+        assert_eq!(resolved.paths.cache, Some(user_dir.join("cache")));
+        assert_eq!(resolved.paths.logs, Some(admin_dir.join("logs")));
+        assert_eq!(
+            resolved.paths.volumes,
+            Some(std::path::absolute("./builder-volumes").unwrap())
+        );
+        assert_eq!(resolved.paths.secrets, None);
+        assert_eq!(
+            resolved.registries.ca_certs,
+            Some(admin_dir.join("company.pem"))
+        );
+        assert_eq!(config.global_layers().build().paths.secrets, Some(None));
+        #[cfg(feature = "local")]
+        assert_eq!(
+            config.legacy_metrics_registry,
+            Some(microsandbox_utils::metrics_registry_shm_name(
+                Path::new("./admin-state"),
+                microsandbox_metrics::REGISTRY_ABI_VERSION
+            ))
+        );
+        assert_eq!(std::fs::read(&user).unwrap(), before);
+    }
 
     #[test]
     fn local_preparation_validates_after_later_layers_supply_referenced_profiles() {
@@ -429,7 +535,7 @@ mod tests {
         assert_eq!(enforced.resolved_config().paths.libkrunfw, None);
         assert_eq!(
             ordinary.resolved_config().paths.agentd.as_deref(),
-            Some(Path::new("environment-agentd"))
+            Some(std::path::absolute("environment-agentd").unwrap().as_path())
         );
         assert_eq!(enforced.resolved_config().paths.agentd, None);
     }
@@ -469,7 +575,8 @@ mod tests {
             assert_eq!(layers.resolved_config().sandbox_defaults.cpus, cpus);
             assert_eq!(
                 layers.resolved_config().paths.msb.as_deref(),
-                path.map(std::path::Path::new)
+                path.map(|value| std::path::absolute(value).unwrap())
+                    .as_deref()
             );
             // Built-in None must stay omitted so image workdir can be inherited.
             assert_eq!(layers.defaults.sandbox_defaults.workdir, None);
@@ -516,7 +623,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sdk.resolved_config().paths.msb.as_deref(),
-            Some(Path::new("sdk-msb"))
+            Some(std::path::absolute("sdk-msb").unwrap().as_path())
         );
         assert_eq!(
             sdk.resolved_config().paths.libkrunfw.as_deref(),
@@ -538,20 +645,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             env.resolved_config().paths.msb.as_deref(),
-            Some(Path::new("env-msb"))
+            Some(std::path::absolute("env-msb").unwrap().as_path())
         );
         assert_eq!(
             env.resolved_config().paths.libkrunfw.as_deref(),
-            Some(Path::new("env-firmware"))
+            Some(std::path::absolute("env-firmware").unwrap().as_path())
         );
         assert_eq!(
             managed.resolved_config().paths.msb.as_deref(),
-            Some(Path::new("admin-msb"))
+            Some(std::path::absolute("admin-msb").unwrap().as_path())
         );
         assert_eq!(managed.resolved_config().paths.libkrunfw, None);
         assert_eq!(
             sdk.resolved_config().paths.msb.as_deref(),
-            Some(Path::new("sdk-msb"))
+            Some(std::path::absolute("sdk-msb").unwrap().as_path())
         );
     }
 

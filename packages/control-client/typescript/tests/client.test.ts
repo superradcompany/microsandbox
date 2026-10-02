@@ -53,7 +53,9 @@ async function opening(transport: ByteTransport): Promise<void> {
   expect([raw.id, raw.flags]).toEqual([0, 0]);
   const envelope = decodeEnvelope(raw.body);
   expect([envelope.v, envelope.t]).toEqual([1, "control.hello"]);
-  expect(decodeHello(envelope.p)).toMatchObject({ max_in_flight: 64, protocol: "msb.control" });
+  expect(decodeHello(envelope.p)).toMatchObject({
+    min_generation: 1, max_generation: 2, max_in_flight: 64, protocol: "msb.control",
+  });
 }
 
 it("sends a direct hello, preserves fragmented welcome bytes, and multiplexes one connection", async () => {
@@ -79,7 +81,7 @@ it("rejects invalid or over-offer welcomes and never sends application bytes aft
   const cases = [
     packet(1, "control.welcome", welcome), packet(0, "control.welcome", welcome, 0),
     packet(0, "control.welcome", welcome, 1, 2), packet(0, "wrong", welcome),
-    ...[{ protocol: "wrong" }, { generation: 2 }, { max_frame_size: 4095 }, { max_in_flight: 65 }, { max_in_flight: 0 }].map(overrides => packet(0, "control.welcome", { ...welcome, ...overrides })),
+    ...[{ protocol: "wrong" }, { generation: 3 }, { max_frame_size: 4095 }, { max_in_flight: 65 }, { max_in_flight: 0 }].map(overrides => packet(0, "control.welcome", { ...welcome, ...overrides })),
   ];
   for (const bytes of cases) {
     let afterHello = false;

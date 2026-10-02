@@ -19,6 +19,13 @@ use super::socks::Socks5Credentials;
 #[serde(tag = "protocol", rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum OutboundProxy {
+    /// An HTTP proxy that opens TCP tunnels with CONNECT.
+    #[serde(rename = "http_connect")]
+    HttpConnect {
+        /// Proxy socket address.
+        address: SocketAddr,
+    },
+
     /// A SOCKS4 proxy at the given address.
     Socks4 {
         /// Proxy socket address.
@@ -42,6 +49,13 @@ pub enum OutboundProxy {
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedOutboundProxy {
+    /// An HTTP CONNECT proxy ready for TCP connections.
+    #[serde(rename = "http_connect")]
+    HttpConnect {
+        /// Proxy socket address.
+        address: SocketAddr,
+    },
+
     /// A SOCKS4 proxy ready for TCP connections.
     Socks4 {
         /// Proxy socket address.
@@ -64,6 +78,10 @@ pub enum ResolvedOutboundProxy {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum OutboundProxyProtocol {
+    /// HTTP CONNECT.
+    #[serde(rename = "http_connect")]
+    HttpConnect,
+
     /// SOCKS version 4.
     Socks4,
     /// SOCKS version 5.
@@ -116,7 +134,7 @@ pub enum OutboundProxyParseError {
 
     /// The URI uses a proxy protocol that is not supported yet.
     #[error(
-        "unsupported outbound proxy protocol {protocol:?}; supported protocols are socks4:// and socks5://"
+        "unsupported outbound proxy protocol {protocol:?}; supported protocols are http://, socks4://, and socks5://"
     )]
     UnsupportedProtocol {
         /// Unsupported URI scheme.
@@ -174,6 +192,7 @@ impl ResolvedOutboundProxy {
 impl fmt::Display for OutboundProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HttpConnect { address } => write!(f, "http://{address}"),
             Self::Socks4 { address, .. } => write!(f, "socks4://{address}"),
             Self::Socks5 { address, .. } => write!(f, "socks5://{address}"),
         }
@@ -183,6 +202,7 @@ impl fmt::Display for OutboundProxy {
 impl fmt::Display for OutboundProxyProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::HttpConnect => f.write_str("HTTP CONNECT"),
             Self::Socks4 => f.write_str("SOCKS4"),
             Self::Socks5 => f.write_str("SOCKS5"),
         }
@@ -197,6 +217,7 @@ impl FromStr for OutboundProxy {
             .split_once("://")
             .ok_or(OutboundProxyParseError::MissingProtocol)?;
         let protocol = match protocol {
+            "http" => OutboundProxyProtocol::HttpConnect,
             "socks4" => OutboundProxyProtocol::Socks4,
             "socks5" => OutboundProxyProtocol::Socks5,
             protocol => {
@@ -212,6 +233,9 @@ impl FromStr for OutboundProxy {
             return Err(OutboundProxyParseError::ExtraComponentsNotSupported);
         }
         match protocol {
+            OutboundProxyProtocol::HttpConnect => {
+                Ok(OutboundProxyBuilder::new().http_connect(address).build()?)
+            }
             OutboundProxyProtocol::Socks4 => {
                 Ok(OutboundProxyBuilder::new().socks4(address).build()?)
             }

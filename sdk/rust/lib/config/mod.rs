@@ -39,7 +39,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 #[cfg(test)]
 use std::path::Path;
 
-mod runtime_paths;
+pub(crate) mod runtime_paths;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -122,10 +122,10 @@ mod deployment_profile_serde {
 
 /// Explicit process-level executable override, below `MSB_PATH` and above
 /// configuration and filesystem candidates. Package discovery uses its own fallback.
-static SDK_MSB_PATH: OnceLock<PathBuf> = OnceLock::new();
+static SDK_MSB_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// Explicit process-level firmware override set via [`set_sdk_libkrunfw_path`].
-static SDK_LIBKRUNFW_PATH: OnceLock<PathBuf> = OnceLock::new();
+static SDK_LIBKRUNFW_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -564,17 +564,23 @@ impl GlobalConfig {
 
 impl PathsConfigPatch {
     /// Capture runtime paths from the environment, falling back to SDK-provided paths.
-    pub(crate) fn from_env_or_sdk() -> Self {
-        let libkrunfw = std::env::var("MSB_LIBKRUNFW_PATH")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(sdk_libkrunfw_path);
-
-        let msb = std::env::var("MSB_PATH")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(sdk_msb_path);
-
+    pub(crate) fn from_env_or_sdk(managed: &Self) -> MicrosandboxResult<Self> {
+        // A failed infallible SDK registration must not silently fall back to another
+        // runtime. Higher-priority environment or managed values can replace it.
+        let runtime_path =
+            |name: &str, managed: bool, sdk: fn() -> MicrosandboxResult<Option<PathBuf>>| {
+                match std::env::var(name).ok() {
+                    Some(path) => Ok(Some(PathBuf::from(path))),
+                    None if managed => Ok(None),
+                    None => sdk(),
+                }
+            };
+        let libkrunfw = runtime_path(
+            "MSB_LIBKRUNFW_PATH",
+            managed.libkrunfw.is_some(),
+            sdk_libkrunfw_path,
+        )?;
+        let msb = runtime_path("MSB_PATH", managed.msb.is_some(), sdk_msb_path)?;
         let mut patch = Self::new();
         if let Some(msb) = msb {
             patch.msb_mut(msb);
@@ -585,7 +591,7 @@ impl PathsConfigPatch {
         if let Some(agentd) = std::env::var_os("MSB_AGENTD_PATH") {
             patch.agentd_mut(PathBuf::from(agentd));
         }
-        patch
+        Ok(patch)
     }
 }
 
@@ -685,12 +691,17 @@ pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
 /// This is an internal SDK bridge for runtimes where mutating `process.env`
 /// does not update the native process environment. User-provided `MSB_PATH`
 /// still wins over this value. Set-once: subsequent calls are ignored.
+/// Relative paths are captured at registration, before runtime discovery.
+///
+/// Resolution errors are retained and returned when runtime resolution is requested.
 pub fn set_sdk_msb_path(path: impl Into<PathBuf>) {
-    let _ = SDK_MSB_PATH.set(path.into());
+    if SDK_MSB_PATH.get().is_none() {
+        let _ = SDK_MSB_PATH.set(runtime_paths::anchor_registered_path(path.into()));
+    }
 }
 
-pub(crate) fn sdk_msb_path() -> Option<PathBuf> {
-    SDK_MSB_PATH.get().cloned()
+pub(crate) fn sdk_msb_path() -> MicrosandboxResult<Option<PathBuf>> {
+    runtime_paths::registered_path(&SDK_MSB_PATH)
 }
 
 /// Resolve the ambient runtime executable as part of a complete runtime pair.
@@ -706,12 +717,17 @@ pub fn resolve_msb_path() -> MicrosandboxResult<PathBuf> {
 /// `MSB_LIBKRUNFW_PATH` environment override still wins.
 ///
 /// Mirrors [`set_sdk_msb_path`]; both share the same precedence shape.
+/// Relative paths are captured at registration, before runtime discovery.
+///
+/// Resolution errors are retained and returned when runtime resolution is requested.
 pub fn set_sdk_libkrunfw_path(path: impl Into<PathBuf>) {
-    let _ = SDK_LIBKRUNFW_PATH.set(path.into());
+    if SDK_LIBKRUNFW_PATH.get().is_none() {
+        let _ = SDK_LIBKRUNFW_PATH.set(runtime_paths::anchor_registered_path(path.into()));
+    }
 }
 
-pub(crate) fn sdk_libkrunfw_path() -> Option<PathBuf> {
-    SDK_LIBKRUNFW_PATH.get().cloned()
+pub(crate) fn sdk_libkrunfw_path() -> MicrosandboxResult<Option<PathBuf>> {
+    runtime_paths::registered_path(&SDK_LIBKRUNFW_PATH)
 }
 
 /// Resolve the ambient firmware library as part of a complete runtime pair.

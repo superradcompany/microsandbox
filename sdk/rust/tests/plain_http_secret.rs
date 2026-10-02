@@ -217,7 +217,7 @@ async fn plain_http_forwards_placeholder_with_explicit_passthrough() {
             s.env("API_KEY")
                 .value(REAL_SECRET)
                 .allow_any_host_dangerous(true)
-                .allow_passthrough_for("host.microsandbox.internal")
+                .allow_placeholder_for("host.microsandbox.internal")
         })
         .network(|n| n.policy(NetworkPolicy::allow_all()))
         .create()

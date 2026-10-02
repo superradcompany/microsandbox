@@ -73,6 +73,7 @@ pub(crate) struct CheckpointCoordinator {
     local_baseline: Option<LocalMemoryPin>,
     inherited_memory: Option<LocalMemoryPin>,
     boot_geometry: (u8, u8, u32, u32),
+    guest_clock: microsandbox_types::GuestClockPolicy,
 }
 
 /// Published checkpoint identity returned to the control executor.
@@ -231,20 +232,29 @@ impl CheckpointCoordinator {
     }
 
     /// Resume this exact resident VM, processing clock correction before releasing workloads.
+    ///
+    /// With the guest clock off, no clock correction is requested and workloads are released
+    /// as soon as the vCPUs resume.
     pub(crate) fn resume_user(
         &self,
         vm: &msb_krun::VmControl,
         paused: &UserPause,
     ) -> Result<(), CheckpointFailure> {
         paused.validate(vm).map_err(CheckpointFailure::paused)?;
-        let request = vm
-            .request_clock_sync()
-            .ok_or_else(|| CheckpointFailure::paused("clock-only resume request unavailable"))?;
+        let request = if self.guest_clock.is_sync() {
+            Some(vm.request_clock_sync().ok_or_else(|| {
+                CheckpointFailure::paused("clock-only resume request unavailable")
+            })?)
+        } else {
+            None
+        };
         vm.resume(paused.generation)
             .map_err(CheckpointFailure::paused)?;
-        let result = if vm.wait_vm_generation_processed(request, WORKLOAD_CONTROL_TIMEOUT)
-            == Some(msb_krun::VmGenerationWaitOutcome::Processed)
-        {
+        let clock_ready = request.is_none_or(|request| {
+            vm.wait_vm_generation_processed(request, WORKLOAD_CONTROL_TIMEOUT)
+                == Some(msb_krun::VmGenerationWaitOutcome::Processed)
+        });
+        let result = if clock_ready {
             match &paused.workload {
                 Some(workload) => self.thaw_workload(workload),
                 None => {
@@ -478,6 +488,7 @@ impl CheckpointCoordinator {
             local_baseline: None,
             inherited_memory: None,
             boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
+            guest_clock: vm.guest_clock,
         })
     }
 

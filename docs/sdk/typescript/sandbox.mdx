@@ -22,6 +22,31 @@ Use `connectOrCreate` when a named sandbox might already exist. It connects to a
 
 Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver throws `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
+## Forking
+
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+
+### fork() and forkMany()
+
+```typescript
+fork(name: string, options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<Sandbox>
+forkMany(names: string[], options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<ForkOutcome[]>
+```
+
+`recordIntegrity` records disk hashes. `guestFlush` selects `"auto"`, `"required"`, or `"skip"`; the default is `"auto"`. Copy-on-write memory is inherent to a live fork, so no restore option is needed.
+
+### ForkOutcome
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Requested child name |
+| `sandbox` | Started `Sandbox` on success |
+| `error` | `Error` on failure |
+
+Exactly one of `sandbox` and `error` is present. `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
+
+Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+
 ## Functions
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
@@ -47,7 +72,7 @@ Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for sn
 ```typescript
 const creation = await Sandbox.restore("saved")
   .name("child")
-  .forked()
+  .cowMemory()
   .restoreWithProgress();
 for await (const event of creation) {
   if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
@@ -1478,7 +1503,7 @@ Configure DNS, TLS, policy, and secrets. See [Networking](/sdk/typescript/networ
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">proxy()</span>
 
 ```typescript
-proxy(configure: (proxy: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
+proxy(configure: (proxy: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
 ```
 
 Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/typescript/proxies) for the protocol builders and examples.

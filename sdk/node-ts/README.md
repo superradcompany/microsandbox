@@ -133,6 +133,19 @@ Pruning removes only unused published runtime RAM. Live mappings, retained basel
 
 These snippets assume you already have a live `sandbox: Sandbox`.
 
+### Fork a Live Sandbox
+
+Forking copies a running or paused local sandbox's disk and execution state into an independent child. Memory uses copy-on-write automatically. The source keeps its previous running or paused state. Host resources require explicit bindings; see [forking and resource bindings](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
+
+```typescript
+const child = await sandbox.fork("experiment");
+await child.stop();
+```
+
+Use `forkMany(["alice", "bob"])` to capture once for several children. Inspect every returned outcome: one child's startup failure does not remove successful siblings. See the [fork API reference](https://docs.microsandbox.dev/sdk/typescript/sandbox#forking).
+
+Restoring starts from a saved snapshot instead. Use `.cowMemory()` to request copy-on-write memory for a full-snapshot restore. A generation describes snapshot-history progression; a branch describes a distinct path through that history. The former live branch APIs and old CoW restore names remain deprecated aliases. See [restore migration notes](https://docs.microsandbox.dev/sandboxes/snapshots#migrating-restore-options) for the old-to-new names and language-specific deprecation notices.
+
 ### Command Execution
 
 ```typescript
@@ -398,6 +411,8 @@ npm run build
 npm run typecheck
 npm test
 ```
+
+On a release branch whose native packages are not published yet, replace `npm ci` with `node ../../scripts/ci/build-unpublished-node-sdk.mjs`. This installs the locked build tools and builds TypeScript while restoring the package manifests afterward. Continue with `npm run build` to build the native addon locally. Standard `npm ci` works again after the post-release lockfile refresh.
 
 Run repository examples from the specific example directory:
 

@@ -18,7 +18,7 @@ import urllib.request
 VERSION = "0.6.18"
 BUNDLE = "microsandbox-linux-x86_64.tar.gz"
 FIRMWARE = "libkrunfw.so.5.6.1"
-TEST = "backend::local::catalog::tests::live_sdk_upgrades_catalog_with_historical_runtime"
+TEST = "backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime"
 RELEASE = f"https://github.com/superradcompany/microsandbox/releases/download/v{VERSION}"
 
 

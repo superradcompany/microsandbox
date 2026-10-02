@@ -2465,6 +2465,84 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
 }
 
 #[tokio::test]
+async fn load_rebuilds_image_vmdk_for_destination_cache() {
+    let tmp = TempDir::new().unwrap();
+    let export_home = tmp.path().join("export-home");
+    let export_backend = isolated_backend(&export_home).await;
+    let export_cache = microsandbox_image::GlobalCache::new(&export_home.join("cache")).unwrap();
+    let seeded = seed_image_cache(&export_cache).await;
+    let (dir, _) = make_artifact_with_image(
+        tmp.path(),
+        "src-vmdk-rebuild",
+        b"upper",
+        seeded.image_ref.to_string(),
+        seeded.manifest_digest.clone(),
+    );
+    let archive = tmp.path().join("vmdk-rebuild.tar");
+
+    microsandbox::with_backend(
+        export_backend,
+        Box::pin(async {
+            save_snapshot(
+                dir.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts {
+                    with_image: true,
+                    plain_tar: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }),
+    )
+    .await;
+
+    let import_home = tmp.path().join("import-home");
+    let import_backend = isolated_backend(&import_home).await;
+    let import_cache = microsandbox_image::GlobalCache::new(&import_home.join("cache")).unwrap();
+    let dest = tmp.path().join("vmdk-rebuild-dest");
+    microsandbox::with_backend(
+        import_backend.clone(),
+        Box::pin(async {
+            Snapshot::load(&archive, Some(&dest)).await.unwrap();
+        }),
+    )
+    .await;
+
+    let vmdk = import_cache.vmdk_path(&seeded.image_digest);
+    assert_vmdk_references_cache(&import_cache, &seeded);
+
+    // A descriptor left by an earlier import, pointing elsewhere, is replaced too.
+    std::fs::write(&vmdk, "RW 8 FLAT \"/elsewhere/fsmeta.erofs\" 0\n").unwrap();
+    let dest = tmp.path().join("vmdk-rebuild-dest-stale");
+    microsandbox::with_backend(
+        import_backend,
+        Box::pin(async {
+            Snapshot::load(&archive, Some(&dest)).await.unwrap();
+        }),
+    )
+    .await;
+    assert_vmdk_references_cache(&import_cache, &seeded);
+}
+
+fn assert_vmdk_references_cache(
+    cache: &microsandbox_image::GlobalCache,
+    seeded: &SeededImageCache,
+) {
+    let descriptor = std::fs::read_to_string(cache.vmdk_path(&seeded.image_digest)).unwrap();
+    for extent in [
+        cache.fsmeta_erofs_path(&seeded.image_digest),
+        cache.layer_erofs_path(&seeded.diff_id),
+    ] {
+        assert!(
+            descriptor.contains(&*std::fs::canonicalize(extent).unwrap().to_string_lossy()),
+            "imported VMDK does not reference the destination cache: {descriptor}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn manifest_digest_is_stable_across_processes() {
     // Canonicalization is stable for one immutable descriptor. Independent
     // captures intentionally receive different opaque snapshot IDs.

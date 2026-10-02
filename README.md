@@ -30,7 +30,7 @@
 ##
 
 - <img height="14" src="https://octicons-col.vercel.app/shield-lock/A770EF"> **Hardware Isolation**: Hardware-level isolation with tiny virtual machines.
-- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Branch & Snapshot**: Fork live sandboxes[^demo]. Save running sandbox state and restore later.
+- <img height="14" src="https://octicons-col.vercel.app/repo-forked/A770EF"> **Fork & Snapshot**: Fork live sandboxes[^demo]. Save running sandbox state and restore later.
 - <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **Cross Platform**: Runs on Linux, macOS, and Windows.
 - <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **OCI Compatible**: Runs standard container images from Docker Hub, GHCR, or any OCI registry.
 - <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **Docker-Like Workflows**: Familiar image, command, shell, and volume workflows.
@@ -139,7 +139,7 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > ```sh
 > # Fork a running sandbox.
-> msb branch app --name experiment
+> msb fork app --name experiment
 > msb exec experiment -- python -c "print('An independent copy!')"
 > ```
 >
@@ -148,6 +148,8 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 > msb snap create --sandbox app --full -o saved.msb
 > msb snap restore saved.msb --name restored
 > ```
+>
+> Forking duplicates live execution. Restoring starts from saved state; add `--cow-mem` to share unchanged memory from a full snapshot. Snapshot generations describe progression, while branches describe distinct paths through snapshot history. The old `--forked` restore flag remains a deprecated alias. See [forking and snapshots](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
 >
 > ```sh
 > # Lifecycle
@@ -404,7 +406,7 @@ Practical ways to put microsandbox to work:
 
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
 
-> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox#microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox/microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart) by U.S. GSA**: From zero to a running AI coding agent with USAi in minutes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />
@@ -482,5 +484,5 @@ Special thanks to all our contributors, testers, and community members who help 
 <br />
 <br />
 
-[^demo]: We have cool demos showcasing vm pause/resume, snapshotting, and branching: [Mario Never Dies](https://github.com/superradcompany/mario-never-dies) and [Multiverse of Madness](https://github.com/superradcompany/multiverse-of-madness)
+[^demo]: We have cool demos showcasing vm pause/resume, snapshotting, and forking: [Mario Never Dies](https://github.com/superradcompany/mario-never-dies) and [Multiverse of Madness](https://github.com/superradcompany/multiverse-of-madness)
 [^boot-time]: Boot time refers to guest boot on an M1 machine.

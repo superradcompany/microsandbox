@@ -12,6 +12,7 @@
 //--------------------------------------------------------------------------------------------------
 
 pub mod catalog;
+pub mod compat;
 pub mod connection;
 #[allow(missing_docs)]
 pub mod entity;

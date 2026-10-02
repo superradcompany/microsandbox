@@ -17,7 +17,7 @@ let sb = Sandbox::builder("worker").image("alpine")
     .create().await?;
 ```
 
-`.owned()` creates an empty directory. `.owned_with(...)` accepts `.directory().quota(...)` or `.disk().size(...)`; disks are raw ext4 and require a positive size. Common mount flags stay on `MountBuilder`. The backing survives stop/start, is captured by snapshots and branches, and is removed with the sandbox. Restore makes private copies automatically. Cloud rejects owned mounts.
+`.owned()` creates an empty directory. `.owned_with(...)` accepts `.directory().quota(...)` or `.disk().size(...)`; disks are raw ext4 and require a positive size. Common mount flags stay on `MountBuilder`. The backing survives stop/start, is captured by snapshots and forks, and is removed with the sandbox. Restore makes private copies automatically. Cloud rejects owned mounts.
 
 ## Volume
 
@@ -690,6 +690,8 @@ Returns `Some` for cloud-backed handles and `None` otherwise.
 </div>
 
 ## VolumeFs
+
+Local operations remain confined to the opened volume directory, including symlink traversal, missing parents, streams, copy, rename, and recursive deletion. Paths that leave the volume return an error. A leading `/` denotes the volume root; valid in-volume parent components and symlinks keep their meaning. Removing or renaming the volume root is refused.
 
 <p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a> · <a href="#h-fs">VolumeHandle::fs()</a></p>
 

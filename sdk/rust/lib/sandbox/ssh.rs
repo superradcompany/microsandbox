@@ -275,6 +275,7 @@ struct PtyInfo {
 struct SftpServerSession {
     client: Arc<AgentClient>,
     cwd: String,
+    user: Option<String>,
     next_handle: u64,
     handles: HashMap<String, crate::sandbox::fs::FsHandle>,
 }
@@ -1670,9 +1671,17 @@ impl russh::server::Handler for SshSession {
             .map(str::to_string)
             .clone()
             .unwrap_or_else(|| "/".to_string());
+        // Root sessions keep the agent's own identity; others act as the same user as exec.
+        let user = self
+            .settings
+            .guest_user
+            .clone()
+            .or_else(|| self.user.clone())
+            .filter(|user| user != "root");
         let sftp = SftpServerSession {
             client,
             cwd,
+            user,
             next_handle: 0,
             handles: HashMap::new(),
         };
@@ -1951,7 +1960,8 @@ impl russh_sftp::server::Handler for SftpServerSession {
         attrs: russh_sftp::protocol::FileAttributes,
     ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
         let path = self.normalize_path(filename);
-        let options = open_flags_to_options(pflags, &attrs);
+        let mut options = open_flags_to_options(pflags, &attrs);
+        options.user = self.user.clone();
         let handle = sftp_open_file(&self.client, &path, options)
             .await
             .map_err(status_code)?;
@@ -2136,6 +2146,7 @@ impl russh_sftp::server::Handler for SftpServerSession {
             FsOp::Mkdir {
                 path: path.clone(),
                 mode: attrs.permissions,
+                user: self.user.clone(),
             },
         )
         .await
@@ -2224,9 +2235,17 @@ impl russh_sftp::server::Handler for SftpServerSession {
     ) -> Result<russh_sftp::protocol::Status, Self::Error> {
         let target = linkpath;
         let link_path = self.normalize_path(targetpath);
-        sftp_simple_op(&self.client, FsOp::Symlink { target, link_path })
-            .await
-            .map_err(status_code)?;
+        let user = self.user.clone();
+        sftp_simple_op(
+            &self.client,
+            FsOp::Symlink {
+                target,
+                link_path,
+                user,
+            },
+        )
+        .await
+        .map_err(status_code)?;
         Ok(status(id, russh_sftp::protocol::StatusCode::Ok))
     }
 }
@@ -3018,6 +3037,7 @@ fn open_flags_to_options(
         truncate: flags.contains(russh_sftp::protocol::OpenFlags::TRUNCATE),
         create_new: flags.contains(russh_sftp::protocol::OpenFlags::EXCLUDE),
         mode: attrs.permissions,
+        user: None,
     }
 }
 
@@ -3378,6 +3398,72 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn sftp_creations_carry_the_session_user() {
+        use microsandbox_protocol::{
+            codec,
+            core::Ready,
+            fs::{FsRequest, FsResponse, FsResponseData},
+            message::{Message, MessageType},
+        };
+        use russh_sftp::{protocol::FileAttributes, server::Handler};
+
+        let (client_io, mut server_io) = tokio::io::duplex(4096);
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        tokio::spawn(async move {
+            server_io.write_all(&1u32.to_be_bytes()).await.unwrap();
+            server_io.write_all(&1024u32.to_be_bytes()).await.unwrap();
+            let ready = Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+            codec::write_message(&mut server_io, &ready).await.unwrap();
+            while let Ok(message) = codec::read_message(&mut server_io).await {
+                let request: FsRequest = message.payload().unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(&request.op).unwrap());
+                let response = FsResponse {
+                    ok: true,
+                    error: None,
+                    data: matches!(request.op, FsOp::OpenFile { .. })
+                        .then_some(FsResponseData::Handle(1)),
+                };
+                let reply =
+                    Message::with_payload(MessageType::FsResponse, message.id, &response).unwrap();
+                codec::write_message(&mut server_io, &reply).await.unwrap();
+            }
+        });
+        let client = AgentClient::connect_stream_with_timeout(client_io, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let mut sftp = SftpServerSession {
+            client: Arc::new(client),
+            cwd: "/".to_string(),
+            user: Some("alice".to_string()),
+            next_handle: 0,
+            handles: HashMap::new(),
+        };
+
+        let flags =
+            russh_sftp::protocol::OpenFlags::WRITE | russh_sftp::protocol::OpenFlags::CREATE;
+        sftp.open(1, "/home/alice/file".into(), flags, FileAttributes::empty())
+            .await
+            .unwrap();
+        sftp.mkdir(2, "/home/alice/dir".into(), FileAttributes::empty())
+            .await
+            .unwrap();
+        sftp.symlink(3, "file".into(), "/home/alice/link".into())
+            .await
+            .unwrap();
+
+        let requests = requests.lock().unwrap();
+        for name in ["OpenFile", "Mkdir", "Symlink"] {
+            let fields = requests.iter().find_map(|op| op.get(name)).unwrap();
+            let user = fields.get("user").or_else(|| fields["options"].get("user"));
+            assert_eq!(user, Some(&serde_json::json!("alice")), "{name}: {fields}");
+        }
     }
 
     #[tokio::test]

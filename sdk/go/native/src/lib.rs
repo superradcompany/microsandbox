@@ -39,6 +39,7 @@ mod creation_progress;
 mod restore;
 mod setup;
 mod storage;
+mod volume_fs;
 
 use std::{
     collections::HashMap,
@@ -66,7 +67,7 @@ use microsandbox::{
         ssh::{SftpClient, SshClient, SshServer, SshStdioStream},
     },
     snapshot::{SaveOpts, SnapshotFormat, SnapshotScope},
-    volume::{Volume, VolumeBuilder, VolumeFs, VolumeHandle, VolumeKind},
+    volume::{Volume, VolumeBuilder, VolumeHandle, VolumeKind},
 };
 use microsandbox_network::secrets::config::SecretViolationAction;
 use tokio::io::AsyncWriteExt;
@@ -489,6 +490,7 @@ struct FfiError {
     kind: &'static str,
     message: String,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    os_error: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -505,6 +507,7 @@ impl FfiError {
             kind,
             message: message.into(),
             recovery: None,
+            os_error: None,
         }
     }
 
@@ -527,6 +530,12 @@ impl FfiError {
     fn to_json(&self) -> String {
         // Message is escaped via serde_json so it's safe to embed arbitrary text.
         let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        if let Some(os_error) = self.os_error {
+            return format!(
+                r#"{{"kind":"{}","message":{},"os_error":{}}}"#,
+                self.kind, msg, os_error
+            );
+        }
         if let Some(recovery) = &self.recovery
             && let Ok(recovery) = serde_json::to_string(recovery)
         {
@@ -576,6 +585,7 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message: e.to_string(),
+            os_error: None,
             recovery: match e {
                 MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
                 _ => None,
@@ -955,10 +965,15 @@ struct NetworkOpts {
     /// Ports nested inside network with explicit bind addresses.
     #[serde(default)]
     port_bindings: Vec<PortBindingOpts>,
+    /// Accept-queue depth for published TCP port listeners.
+    tcp_accept_queue_size: Option<u32>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
     ipv6_pool: Option<String>,
+    /// NAT64 /96 prefixes for policy classification.
+    #[serde(default)]
+    nat64_prefixes: Vec<String>,
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
@@ -969,6 +984,8 @@ struct NetworkOpts {
     secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
+    /// Body returned to HTTP/HTTPS clients when egress is denied.
+    http: Option<microsandbox_network::config::HttpConfig>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1402,6 +1419,12 @@ fn apply_network(
             .map_err(|e| FfiError::invalid_argument(format!("ipv6_pool {raw:?}: {e}")))?;
         builder = builder.network(|n| n.ipv6_pool(pool));
     }
+    for raw in &net.nat64_prefixes {
+        let prefix: ipnetwork::Ipv6Network = raw.parse().map_err(|e| {
+            FfiError::invalid_argument(format!("nat64_prefixes entry {raw:?}: {e}"))
+        })?;
+        builder = builder.network(|n| n.nat64_prefix(prefix));
+    }
 
     // DNS configuration. Either nested `dns: {...}` or the legacy flat
     // `dns_rebind_protection` field. The nested form wins.
@@ -1492,6 +1515,9 @@ fn apply_network(
     if let Some(max) = net.max_udp_connections {
         builder = builder.network(move |n| n.max_udp_connections(max));
     }
+    if let Some(size) = net.tcp_accept_queue_size {
+        builder = builder.network(move |n| n.tcp_accept_queue_size(size));
+    }
 
     // Strict hostname policy.
     if let Some(strict) = net.strict {
@@ -1518,6 +1544,15 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Body returned to HTTP/HTTPS clients when egress is denied.
+    if let Some(http) = net.http.as_ref() {
+        builder = builder.network(|n| n.http(|h| h.deny_response(http.deny_response)));
+        if let Some(message) = http.deny_message.as_ref() {
+            let message = message.clone();
+            builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
     }
 
     // Sandbox-wide secret violation action.
@@ -1886,7 +1921,7 @@ fn apply_secret(
             };
         }
         for host in &s.passthrough {
-            sb = sb.allow_passthrough_for(host);
+            sb = sb.allow_placeholder_for(host);
         }
         if let Some(ref ph) = placeholder {
             sb = sb.placeholder(ph);
@@ -2526,6 +2561,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     )));
                 }
                 builder = match proxy.protocol.as_str() {
+                    "http_connect" => builder.proxy(move |p| p.http_connect(proxy.address)),
                     "socks4" => builder.proxy(move |p| {
                         let proxy_builder = p.socks4(proxy.address);
                         match proxy.user_id {
@@ -3513,7 +3549,7 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch_many(request.names)
+                live.fork_many(request.names)
             } else {
                 let source = Sandbox::get(&source).await.map_err(FfiError::from)?;
                 if let Some(expected) = request.source_identity.filter(|id| !id.is_empty())
@@ -3525,13 +3561,13 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
                         actual: source.id().to_string(),
                     }));
                 }
-                source.branch_many(request.names)
+                source.fork_many(request.names)
             };
             builder = builder.guest_flush(request.guest_flush);
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let outcomes = builder.branch().await.map_err(FfiError::from)?;
+            let outcomes = builder.fork().await.map_err(FfiError::from)?;
             let mut rows = Vec::with_capacity(outcomes.len());
             for outcome in outcomes {
                 let row = match outcome.result {
@@ -3580,17 +3616,17 @@ pub unsafe extern "C" fn msb_sandbox_branch_with_options(
         };
         Ok(Box::pin(async move {
             let mut builder = if let Some(live) = live {
-                live.branch(child)
+                live.fork(child)
             } else {
                 Sandbox::get(&source)
                     .await
                     .map_err(FfiError::from)?
-                    .branch(child)
+                    .fork(child)
             };
             if record_integrity {
                 builder = builder.record_integrity();
             }
-            let sb = builder.branch().await.map_err(FfiError::from)?;
+            let sb = builder.fork().await.map_err(FfiError::from)?;
             let backend_kind = sb.backend_kind().as_str();
             let handle = register(sb)?;
             Ok(serde_json::json!({ "handle": handle, "backend_kind": backend_kind }).to_string())
@@ -6107,53 +6143,7 @@ pub unsafe extern "C" fn msb_volume_fs_op(
                 FfiError::invalid_argument(format!("invalid volume fs args: {error}"))
             })?;
         Ok(Box::pin(async move {
-            let path = args["path"]
-                .as_str()
-                .ok_or_else(|| FfiError::invalid_argument("missing volume fs path"))?;
-            // Rust handles encode cloud volume UUIDs as `cloud-id:<uuid>`.
-            // Reusing that target here preserves handle identity across a
-            // named volume delete/recreate instead of resolving by name.
-            let backend = default_backend();
-            let fs = VolumeFs::with_backend(backend, &target);
-            match op.as_str() {
-                "read" => {
-                    let data = fs.read(path).await.map_err(FfiError::from)?;
-                    Ok(serde_json::json!({
-                        "data_b64": base64::engine::general_purpose::STANDARD.encode(data)
-                    })
-                    .to_string())
-                }
-                "write" => {
-                    let encoded = args["data_b64"]
-                        .as_str()
-                        .ok_or_else(|| FfiError::invalid_argument("missing volume fs data"))?;
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(encoded)
-                        .map_err(|error| {
-                            FfiError::invalid_argument(format!("invalid base64 data: {error}"))
-                        })?;
-                    fs.write(path, data).await.map_err(FfiError::from)?;
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "mkdir" => {
-                    fs.mkdir(path).await.map_err(FfiError::from)?;
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "remove" => {
-                    let recursive = args["recursive"].as_bool().unwrap_or(false);
-                    if recursive {
-                        fs.remove_dir(path).await.map_err(FfiError::from)?;
-                    } else {
-                        fs.remove(path).await.map_err(FfiError::from)?;
-                    }
-                    Ok(r#"{"ok":true}"#.into())
-                }
-                "exists" => {
-                    let exists = fs.exists(path).await.map_err(FfiError::from)?;
-                    Ok(serde_json::json!({ "exists": exists }).to_string())
-                }
-                _ => Err(FfiError::invalid_argument("unknown volume fs operation")),
-            }
+            volume_fs::dispatch(&target, &op, &args).await
         }))
     })
 }
@@ -7796,6 +7786,23 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn network_accept_queue_size_reaches_the_sandbox_config() {
+        let omitted: super::NetworkOpts = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(omitted.tcp_accept_queue_size, None);
+
+        let net: super::NetworkOpts = serde_json::from_value(serde_json::json!({
+            "ports": {"8080": 80}, "tcp_accept_queue_size": 4096
+        }))
+        .unwrap();
+        let builder = microsandbox::Sandbox::builder("accept-queue").image("alpine");
+        let Ok(builder) = super::apply_network(builder, &net) else {
+            panic!("apply_network rejected a valid accept queue size");
+        };
+        let config = builder.build().await.unwrap();
+        assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
     }
 
     use super::*;

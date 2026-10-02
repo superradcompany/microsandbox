@@ -507,7 +507,7 @@ impl JsSandboxBuilder {
 
     /// Configure the single proxy used for outbound sandbox connections.
     #[napi(
-        ts_args_type = "configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder"
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder"
     )]
     pub fn proxy(
         &mut self,

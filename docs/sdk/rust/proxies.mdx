@@ -3,7 +3,7 @@ title: Proxies
 description: Rust SDK - Proxy API reference
 ---
 
-Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder::proxy()`](#proxy). Proxy protocols are mutually exclusive.
+Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder::proxy()`](#proxy). Proxy protocols are mutually exclusive.
 
 See [Proxies](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
 
@@ -38,6 +38,14 @@ Invalid proxy configuration is retained by the sandbox builder and returned from
 ## OutboundProxyBuilder
 
 Protocol selector passed to [`SandboxBuilder::proxy()`](#proxy).
+
+### <span id="http-connect">http_connect()</span>
+
+```rust
+fn http_connect(self, address: impl Into<String>) -> HttpConnectProxyBuilder
+```
+
+Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
 
 ### <span id="socks4">socks4()</span>
 
@@ -97,5 +105,6 @@ Declarative outbound proxy configuration stored in the sandbox's durable network
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
+| `HttpConnect` | `address: SocketAddr` | HTTP proxy address used for TCP CONNECT tunnels |
 | `Socks4` | `address: SocketAddr`, `user_id: Option<String>` | SOCKS4 proxy address and optional user ID |
 | `Socks5` | `address: SocketAddr`, `credentials: Option<Socks5Credentials>` | SOCKS5 proxy address and optional username/password credentials |

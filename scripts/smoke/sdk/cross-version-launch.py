@@ -14,7 +14,10 @@ from microsandbox import Network, Sandbox
 async def main():
     for setting in (None, Network.none()):
         name = f"launch-compat-{os.getpid()}-{'default' if setting is None else 'offline'}"
-        sandbox = await Sandbox.create(name, image="alpine", memory=256, network=setting)
+        options = {} if setting is None else {"network": setting}
+        sandbox = await Sandbox.create(
+            name, image="alpine", memory=256, max_duration=120, **options
+        )
         try:
             result = await sandbox.exec("sh", ["-c", "printf launch-compatible"])
             assert result.exit_code == 0, result

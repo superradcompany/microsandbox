@@ -1386,6 +1386,27 @@ pub(crate) fn resolve_default_user(default_user: Option<&str>) -> AgentdResult<(
     Ok((resolved.uid, resolved.gid))
 }
 
+/// Like [`resolve_default_user`], plus the supplementary groups exec would apply to that user.
+pub(crate) fn resolve_user_groups(user: &str) -> AgentdResult<(u32, u32, Vec<libc::gid_t>)> {
+    let resolved = resolve_user_spec(user)?;
+    let mut groups = Vec::new();
+    if let Some(ref name) = resolved.initgroups_user {
+        let mut count: libc::c_int = 32;
+        loop {
+            groups.resize(count as usize, 0);
+            if unsafe {
+                libc::getgrouplist(name.as_ptr(), resolved.gid, groups.as_mut_ptr(), &mut count)
+            } >= 0
+            {
+                groups.truncate(count as usize);
+                break;
+            }
+            count = count.max(groups.len() as libc::c_int + 1);
+        }
+    }
+    Ok((resolved.uid, resolved.gid, groups))
+}
+
 fn resolve_requested_user(
     req: &ExecRequest,
     default_user: Option<&str>,

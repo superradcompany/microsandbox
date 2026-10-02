@@ -12,8 +12,10 @@ name = "microsandbox_migration"
 path = "lib/lib.rs"
 
 [dependencies]
+microsandbox-db.workspace = true
 sea-orm-migration.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+microsandbox-types.workspace = true
 tokio.workspace = true

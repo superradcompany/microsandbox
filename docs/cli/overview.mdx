@@ -59,7 +59,7 @@ msb snap export devbox:ready --output ready.msb
 msb snap import ready.msb --group received
 ```
 
-Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live branches, groups, and archive operations are local-only. Use `msb branch devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
+Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live forks, groups, and archive operations are local-only. Use `msb fork devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
 
 ## Quick reference
 
@@ -68,7 +68,7 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 | [`run`, `create`, `start`, `stop`, `restart`](/cli/sandbox-commands) | Manage sandbox lifecycles |
 | [`exec`, `copy`, `logs`](/cli/sandbox-commands#msb-exec) | Run commands and access files or output |
 | [`ls`, `ps`, `inspect`, `metrics`](/cli/sandbox-commands#msb-ls) | Inspect sandboxes |
-| [`modify`, `pause`, `resume`, `branch`, `rm`](/cli/sandbox-commands#msb-modify) | Change, branch, or remove sandboxes |
+| [`modify`, `pause`, `resume`, `fork`, `rm`](/cli/sandbox-commands#msb-modify) | Change, fork, or remove sandboxes |
 | [`snap`](/cli/snapshot-commands) | Save and restore state |
 | [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
 | [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |

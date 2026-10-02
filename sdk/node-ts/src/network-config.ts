@@ -97,6 +97,10 @@ export interface SecretEntry {
 /** Proxy used for outbound sandbox connections. */
 export type OutboundProxy =
   | {
+      readonly protocol: "http_connect";
+      readonly address: string;
+    }
+  | {
       readonly protocol: "socks4";
       readonly address: string;
       readonly userId?: string;
@@ -123,6 +127,8 @@ export interface NetworkConfig {
   readonly maxConnections: number | null;
   readonly maxTcpConnections: number | null;
   readonly maxUdpConnections?: number | null;
+  /** Accept-queue depth for published TCP port listeners. Absent means the default, 1024. */
+  readonly tcpAcceptQueueSize?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {
@@ -133,7 +139,13 @@ export interface NetworkConfig {
     readonly mac?: readonly number[] | null;
     readonly mtu?: number | null;
   };
+  readonly nat64Prefixes: readonly string[];
   readonly trustHostCAs: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
+  /**
+   * HTTP denial responses are disabled by default. When enabled, denyMessage
+   * overrides the built-in body; `{host}` names the blocked hostname.
+   */
+  readonly http: { readonly denyResponse: boolean; readonly denyMessage?: string | null };
 }

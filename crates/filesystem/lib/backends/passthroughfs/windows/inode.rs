@@ -87,6 +87,8 @@ impl PassthroughFs {
         if self.cfg.owned_checkpoint.is_some()
             && let Ok(data) = self.inode(inode)
         {
+            // Renamed `try_update` in Rust 1.99; keep older toolchains building.
+            #[allow(deprecated)]
             let _ = data
                 .lookups
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -100,6 +102,8 @@ impl PassthroughFs {
             return;
         }
         if let Ok(data) = self.inode(inode) {
+            // Renamed `try_update` in Rust 1.99; keep older toolchains building.
+            #[allow(deprecated)]
             let _ = data
                 .lookups
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {

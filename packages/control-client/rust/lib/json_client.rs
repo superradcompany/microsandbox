@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::{
-    CheckedControlRequest, ControlClientError, ControlClientResult, ControlMode,
-    IntoControlMessage, JsonReply, dialer::Dialer,
+    CheckedControlRequest, CompatibleControlRequest, ControlClientError, ControlClientResult,
+    ControlMode, IntoControlMessage, JsonReply, dialer::Dialer,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -35,7 +35,7 @@ pub struct JsonControlClient {
     pub(crate) dialer: Dialer,
     pub(crate) options: ConnectOptions,
     closed: CancellationToken,
-    rediscover: bool,
+    rediscover: Option<ControlMode>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ impl JsonControlClient {
         Self::configured(
             Dialer::Unverified(connector),
             ConnectOptions::default(),
-            false,
+            None,
         )
     }
 
@@ -67,11 +67,15 @@ impl JsonControlClient {
         Ok(Self::configured(
             Dialer::Unverified(connector),
             options,
-            false,
+            None,
         ))
     }
 
-    pub(crate) fn configured(dialer: Dialer, options: ConnectOptions, rediscover: bool) -> Self {
+    pub(crate) fn configured(
+        dialer: Dialer,
+        options: ConnectOptions,
+        rediscover: Option<ControlMode>,
+    ) -> Self {
         Self {
             dialer,
             options,
@@ -139,9 +143,32 @@ impl JsonControlClient {
         request.decode_json(response)
     }
 
+    /// Execute a generation-aware checked request using its historical JSON representation.
+    pub async fn request_compatible<R: CompatibleControlRequest>(
+        &self,
+        request: &R,
+        options: RequestOptions,
+    ) -> ControlClientResult<R::Response> {
+        let response = self
+            .operation_bytes(request.compatibility_json_bytes()?, options)
+            .await?;
+        request.decode_compatibility_json(response)
+    }
+
     pub(crate) async fn operation(
         &self,
         request: ControlRequest,
+        options: RequestOptions,
+    ) -> ControlClientResult<JsonReply> {
+        let bytes = Zeroizing::new(
+            serde_json::to_vec(&request).map_err(|_| ClientError::new(ErrorKind::Encode))?,
+        );
+        self.operation_bytes(bytes, options).await
+    }
+
+    pub(crate) async fn operation_bytes(
+        &self,
+        request: Zeroizing<Vec<u8>>,
         options: RequestOptions,
     ) -> ControlClientResult<JsonReply> {
         let until = deadline(
@@ -151,7 +178,7 @@ impl JsonControlClient {
                 .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
         )?;
         let setup_until = deadline(self.options.setup_timeout)?.min(until);
-        if self.rediscover && !self.dialer.verified() {
+        if let Some(expected) = self.rediscover.filter(|_| !self.dialer.verified()) {
             // A path-only caller cannot reuse evidence about an old process.
             // Discover again before this new exchange; a format change closes
             // this handle instead of silently retargeting its prepared request.
@@ -166,25 +193,24 @@ impl JsonControlClient {
                     return Err(error);
                 }
             };
-            if mode != ControlMode::Json {
+            if mode != expected {
                 self.close().await;
                 return Err(ControlClientError::RuntimeChanged);
             }
         }
-        self.exchange(&request, until, setup_until, None).await
+        self.exchange_bytes(request, until, setup_until, None).await
     }
 
     pub(crate) async fn discover(
         &self,
         until: Instant,
-    ) -> ControlClientResult<(ControlMode, crate::Capabilities)> {
+    ) -> ControlClientResult<(ControlMode, crate::RuntimeCapabilities)> {
+        let request = Zeroizing::new(
+            serde_json::to_vec(&ControlRequest::Capabilities)
+                .map_err(|_| ClientError::new(ErrorKind::Encode))?,
+        );
         let reply = self
-            .exchange(
-                &ControlRequest::Capabilities,
-                until,
-                until,
-                Some(MAX_DISCOVERY_RESPONSE_SIZE),
-            )
+            .exchange_bytes(request, until, until, Some(MAX_DISCOVERY_RESPONSE_SIZE))
             .await?;
         let mode = reply.discovery_mode()?;
         let capabilities = crate::json_reply::capabilities(
@@ -197,16 +223,13 @@ impl JsonControlClient {
         Ok((mode, capabilities))
     }
 
-    async fn exchange(
+    async fn exchange_bytes(
         &self,
-        request: &ControlRequest,
+        mut line: Zeroizing<Vec<u8>>,
         until: Instant,
         setup_until: Instant,
         max_reply: Option<usize>,
     ) -> ControlClientResult<JsonReply> {
-        let mut line = Zeroizing::new(
-            serde_json::to_vec(request).map_err(|_| ClientError::new(ErrorKind::Encode))?,
-        );
         line.push(b'\n');
         let mut admitted = false;
         let result = timeout_at(until, async {

@@ -55,8 +55,8 @@ try:
     archive = root / "saved.msb"
     run("archive", "snapshot", "save", "source:saved", archive)
     for name, source, flags in [("eager", "source:saved", []),
-                                ("forked", "source:saved", ["--forked"]),
-                                ("archive-child", str(archive), ["--forked"]),
+                                ("forked", "source:saved", ["--cow-mem"]),
+                                ("archive-child", str(archive), ["--cow-mem"]),
                                 ("branch-child", None, [])]:
         names.append(name)
         if source is None:

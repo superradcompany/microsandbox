@@ -5138,7 +5138,7 @@
           "strict": {
             "type": "boolean",
             "description": "Require hostname-based policy allows to use inspectable application authority.",
-            "default": false
+            "default": true
           }
         }
       },
@@ -5659,7 +5659,7 @@
             ],
             "default": {
               "enabled": true,
-              "strict": false
+              "strict": true
             }
           },
           "rlimits": {

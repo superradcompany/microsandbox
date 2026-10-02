@@ -575,13 +575,27 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
   </div>
 </div>
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">http()</span>
+
+```typescript
+http(configure: (h: HttpBuilder) => HttpBuilder): this
+```
+
+Denial responses are disabled by default. Use `h.denyResponse(true)` to enable readable `403` responses, and optionally `h.denyMessage(message)` to customize the body. `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it.
+
+```typescript
+network.http((h) => h.denyResponse(true).denyMessage("Blocked: {host}"))
+```
+
+See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees).
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
 ```typescript
 strict(enabled: boolean): this
 ```
 
-Require hostname-based policy allows to use an inspectable request authority. Default: `false`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
+Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
 <p className="msb-label">Parameters</p>
 
@@ -591,6 +605,10 @@ Require hostname-based policy allows to use an inspectable request authority. De
     <div className="msb-param-desc">Enable strict hostname policy mode.</div>
   </div>
 </div>
+
+#### tcpAcceptQueueSize()
+
+`network.tcpAcceptQueueSize(4096)` sets how many not-yet-accepted connections each published TCP port's host listener queues. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; any other number, including a fraction, makes the `tcpAcceptQueueSize()` call itself throw. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(...).tcpAcceptQueueSize(n)` applies it to the listeners a restored child publishes.
 
 #### maxUdpConnections()
 
@@ -685,6 +703,23 @@ Set the IPv6 pool used to derive per-sandbox `/64` guest prefixes. Defaults to `
   </div>
 </div>
 
+#### <span className="msb-recv">.</span><span className="msb-hn">nat64Prefix()</span>
+
+```typescript
+nat64Prefix(prefix: string): this
+```
+
+Add a NAT64 `/96` prefix for policy classification. Destinations inside NAT64 prefixes are evaluated against both their IPv6 address and the embedded IPv4 address. The well-known `64:ff9b::/96` prefix is configured by default.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>prefix</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">NAT64 IPv6 <code>/96</code> prefix.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv" id="nb-interface">network.</span><span className="msb-hn">interface()</span>
 
 <Tooltip tip="Interface and IP-pool overrides are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -735,7 +770,7 @@ Enable or disable networking entirely. When `false`, no network interface is cre
 secretViolationAction(action: "block" | "block-and-log" | "block-and-terminate"): this
 ```
 
-Set the sandbox-wide blocking action. Passthrough hosts are configured per secret with `allowPassthroughFor()`.
+Set the sandbox-wide blocking action. Passthrough hosts are configured per secret with `allowPlaceholderFor()`.
 
 #### <span className="msb-recv" id="nb-secret">network.</span><span className="msb-hn">secret()</span>
 
@@ -1842,11 +1877,14 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secretViolationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
 | maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
+| tcpAcceptQueueSize | `number \| null` (optional) | Accept-queue depth for published TCP port listeners; absent means the default, 1,024 |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
 | interface | `{ ipv4Pool?, ipv6Pool?, ipv4Address?, ipv6Address?, mac?, mtu? }` | Optional interface overrides |
+| nat64Prefixes | `readonly string[]` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
+| http | `{ denyResponse: boolean; denyMessage?: string \| null }` | `denyResponse` defaults to `false`; when enabled, an omitted or `null` message uses the built-in body |
 
 ### NetworkProfile
 

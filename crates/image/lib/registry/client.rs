@@ -21,7 +21,7 @@ use tokio::{
 
 use crate::{
     cache::{
-        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache,
+        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache, VmdkWriteMode,
         lock::{lock_exclusive, open_lock_file},
     },
     config::ImageConfig,
@@ -1330,82 +1330,23 @@ impl Registry {
         validated_diff_ids: &[Digest],
         progress: Option<&PullProgressSender>,
     ) -> ImageResult<()> {
-        let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
-        let vmdk_path = self.cache.vmdk_path(manifest_digest);
+        let cache = self.cache.clone();
+        let manifest_digest = manifest_digest.clone();
+        let diff_ids = validated_diff_ids.to_vec();
+        let progress = progress.cloned();
 
-        let fsmeta_lock_path = self.cache.fsmeta_erofs_lock_path(manifest_digest);
-        let fsmeta_lock_file = open_lock_file(&fsmeta_lock_path)?;
-        let fsmeta_lock_file = tokio::task::spawn_blocking(move || {
-            lock_exclusive(&fsmeta_lock_file)?;
-            Ok::<_, ImageError>(fsmeta_lock_file)
-        })
-        .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        let materializer_guard = Arc::new(fsmeta_lock_file);
-
-        // Re-check under lock: a concurrent pull may have regenerated VMDK,
-        // or the fsmeta may have been evicted while we waited.
-        if path_exists_async(&vmdk_path).await {
-            return Ok(());
-        }
-        if !cache::is_valid_erofs_artifact_async(&fsmeta_path).await {
-            return Err(ImageError::Materialize {
-                digest: manifest_digest.to_string(),
-                message: "fsmeta vanished while waiting for VMDK regen lock".into(),
-                source: None,
-            });
-        }
-
-        let layer_erofs_paths: Vec<std::path::PathBuf> = validated_diff_ids
-            .iter()
-            .map(|d| self.cache.layer_erofs_path(d))
-            .collect();
-        let work_dir = self.cache.work_dir(manifest_digest);
-        let manifest_digest_str = manifest_digest.to_string();
-
-        let stitch_progress = progress.cloned();
-        let worker_cache = self.cache.clone();
+        // The worker owns the cache operation pins and the materializer lock, even if
+        // the awaiting pull is cancelled while the descriptor is being repaired.
         tokio::task::spawn_blocking(move || {
-            // Both the materializer mutex and the operation pins must outlive cancellation.
-            let _protection = (materializer_guard, worker_cache);
-            std::fs::create_dir_all(&work_dir).map_err(|e| ImageError::Cache {
-                path: work_dir.clone(),
-                source: e,
-            })?;
-            let _work_guard = scopeguard::guard((), |_| {
-                let _ = std::fs::remove_dir_all(&work_dir);
-            });
-
-            if let Some(ref p) = stitch_progress {
-                p.send(PullProgress::StitchWritingVmdk);
-            }
-            let temp_vmdk = work_dir.join("rootfs.vmdk");
-            let mut extents: Vec<&std::path::Path> = vec![&fsmeta_path];
-            extents.extend(layer_erofs_paths.iter().map(|p| p.as_path()));
-
-            crate::stitch::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
-                ImageError::Materialize {
-                    digest: manifest_digest_str.clone(),
-                    message: format!("VMDK write failed: {e}"),
-                    source: None,
-                }
-            })?;
-
-            std::fs::rename(&temp_vmdk, &vmdk_path).map_err(|e| ImageError::Cache {
-                path: vmdk_path.clone(),
-                source: e,
-            })?;
-
-            Ok::<(), ImageError>(())
+            cache.write_vmdk(
+                &manifest_digest,
+                &diff_ids,
+                VmdkWriteMode::KeepExisting,
+                progress.as_ref(),
+            )
         })
         .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-
-        if let Some(p) = progress {
-            p.send(PullProgress::StitchComplete);
-        }
-
-        Ok(())
+        .map_err(|e| ImageError::Io(io::Error::other(e)))?
     }
 
     // NOTE: materialize_flat_image was removed — replaced by fsmeta + VMDK generation

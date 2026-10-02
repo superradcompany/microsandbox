@@ -3,7 +3,6 @@ package microsandbox
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -17,9 +16,8 @@ func TestVolumeName(t *testing.T) {
 	}
 }
 
-// VolumeFs.abs must reject any relative path that resolves outside the root.
-// This is the test that catches the "fs.root + / + rel" footgun where a
-// caller-supplied "../../etc/passwd" would happily escape the volume.
+// Invalid host-rooted and parent paths are rejected even before loading native
+// code. Symlink confinement is exercised against the native implementation.
 func TestVolumeFsPathEscape(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -33,6 +31,8 @@ func TestVolumeFsPathEscape(t *testing.T) {
 		{"parent traversal", "../escape"},
 		{"deep traversal", "a/b/../../../escape"},
 		{"absolute path", filepath.Join(volumeRoot, "etc", "passwd")},
+		{"rooted forward slash", "/absolute"},
+		{"rooted separator", string(filepath.Separator) + "absolute"},
 		{"absolute under root", filepath.Join(root, "..", "escape")},
 	}
 	for _, c := range cases {
@@ -50,38 +50,6 @@ func TestVolumeFsPathEscape(t *testing.T) {
 				t.Errorf("Remove(%q): want ErrPathEscape, got %v", c.rel, err)
 			}
 		})
-	}
-}
-
-// Sanity: legitimate paths still work end-to-end.
-func TestVolumeFsHappyPath(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	fs := &VolumeFs{root: root}
-
-	if err := fs.Mkdir(ctx, "sub/dir"); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-	if err := fs.WriteString(ctx, "sub/dir/file.txt", "hi"); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	got, err := fs.ReadString(ctx, "sub/dir/file.txt")
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if got != "hi" {
-		t.Errorf("Read: got %q want %q", got, "hi")
-	}
-
-	ok, err := fs.Exists(ctx, "sub/dir/file.txt")
-	if err != nil || !ok {
-		t.Fatalf("Exists: got %v, %v", ok, err)
-	}
-
-	// Confirm the file actually lives under root.
-	abs := filepath.Join(root, "sub", "dir", "file.txt")
-	if _, err := os.Stat(abs); err != nil {
-		t.Fatalf("expected file at %q: %v", abs, err)
 	}
 }
 

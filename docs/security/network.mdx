@@ -66,6 +66,8 @@ NetworkPolicy::builder()
 ```
 </CodeGroup>
 
+NAT64-translated access to IPv4 metadata and private ranges is treated the same way for NAT64 prefixes. The well-known `64:ff9b::/96` prefix is configured by default, and operators can add routed environment-specific `/96` prefixes with `--net-nat64-prefix`.
+
 ## DNS rebinding
 
 An attacker who controls a domain can make it resolve to a public IP during the allowlist check, then flip to a private IP on a later lookup. The guest ends up making a request that *looked* bound for `evil.example.com` but actually lands on `192.168.1.10`.

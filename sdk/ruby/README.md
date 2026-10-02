@@ -1,6 +1,6 @@
 # Ruby SDK
 
-The microsandbox Ruby SDK provides Ruby 3.1+ bindings for creating and
+The microsandbox Ruby SDK provides Ruby 3.3+ bindings for creating and
 controlling local or cloud sandboxes.
 
 ## Installation
@@ -22,10 +22,10 @@ install without a Rust toolchain:
 
 | Gem platform        | Ruby     | Notes              |
 | ------------------- | -------- | ------------------ |
-| `x86_64-linux-gnu`  | 3.1–4.0  | glibc 2.35+        |
-| `aarch64-linux-gnu` | 3.1–4.0  | glibc 2.35+        |
-| `arm64-darwin`      | 3.1–4.0  | Apple Silicon      |
-| `x64-mingw-ucrt`    | 3.1–4.0  | RubyInstaller 3.1+ |
+| `x86_64-linux-gnu`  | 3.3–4.0  | glibc 2.35+        |
+| `aarch64-linux-gnu` | 3.3–4.0  | glibc 2.35+        |
+| `arm64-darwin`      | 3.3–4.0  | Apple Silicon      |
+| `x64-mingw-ucrt`    | 3.3–4.0  | RubyInstaller 3.3+ |
 
 The Linux gems require glibc 2.35 or newer (Ubuntu 22.04, Debian 12, and
 later). The platform name carries no glibc version, so on an older glibc host
@@ -61,21 +61,21 @@ To build a platform gem from a checkout, install every target Ruby, then run
 from `sdk/ruby`:
 
 ```sh
-rake version_check cargo:patch_workspace
-rake gem:stage # Once per installed Ruby, 3.1 through 4.0
+rake cargo:patch_workspace version_check
+rake gem:stage # Once each under Ruby 3.3, 3.4, and 4.0
 GEM_PLATFORM=arm64-darwin rake gem:platform
 ```
 
-`gem:platform` refuses to package unless all five ABIs are staged. Set
+`gem:platform` refuses to package unless all three ABIs are staged. Set
 `RUBY_ABIS` (for example `RUBY_ABIS=3.4`) to relax that when testing against a
 single local Ruby; CI never sets it.
 
-`cargo:patch_workspace` points the build at the in-tree Rust SDK and drops
-`ext/microsandbox/Cargo.lock`, which pins the published crate graph and cannot
-resolve against the patched path. When you are done, run
-`rake cargo:unpatch_workspace` — it removes the gitignored patch config (which
-would otherwise keep later local builds silently resolving against the in-tree
-SDK) and restores the lockfile.
+`cargo:patch_workspace` builds against the Rust SDK in this checkout and saves
+the standalone lockfile for restoration. Run it before `version_check` so you
+can build an unpublished release. The check still requires matching gem and
+extension versions and an exact Rust SDK pin, but skips the registry lockfile
+check. When finished, run `rake cargo:unpatch_workspace` to restore the lockfile
+and switch back to the published SDK.
 
 To use the local backend, install the microsandbox runtime and firmware once:
 
@@ -174,6 +174,11 @@ the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
 them, and rotate them after suspected host compromise.
 
+Route outbound TCP through an HTTP CONNECT proxy with
+`proxy: Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")`. The
+microsandbox host resolves and checks each destination before opening the
+tunnel. HTTP CONNECT proxy authentication and UDP are not supported.
+
 ## Snapshots
 
 Snapshot operations use the selected backend and preserve whether a snapshot
@@ -200,7 +205,8 @@ Snapshot archive operations are currently local-only. With the cloud backend, `s
 
 The gem supports sandbox lifecycle operations, collected exec and shell
 output, SSH exec, logs, metrics, guest filesystem operations, local image,
-volume, and snapshot management, and local or cloud backend selection.
+volume, and snapshot management, local or cloud backend selection, and typed
+error classes (see [Errors](#errors)).
 
 SSH exec inherits the global inactivity timeout by default. Override it for a
 single command in seconds, or use `0` to disable it:
@@ -214,8 +220,87 @@ Streaming exec, logs, metrics, and filesystem handles; interactive SSH/SFTP;
 live modification plans; and the complete Rust network and mount builders are
 not currently exposed. Use the Rust SDK when those APIs are required.
 
+## Errors
+
+Every error reported by a sandbox, image, volume, snapshot, or backend
+operation is a `Microsandbox::Error`, so `rescue Microsandbox::Error` catches
+all of them. The native layer raises the subclass matching the core error,
+which lets callers branch on the failure without matching message text:
+
+```ruby
+begin
+  sandbox.exec("sleep", ["30"], timeout: 1)
+rescue Microsandbox::ExecTimeoutError => error
+  puts "timed out: #{error.message}"
+rescue Microsandbox::Error => error
+  puts "#{error.code}: #{error.message}"
+end
+```
+
+Class names and `#code` strings mirror the Python SDK; the snapshot,
+exec-failed, and volume-already-exists classes follow the Go SDK's finer
+coverage. All classes are direct subclasses of `Microsandbox::Error`
+(code `microsandbox-error`):
+
+| Group                 | Classes                                                                                                                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime bootstrap     | `RuntimeNotInstalledError`, `RuntimeIncompleteError`                                                                                                                                                 |
+| Configuration         | `InvalidConfigError`, `NoDefaultCommandError`                                                                                                                                                        |
+| Lifecycle             | `SandboxNotFoundError`, `SandboxNotRunningError`, `SandboxAlreadyExistsError`, `SandboxReplacedError`, `SandboxStillRunningError`, `SandboxStopTimedOutError`, `StopTimeoutError`                    |
+| Execution             | `ExecTimeoutError`, `ExecFailedError`                                                                                                                                                                |
+| Filesystem            | `FilesystemError`, `PathNotFoundError`                                                                                                                                                               |
+| Volumes and images    | `VolumeNotFoundError`, `VolumeAlreadyExistsError`, `ImageNotFoundError`, `ImageInUseError`, `ImagePullFailedError`                                                                                   |
+| Snapshots             | `SnapshotNotFoundError`, `SnapshotAlreadyExistsError`, `SnapshotSandboxRunningError`, `SnapshotImageMissingError`, `SnapshotIntegrityError`, `SnapshotSourceRecoveryError`, `SnapshotMigrationError` |
+| Networking            | `NetworkPolicyError`, `SecretViolationError`, `TlsError`                                                                                                                                             |
+| I/O                   | `IoError`                                                                                                                                                                                            |
+| Metrics               | `MetricsDisabledError`, `MetricsUnavailableError`                                                                                                                                                    |
+| Runtime compatibility | `UnsupportedOperationError`                                                                                                                                                                          |
+| Backend routing       | `CloudHttpError`, `UnsupportedError`                                                                                                                                                                 |
+
+Each class exposes its stable, machine-readable code through `.code` and
+`#code` (for example `Microsandbox::ExecTimeoutError.code == "exec-timeout"`).
+Core errors without a dedicated class raise `Microsandbox::Error` itself.
+`PathNotFoundError`, `ImagePullFailedError`, `SecretViolationError`,
+`TlsError`, and `SandboxStopTimedOutError` are defined for parity with the
+Python SDK but are not raised by the current core; an explicit
+`stop_with_timeout` that runs out of time raises `StopTimeoutError`.
+
+`UnsupportedError` is raised when the selected backend does not implement an
+operation. Its message names the Ruby API and the remedy, both also available
+as attributes:
+
+```ruby
+Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+begin
+  Microsandbox::Sandbox.create("my-sandbox", image: "python", replace: true)
+rescue Microsandbox::UnsupportedError => error
+  error.message   # => "sandbox.create is not supported by this backend: the replace option is not accepted here"
+  error.operation # => "sandbox.create"
+  error.hint      # => "the replace option is not accepted here"
+end
+```
+
+`SnapshotSourceRecoveryError` is raised when a snapshot was captured but the
+source sandbox failed to recover its prior execution state. It carries the
+recovery locator as attributes, so there is no need to parse the message:
+`source_sandbox`, `checkpoint_id`, `checkpoint_root`, `checkpoint_path`,
+`detail`, `publication_error`, and `artifact`. `artifact` is a Hash with
+`"kind"` (`"installed"` or `"archive"`), `"path"`, `"snapshot_id"`, and
+`"digest"` keys, set only when the requested snapshot was published;
+otherwise `checkpoint_path` names the retained runtime-local checkpoint. The
+error does not imply that the source is running or safe to resume.
+
+Argument validation is not covered by that guarantee: unknown keywords and
+wrongly typed values keep raising Ruby's `ArgumentError` and `TypeError`
+before any operation runs.
+
 ## Development
 
-The native extension is built against the published `microsandbox` Rust crate
-at the exact same version. `rake version_check` rejects non-exact requirements
-and version drift between the gem, native extension, and Rust SDK.
+The gem, native extension, and published Rust SDK must use the same version.
+`rake version_check` verifies their versions, the exact SDK pin, and the
+standalone lockfile's registry entry.
+
+After publishing the Rust SDK, the release workflow opens a PR to refresh
+`ext/microsandbox/Cargo.lock`. To refresh it manually, run
+`cargo update -p microsandbox --precise <version>` from `ext/microsandbox`,
+using the version pinned in `Cargo.toml` with no workspace patch active.

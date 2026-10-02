@@ -317,6 +317,7 @@ pub fn run(args: MachineArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,
@@ -454,7 +455,7 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
         None => return Err("missing --config-file for `msb machine`".to_string()),
     };
     let config = if args.legacy_launch {
-        microsandbox_runtime::launch_protocol::decode_legacy(&bytes)?
+        microsandbox_runtime::compat::launch::decode_legacy(&bytes)?
     } else {
         LaunchConfig::decode(&bytes)?
     };
@@ -929,14 +930,8 @@ mod tests {
 
     #[test]
     fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
-        use microsandbox_runtime::launch_protocol::LaunchProtocol;
         let file = tempfile::NamedTempFile::new().unwrap();
-        let bytes = LaunchProtocol::Legacy {
-            file_mounts: true,
-            resolved_network: true,
-        }
-        .encode(&LaunchConfig::default())
-        .unwrap();
+        let bytes = include_bytes!("../../runtime/tests/fixtures/launch-v0.6.18.json");
         std::fs::write(file.path(), bytes).unwrap();
         let mut args = args_with(None, Some(file.path().to_path_buf()));
         assert!(load_launch_config(&args).is_err());

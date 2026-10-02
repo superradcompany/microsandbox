@@ -1089,16 +1089,20 @@ fn planned_metadata(
     encoding_mode: TreeEncodingMode,
 ) -> InodeMetadata {
     match encoding_mode {
+        // Ownership, mtime and directory modes come from the tree:
+        // patch-created entries carry root:root, 0755 and mtime 0, while
+        // directories copied up from a lower layer keep the lower directory's
+        // values, including an explicit 0000 mode.
         TreeEncodingMode::Upper => InodeMetadata {
-            uid: 0,
-            gid: 0,
+            uid: metadata.uid,
+            gid: metadata.gid,
             mode: if directory {
-                normalize_dir_permissions(metadata.mode)
+                metadata.mode & 0o7777
             } else {
                 normalize_file_permissions(metadata.mode)
             },
-            mtime: 0,
-            mtime_nsec: 0,
+            mtime: metadata.mtime,
+            mtime_nsec: metadata.mtime_nsec,
         },
         TreeEncodingMode::Rootfs => InodeMetadata {
             uid: metadata.uid,
@@ -1177,11 +1181,6 @@ fn same_file_data(left: &FileData, right: &FileData) -> bool {
         }
         _ => false,
     }
-}
-
-fn normalize_dir_permissions(mode: u16) -> u16 {
-    let perms = mode & 0o7777;
-    if perms == 0 { 0o755 } else { perms }
 }
 
 fn blocks_for_len(len: usize) -> u32 {
@@ -2650,6 +2649,46 @@ mod tests {
         let expected = crc32c::crc32c_raw(0xFFFF_FFFF, &sb[..0x3FC]);
 
         assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn test_upper_metadata_keeps_tree_ownership_and_directory_mode() {
+        let copied_up = InodeMetadata {
+            uid: 0x12345,
+            gid: 1000,
+            mode: 0o2755,
+            mtime: 1_800_000_000,
+            mtime_nsec: 123,
+        };
+        let planned = planned_metadata(&copied_up, true, TreeEncodingMode::Upper);
+        assert_eq!(
+            (
+                planned.uid,
+                planned.gid,
+                planned.mode,
+                planned.mtime,
+                planned.mtime_nsec
+            ),
+            (0x12345, 1000, 0o2755, 1_800_000_000, 123)
+        );
+
+        let empty = InodeMetadata {
+            uid: 0,
+            gid: 0,
+            mode: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+        };
+        // A directory's 0000 mode is kept (e.g. copied up from a lower
+        // layer); only an empty file mode still defaults to 0644.
+        assert_eq!(
+            planned_metadata(&empty, true, TreeEncodingMode::Upper).mode,
+            0
+        );
+        assert_eq!(
+            planned_metadata(&empty, false, TreeEncodingMode::Upper).mode,
+            0o644
+        );
     }
 
     #[test]

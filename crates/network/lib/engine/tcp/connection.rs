@@ -16,6 +16,8 @@ use smoltcp::socket::tcp;
 use smoltcp::wire::IpListenEndpoint;
 use tokio::sync::mpsc;
 
+use crate::tcp::deferred_close::DeferredClose;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -85,10 +87,6 @@ pub struct TcpConnectionTracker {
 #[deprecated(note = "use TcpConnectionTracker instead")]
 pub type ConnectionTracker = TcpConnectionTracker;
 
-/// Maximum number of poll iterations to attempt flushing remaining data
-/// after the proxy task has exited before force-aborting the socket.
-const DEFERRED_CLOSE_LIMIT: u16 = 64;
-
 /// Internal state for a single tracked TCP connection.
 struct Connection {
     /// Guest source address (from the guest's SYN).
@@ -116,8 +114,11 @@ struct Connection {
     /// Data read from smoltcp socket that couldn't be sent to proxy (channel full).
     /// Must be sent before reading more from the socket to preserve stream order.
     read_buf: Option<Bytes>,
-    /// Counter for deferred close attempts (prevents stalling forever).
-    close_attempts: u16,
+    /// Progress deadline while draining after the host task exits.
+    deferred_close: DeferredClose,
+    /// Egress policy already denied this flow at SYN time; the connection
+    /// was accepted only so an HTTP/HTTPS client can be answered with 403.
+    policy_denied: bool,
 }
 
 /// Proxy-side channel ends, created at socket creation time and taken when
@@ -142,6 +143,9 @@ pub struct NewConnection {
     pub to_smoltcp: mpsc::Sender<Bytes>,
     /// Status the proxy task updates before it exits.
     pub proxy_connect: Arc<ProxyConnectState>,
+    /// Egress policy already denied this flow at SYN time. The dispatcher
+    /// must answer it (HTTP 403) and never dial upstream.
+    pub policy_denied: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -234,6 +238,29 @@ impl TcpConnectionTracker {
         dst: SocketAddr,
         sockets: &mut SocketSet<'_>,
     ) -> bool {
+        self.insert_tcp_socket(src, dst, sockets, false)
+    }
+
+    /// Like [`Self::create_tcp_socket`], for a flow egress policy has
+    /// already denied. The handshake completes so the guest's HTTP/HTTPS
+    /// client can be answered with `403 Forbidden`; the dispatcher never
+    /// dials upstream for it.
+    pub fn create_policy_denied_tcp_socket(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+    ) -> bool {
+        self.insert_tcp_socket(src, dst, sockets, true)
+    }
+
+    fn insert_tcp_socket(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+        policy_denied: bool,
+    ) -> bool {
         if self
             .max_tcp_connections
             .is_some_and(|max| self.connections.len() >= max.get())
@@ -292,11 +319,20 @@ impl TcpConnectionTracker {
                 proxy_connect: Arc::new(ProxyConnectState::new()),
                 write_buf: None,
                 read_buf: None,
-                close_attempts: 0,
+                deferred_close: DeferredClose::default(),
+                policy_denied,
             },
         );
 
         true
+    }
+
+    /// Earliest pending drain deadline for the network poll loop.
+    pub(crate) fn deferred_close_delay(&self) -> Option<std::time::Duration> {
+        self.connections
+            .values()
+            .filter_map(|conn| conn.deferred_close.poll_delay())
+            .min()
     }
 
     /// Relay data between smoltcp sockets and proxy task channels.
@@ -317,6 +353,7 @@ impl TcpConnectionTracker {
             // Already torn down (e.g. abort fired on a previous pass).
             // Leave it for `cleanup_closed` to evict.
             if matches!(socket.state(), tcp::State::Closed) {
+                conn.deferred_close = DeferredClose::default();
                 continue;
             }
 
@@ -347,17 +384,11 @@ impl TcpConnectionTracker {
                     socket.abort();
                     continue;
                 }
+                let queued_before = socket.send_queue();
                 write_proxy_data(socket, conn);
-                if conn.write_buf.is_none() {
-                    socket.close();
-                } else {
-                    // Abort if we've been trying to flush for too long
-                    // (guest stopped reading, socket send buffer full).
-                    conn.close_attempts += 1;
-                    if conn.close_attempts >= DEFERRED_CLOSE_LIMIT {
-                        socket.abort();
-                    }
-                }
+                let written = socket.send_queue() - queued_before;
+                conn.deferred_close
+                    .finish(socket, conn.write_buf.is_some(), written);
                 continue;
             }
 
@@ -428,6 +459,7 @@ impl TcpConnectionTracker {
                         from_smoltcp: channels.from_smoltcp,
                         to_smoltcp: channels.to_smoltcp,
                         proxy_connect: conn.proxy_connect.clone(),
+                        policy_denied: conn.policy_denied,
                     });
                 }
             }
@@ -543,6 +575,39 @@ fn write_proxy_data(socket: &mut tcp::Socket<'_>, conn: &mut Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn exited_proxy_drains_slow_guest_and_times_out_only_when_stalled() {
+        use crate::tcp::test_support::TestNetwork;
+
+        for stalled in [false, true] {
+            let mut network = TestNetwork::new(true);
+            let mut tracker = TcpConnectionTracker::new(None);
+            assert!(tracker.create_tcp_socket(
+                "10.0.0.1:12345".parse().unwrap(),
+                "10.0.0.2:8099".parse().unwrap(),
+                &mut network.sockets,
+            ));
+            for _ in 0..16 {
+                network.poll();
+            }
+            let mut connections = tracker.take_new_connections(&mut network.sockets);
+            assert_eq!(connections.len(), 1);
+            let conn = connections.remove(0);
+            conn.proxy_connect.mark_connected();
+            let payload: Vec<u8> = (0..262144).map(|i| (i % 251) as u8).collect();
+            for chunk in payload.chunks(16384) {
+                conn.to_smoltcp
+                    .try_send(Bytes::copy_from_slice(chunk))
+                    .unwrap();
+            }
+            drop(conn);
+
+            network
+                .check_drain(|sockets| tracker.relay_data(sockets), &payload, stalled)
+                .await;
+        }
+    }
 
     #[test]
     fn omitted_limit_tracks_more_than_the_previous_default() {

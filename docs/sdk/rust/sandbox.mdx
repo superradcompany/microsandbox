@@ -24,11 +24,37 @@ Use `connect_or_create` when a named sandbox might already exist. It connects to
 
 Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `SandboxId`. If the name is removed and reused, an old receiver returns `MicrosandboxError::SandboxReplaced` instead of acting on the replacement. Custom backends provide the same behavior by implementing the `*_identified` methods on `SandboxBackend`. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
 
+## Forking
+
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+
+### fork() and fork_many()
+
+```rust
+let child = source.fork("experiment").fork().await?;
+let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
+```
+
+`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
+
+### ForkOutcome
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Requested child name as a `String` |
+| `result` | `MicrosandboxResult<Sandbox>` for that child |
+
+The outer result of `ForkManyBuilder::fork()` reports batch validation or capture failure. Match each outcome's `result` to handle individual child failures.
+
+`branch()`, `branch_many()`, the builder `.branch()` terminal, `.branch_with_progress()`, and the `BranchBuilder`, `BranchManyBuilder`, and `BranchOutcome` types remain deprecated aliases.
+
+Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+
 ## Sandbox
 
 ### External mount restore
 
-Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct branches retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct forks retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
 ### Creation and restore progress
 
@@ -37,7 +63,7 @@ Use `create_with_progress()` for fresh creation and `restore_with_progress()` fo
 ```rust
 let (mut progress, task) = Sandbox::restore("saved")
     .name("child")
-    .forked()
+    .cow_memory()
     .restore_with_progress()?;
 while let Some(event) = progress.recv().await {
     eprintln!("{event:?}");
@@ -1416,6 +1442,23 @@ Select the guest transparent huge-page policy applied through the kernel command
   <div className="msb-param">
     <div className="msb-param-key"><code>policy</code><span className="msb-type">TransparentHugePagePolicy</span></div>
     <div className="msb-param-desc"><code>Always</code>, <code>Madvise</code>, or <code>Never</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">guest_clock()</span>
+
+```rust
+fn guest_clock(self, policy: GuestClockPolicy) -> Self
+```
+
+Control whether the sandbox clock follows the host. Full snapshots save this setting; restores inherit it unless overridden. Local-only. See [guest clock](/sandboxes/snapshots#keep-the-guest-clock) for details.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>policy</code><span className="msb-type">GuestClockPolicy</span></div>
+    <div className="msb-param-desc"><code>Sync</code> (default) follows host time; <code>Off</code> stops host clock updates after boot.</div>
   </div>
 </div>
 
@@ -2861,13 +2904,15 @@ fn substitution(self, value: SecretSubstitution) -> Self
 
 Replace the enabled request locations for this secret. Omit this method to leave existing settings unchanged. At least one location must remain enabled. See [SecretSubstitution](/sdk/rust/secrets#secretsubstitution) for defaults and protocol limits.
 
-#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_passthrough_for">allow_passthrough_for()</span>
+<span id="secretpatchbuilder-allow_passthrough_for" />
+
+#### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-allow_placeholder_for">allow_placeholder_for()</span>
 
 ```rust
-fn allow_passthrough_for(self, host: impl Into<String>) -> Self
+fn allow_placeholder_for(self, host: impl Into<String>) -> Self
 ```
 
-Add a destination allowed to receive the unchanged placeholder. This does not grant access to the real secret.
+Add a destination allowed to receive the unchanged placeholder where substitution does not apply. `allow_passthrough_for()` remains a deprecated alias. This does not grant access to the real secret.
 
 #### <span className="msb-recv">secret.</span><span className="msb-hn" id="secretpatchbuilder-violation_action">violation_action()</span>
 

@@ -14,7 +14,7 @@ root.mkdir(parents=True, exist_ok=True)
 prefix = os.environ.get("STACK8_PREFIX", "cow8")
 mode = os.environ.get("STACK8_MODE", "forked")
 assert mode in ("forked", "eager")
-restore_flags = ["--forked"] if mode == "forked" else []
+restore_flags = ["--cow-mem"] if mode == "forked" else []
 layout = os.environ.get("STACK8_LAYOUT", "flat:512M")
 resize = os.environ.get("STACK8_LIVE_RESIZE") == "1"
 rows = []
@@ -50,7 +50,7 @@ def run(label, *args, expected=0, timeout=120):
 try:
     refused = prefix + "-forked-boot"
     result = run("forked-boot-rejected", "create", image, "-n", refused,
-                 "--forked", expected=None)
+                 "--cow-mem", expected=None)
     assert result.returncode != 0, "forked must require captured RAM"
     source = prefix + "-source"
     names.append(source)
@@ -148,7 +148,7 @@ try:
         refused_name = prefix + "-refused-" + label
         names.append(refused_name)
         result = run("forked-disk-" + label, "create", "-n", refused_name,
-                     "--from-snapshot", snapshot, "--forked", expected=None)
+                     "--from-snapshot", snapshot, "--cow-mem", expected=None)
         assert result.returncode != 0 and "forked requires a full snapshot" in result.stderr
         inspected = run("refused-inspect-" + label, "inspect", refused_name, "--format", "json", expected=None)
         assert inspected.returncode != 0, "invalid restore must not publish a sandbox row"

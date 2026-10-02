@@ -16,7 +16,7 @@ use microsandbox_network::secrets::{
     handle::SecretsHandle,
 };
 use microsandbox_protocol::control::{
-    Capabilities, ControlRequest, JsonControlResponse, SecretChange, SecretValue,
+    Capabilities, ControlOperation, ControlRequest, JsonControlResponse, SecretChange, SecretValue,
 };
 use microsandbox_protocol_client::{BoxFuture, BoxTransport, ClientResult, Connector};
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
@@ -54,7 +54,10 @@ struct ServerConnector {
 //--------------------------------------------------------------------------------------------------
 
 impl Handler for SecretHost {
-    fn handle(&self, request: ControlRequest) -> Response {
+    fn handle(&self, request: ControlOperation, _generation: u8) -> Response {
+        let ControlOperation::GenerationOne(request) = request else {
+            panic!("unexpected generation-two fixture operation")
+        };
         match request {
             ControlRequest::Capabilities => {
                 let capabilities = Capabilities {

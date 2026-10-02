@@ -4,7 +4,7 @@ description: Save files or running workloads and restore them into new sandboxes
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, branching, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
 
@@ -273,25 +273,25 @@ Full restores normally copy memory. Enable copy-on-write (CoW) to share unchange
 ```typescript TypeScript
 const worker_a = await Sandbox.restore("worker:snap")
     .name("worker_a")
-    .forked()
+    .cowMemory()
     .restore();
 
 const worker_b = await Sandbox.restore("worker:snap")
     .name("worker_b")
-    .forked()
+    .cowMemory()
     .restore();
 ```
 
 ```rust Rust
 let worker_a = Sandbox::restore("worker:snap")
     .name("worker_a")
-    .forked()
+    .cow_memory()
     .restore()
     .await?;
 
 let worker_b = Sandbox::restore("worker:snap")
     .name("worker_b")
-    .forked()
+    .cow_memory()
     .restore()
     .await?;
 ```
@@ -300,31 +300,31 @@ let worker_b = Sandbox::restore("worker:snap")
 worker_a = await Sandbox.restore(
     "worker:snap",
     name="worker_a",
-    forked=True,
+    cow_memory=True,
 )
 
 worker_b = await Sandbox.restore(
     "worker:snap",
     name="worker_b",
-    forked=True,
+    cow_memory=True,
 )
 ```
 
 ```go Go
 worker_a, err := m.RestoreSandbox(ctx, "worker:snap", "worker_a",
-    m.WithForked(),
+    m.WithCowMemory(),
 )
 if err != nil { return err }
 
 worker_b, err := m.RestoreSandbox(ctx, "worker:snap", "worker_b",
-    m.WithForked(),
+    m.WithCowMemory(),
 )
 if err != nil { return err }
 ```
 
 ```bash CLI
-msb snap restore worker:snap --name worker_a --forked
-msb snap restore worker:snap --name worker_b --forked
+msb snap restore worker:snap --name worker_a --cow-mem
+msb snap restore worker:snap --name worker_b --cow-mem
 ```
 </CodeGroup>
 
@@ -372,13 +372,58 @@ msb snap restore worker:snap --name rebooted --disk-only
 
 Snapshots with a tmpfs root cannot be restored disk-only.
 
+### Keep the guest clock
+
+By default (`sync`), the sandbox's date and time follow the host. The host updates the clock at boot, about once a minute, and when a full snapshot restores or a paused sandbox resumes.
+
+With `off`, the host stops updating the clock after boot. Full restores continue from the snapshot's saved time. The clock keeps running, making this useful for tests that need a repeatable starting time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::GuestClockPolicy;
+
+let source = Sandbox::builder("worker")
+    .image("alpine")
+    .guest_clock(GuestClockPolicy::Off)
+    .create()
+    .await?;
+```
+
+```bash CLI
+msb create alpine --name worker --guest-clock off
+```
+</CodeGroup>
+
+Full snapshots save this setting. Restores inherit it unless you choose `sync` to use host time or `off` to continue from the saved time:
+
+<CodeGroup>
+```rust Rust
+let child = Sandbox::restore("worker:snap")
+    .name("child")
+    .guest_clock(GuestClockPolicy::Sync)
+    .restore()
+    .await?;
+```
+
+```bash CLI
+msb snap restore worker:snap --name child --guest-clock sync
+```
+</CodeGroup>
+
+- **Scope:** `off` prevents host clock updates. Programs inside the sandbox with permission to set the time can still change it.
+- **Drift:** With `off`, the guest clock is not corrected after the host sleeps or its clock changes.
+- **Monotonic clock:** Continues from the snapshot in both modes.
+- **Forks:** Forks inherit this setting.
+- **Compatibility:** Older runtimes reject `off`. Older SDKs and CLIs reject full snapshots saved with `off`, including exported archives. Cloud also rejects `off`.
+- **Downgrades:** Older SDKs and CLIs require a database downgrade to reopen this installation. Downgrading is blocked while any sandbox's saved or active settings use `off`.
+
 <a id="guest-filesystem-flush"></a>
 
 ### Guest flushing
 
-Guest flushing writes pending filesystem changes from memory to disk. It works the same way in the CLI and all SDKs, for snapshots, branching, and pausing.
+Guest flushing writes pending filesystem changes from memory to disk. It works the same way in the CLI and all SDKs, for snapshots, forking, and pausing.
 
-The default `auto` policy flushes running disk snapshots. Full snapshots and branches keep those changes in memory instead. Choose `required` if you plan to restore a full snapshot's disks without its memory:
+The default `auto` policy flushes running disk snapshots. Full snapshots and forks keep those changes in memory instead. Choose `required` if you plan to restore a full snapshot's disks without its memory:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -436,7 +481,7 @@ Flushing does not save data still buffered by your application or commit databas
 
 | Policy | Behavior |
 | --- | --- |
-| `auto` (default) | Flush before a running disk-only capture; no extra flush for full captures, branching, or pausing |
+| `auto` (default) | Flush before a running disk-only capture; no extra flush for full captures, forking, or pausing |
 | `required` | Require a successful flush before capture or pause |
 | `skip` | Skip guest flushing; disk-only snapshots may miss buffered writes and need filesystem recovery |
 
@@ -447,41 +492,63 @@ Flushing does not save data still buffered by your application or commit databas
 
 </Accordion>
 
-## Branching
+## Snapshot history and branching
 
-<Tooltip tip="Branching is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+A **generation** describes how snapshot history progresses. A **branch** describes a distinct path through that history. Taking successive snapshots advances a lineage; restoring an earlier snapshot and capturing new state creates a divergent path. A snapshot group is a namespace that can contain multiple paths, with a selected head. Branches here describe ancestry, not a separate live sandbox operation or a named branch-management API.
 
-Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, branching preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
+**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options remain deprecated aliases with the same behavior. CoW restore memory is off by default; live forks always use it. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
+
+### Migrating restore options
+
+Existing callers can migrate gradually. Keep using the old name until you update the caller; both spellings enable the same memory policy and retain the same restore validation.
+
+| Deprecated name | Preferred name | Deprecation notice |
+| --- | --- | --- |
+| CLI `--forked` | `--cow-mem` | Warning on stderr, including with `--quiet` |
+| TypeScript `.forked()` | `.cowMemory()` | `@deprecated` annotation and a Node `DeprecationWarning` once per process through the SDK |
+| Rust `.forked()` | `.cow_memory()` | Compiler deprecation warning |
+| Python `forked=True` | `cow_memory=True` | `DeprecationWarning`, subject to Python's warning filters |
+| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` | `Deprecated:` annotations for documentation and tooling |
+
+<span id="branching" />
+
+## Forking
+
+<Tooltip tip="Forking is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+`fork` is the live operation; the former `branch` SDK methods remain deprecated aliases.
+
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
 
 <CodeGroup>
 ```typescript TypeScript
 const source = await Sandbox.get("worker");
 
-const experiment = await source.branch("experiment");
+const experiment = await source.fork("experiment");
 ```
 
 ```rust Rust
 let source = Sandbox::get("worker").await?;
 
-let experiment = source.branch("experiment").branch().await?;
+let experiment = source.fork("experiment").fork().await?;
 ```
 
 ```python Python
 source = await Sandbox.get("worker")
 
-experiment = await source.branch("experiment")
+experiment = await source.fork("experiment")
 ```
 
 ```go Go
 source, err := m.GetSandbox(ctx, "worker")
 if err != nil { return err }
 
-experiment, err := source.Branch(ctx, "experiment")
+experiment, err := source.Fork(ctx, "experiment")
 if err != nil { return err }
 ```
 
 ```bash CLI
-msb branch worker --name experiment
+msb fork worker --name experiment
 ```
 </CodeGroup>
 
@@ -495,31 +562,68 @@ Capture once for several children:
 ```typescript TypeScript
 const source = await Sandbox.get("worker");
 
-const children = await source.branchMany(["alice", "bob"]);
+const outcomes = await source.forkMany(["alice", "bob"]);
+for (const outcome of outcomes) {
+  if (outcome.error !== undefined) {
+    console.error(`${outcome.name}: ${outcome.error.message}`);
+  } else {
+    console.log(`${outcome.name} started`);
+    // Use the child, then stop it when finished.
+    await outcome.sandbox.stop();
+  }
+}
 ```
 
 ```rust Rust
 let source = Sandbox::get("worker").await?;
 
-let children = source.branch_many(["alice", "bob"]).branch().await?;
+let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
+for outcome in outcomes {
+    match outcome.result {
+        Ok(child) => {
+            println!("{} started", outcome.name);
+            // Use the child, then stop it when finished.
+            child.stop().await?;
+        }
+        Err(error) => eprintln!("{}: {error}", outcome.name),
+    }
+}
 ```
 
 ```python Python
 source = await Sandbox.get("worker")
 
-children = await source.branch_many(["alice", "bob"])
+outcomes = await source.fork_many(["alice", "bob"])
+for outcome in outcomes:
+    if outcome.error is not None:
+        print(f"{outcome.name}: {outcome.error}")
+    else:
+        print(f"{outcome.name} started")
+        # Use the child, then stop it when finished.
+        await outcome.sandbox.stop()
 ```
 
 ```go Go
 source, err := m.GetSandbox(ctx, "worker")
 if err != nil { return err }
 
-children, err := source.BranchMany(ctx, []string{"alice", "bob"})
+outcomes, err := source.ForkMany(ctx, []string{"alice", "bob"})
 if err != nil { return err }
+for _, outcome := range outcomes {
+    if outcome.Error != nil {
+        fmt.Printf("%s: %v\n", outcome.Name, outcome.Error)
+        continue
+    }
+    fmt.Printf("%s started\n", outcome.Name)
+    // Use the child, then stop it and close its handle when finished.
+    stopErr := outcome.Sandbox.Stop(ctx)
+    outcome.Sandbox.Close()
+    if stopErr != nil { return stopErr }
+}
 ```
 
 ```bash CLI
-msb branch worker --names alice bob
+msb fork worker --names alice bob
 ```
 </CodeGroup>
 
@@ -686,13 +790,13 @@ msb snap restore worker:snap --name partial --allow-missing-resources
 
 Allowing missing resources does not reuse source bindings or accept changed files; see [Validate mounts](#validate-mounts). Warnings remain visible even when progress output is suppressed.
 
-Direct branching keeps its existing behavior for unavailable resources. Disk-only restore boots fresh rather than resuming open filesystem handles.
+Direct forking keeps its existing behavior for unavailable resources. Disk-only restore boots fresh rather than resuming open filesystem handles.
 
 </Accordion>
 
 ### Validate mounts
 
-Full restore and branching validate captured filesystem identities. Strict is the default; relaxed mode accepts supported differences and reports warnings:
+Full restore and forking validate captured filesystem identities. Strict is the default; relaxed mode accepts supported differences and reports warnings:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -1480,9 +1584,9 @@ msb snap inspect baseline:deps --verify
 ```
 </CodeGroup>
 
-Without hashes, size and structure checks cannot detect same-length disk corruption. Save and load preserve recorded integrity but do not scan it automatically. Full-snapshot RAM has separate content-addressed checks; branch RAM is not hashed.
+Without hashes, size and structure checks cannot detect same-length disk corruption. Save and load preserve recorded integrity but do not scan it automatically. Full-snapshot RAM has separate content-addressed checks; fork RAM is not hashed.
 
-<Accordion title="Full snapshots and branches">
+<Accordion title="Full snapshots and forks">
 
 <CodeGroup>
 ```typescript TypeScript
@@ -1493,7 +1597,7 @@ await Snapshot.builder("saved")
     .create();
 
 const source = await Sandbox.get("worker");
-const child = await source.branch("child", { recordIntegrity: true });
+const child = await source.fork("child", { recordIntegrity: true });
 ```
 
 ```rust Rust
@@ -1505,7 +1609,7 @@ Snapshot::builder("saved")
     .await?;
 
 let source = Sandbox::get("worker").await?;
-let child = source.branch("child").record_integrity().branch().await?;
+let child = source.fork("child").record_integrity().fork().await?;
 ```
 
 ```python Python
@@ -1517,7 +1621,7 @@ await Snapshot.create(
 )
 
 source = await Sandbox.get("worker")
-child = await source.branch("child", record_integrity=True)
+child = await source.fork("child", record_integrity=True)
 ```
 
 ```go Go
@@ -1534,13 +1638,13 @@ if err != nil { return err }
 source, err := m.GetSandbox(ctx, "worker")
 if err != nil { return err }
 
-child, err := source.Branch(ctx, "child", m.WithBranchIntegrity())
+child, err := source.Fork(ctx, "child", m.WithForkIntegrity())
 if err != nil { return err }
 ```
 
 ```bash CLI
 msb snap create saved --sandbox worker --full --integrity
-msb branch worker --name child --integrity
+msb fork worker --name child --integrity
 ```
 </CodeGroup>
 

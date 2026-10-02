@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use microsandbox::SandboxConfigPatch;
 use microsandbox::sandbox::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
-    RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
+    DiskImageFormat, EnvVar, GuestClockPolicy, HandoffInit, HostPermissions, MountBuilder, Patch,
+    PullPolicy, Rlimit, RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
     SandboxRuntimeOptionsPatch, SandboxSpecPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
 use microsandbox::sandbox::{
-    DnsConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch, SecretsConfigPatch,
-    TlsConfigPatch,
+    DnsConfigPatch, HttpConfigPatch, NetworkPolicy, NetworkProfile, NetworkSpecPatch,
+    SecretsConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
 use microsandbox_types_macros::ConfigPatch;
@@ -111,6 +111,7 @@ struct SandboxConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -150,6 +151,7 @@ struct RuntimeConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -374,7 +376,7 @@ struct AppendPatchInput {
 #[serde(untagged)]
 enum NetworkInput {
     Preset(NetworkPreset),
-    Object(NetworkConfigInput),
+    Object(Box<NetworkConfigInput>),
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -401,6 +403,16 @@ struct NetworkConfigInput {
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
+    tcp_accept_queue_size: Option<u32>,
+    #[config_patch(nested)]
+    http: Option<HttpInput>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
+#[serde(default, deny_unknown_fields)]
+struct HttpInput {
+    deny_response: Option<bool>,
+    deny_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -467,7 +479,7 @@ impl SandboxConfigInput {
         if let Some(ports) = self.ports.take() {
             let network = self
                 .network
-                .get_or_insert_with(|| NetworkInput::Object(NetworkConfigInput::default()));
+                .get_or_insert_with(|| NetworkInput::Object(Box::default()));
             network.object_mut().ports = Some(match network.object_mut().ports.take() {
                 Some(mut nested) => {
                     nested.extend(ports);
@@ -486,16 +498,16 @@ impl NetworkInput {
                 policy: Some(policy),
                 ..NetworkConfigInput::default()
             },
-            Self::Object(input) => input,
+            Self::Object(input) => *input,
         }
     }
 
     fn object_mut(&mut self) -> &mut NetworkConfigInput {
         if let Self::Preset(policy) = self {
-            *self = Self::Object(NetworkConfigInput {
+            *self = Self::Object(Box::new(NetworkConfigInput {
                 policy: Some(*policy),
                 ..NetworkConfigInput::default()
-            });
+            }));
         }
         let Self::Object(input) = self else {
             unreachable!("preset was normalized to an object")
@@ -671,7 +683,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                 reject_scoped_wrapper(&source.path, "network", "--net-conf")?;
                 let network = load_typed::<NetworkConfigInput>(&source.path, "network config")?;
                 SandboxConfigInput {
-                    network: Some(NetworkInput::Object(network)),
+                    network: Some(NetworkInput::Object(Box::new(network))),
                     ..SandboxConfigInput::default()
                 }
             }
@@ -693,6 +705,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                     shell: scoped.shell,
                     user: scoped.user,
                     hostname: scoped.hostname,
+                    guest_clock: scoped.guest_clock,
                     security: scoped.security,
                     entrypoint: scoped.entrypoint,
                     cmd: scoped.cmd,
@@ -1205,6 +1218,9 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
     }
     if let Some(value) = &input.hostname {
         runtime = runtime.hostname(value.clone());
+    }
+    if let Some(value) = input.guest_clock {
+        runtime = runtime.guest_clock(value);
     }
     if let Some(value) = input.security {
         config_patch = config_patch.security_profile(match value {
@@ -1738,6 +1754,21 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
+    if let Some(size) = input.tcp_accept_queue_size {
+        // Refuse here rather than at launch, where the runtime would reject the whole network.
+        microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
+        patch = patch.tcp_accept_queue_size(size);
+    }
+    if let Some(http) = input.http {
+        let mut value = HttpConfigPatch::new();
+        if let Some(enabled) = http.deny_response {
+            value = value.deny_response(enabled);
+        }
+        if let Some(message) = http.deny_message {
+            value = value.deny_message(message);
+        }
+        patch = patch.http(value);
+    }
     Ok(patch)
 }
 
@@ -1834,6 +1865,27 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_config_tcp_accept_queue_size_is_validated_before_launch() {
+        let input = |value: u32| -> NetworkInput {
+            serde_json::from_value(serde_json::json!({ "tcp_accept_queue_size": value })).unwrap()
+        };
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input(4096)), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.tcp_accept_queue_size, Some(4096));
+
+        for invalid in [0, 2_147_483_648] {
+            let error = materialize_network_patch(Some(&input(invalid)), None, None).unwrap_err();
+            assert!(
+                error.to_string().contains("TCP accept queue size"),
+                "{invalid}: {error}"
+            );
+        }
+    }
+
     fn write_config(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let path = dir.join(name);
         fs::write(&path, contents).unwrap();
@@ -1861,6 +1913,7 @@ workdir: "/lower"
 shell: "/bin/sh"
 user: "lower"
 hostname: "lower"
+guest_clock: sync
 security: default
 entrypoint: ["lower-entrypoint"]
 cmd: ["lower-command"]
@@ -1896,6 +1949,7 @@ workdir: "/higher"
 shell: "/bin/bash"
 user: "higher"
 hostname: "higher"
+guest_clock: "off"
 security: restricted
 entrypoint: ["higher-entrypoint"]
 cmd: ["higher-command"]
@@ -1954,6 +2008,7 @@ registry: { username: higher, password_env: PATH }
             shell,
             user,
             hostname,
+            guest_clock,
             security,
             entrypoint,
             cmd,
@@ -1988,6 +2043,7 @@ registry: { username: higher, password_env: PATH }
         assert_eq!(shell.as_deref(), Some("/bin/bash"));
         assert_eq!(user.as_deref(), Some("higher"));
         assert_eq!(hostname.as_deref(), Some("higher"));
+        assert_eq!(guest_clock, Some(GuestClockPolicy::Off));
         assert!(matches!(security, Some(SecurityInput::Restricted)));
         assert_eq!(entrypoint.as_deref().unwrap(), ["higher-entrypoint"]);
         assert_eq!(cmd.as_deref().unwrap(), ["higher-command"]);
@@ -2595,6 +2651,9 @@ network:
   allow: ["api.openai.com"]
   strict: true
   max_tcp_connections: 64
+  http:
+    deny_response: true
+    deny_message: "Blocked: {host}"
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2627,6 +2686,11 @@ secrets:
             "#!/bin/bash\npython app.py\n"
         );
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
+        assert!(config.spec.network.http.deny_response);
+        assert_eq!(
+            config.spec.network.http.deny_message.as_deref(),
+            Some("Blocked: {host}")
+        );
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);
         assert!(config.spec.network.tls.as_ref().unwrap().enabled);

@@ -295,7 +295,9 @@ impl SandboxHandle {
     /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => Ok(crate::db::config::decode(&s.config_json)?),
+            SandboxHandleInner::Local(s) => {
+                Ok(serde_json::from_str::<SandboxConfig>(&s.config_json)?)
+            }
             SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
                 Operation::SandboxHandleConfig,
             )),
@@ -304,9 +306,10 @@ impl SandboxHandle {
 
     /// Parse the active configuration snapshot, when one is available.
     pub fn active_config(&self) -> MicrosandboxResult<Option<SandboxConfig>> {
-        self.active_config_json()
-            .map(crate::db::config::decode)
-            .transpose()
+        Ok(self
+            .active_config_json()
+            .map(serde_json::from_str::<SandboxConfig>)
+            .transpose()?)
     }
 
     /// Start planning a sandbox modification from this handle.
@@ -602,9 +605,7 @@ impl SandboxHandle {
                 // handshake so concurrent name reuse cannot silently rebind
                 // this receiver to the replacement.
                 self.refresh().await?;
-                // A current SQL schema can still contain historical JSON.
-                // Use the same lossless decoder as config inspection/start.
-                let config = crate::db::config::decode(&local.config_json)?;
+                let config = serde_json::from_str::<SandboxConfig>(&local.config_json)?;
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),
@@ -975,7 +976,7 @@ fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
         return false;
     };
 
-    crate::db::config::decode(&state.config_json)
+    serde_json::from_str::<SandboxConfig>(&state.config_json)
         .map(|config| config.spec.lifecycle.ephemeral)
         .unwrap_or(false)
 }
@@ -1163,6 +1164,20 @@ mod tests {
             result,
             Err(MicrosandboxError::SandboxNotRunning(_))
         ));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn fork_builders_keep_legacy_branch_aliases() {
+        let source = cloud_handle(CloudSandboxStatus::Running);
+        let canonical: crate::sandbox::ForkBuilder = source.fork("child");
+        let legacy: crate::sandbox::BranchBuilder = source.branch("child");
+        assert_eq!(
+            serde_json::to_value(canonical.inner.config.into_config()).unwrap(),
+            serde_json::to_value(legacy.inner.config.into_config()).unwrap(),
+        );
+        let _: crate::sandbox::ForkManyBuilder = source.branch_many(["a", "b"]);
+        let _: crate::sandbox::BranchManyBuilder = source.fork_many(["a", "b"]);
     }
 
     #[test]

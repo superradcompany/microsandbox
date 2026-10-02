@@ -39,4 +39,5 @@ pub(crate) use restore::{
 };
 
 pub(crate) use archive::save_snapshot_expected;
+pub(super) use store::looks_like_path;
 pub(crate) use store::remove_snapshot_expected;

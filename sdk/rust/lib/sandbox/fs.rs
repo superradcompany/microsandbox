@@ -1101,7 +1101,7 @@ pub(crate) mod agent {
     //! on cloud). The per-call overhead is small relative to the cross-VM
     //! I/O these calls drive and keeps the trait dispatch path stateless.
 
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -1487,6 +1487,7 @@ pub(crate) mod agent {
             op: FsOp::Mkdir {
                 path: path.to_string(),
                 mode: None,
+                user: None,
             },
             bulk: None,
         };
@@ -1668,6 +1669,7 @@ pub(crate) mod agent {
             op: FsOp::Symlink {
                 target: target.to_string(),
                 link_path: link_path.to_string(),
+                user: None,
             },
             bulk: None,
         };
@@ -1774,7 +1776,7 @@ pub(crate) mod agent {
         guest_path: &str,
         host_path: &Path,
     ) -> MicrosandboxResult<()> {
-        let (std_file, temp_path) = prepare_host_copy_target(host_path).await?;
+        let (std_file, temp_path, host_path) = prepare_host_copy_target(host_path).await?;
         let mut file = tokio::fs::File::from_std(std_file);
         let mut stream = read_stream(backend, name, guest_path).await?;
         let mut received = 0u64;
@@ -1799,15 +1801,17 @@ pub(crate) mod agent {
         }
         drop(file);
 
-        publish_host_copy_target(temp_path, host_path)?;
+        publish_host_copy_target(temp_path, &host_path)?;
         tracing::debug!(bytes = received, path = %host_path.display(), "copied guest file to host");
         Ok(())
     }
 
     async fn prepare_host_copy_target(
         host_path: &Path,
-    ) -> MicrosandboxResult<(std::fs::File, tempfile::TempPath)> {
-        let host_path = host_path.to_path_buf();
+    ) -> MicrosandboxResult<(std::fs::File, tempfile::TempPath, PathBuf)> {
+        // Keep publication and staging tied to the same caller-local destination even if
+        // another task changes cwd while the guest transfer is awaiting data.
+        let host_path = std::path::absolute(host_path)?;
         tokio::task::spawn_blocking(move || {
             let existing_permissions = match std::fs::symlink_metadata(&host_path) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1859,7 +1863,7 @@ pub(crate) mod agent {
                 }
             }
             let (file, path) = named.into_parts();
-            Ok((file, path))
+            Ok((file, path, host_path))
         })
         .await
         .map_err(|error| MicrosandboxError::Custom(format!("host copy worker failed: {error}")))?
@@ -1901,13 +1905,75 @@ pub(crate) mod agent {
 
         use super::*;
 
+        #[test]
+        fn host_copy_destination_stays_in_starting_directory() {
+            const CHILD: &str = "MSB_TEST_HOST_COPY_CWD";
+            if std::env::var_os(CHILD).is_none() {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg("sandbox::fs::agent::tests::host_copy_destination_stays_in_starting_directory")
+                    .arg("--nocapture")
+                    .env(CHILD, "1")
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout)
+                        .contains("host copy path lifetime checked")
+                );
+                return;
+            }
+            // Cwd belongs to the process, so this test runs alone in a child process.
+            let root = tempfile::tempdir().unwrap();
+            let first = root.path().join("first");
+            let second = root.path().join("second");
+            std::fs::create_dir(&first).unwrap();
+            std::fs::create_dir(&second).unwrap();
+            std::fs::write(first.join("result.txt"), b"old first").unwrap();
+            std::fs::write(second.join("result.txt"), b"keep second").unwrap();
+            std::env::set_current_dir(&first).unwrap();
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let (file, temp_path, destination) =
+                        prepare_host_copy_target(Path::new("result.txt"))
+                            .await
+                            .unwrap();
+                    let mut file = tokio::fs::File::from_std(file);
+                    file.write_all(b"downloaded").await.unwrap();
+                    file.flush().await.unwrap();
+                    drop(file);
+                    // Simulate a cwd change while waiting for the final guest stream record.
+                    std::env::set_current_dir(&second).unwrap();
+                    publish_host_copy_target(temp_path, &destination).unwrap();
+                });
+            assert_eq!(
+                std::fs::read(first.join("result.txt")).unwrap(),
+                b"downloaded"
+            );
+            assert_eq!(
+                std::fs::read(second.join("result.txt")).unwrap(),
+                b"keep second"
+            );
+            std::env::set_current_dir(root.path()).unwrap();
+            println!("host copy path lifetime checked");
+        }
+
         #[tokio::test]
         async fn host_copy_target_atomically_replaces_existing_file() {
             let dir = tempfile::tempdir().unwrap();
             let destination = dir.path().join("artifact.bin");
             std::fs::write(&destination, b"old").unwrap();
 
-            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let (file, temp_path, destination) =
+                prepare_host_copy_target(&destination).await.unwrap();
             let mut file = tokio::fs::File::from_std(file);
             file.write_all(b"complete replacement").await.unwrap();
             file.sync_all().await.unwrap();
@@ -1928,7 +1994,8 @@ pub(crate) mod agent {
             std::fs::write(&destination, b"old").unwrap();
             std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
 
-            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let (file, temp_path, destination) =
+                prepare_host_copy_target(&destination).await.unwrap();
             drop(file);
             publish_host_copy_target(temp_path, &destination).unwrap();
 
@@ -1948,7 +2015,8 @@ pub(crate) mod agent {
             let destination = dir.path().join("artifact.bin");
             std::fs::write(&destination, b"original").unwrap();
 
-            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let (file, temp_path, destination) =
+                prepare_host_copy_target(&destination).await.unwrap();
             let temp_name = temp_path.to_path_buf();
             drop(file);
             drop(temp_path);
@@ -1962,7 +2030,8 @@ pub(crate) mod agent {
         async fn new_host_copy_target_is_owner_only() {
             let dir = tempfile::tempdir().unwrap();
             let destination = dir.path().join("new.bin");
-            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let (file, temp_path, destination) =
+                prepare_host_copy_target(&destination).await.unwrap();
             drop(file);
             publish_host_copy_target(temp_path, &destination).unwrap();
 
@@ -2001,7 +2070,8 @@ pub(crate) mod agent {
             let target = dir.path().join("target.bin");
             let destination = dir.path().join("link.bin");
             std::fs::write(&target, b"target").unwrap();
-            let (file, temp_path) = prepare_host_copy_target(&destination).await.unwrap();
+            let (file, temp_path, destination) =
+                prepare_host_copy_target(&destination).await.unwrap();
             drop(file);
             symlink(&target, &destination).unwrap();
 

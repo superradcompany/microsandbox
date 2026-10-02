@@ -977,6 +977,9 @@ async fn capture_full_snapshot(
         manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
             user: sandbox_config.spec.runtime.user.clone(),
         })?;
+        // Captured execution carries its own guest timeline; keep the source's clock policy
+        // so restores do not step that timeline to host time unless they ask to.
+        manifest.set_guest_clock(sandbox_config.spec.runtime.guest_clock.unwrap_or_default())?;
         manifest.set_owned_volumes(closure.checkpoint().owned_volumes.clone())?;
         manifest
             .validate()

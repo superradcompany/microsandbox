@@ -47,3 +47,5 @@ Configuration-focused examples intentionally replace their fixed-name sandbox so
 | `net-ports` | `cargo run -p net-ports` | Port publishing |
 | `net-secrets` | `cargo run -p net-secrets` | Secret injection |
 | `net-tls` | `cargo run -p net-tls` | TLS interception |
+
+The `snapshot-fork` example keeps its historical directory name; it demonstrates restoring a saved disk snapshot. Live forking uses the `fork` API.

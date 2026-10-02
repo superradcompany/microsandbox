@@ -18,7 +18,7 @@ use crate::backend::sandbox::SandboxIdentity;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::SandboxConfig;
-use super::branch::BranchOutcome;
+use super::branch::ForkOutcome;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -95,9 +95,9 @@ pub(super) async fn branch_many(
     _record_integrity: bool,
     _names: Vec<String>,
     _guest_flush: microsandbox_types::GuestFlush,
-) -> MicrosandboxResult<Vec<BranchOutcome>> {
+) -> MicrosandboxResult<Vec<ForkOutcome>> {
     Err(MicrosandboxError::InvalidConfig(
-        "direct branching requires a local backend".into(),
+        "direct forking requires a local backend".into(),
     ))
 }
 
@@ -110,10 +110,10 @@ pub(super) async fn branch_many(
     record_integrity: bool,
     names: Vec<String>,
     guest_flush: microsandbox_types::GuestFlush,
-) -> MicrosandboxResult<Vec<BranchOutcome>> {
+) -> MicrosandboxResult<Vec<ForkOutcome>> {
     validate_names(source, &names)?;
     let local = backend.as_local().ok_or_else(|| {
-        MicrosandboxError::InvalidConfig("direct branching requires a local backend".into())
+        MicrosandboxError::InvalidConfig("direct forking requires a local backend".into())
     })?;
     // Fail known conflicts before capture. Each create still performs its authoritative,
     // locked reservation: preflight cannot promise atomicity against another process.
@@ -158,7 +158,7 @@ pub(super) async fn branch_many(
     Ok(names
         .into_iter()
         .zip(results)
-        .map(|(name, result)| BranchOutcome { name, result })
+        .map(|(name, result)| ForkOutcome { name, result })
         .collect())
 }
 

@@ -4,10 +4,12 @@
 //! for sandbox networking. Designed for the smoltcp in-process engine.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
-use microsandbox_types::{NetworkRateLimiterConfig, TlsConfig};
+use microsandbox_types::{
+    HttpConfig, NetworkRateLimiterConfig, TlsConfig, WELL_KNOWN_NAT64_PREFIX,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::dns::Nameserver;
@@ -27,6 +29,24 @@ pub enum ConnectionLimit {
     Unlimited,
     /// Maximum number of concurrent connections.
     Limited(NonZeroUsize),
+}
+
+/// Accept-queue depth requested for each published TCP port's host listener.
+///
+/// Valid values are `1..=i32::MAX`, the positive range `listen(2)` accepts. The host kernel clamps
+/// the request to its own ceiling -- `net.core.somaxconn` on Linux (4096 by default),
+/// `kern.ipc.somaxconn` on macOS (128 by default) -- so asking for more than the host allows is
+/// not an error; it simply has no further effect until that ceiling is raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub struct TcpAcceptQueueSize(NonZeroU32);
+
+/// A requested TCP accept queue size outside `1..=i32::MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("TCP accept queue size must be between 1 and {max}, got {value}", max = TcpAcceptQueueSize::MAX)]
+pub struct InvalidTcpAcceptQueueSize {
+    /// The rejected value.
+    pub value: u32,
 }
 
 /// Complete network configuration for a sandbox.
@@ -61,8 +81,8 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Require hostname-based policy allows to use inspectable application authority.
-    #[serde(default)]
+    /// Require hostname-based policy allows to use inspectable application authority. Enabled by default.
+    #[serde(default = "default_true")]
     pub strict: bool,
 
     /// Secret injection settings.
@@ -79,9 +99,18 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub max_udp_connections: Option<ConnectionLimit>,
 
+    /// Accept-queue depth for published TCP port listeners. `None` uses [`TcpAcceptQueueSize::DEFAULT`].
+    // Omitted when unset so launches that do not ask for it stay byte-identical for older runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_accept_queue_size: Option<TcpAcceptQueueSize>,
+
     /// Egress and ingress rate limits. `None` means unlimited in both directions.
     #[serde(default)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
+
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    pub nat64_prefixes: Vec<Ipv6Network>,
 
     /// Ship the host's trusted root CAs into the guest at boot so outbound
     /// TLS works behind corporate MITM proxies (Cloudflare Warp Zero
@@ -92,10 +121,14 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub trust_host_cas: bool,
 
+    /// HTTP denial response settings.
+    #[serde(default)]
+    pub http: HttpConfig,
+
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
     /// Applies to TLS-intercepted and bypassed/plain TCP traffic. SOCKS5 also
-    /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
+    /// relays non-DNS UDP; SOCKS4 and HTTP CONNECT block it.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
 }
@@ -209,13 +242,28 @@ impl ConnectionLimit {
     }
 }
 
+impl TcpAcceptQueueSize {
+    /// Size used when none is configured.
+    ///
+    /// Deeper than the 128 that `TcpListener::bind` would inherit from mio, so the queue can
+    /// absorb a burst of parallel connections -- such as a reverse proxy fanning out one page
+    /// load of a modern web app -- while the accept loop drains it.
+    pub const DEFAULT: Self = Self(NonZeroU32::new(1024).unwrap());
+
+    /// Largest accepted value; `listen(2)` takes a signed `int`.
+    pub const MAX: u32 = i32::MAX as u32;
+
+    /// Return the requested size.
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
 impl ResolvedNetworkConfig {
     /// Creates a runtime configuration from its declarative configuration and
     /// fully resolved outbound proxy.
-    pub(super) fn new(
-        config: NetworkConfig,
-        outbound_proxy: Option<ResolvedOutboundProxy>,
-    ) -> Self {
+    #[doc(hidden)]
+    pub fn new(config: NetworkConfig, outbound_proxy: Option<ResolvedOutboundProxy>) -> Self {
         Self {
             config,
             outbound_proxy,
@@ -276,14 +324,40 @@ impl Default for NetworkConfig {
             policy: NetworkPolicy::default(),
             dns: DnsConfig::default(),
             tls: TlsConfig::default(),
-            strict: false,
+            strict: true,
             secrets: SecretsConfig::default(),
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_accept_queue_size: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
+            http: HttpConfig::default(),
             outbound_proxy: None,
         }
+    }
+}
+
+impl Default for TcpAcceptQueueSize {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u32> for TcpAcceptQueueSize {
+    type Error = InvalidTcpAcceptQueueSize;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match NonZeroU32::new(value) {
+            Some(size) if value <= Self::MAX => Ok(Self(size)),
+            _ => Err(InvalidTcpAcceptQueueSize { value }),
+        }
+    }
+}
+
+impl From<TcpAcceptQueueSize> for u32 {
+    fn from(size: TcpAcceptQueueSize) -> Self {
+        size.get()
     }
 }
 
@@ -313,6 +387,14 @@ fn default_query_timeout_ms() -> u64 {
     5000
 }
 
+fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -320,9 +402,37 @@ fn default_query_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
+    use crate::config::NetworkBuilder;
     use crate::dns::Nameserver;
     use crate::policy::{Destination, NetworkPolicy, Rule};
     use crate::proxy::OutboundProxy;
+
+    #[test]
+    fn strict_defaults_and_explicit_opt_out_survive_wire_round_trips() {
+        assert!(NetworkConfig::default().strict);
+        assert!(NetworkBuilder::new().build().unwrap().strict);
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"strict": true}),
+            serde_json::json!({"strict": false}),
+        ] {
+            let expected = value
+                .get("strict")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let config: NetworkConfig = serde_json::from_value(value.clone()).unwrap();
+            let domain: microsandbox_types::NetworkSpec =
+                serde_json::from_value(value.clone()).unwrap();
+            let cloud: microsandbox_types::CloudNetworkSpec =
+                serde_json::from_value(value).unwrap();
+            assert_eq!(config.strict, expected);
+            assert_eq!(domain.strict, expected);
+            assert_eq!(cloud.strict, expected);
+            let round_trip: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            assert_eq!(round_trip.strict, expected);
+        }
+    }
 
     /// The engine's `policy`/`dns`/`interface` subdocuments must remain
     /// serde-compatible with the wire twins in `microsandbox_types` that the
@@ -397,6 +507,35 @@ mod tests {
             legacy_group,
             microsandbox_types::DestinationGroup::LinkLocal
         );
+    }
+
+    #[test]
+    fn http_config_uses_nested_wire_contract() {
+        for (raw, expected) in [
+            (r#"{}"#, None),
+            (r#"{"http":{}}"#, None),
+            (r#"{"http":{"deny_message":null}}"#, None),
+            (r#"{"http":{"deny_message":""}}"#, Some("")),
+            (
+                r#"{"http":{"deny_message":"blocked {host}"}}"#,
+                Some("blocked {host}"),
+            ),
+        ] {
+            let config: NetworkConfig = serde_json::from_str(raw).unwrap();
+            assert_eq!(config.http.deny_message.as_deref(), expected);
+            assert!(!config.http.deny_response);
+            let wire = serde_json::to_value(&config).unwrap();
+            assert!(wire.get("http_deny_message").is_none());
+            assert_eq!(
+                wire["http"].get("deny_message"),
+                expected.map(serde_json::Value::from).as_ref()
+            );
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
+            assert_eq!(spec.http.deny_message.as_deref(), expected);
+            let restored: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(restored.http.deny_message.as_deref(), expected);
+        }
     }
 
     /// `outbound_proxy` round-trips whole-config through the wire type the
@@ -589,6 +728,62 @@ mod connection_limit_tests {
             let back: NetworkConfig =
                 serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
             assert_eq!(back.max_udp_connections, config.max_udp_connections);
+        }
+    }
+
+    #[test]
+    fn accept_queue_size_accepts_exactly_the_positive_c_int_range() {
+        for value in [1, 128, 1024, TcpAcceptQueueSize::MAX] {
+            assert_eq!(TcpAcceptQueueSize::try_from(value).unwrap().get(), value);
+        }
+        for value in [0, TcpAcceptQueueSize::MAX + 1, u32::MAX] {
+            assert_eq!(
+                TcpAcceptQueueSize::try_from(value),
+                Err(InvalidTcpAcceptQueueSize { value })
+            );
+        }
+        assert_eq!(TcpAcceptQueueSize::default(), TcpAcceptQueueSize::DEFAULT);
+        assert_eq!(TcpAcceptQueueSize::DEFAULT.get(), 1024);
+    }
+
+    #[test]
+    fn wire_tcp_accept_queue_size_is_omitted_when_unset_and_validated_when_set() {
+        // Unset must not reach the wire at all: older runtimes then see the payload they know.
+        let unset = serde_json::to_value(NetworkConfig::default()).unwrap();
+        assert!(unset.get("tcp_accept_queue_size").is_none());
+        let spec: microsandbox_types::NetworkSpec = serde_json::from_value(unset).unwrap();
+        assert_eq!(spec.tcp_accept_queue_size, None);
+        assert!(
+            serde_json::to_value(&spec)
+                .unwrap()
+                .get("tcp_accept_queue_size")
+                .is_none()
+        );
+
+        let config: NetworkConfig =
+            serde_json::from_value(serde_json::json!({"tcp_accept_queue_size": 4096})).unwrap();
+        assert_eq!(
+            config.tcp_accept_queue_size.map(TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+        let spec: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(spec.tcp_accept_queue_size, Some(4096));
+        let back: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+        assert_eq!(back.tcp_accept_queue_size, config.tcp_accept_queue_size);
+
+        // The wire type is a plain integer, so the engine type is what refuses a bad value.
+        for invalid in [0, TcpAcceptQueueSize::MAX + 1] {
+            let wire = serde_json::json!({"tcp_accept_queue_size": invalid});
+            let spec: microsandbox_types::NetworkSpec =
+                serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(spec.tcp_accept_queue_size, Some(invalid));
+            let error = serde_json::from_value::<NetworkConfig>(wire).unwrap_err();
+            assert!(
+                error.to_string().contains("TCP accept queue size"),
+                "{invalid}: {error}"
+            );
         }
     }
 

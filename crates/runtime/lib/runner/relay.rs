@@ -68,7 +68,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
 use crate::checkpoint::RestoredAgentState;
-use crate::clock::spawn_clock_sync_task;
+use crate::clock::{RestoreActivationMode, spawn_clock_sync_task};
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
 use crate::{RuntimeError, RuntimeResult};
@@ -471,6 +471,8 @@ pub struct AgentRelay {
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
     kernel_clock_synchronized: bool,
+    /// Host control over the guest wall clock.
+    guest_clock: microsandbox_types::GuestClockPolicy,
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
@@ -1135,6 +1137,7 @@ impl AgentRelay {
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             kernel_clock_synchronized: false,
+            guest_clock: Default::default(),
             log_writer: None,
             #[cfg(unix)]
             bind_identity_map: None,
@@ -1164,6 +1167,7 @@ impl AgentRelay {
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             kernel_clock_synchronized: false,
+            guest_clock: Default::default(),
             log_writer: None,
             #[cfg(unix)]
             bind_identity_map: None,
@@ -1183,6 +1187,12 @@ impl AgentRelay {
             self.endpoint.display()
         );
         Ok(())
+    }
+
+    /// Select how the relay manages the guest wall clock.
+    pub fn with_guest_clock(mut self, policy: microsandbox_types::GuestClockPolicy) -> Self {
+        self.guest_clock = policy;
+        self
     }
 
     /// Attach a log writer for `exec.log` capture.
@@ -1520,10 +1530,16 @@ impl AgentRelay {
         )?;
         let prepared_persist_us = prepared_persist_started.elapsed().as_micros();
         let generation_install_started = Instant::now();
-        let request = vm
-            .install_vm_generation_and_clock(generation_bytes.into())
+        // With the guest clock off, publish only the new identity so the restored guest
+        // continues from its captured wall clock instead of stepping to host time.
+        let activation = RestoreActivationMode::for_policy(self.guest_clock);
+        let request = activation
+            .install(vm, generation_bytes.into())
             .ok_or_else(|| {
-                RuntimeError::Custom("restored kernel lacks identity-and-clock activation; recreate this development full snapshot with the updated kernel or use disk-only restore".into())
+                RuntimeError::Custom(format!(
+                    "restored kernel lacks {}; recreate this development full snapshot with the updated kernel or use disk-only restore",
+                    activation.description(),
+                ))
             })?;
         let generation_install_us = generation_install_started.elapsed().as_micros();
         let resume_started = Instant::now();
@@ -1536,7 +1552,10 @@ impl AgentRelay {
         match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
             Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
             Some(msb_krun::VmGenerationWaitOutcome::Failed) => {
-                return Err(RuntimeError::Custom("restored kernel rejected identity-and-clock activation; workloads remain frozen".into()));
+                return Err(RuntimeError::Custom(format!(
+                    "restored kernel rejected {}; workloads remain frozen",
+                    activation.description(),
+                )));
             }
             Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
                 return Err(RuntimeError::Custom(
@@ -1555,7 +1574,7 @@ impl AgentRelay {
             }
         }
         let generation_ack_us = generation_ack_started.elapsed().as_micros();
-        self.kernel_clock_synchronized = true;
+        self.kernel_clock_synchronized = activation == RestoreActivationMode::IdentityAndClock;
 
         let ready_started = Instant::now();
         self.install_restored_ready(restored)?;
@@ -1798,8 +1817,11 @@ impl AgentRelay {
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
         let mut ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
-        let clock_sync_handle =
-            spawn_clock_sync_task(agent_tx.clone(), self.kernel_clock_synchronized);
+        let clock_sync_handle = spawn_clock_sync_task(
+            agent_tx.clone(),
+            self.guest_clock,
+            self.kernel_clock_synchronized,
+        );
         let bulk_write_budget = self
             .dual_port_active
             .then(|| Arc::new(Semaphore::new(BULK_WRITE_BYTE_CAPACITY)));
@@ -2128,7 +2150,9 @@ impl AgentRelay {
         }
 
         // Abort background tasks.
-        clock_sync_handle.abort();
+        if let Some(handle) = clock_sync_handle {
+            handle.abort();
+        }
         ring_writer_handle.abort();
         if let Some(handle) = bulk_writer_handle {
             handle.abort();
@@ -7496,6 +7520,42 @@ mod tests {
         ));
         assert!(next_control_write(&mut pending, control).unwrap().is_none());
         assert_eq!(pending.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_is_not_spawned_when_guest_clock_is_off() {
+        let (tx, mut rx) = ControlWriter::new();
+        assert!(
+            spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Off, false).is_none()
+        );
+        // The only writer was dropped without sending, so the guest never receives a clock frame.
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_sends_initial_sync_after_cold_boot() {
+        let (tx, mut rx) = ControlWriter::new();
+        let handle = spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Sync, false)
+            .expect("sync policy spawns the clock task");
+        let write = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("initial clock sync is sent without waiting for the interval")
+            .expect("clock frame");
+        assert_eq!(decode_frame(&write.data).unwrap().t, MessageType::ClockSync);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_skips_initial_sync_after_kernel_restore_sync() {
+        let (tx, mut rx) = ControlWriter::new();
+        let handle = spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Sync, true)
+            .expect("sync policy spawns the clock task");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err()
+        );
+        handle.abort();
     }
 
     #[tokio::test]

@@ -16,6 +16,8 @@ Local SDK calls select an existing `msb` and `libkrunfw` pair in this order:
 2. The resolved runtime home: configured `home`, otherwise non-empty `MSB_HOME`, otherwise `~/.microsandbox`.
 3. Binaries supplied by the SDK package, when available.
 
+A local backend captures its effective home, relative directory overrides, configured runtime paths, and registry CA certificate path when it is constructed. Later changes to the working directory or `MSB_HOME` do not move that backend's files. Construct a new backend to select another home. Relative host paths in global `config.json` and managed configuration resolve against the contributing file’s directory. Programmatic paths and environment defaults use the caller’s working directory. Process-level SDK runtime setters capture relative paths when registered; environment runtime overrides are captured during backend construction, below managed policy. Existing saved sandbox records retain their legacy relative-path interpretation without rewriting.
+
 A complete home installation wins over Python wheel and Node platform-package binaries, even when its release version differs from the SDK. You do not need to set `MSB_HOME` for `~/.microsandbox` to take precedence. The Python and Node CLI entry points follow the same home-first policy. Go's `EnsureRuntime` also reuses a complete home installation without replacing it to match the SDK's pinned download version.
 
 A partial home installation fails with an incomplete-runtime error; it is not silently bypassed by package binaries or repaired by setup. An invalid explicit path also fails instead of falling through. Keep the executable and firmware library from the same runtime bundle, and use compatible SDK/runtime releases.

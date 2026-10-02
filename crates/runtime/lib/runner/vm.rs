@@ -284,6 +284,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Host control over the guest wall clock during boot, restore, and resume.
+    pub guest_clock: microsandbox_types::GuestClockPolicy,
+
     /// Protected memory cache resolved by the sandbox's owning local backend.
     pub memory_cache_dir: Option<PathBuf>,
 
@@ -526,6 +529,7 @@ impl std::fmt::Debug for VmConfig {
         debug
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("thp", &self.thp)
+            .field("guest_clock", &self.guest_clock)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
@@ -792,6 +796,8 @@ fn run(
             crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
         return Err(error.into());
     }
+
+    relay = relay.with_guest_clock(config.vm.guest_clock);
 
     // Attach the exec.log writer so the ring reader can capture the
     // primary session's stdout/stderr. Failure to open the file is

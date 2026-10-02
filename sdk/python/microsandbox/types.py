@@ -1219,17 +1219,30 @@ class Secret:
         *,
         value: str,
         allow: Sequence[str] = (),
+        allow_placeholder_for: Sequence[str] = (),
         passthrough: Sequence[str] = (),
         placeholder: str | None = None,
         require_tls_identity: bool = True,
         violation_action: ViolationAction | None = None,
         substitution: SecretSubstitution | None = None,
     ) -> SecretEntry:
+        """Create an environment secret with per-host permissions.
+
+        ``allow_placeholder_for`` permits unchanged placeholders where substitution
+        does not apply. ``passthrough`` is a deprecated alias for ``allow_placeholder_for``.
+        When both are supplied, their host lists are combined.
+        """
+        if passthrough:
+            warnings.warn(
+                "passthrough is deprecated; use allow_placeholder_for instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return SecretEntry(
             env_var=env_var,
             value=value,
             allow=tuple(allow),
-            passthrough=tuple(passthrough),
+            passthrough=tuple(allow_placeholder_for) + tuple(passthrough),
             placeholder=placeholder,
             require_tls_identity=require_tls_identity,
             violation_action=violation_action,
@@ -1597,7 +1610,7 @@ class SecretSource:
 class OutboundProxy:
     """Proxy used for outbound sandbox connections."""
 
-    protocol: Literal["socks4", "socks5"]
+    protocol: Literal["http_connect", "socks4", "socks5"]
     address: str
     user_id: str | None = None
     username: str | None = None
@@ -1610,6 +1623,11 @@ class OutboundProxy:
             raise ValueError("credentials are only supported for SOCKS5 proxies")
         if (self.username is None) != (self.password is None):
             raise ValueError("SOCKS5 username and password must be provided together")
+
+    @classmethod
+    def http_connect(cls, address: str) -> OutboundProxy:
+        """Create an HTTP CONNECT outbound proxy."""
+        return cls(protocol="http_connect", address=address)
 
     @classmethod
     def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:
@@ -1734,6 +1752,20 @@ class VsockRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class HttpConfig:
+    """HTTP denial response settings. ``{host}`` names the blocked host."""
+
+    deny_response: bool = False
+    """Enable readable HTTP denial responses. Disabled by default."""
+
+    deny_message: str | None = None
+    """Body used when deny_response is enabled.
+
+    ``None`` uses the built-in message; an empty string sends no body.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class Network:
     """Network configuration for a sandbox."""
 
@@ -1750,24 +1782,31 @@ class Network:
     layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
-    strict: bool = False
+    strict: bool = True
     """Require hostname-based policy allows to use inspectable application
-    authority. Defaults to ``False``."""
+    authority. Defaults to ``True``. Set to ``False`` to opt out."""
     ipv4_pool: str | None = None
     """IPv4 pool used to derive per-sandbox /30 guest subnets. Defaults
     to ``172.16.0.0/12``."""
     ipv6_pool: str | None = None
     """IPv6 pool used to derive per-sandbox /64 guest prefixes. Defaults
     to ``fd42:6d73:62::/48``."""
+    nat64_prefixes: tuple[str, ...] = field(default=("64:ff9b::/96",), kw_only=True)
+    """NAT64 /96 prefixes used for policy classification."""
     max_connections: int | None = None
     """Deprecated: use ``max_tcp_connections`` instead."""
     max_tcp_connections: int | None = field(default=None, kw_only=True)
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    tcp_accept_queue_size: int | None = field(default=None, kw_only=True)
+    """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
+    Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
     rate_limiter: NetworkRateLimiter | None = None
     """Local egress and ingress rate limits. ``None`` means unlimited."""
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
+    http: HttpConfig | None = None
+    """HTTP denial response settings."""
 
     @classmethod
     def none(cls) -> Network:
@@ -1814,14 +1853,15 @@ class Network:
             if not isinstance(self.tls, TlsConfig):
                 raise TypeError("Network.tls must be TlsConfig or None")
             d["tls"] = self.tls._to_dict()
-        if self.strict:
-            d["strict"] = self.strict
+        d["strict"] = self.strict
         if self.ipv4_pool is not None:
             d["ipv4_pool"] = self.ipv4_pool
         if self.ipv6_pool is not None:
             d["ipv6_pool"] = self.ipv6_pool
         if self.max_connections is not None and self.max_tcp_connections is not None:
             raise ValueError("max_connections and max_tcp_connections are mutually exclusive")
+        if self.nat64_prefixes:
+            d["nat64_prefixes"] = list(self.nat64_prefixes)
         if self.max_connections is not None:
             warnings.warn(
                 "max_connections is deprecated; use max_tcp_connections",
@@ -1833,6 +1873,8 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.tcp_accept_queue_size is not None:
+            d["tcp_accept_queue_size"] = self.tcp_accept_queue_size
         if self.rate_limiter is not None:
             if not isinstance(self.rate_limiter, NetworkRateLimiter):
                 raise TypeError("Network.rate_limiter must be NetworkRateLimiter or None")
@@ -1844,6 +1886,16 @@ class Network:
         )
         if violation != str(ViolationAction.BLOCK_AND_LOG):
             d["secret_violation_action"] = violation
+        if self.http is not None:
+            if not isinstance(self.http, HttpConfig):
+                raise TypeError("Network.http must be HttpConfig or None")
+            if not isinstance(self.http.deny_response, bool):
+                raise TypeError("HttpConfig.deny_response must be a bool")
+            d["http"] = {"deny_response": self.http.deny_response}
+            if self.http.deny_message is not None:
+                if not isinstance(self.http.deny_message, str):
+                    raise TypeError("HttpConfig.deny_message must be a str or None")
+                d["http"]["deny_message"] = self.http.deny_message
         return d
 
 

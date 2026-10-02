@@ -297,7 +297,7 @@ fn apply_secret_args(
                 s = s.allow(host);
             }
             for host in spec.passthrough_hosts {
-                s = s.allow_passthrough_for(host);
+                s = s.allow_placeholder_for(host);
             }
             s
         });

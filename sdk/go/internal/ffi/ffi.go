@@ -1142,6 +1142,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -1259,6 +1260,8 @@ type Error struct {
 	Kind     string                         `json:"kind"`
 	Message  string                         `json:"message"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
+	OSError *int32 `json:"os_error,omitempty"`
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1828,6 +1831,12 @@ type MountSpec struct {
 	OverrideGid        *uint32 `json:"override_gid,omitempty"`
 }
 
+// HTTPConfig carries HTTP denial settings to the native SDK.
+type HTTPConfig struct {
+	DenyResponse bool   `json:"deny_response"`
+	DenyMessage  string `json:"deny_message,omitempty"`
+}
+
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
 	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
@@ -1839,14 +1848,17 @@ type NetworkOptions struct {
 	Strict                *bool                      `json:"strict,omitempty"`
 	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
 	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
+	TCPAcceptQueueSize    *uint32                    `json:"tcp_accept_queue_size,omitempty"`
 	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
 	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
+	NAT64Prefixes         []string                   `json:"nat64_prefixes,omitempty"`
 	MaxConnections        *uint                      `json:"max_connections,omitempty"`
 	MaxTCPConnections     *uint                      `json:"max_tcp_connections,omitempty"`
 	MaxUDPConnections     *uint                      `json:"max_udp_connections,omitempty"`
 	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
 	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
 	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
+	HTTP                  *HTTPConfig                `json:"http,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that
@@ -5103,9 +5115,27 @@ func VolumeFsOp(ctx context.Context, name, op string, args any, result any) erro
 	defer C.free(unsafe.Pointer(cName))
 	defer C.free(unsafe.Pointer(cOp))
 	defer C.free(unsafe.Pointer(cArgs))
-	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+	invoke := func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_volume_fs_op(cancelID, cName, cOp, cArgs, buf, bufLen)
-	})
+	}
+	out, err := call(ctx, invoke)
+	// Local reads historically used os.ReadFile and had no fixed response-size
+	// limit. Only retry this read-only operation; never replay a mutation.
+	for size := defaultBufSize; op == "local_read" && err != nil; {
+		var native *Error
+		if !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			break
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		size = needed
+		out, err = callBuf(ctx, size, invoke)
+	}
 	if err != nil {
 		return err
 	}

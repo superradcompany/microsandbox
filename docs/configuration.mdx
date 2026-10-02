@@ -21,6 +21,8 @@ See [Managed deployment](/enterprise/managed-configuration) for deployment, prec
 
 ## Reference example
 
+Relative host paths stored in this file resolve from the file's directory, including `home`, `paths.*`, and `registries.ca_certs`. For example, `/etc/microsandbox/config.json` containing `"ca_certs": "./company.pem"` selects `/etc/microsandbox/company.pem`, regardless of the caller's working directory. This intentionally replaces the previous working-directory-relative interpretation. Use an absolute path to keep a location elsewhere. Programmatic SDK paths and environment defaults are captured relative to the caller's working directory when the backend is constructed. Guest paths, such as `sandbox_defaults.workdir`, are unaffected.
+
 <Accordion title="Full example">
 ```json
 {

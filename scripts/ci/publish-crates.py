@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -62,6 +63,31 @@ def publication_closure(metadata: dict[str, object], roots: tuple[str, ...]) -> 
     if missing:
         raise SystemExit(f"unknown release root crates: {', '.join(missing)}")
 
+    workspace = tomllib.loads((Path(metadata["workspace_root"]) / "Cargo.toml").read_text())
+    workspace_dependencies = workspace.get("workspace", {}).get("dependencies", {})
+    edges = {}
+    for name, raw in raw_packages.items():
+        manifest = tomllib.loads(Path(raw["manifest_path"]).read_text())
+        versioned_dev = set()
+        for table in [manifest, *manifest.get("target", {}).values()]:
+            for alias, declaration in table.get("dev-dependencies", {}).items():
+                if isinstance(declaration, dict) and declaration.get("workspace"):
+                    declaration = workspace_dependencies[alias]
+                if isinstance(declaration, str) or "version" in declaration:
+                    versioned_dev.add(alias)
+        # Cargo retains versioned dev dependencies in published manifests and
+        # resolves them even with --no-verify. Only path-only dev helpers vanish.
+        edges[name] = frozenset(
+            dependency["name"]
+            for dependency in raw["dependencies"]
+            if dependency.get("path") is not None
+            and dependency["name"] in raw_packages
+            and (
+                dependency.get("kind") != "dev"
+                or (dependency.get("rename") or dependency["name"]) in versioned_dev
+            )
+        )
+
     selected: set[str] = set()
     pending = list(roots)
     while pending:
@@ -72,27 +98,12 @@ def publication_closure(metadata: dict[str, object], roots: tuple[str, ...]) -> 
         if raw.get("publish") == []:
             raise SystemExit(f"release crate {name} has publish = false")
         selected.add(name)
-        # Optional normal/build dependencies must be publishable even when a
-        # feature is currently off. Dev-only workspace helpers never ship.
-        pending.extend(
-            dependency["name"]
-            for dependency in raw["dependencies"]
-            if dependency.get("kind") != "dev"
-            and dependency.get("path") is not None
-            and dependency["name"] in raw_packages
-        )
+        pending.extend(edges[name])
 
     packages = {}
     for name in selected:
         raw = raw_packages[name]
-        dependencies = frozenset(
-            dependency["name"]
-            for dependency in raw["dependencies"]
-            if dependency.get("kind") != "dev"
-            and dependency.get("path") is not None
-            and dependency["name"] in selected
-        )
-        packages[name] = Package(name, raw["version"], dependencies)
+        packages[name] = Package(name, raw["version"], edges[name])
     return packages
 
 
@@ -204,13 +215,53 @@ def package_all(packages: list[Package]) -> None:
         subprocess.run(["cargo", "package", "-p", package.name, "--no-verify"], check=True)
 
 
+def run_with_index_retry(command: list[str], published: list[Package], timeout: int) -> None:
+    """Retry pre-upload resolution failures for this release's published dependencies."""
+    deadline = time.monotonic() + timeout
+    delay = 1
+    resolution_errors = tuple(
+        diagnostic
+        for package in published
+        for diagnostic in (
+            f'failed to select a version for the requirement `{package.name} = "={package.version}"`',
+            f'no matching package named `{package.name}` found',
+        )
+    )
+    while True:
+        missing_published_dependency = False
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        ) as process:
+            for line in process.stdout:
+                print(line, end="", flush=True)
+                if any(diagnostic in line for diagnostic in resolution_errors):
+                    missing_published_dependency = True
+            returncode = process.wait()
+        if returncode == 0:
+            return
+        # A separate sparse-index probe can see a new version before Cargo's
+        # registry view does. Cargo packages again during `publish`, so protect
+        # both operations. Never retry an ambiguous upload or unrelated error.
+        remaining = deadline - time.monotonic()
+        if not missing_published_dependency or remaining <= 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        pause = min(delay, remaining)
+        print(f"waiting {pause:g}s for Cargo to resolve published release dependencies", flush=True)
+        time.sleep(pause)
+        delay = min(delay * 2, 20)
+
+
 def publish(waves: list[list[Package]], timeout: int) -> None:
+    published: list[Package] = []
     for number, wave in enumerate(waves, start=1):
         # Cargo normalizes path dependencies to registry dependencies while it
         # packages a crate. Package one wave at a time, after the prior wave is
         # indexed, so a brand-new release never tries to resolve unpublished
         # internal versions.
-        package_all(wave)
+        for package in sorted(wave, key=lambda item: item.name):
+            run_with_index_retry(
+                ["cargo", "package", "-p", package.name, "--no-verify"], published, timeout
+            )
         newly_published = []
         names = ", ".join(package.name for package in wave)
         print(f"publishing wave {number}: {names}", flush=True)
@@ -224,13 +275,14 @@ def publish(waves: list[list[Package]], timeout: int) -> None:
                     )
                 print(f"{package.name} {package.version} already published; checksum matches")
                 continue
-            subprocess.run(
+            run_with_index_retry(
                 ["cargo", "publish", "-p", package.name, "--no-verify"],
-                check=True,
+                published, timeout,
             )
             newly_published.append(package)
         if newly_published:
             wait_until_indexed(newly_published, timeout)
+        published.extend(wave)
 
 
 def main() -> None:

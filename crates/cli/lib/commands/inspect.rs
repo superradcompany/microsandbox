@@ -233,6 +233,10 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
             ),
         );
         ui::detail_kv_indent("THP", config.spec.resources.thp.as_str());
+        ui::detail_kv(
+            "Guest Clock",
+            config.spec.runtime.guest_clock.unwrap_or_default().as_str(),
+        );
 
         let security = match config.spec.security_profile {
             SecurityProfile::Default => "default",

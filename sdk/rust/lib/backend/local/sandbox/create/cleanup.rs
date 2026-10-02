@@ -241,7 +241,10 @@ mod tests {
             }
             let config = SandboxBuilder::new(name)
                 .image(rootfs.clone())
-                .volume("/bind", |mount| mount.bind(rootfs))
+                .volume("/bind", |mount| {
+                    // Bind roots refuse symlinks, and /tmp is one on macOS.
+                    mount.bind(rootfs.canonicalize().unwrap())
+                })
                 .volume("/shared", |mount| mount.named("shared"))
                 .volume("/owned", |mount| mount.owned())
                 .build()
@@ -715,7 +718,6 @@ mod tests {
         .await
         .unwrap();
         drop(cleanup);
-        tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
             microsandbox_runtime::ipc::try_acquire_transition_guard(
                 &backend.config().run_dir(),
@@ -735,21 +737,27 @@ mod tests {
             SandboxStatus::Running
         );
         drop(runtime);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let model = sandbox_entity::Entity::find_by_id(id)
-                    .one(pools.read())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                if model.status == SandboxStatus::Stopped {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
+        // Cleanup owns the transition through its final catalog write. Reacquiring it
+        // waits for completion; the timeout is only a watchdog for a stuck cleanup.
+        let _transition = tokio::time::timeout(
+            Duration::from_secs(30),
+            LocalBackend::acquire_sandbox_transition_guard(
+                &backend.config().run_dir(),
+                &config.spec.name,
+            ),
+        )
         .await
+        .expect("cancelled creation cleanup did not release the name transition")
         .unwrap();
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            SandboxStatus::Stopped
+        );
         let runs = run_entity::Entity::find()
             .filter(run_entity::Column::SandboxId.eq(id))
             .all(pools.read())

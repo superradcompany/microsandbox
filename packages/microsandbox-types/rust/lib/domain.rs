@@ -29,6 +29,9 @@ pub const DEFAULT_SANDBOX_MEMORY_MIB: u32 = 512;
 /// Default metrics sampling interval in milliseconds.
 pub const DEFAULT_METRICS_SAMPLE_INTERVAL_MS: u64 = 1000;
 
+/// The well-known NAT64 prefix from RFC 6052.
+pub const WELL_KNOWN_NAT64_PREFIX: &str = "64:ff9b::/96";
+
 //--------------------------------------------------------------------------------------------------
 // Types: Root Filesystems
 //--------------------------------------------------------------------------------------------------
@@ -573,6 +576,22 @@ pub enum Patch {
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
+/// HTTP responses returned when network policy denies a request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct HttpConfig {
+    /// Return readable HTTP 403 responses for supported denied requests. Default: false.
+    pub deny_response: bool,
+
+    /// Denial response body. `{host}` names the blocked host.
+    /// Used only when `deny_response` is enabled. Omission uses the default;
+    /// an empty string produces an empty body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_message: Option<String>,
+}
+
 /// Complete network specification for a sandbox.
 ///
 /// Common, backend-visible fields are typed directly. Rich local-engine subdocuments such as policy, DNS, TLS, secrets, and interface overrides are carried as JSON so the shared contract can preserve them without depending on the local networking engine crate.
@@ -623,13 +642,28 @@ pub struct NetworkSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
 
+    /// Accept-queue depth for published TCP port listeners, `1..=2147483647`. Omitted is 1024.
+    /// The host kernel clamps it to `net.core.somaxconn` (Linux) or `kern.ipc.somaxconn` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_accept_queue_size: Option<u32>,
+
     /// Local network rate limits. Missing means unlimited in both directions.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nested)]
     pub rate_limiter: Option<NetworkRateLimiterConfig>,
 
+    /// NAT64 `/96` prefixes for policy classification.
+    #[serde(default = "default_nat64_prefixes")]
+    #[cfg_attr(feature = "ts", ts(type = "Array<string>"))]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+    pub nat64_prefixes: Vec<Ipv6Network>,
+
     /// Whether to copy trusted host CAs into the guest at boot.
     pub trust_host_cas: bool,
+
+    /// HTTP denial response settings.
+    #[config_patch(nested)]
+    pub http: HttpConfig,
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
     ///
@@ -646,6 +680,13 @@ pub struct NetworkSpec {
 #[serde(tag = "protocol", rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum OutboundProxy {
+    /// An HTTP proxy that opens TCP tunnels with CONNECT.
+    #[serde(rename = "http_connect")]
+    HttpConnect {
+        /// Proxy socket address.
+        address: String,
+    },
+
     /// A SOCKS4 proxy at the given `IP:port` address.
     Socks4 {
         /// Proxy socket address.
@@ -1041,6 +1082,29 @@ pub enum TransparentHugePagePolicy {
     Never,
 }
 
+/// Host control over the guest wall clock (`CLOCK_REALTIME`).
+///
+/// Serializes as the lowercase variant name (`"sync"`, `"off"`) to match the CLI spelling.
+/// The guest monotonic clock is never adjusted by either policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum GuestClockPolicy {
+    /// Keep the guest wall clock in step with the host.
+    ///
+    /// The runtime sends the host time at boot and about once a minute, and steps the
+    /// guest clock to host time when a full snapshot is restored or a paused sandbox resumes.
+    #[default]
+    Sync,
+
+    /// Never set the guest wall clock after boot.
+    ///
+    /// The guest keeps the time it read at boot and advances it on its own. A restored full
+    /// snapshot continues from the captured guest time instead of jumping to host time.
+    Off,
+}
+
 /// Guest runtime options for a sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -1085,6 +1149,11 @@ pub struct SandboxRuntimeOptions {
 
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     pub disable_metrics_sample: bool,
+
+    /// Host control over the guest wall clock. `None` selects [`GuestClockPolicy::Sync`];
+    /// a full snapshot restore without an explicit value keeps the policy recorded in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_clock: Option<GuestClockPolicy>,
 }
 
 /// Environment variable entry.
@@ -1273,6 +1342,21 @@ impl TransparentHugePagePolicy {
             Self::Always => "always",
             Self::Madvise => "madvise",
             Self::Never => "never",
+        }
+    }
+}
+
+impl GuestClockPolicy {
+    /// Whether the runtime keeps the guest wall clock in step with the host.
+    pub fn is_sync(&self) -> bool {
+        matches!(self, Self::Sync)
+    }
+
+    /// Return the lowercase configuration spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Off => "off",
         }
     }
 }
@@ -1688,6 +1772,26 @@ impl FromStr for TransparentHugePagePolicy {
     }
 }
 
+impl fmt::Display for GuestClockPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GuestClockPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sync" => Ok(Self::Sync),
+            "off" => Ok(Self::Off),
+            _ => Err(format!(
+                "unknown guest clock policy: {value}; expected sync or off"
+            )),
+        }
+    }
+}
+
 impl Default for RootfsSource {
     fn default() -> Self {
         Self::oci(String::new())
@@ -1792,6 +1896,7 @@ impl Default for SandboxRuntimeOptions {
             log_level: None,
             metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
             disable_metrics_sample: false,
+            guest_clock: None,
         }
     }
 }
@@ -1805,15 +1910,26 @@ impl Default for NetworkSpec {
             policy: None,
             dns: None,
             tls: None,
-            strict: false,
+            strict: true,
             secrets: None,
             max_tcp_connections: None,
             max_udp_connections: None,
+            tcp_accept_queue_size: None,
             rate_limiter: None,
+            nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             outbound_proxy: None,
+            http: HttpConfig::default(),
         }
     }
+}
+
+pub(crate) fn default_nat64_prefixes() -> Vec<Ipv6Network> {
+    vec![
+        WELL_KNOWN_NAT64_PREFIX
+            .parse()
+            .expect("well-known NAT64 prefix must be valid"),
+    ]
 }
 
 impl Default for PublishedPortSpec {
@@ -2274,10 +2390,22 @@ pub const MAX_SECRET_PLACEHOLDER_BYTES: usize = 1024;
 /// engine substitutes the real `value` into outbound requests bound for an
 /// allowed host (and blocks/forwards per [`SecretViolationAction`] otherwise). Carried
 /// in [`NetworkSpec::secrets`](NetworkSpec).
+///
+/// When constructing directly, use `..Default::default()` for unspecified fields.
+/// The global `passthrough_hosts` field preserves historical defaults; its addition
+/// requires updating older exhaustive struct literals and patterns.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SecretsConfig {
+    /// Default hosts allowed to receive placeholders unchanged.
+    /// A per-secret violation action overrides this default.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    #[cfg_attr(feature = "utoipa", schema(ignore))]
+    pub passthrough_hosts: Option<Vec<HostPattern>>,
+
     /// List of secrets to inject.
     #[serde(default)]
     #[config_patch(merge_with = merge_secret_entries)]
@@ -3187,7 +3315,7 @@ mod tests {
     fn secrets_config_queries_entries() {
         let mut config = SecretsConfig {
             secrets: vec![secret_entry("HTTP_TOKEN", false)],
-            violation_action: SecretViolationAction::default(),
+            ..Default::default()
         };
 
         assert!(!config.has_tls_identity_secrets());
@@ -3276,6 +3404,33 @@ mod tests {
             assert_eq!(decoded.cpu_placement, policy);
             assert_eq!(policy.to_string().parse::<CpuPlacement>().unwrap(), policy);
         }
+    }
+
+    #[test]
+    fn guest_clock_policy_is_omitted_until_set_and_roundtrips() {
+        let defaults = serde_json::to_value(SandboxRuntimeOptions::default()).unwrap();
+        assert!(defaults.get("guest_clock").is_none());
+
+        let legacy: SandboxRuntimeOptions = serde_json::from_str(r#"{"workdir":"/app"}"#).unwrap();
+        assert_eq!(legacy.guest_clock, None);
+
+        for policy in [GuestClockPolicy::Sync, GuestClockPolicy::Off] {
+            let runtime = SandboxRuntimeOptions {
+                guest_clock: Some(policy),
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&runtime).unwrap();
+            assert_eq!(json["guest_clock"], serde_json::json!(policy.as_str()));
+            let decoded: SandboxRuntimeOptions = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.guest_clock, Some(policy));
+            assert_eq!(
+                policy.to_string().parse::<GuestClockPolicy>().unwrap(),
+                policy
+            );
+        }
+
+        assert_eq!(GuestClockPolicy::default(), GuestClockPolicy::Sync);
+        assert!("host_sync".parse::<GuestClockPolicy>().is_err());
     }
 
     #[test]

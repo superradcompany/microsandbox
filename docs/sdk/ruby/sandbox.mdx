@@ -12,7 +12,7 @@ Create and control a microVM sandbox from Ruby. The SDK supports local and cloud
 gem install microsandbox
 ```
 
-Ruby 3.1 and newer are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
+Ruby 3.3, 3.4, and 4.0 are supported. When a matching platform gem is available, it carries the native extension; otherwise the source gem requires Rust 1.85 or newer to build it locally.
 
 ```ruby
 require "microsandbox"
@@ -50,6 +50,33 @@ Microsandbox::Sandbox.builder(name).connect_or_create # => Sandbox
 ```
 
 Builder terminal with the same reuse, creation-option, concurrency, and replace-option behavior as `Microsandbox::Sandbox.connect_or_create`.
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">http()</span>
+
+```ruby
+builder.http { |h| h.deny_response(true).deny_message(message) } # => SandboxBuilder
+```
+
+Denial responses are disabled by default. Call `h.deny_response(true)` to enable readable `403` responses. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it. See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees) for which requests receive a response.
+
+<Accordion title="Example">
+```ruby
+builder = Microsandbox::Sandbox.builder("agent")
+  .image("python")
+  .http { |h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.") }
+```
+
+The same option is available when creating a sandbox:
+
+```ruby
+Microsandbox::Sandbox.create(
+  "agent",
+  image: "python",
+  network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
+  http: { deny_response: true, deny_message: "{host} is blocked. Ask the user to allow it." }
+)
+```
+</Accordion>
 
 ## Sandbox
 

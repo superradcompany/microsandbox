@@ -3,14 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 #[cfg(feature = "net")]
 use microsandbox::OutboundProxy;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
-    RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, GuestClockPolicy, MountBuilder,
+    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
@@ -147,6 +148,11 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
+    /// Guest wall-clock policy: `sync` (default) keeps the guest clock in step with the
+    /// host; `off` leaves it alone after boot, including across full snapshot restores.
+    #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
+    pub guest_clock: Option<GuestClockPolicy>,
+
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
     #[arg(short, long)]
@@ -268,8 +274,9 @@ pub struct SandboxOpts {
     pub rm: Vec<String>,
 
     // --- Image/Runtime overrides ---
-    /// Override the image's default entrypoint command.
-    #[arg(long)]
+    /// Override the image's entrypoint executable. With `msb run`, pass its
+    /// arguments after the image and `--`.
+    #[arg(long, value_name = "EXECUTABLE")]
     pub entrypoint: Option<String>,
 
     /// Hand off PID 1 to this init binary inside the guest after agentd
@@ -351,6 +358,11 @@ pub struct SandboxOpts {
     #[arg(short, long)]
     pub port: Vec<String>,
 
+    /// Accept-queue depth for published TCP ports (default: 1024; the host clamps it to its somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_accept_queue_size: Option<u32>,
+
     /// Disable all network access by default. Sugar for `--net-default deny`.
     /// Combine with `--net-rule allow@<target>` entries to build an
     /// allowlist; without rules, the guest has no network reachability.
@@ -410,6 +422,11 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long = "net-ipv6-pool", value_name = "CIDR")]
     pub net_ipv6_pool: Option<String>,
+
+    /// NAT64 /96 prefix for policy classification. Repeatable.
+    #[cfg(feature = "net")]
+    #[arg(long = "net-nat64-prefix", value_name = "CIDR")]
+    pub net_nat64_prefix: Vec<String>,
 
     /// Network rule. Repeatable; each value is a comma-separated list of
     /// rule tokens. Token grammar:
@@ -527,10 +544,10 @@ pub struct SandboxOpts {
     #[arg(long)]
     pub max_udp_connections: Option<usize>,
 
-    /// Require hostname-based network allows to use inspectable request authority.
+    /// Require inspectable request authority for hostname allows (default: true).
     #[cfg(feature = "net")]
-    #[arg(long = "net-strict")]
-    pub net_strict: bool,
+    #[arg(long = "net-strict", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub net_strict: Option<bool>,
 
     /// Ship the host's trusted root CAs into the guest. Opt in to make
     /// outbound TLS work behind corporate MITM proxies (Warp Zero
@@ -541,9 +558,9 @@ pub struct SandboxOpts {
     pub trust_host_cas: bool,
 
     /// Dial all outbound sandbox connections through this proxy.
-    /// Supports the socks4:// and socks5:// protocols.
+    /// Supports http://, socks4://, and socks5:// protocols.
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "socks[4|5]://IP:PORT")]
+    #[arg(long, value_name = "http://IP:PORT|socks[4|5]://IP:PORT")]
     pub proxy: Option<String>,
 
     /// Optional user ID for a SOCKS4 proxy.
@@ -718,6 +735,22 @@ impl SandboxOpts {
         };
 
         match raw.parse::<OutboundProxy>()? {
+            OutboundProxy::HttpConnect { address } => {
+                if self.socks4_user_id.is_some()
+                    || self.socks5_username.is_some()
+                    || self.socks5_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "SOCKS authentication flags cannot be used with an http:// proxy"
+                    );
+                }
+
+                Ok(Some(
+                    OutboundProxyBuilder::new()
+                        .http_connect(address.to_string())
+                        .build()?,
+                ))
+            }
             OutboundProxy::Socks4 { address, .. } => {
                 if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
                     anyhow::bail!(
@@ -816,6 +849,7 @@ impl SandboxOpts {
             || self.net_default_ingress.is_some()
             || self.net_ipv4_pool.is_some()
             || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -827,6 +861,8 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
+            || self.tcp_accept_queue_size.is_some()
+            || self.net_strict.is_some()
             || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -1021,6 +1057,7 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
+            || self.guest_clock.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -1065,6 +1102,9 @@ impl SandboxOpts {
             || self.net_default.is_some()
             || self.net_default_egress.is_some()
             || self.net_default_ingress.is_some()
+            || self.net_ipv4_pool.is_some()
+            || self.net_ipv6_pool.is_some()
+            || !self.net_nat64_prefix.is_empty()
             || self.net_egress_bandwidth.is_some()
             || self.net_egress_bandwidth_burst.is_some()
             || self.net_egress_ops.is_some()
@@ -1076,7 +1116,8 @@ impl SandboxOpts {
             || self.max_connections.is_some()
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
-            || self.net_strict
+            || self.tcp_accept_queue_size.is_some()
+            || self.net_strict.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
             || self.socks4_user_id.is_some()
@@ -1299,6 +1340,9 @@ fn apply_sandbox_opts_inner(
             .map_err(anyhow::Error::msg)?;
         builder = builder.thp(policy);
     }
+    if let Some(policy) = opts.guest_clock {
+        builder = builder.guest_clock(policy);
+    }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
     }
@@ -1455,6 +1499,11 @@ fn apply_sandbox_opts_inner(
     }
 
     Ok(builder)
+}
+
+/// Parse the clock policy at the CLI boundary while retaining possible values in help.
+pub(crate) fn guest_clock_parser() -> impl TypedValueParser<Value = GuestClockPolicy> {
+    PossibleValuesParser::new(["sync", "off"]).try_map(|value| value.parse::<GuestClockPolicy>())
 }
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
@@ -2518,7 +2567,7 @@ fn apply_network_opts(
                 s = allow_secret_host(s, &host);
             }
             for host in secret.passthrough_hosts {
-                s = s.allow_passthrough_for(host);
+                s = s.allow_placeholder_for(host);
             }
             s
         });
@@ -2554,6 +2603,7 @@ fn apply_network_opts(
         }
         let max_conn = opts.max_tcp_connections.or(opts.max_connections);
         let max_udp_conn = opts.max_udp_connections;
+        let tcp_accept_queue_size = opts.tcp_accept_queue_size;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2570,6 +2620,14 @@ fn apply_network_opts(
                     .map_err(anyhow::Error::from)
             })
             .transpose()?;
+        let nat64_prefixes = opts
+            .net_nat64_prefix
+            .iter()
+            .map(|s| {
+                s.parse::<ipnetwork::Ipv6Network>()
+                    .map_err(anyhow::Error::from)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let trust_host_cas = opts.trust_host_cas;
         let net_strict = opts.net_strict;
         let tls_intercept = opts.tls_intercept;
@@ -2610,17 +2668,23 @@ fn apply_network_opts(
             if let Some(max) = max_udp_conn {
                 n = n.max_udp_connections(max);
             }
+            if let Some(size) = tcp_accept_queue_size {
+                n = n.tcp_accept_queue_size(size);
+            }
             if let Some(pool) = ipv4_pool {
                 n = n.ipv4_pool(pool);
             }
             if let Some(pool) = ipv6_pool {
                 n = n.ipv6_pool(pool);
             }
+            for prefix in nat64_prefixes {
+                n = n.nat64_prefix(prefix);
+            }
             if trust_host_cas {
                 n = n.trust_host_cas(true);
             }
-            if net_strict {
-                n = n.strict(true);
+            if let Some(enabled) = net_strict {
+                n = n.strict(enabled);
             }
             if egress_rate_limiter.is_some() || ingress_rate_limiter.is_some() {
                 n = n.rate_limiter(|mut r| {
@@ -3238,7 +3302,7 @@ pub fn resolve_command(
     }
 
     // Non-interactive with nothing to run.
-    ui::warn("no command provided and stdin is not a terminal");
+    ui::warn("no command provided or configured; pass a command after -- in non-interactive mode");
     Ok((None, vec![]))
 }
 
@@ -3372,6 +3436,38 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn net_strict_defaults_and_explicit_overrides() {
+        for (args, explicit) in [
+            (vec!["test"], None),
+            (vec!["test", "--net-strict"], Some(true)),
+            (vec!["test", "--net-strict=true"], Some(true)),
+            (vec!["test", "--net-strict=false"], Some(false)),
+        ] {
+            let matches = SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(args)
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            assert_eq!(opts.net_strict, explicit);
+            for initial in [None, Some(true), Some(false)] {
+                let mut builder = SandboxBuilder::new("test").image("alpine");
+                if let Some(enabled) = initial {
+                    builder = builder.network(|n| n.strict(enabled));
+                }
+                let config = apply_sandbox_opts(builder, &opts)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    config.spec.network.strict,
+                    explicit.or(initial).unwrap_or(true)
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn tcp_limit_flags_are_aliases_but_mutually_exclusive() {
         for flag in ["--max-connections", "--max-tcp-connections"] {
@@ -3392,6 +3488,31 @@ mod tests {
             ])
             .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tcp_accept_queue_size_flag_accepts_only_the_positive_c_int_range() {
+        let parse = |value: &str| {
+            SandboxOpts::augment_args(Command::new("test")).try_get_matches_from([
+                "test",
+                "--tcp-accept-queue-size",
+                value,
+            ])
+        };
+        for value in ["1", "4096", "2147483647"] {
+            let opts = SandboxOpts::from_arg_matches(&parse(value).unwrap()).unwrap();
+            assert_eq!(opts.tcp_accept_queue_size, Some(value.parse().unwrap()));
+            assert!(opts.has_network_config());
+            assert!(opts.has_creation_flags());
+        }
+        for value in ["0", "2147483648"] {
+            assert_eq!(
+                parse(value).unwrap_err().kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{value}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]
@@ -3848,6 +3969,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_guest_clock_policy() {
+        for (args, expected) in [
+            (vec!["create"], None),
+            (
+                vec!["create", "--guest-clock", "sync"],
+                Some(GuestClockPolicy::Sync),
+            ),
+            (
+                vec!["create", "--guest-clock", "off"],
+                Some(GuestClockPolicy::Off),
+            ),
+        ] {
+            let matches = SandboxOpts::augment_args(Command::new("create"))
+                .try_get_matches_from(args)
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            if expected.is_some() {
+                assert!(opts.has_creation_flags());
+            }
+
+            let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(config.spec.runtime.guest_clock, expected);
+        }
+
+        assert!(
+            SandboxOpts::augment_args(Command::new("create"))
+                .try_get_matches_from(["create", "--guest-clock", "host"])
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -4724,7 +4881,7 @@ mod tests {
     async fn apply_volume_dot_source_is_bind_mount() {
         match build_volume(".:/mnt").await {
             VolumeMount::Bind { host, guest, .. } => {
-                assert_eq!(host, PathBuf::from("."));
+                assert_eq!(host, std::path::absolute(".").unwrap());
                 assert_eq!(guest, "/mnt");
             }
             other => panic!("expected bind mount, got {other:?}"),
@@ -4735,7 +4892,7 @@ mod tests {
     async fn apply_volume_dot_dot_source_is_bind_mount() {
         match build_volume("..:/mnt").await {
             VolumeMount::Bind { host, guest, .. } => {
-                assert_eq!(host, PathBuf::from(".."));
+                assert_eq!(host, std::path::absolute("..").unwrap());
                 assert_eq!(guest, "/mnt");
             }
             other => panic!("expected bind mount, got {other:?}"),

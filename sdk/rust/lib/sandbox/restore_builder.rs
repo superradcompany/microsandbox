@@ -191,6 +191,13 @@ impl RestoreBuilder {
         self
     }
 
+    /// Select how the host manages the restored guest's wall clock, including full restore.
+    /// Without this call the restore keeps the policy recorded in the snapshot.
+    pub fn guest_clock(mut self, policy: super::GuestClockPolicy) -> Self {
+        self.inner = self.inner.guest_clock(policy);
+        self
+    }
+
     /// Set host runtime logging for the restored sandbox.
     pub fn log_level(mut self, level: crate::LogLevel) -> Self {
         self.inner = self.inner.log_level(level);
@@ -198,9 +205,15 @@ impl RestoreBuilder {
     }
 
     /// Restore captured RAM with private copy-on-write mappings.
-    pub fn forked(mut self) -> Self {
+    pub fn cow_memory(mut self) -> Self {
         self.inner = self.inner.forked();
         self
+    }
+
+    /// Deprecated spelling for copy-on-write memory during full-snapshot restore.
+    #[deprecated(note = "use cow_memory instead")]
+    pub fn forked(self) -> Self {
+        self.cow_memory()
     }
 
     /// Cold-boot the captured disk instead of resuming captured execution.
@@ -335,13 +348,23 @@ macro_rules! resource_methods {
                 self.inner = self.inner.port_udp_bind(bind, host, guest);
                 self
             }
+
+            /// Set the accept-queue depth of this child's published TCP listeners, `1..=i32::MAX`.
+            /// Defaults to 1024; the host kernel clamps it to its own `somaxconn`.
+            #[cfg(feature = "net")]
+            pub fn tcp_accept_queue_size(mut self, size: u32) -> Self {
+                self.inner = self
+                    .inner
+                    .network(|network| network.tcp_accept_queue_size(size));
+                self
+            }
         }
     };
 }
 
 resource_methods!(RestoreBuilder);
-resource_methods!(super::branch::BranchBuilder);
-resource_methods!(super::branch::BranchManyBuilder);
+resource_methods!(super::branch::ForkBuilder);
+resource_methods!(super::branch::ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -353,6 +376,19 @@ mod tests {
 
     fn config(builder: &RestoreBuilder) -> crate::SandboxConfig {
         builder.inner.config.clone().into_config()
+    }
+
+    #[test]
+    fn cow_memory_preserves_the_existing_transient_launch_flag() {
+        let ordinary = Sandbox::restore("saved").name("child");
+        assert!(!config(&ordinary).forked);
+        let cow = ordinary.cow_memory();
+        assert!(config(&cow).forked);
+        assert!(!config(&cow).clone_for_persistence().forked);
+        #[allow(deprecated)]
+        let legacy = Sandbox::restore("saved").name("child").forked();
+        assert_eq!(config(&legacy).forked, config(&cow).forked);
+        assert!(!config(&legacy).clone_for_persistence().forked);
     }
 
     #[test]
@@ -474,6 +510,30 @@ mod tests {
         let legacy = Sandbox::restore("saved").max_connections(0);
         assert_eq!(config(&legacy).spec.network.max_tcp_connections, Some(0));
         assert_eq!(config(&legacy).spec.network.max_udp_connections, None);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_accept_queue_size_is_omitted_unless_set_and_validated() {
+        let defaults = Sandbox::restore("saved").port(8080, 80);
+        assert_eq!(config(&defaults).spec.network.tcp_accept_queue_size, None);
+        let tuned = Sandbox::restore("saved")
+            .port(8080, 80)
+            .tcp_accept_queue_size(4096);
+        assert_eq!(
+            config(&tuned).spec.network.tcp_accept_queue_size,
+            Some(4096)
+        );
+        assert_eq!(
+            config(&tuned)
+                .local_network_config()
+                .unwrap()
+                .tcp_accept_queue_size
+                .map(microsandbox_network::config::TcpAcceptQueueSize::get),
+            Some(4096)
+        );
+        let invalid = Sandbox::restore("saved").tcp_accept_queue_size(0);
+        assert!(invalid.inner.build_error.is_some());
     }
 
     #[test]

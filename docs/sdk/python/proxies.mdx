@@ -3,7 +3,7 @@ title: Proxies
 description: Python SDK - Proxy API reference
 ---
 
-Configure one SOCKS4 or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
+Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
 
 See [Proxies](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
 
@@ -33,8 +33,11 @@ Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
 
 | Class method | Returns | Description |
 |--------------|---------|-------------|
+| `http_connect(address)` | `OutboundProxy` | Configure an HTTP CONNECT proxy at `IP:port` for TCP |
 | `socks4(address, *, user_id=None)` | `OutboundProxy` | Configure a SOCKS4 proxy at `IP:port` with an optional user ID |
 | `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |
+
+HTTP CONNECT sends the policy-checked destination IP and port through the proxy. Destination DNS resolution remains in microsandbox. HTTP CONNECT does not support proxy authentication or UDP.
 
 The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies the caller; it is not a password.
 

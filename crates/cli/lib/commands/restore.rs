@@ -2,12 +2,14 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    BranchBuilder, BranchManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
+    ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
 };
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
-use super::common::{display_restore_warnings, parse_restore_volume, parse_vsock_route};
+use super::common::{
+    display_restore_warnings, guest_clock_parser, parse_restore_volume, parse_vsock_route,
+};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -24,6 +26,9 @@ pub struct RestoreArgs {
     pub name: String,
     /// Restore captured RAM using private copy-on-write mappings.
     #[arg(long, conflicts_with = "disk_only")]
+    pub cow_mem: bool,
+    /// Deprecated alias for --cow-mem.
+    #[arg(long, hide = true, conflicts_with = "disk_only")]
     pub forked: bool,
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
@@ -58,6 +63,10 @@ pub struct RestoreResourceArgs {
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
+    /// Accept-queue depth for the child's published TCP ports (default: 1024; clamped to somaxconn).
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
+    pub tcp_accept_queue_size: Option<u32>,
     /// Default user for new exec commands; captured processes keep their credentials.
     #[arg(short, long)]
     pub user: Option<String>,
@@ -81,6 +90,9 @@ pub struct RestoreControlArgs {
     /// Guest security profile for disk boot; rejected for full execution restore.
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+    /// Guest wall-clock policy (`sync` or `off`); defaults to the policy recorded in the snapshot.
+    #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
+    pub guest_clock: Option<GuestClockPolicy>,
     /// Maximum lifetime of the destination sandbox (e.g. 30s, 5m, 1h).
     #[arg(long, value_name = "DURATION")]
     pub max_duration: Option<String>,
@@ -134,6 +146,9 @@ impl RestoreControlArgs {
                 other => anyhow::bail!("invalid security profile {other:?}"),
             };
             builder = builder.security(profile);
+        }
+        if let Some(policy) = self.guest_clock {
+            builder = builder.guest_clock(policy);
         }
         if let Some(duration) = &self.max_duration {
             builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
@@ -191,7 +206,10 @@ pub async fn run(
         builder = builder.log_level(level);
     }
     if args.forked {
-        builder = builder.forked();
+        ui::warn("--forked is deprecated; use --cow-mem instead");
+    }
+    if args.cow_mem || args.forked {
+        builder = builder.cow_memory();
     }
     if args.disk_only {
         builder = builder.disk_only();
@@ -266,6 +284,10 @@ macro_rules! apply_resources {
                         };
                     }
                 }
+                #[cfg(feature = "net")]
+                if let Some(size) = self.tcp_accept_queue_size {
+                    builder = builder.tcp_accept_queue_size(size);
+                }
                 Ok(builder)
             }
         }
@@ -273,8 +295,8 @@ macro_rules! apply_resources {
 }
 
 apply_resources!(apply_restore, RestoreBuilder);
-apply_resources!(apply_branch, BranchBuilder);
-apply_resources!(apply_branch_many, BranchManyBuilder);
+apply_resources!(apply_branch, ForkBuilder);
+apply_resources!(apply_branch_many, ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -328,6 +350,8 @@ mod tests {
             "2G",
             "--security",
             "restricted",
+            "--guest-clock",
+            "off",
             "--max-duration",
             "10m",
             "--idle-timeout",
@@ -337,6 +361,7 @@ mod tests {
         assert_eq!(cli.args.controls.cpus, Some(2));
         assert_eq!(cli.args.controls.memory.as_deref(), Some("2G"));
         assert_eq!(cli.args.controls.security.as_deref(), Some("restricted"));
+        assert_eq!(cli.args.controls.guest_clock, Some(GuestClockPolicy::Off));
         assert!(
             cli.args
                 .controls
@@ -352,6 +377,18 @@ mod tests {
 
     #[test]
     fn invalid_destination_controls_fail_before_source_resolution() {
+        assert!(
+            TestCli::try_parse_from([
+                "restore",
+                "source-not-opened",
+                "--name",
+                "worker",
+                "--guest-clock",
+                "host",
+            ])
+            .is_err()
+        );
+
         for controls in [
             RestoreControlArgs {
                 memory: Some("not-a-size".into()),
@@ -413,6 +450,39 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_parses_accept_queue_size_for_child_listeners() {
+        let cli = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "child",
+            "-p",
+            "8080:80",
+            "--tcp-accept-queue-size",
+            "4096",
+        ])
+        .unwrap();
+        assert_eq!(cli.args.resources.tcp_accept_queue_size, Some(4096));
+        let defaults = TestCli::try_parse_from(["restore", "ready", "--name", "child"]).unwrap();
+        assert_eq!(defaults.args.resources.tcp_accept_queue_size, None);
+        for invalid in ["0", "2147483648"] {
+            assert!(
+                TestCli::try_parse_from([
+                    "restore",
+                    "ready",
+                    "--name",
+                    "child",
+                    "--tcp-accept-queue-size",
+                    invalid,
+                ])
+                .is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     #[cfg(feature = "net")]

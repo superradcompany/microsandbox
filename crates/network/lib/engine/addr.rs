@@ -1,6 +1,8 @@
 //! IP address helpers shared by network policy and DNS code.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use ipnetwork::Ipv6Network;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -19,6 +21,21 @@ pub(crate) fn normalize_ip_addr(addr: IpAddr) -> IpAddr {
             .map(IpAddr::V4)
             .unwrap_or(IpAddr::V6(v6)),
     }
+}
+
+/// Extract the embedded IPv4 destination from a NAT64 `/96` prefix.
+///
+/// This is a policy projection, not general address normalization: the IPv6
+/// address remains the transport destination, but policy also evaluates the
+/// IPv4 address encoded in the low 32 bits.
+pub(crate) fn nat64_embedded_ipv4_addr(
+    addr: Ipv6Addr,
+    prefixes: &[Ipv6Network],
+) -> Option<Ipv4Addr> {
+    prefixes
+        .iter()
+        .any(|prefix| prefix.prefix() == 96 && prefix.contains(addr))
+        .then(|| Ipv4Addr::from((u128::from(addr) & u128::from(u32::MAX)) as u32))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -51,5 +68,36 @@ mod tests {
         let addr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
         assert_eq!(normalize_ip_addr(addr), addr);
+    }
+
+    #[test]
+    fn nat64_embedded_ipv4_addr_uses_configured_prefixes() {
+        let prefixes = ["64:ff9b::/96".parse().unwrap()];
+
+        assert_eq!(
+            nat64_embedded_ipv4_addr("64:ff9b::a9fe:a9fe".parse().unwrap(), &prefixes),
+            Some(Ipv4Addr::new(169, 254, 169, 254)),
+        );
+    }
+
+    #[test]
+    fn nat64_embedded_ipv4_addr_requires_configured_prefix() {
+        let prefixes = ["2001:db8:64::/96".parse().unwrap()];
+
+        assert_eq!(
+            nat64_embedded_ipv4_addr("64:ff9b::a9fe:a9fe".parse().unwrap(), &prefixes),
+            None,
+        );
+        assert_eq!(
+            nat64_embedded_ipv4_addr("2002:0a00:0001::1".parse().unwrap(), &prefixes),
+            None,
+        );
+        assert_eq!(
+            nat64_embedded_ipv4_addr(
+                "2001:0000:4136:e378:8000:63bf:80ff:fffe".parse().unwrap(),
+                &prefixes,
+            ),
+            None,
+        );
     }
 }

@@ -16,7 +16,6 @@ impl ControlSession {
         db: &DbWriteConnection,
         expected: Option<&str>,
         active: &SandboxConfig,
-        runtime: Option<&crate::config::GlobalConfig>,
     ) -> MicrosandboxResult<String> {
         let conflict = || MicrosandboxError::ControlStateChanged;
         if self.entry.invalidated.is_cancelled() {
@@ -28,12 +27,7 @@ impl ControlSession {
             .await
             .map_err(|_| conflict())?;
         let key = self.entry.key;
-        let json = match expected {
-            Some(original) => {
-                crate::db::writing::encode_existing(db, active, original, runtime).await?
-            }
-            None => crate::db::writing::encode_new(db, active, runtime).await?,
-        };
+        let json = serde_json::to_string(active)?;
         // Verification alone would leave a restart race before the write. This
         // single statement compares the latest run and the exact snapshot in
         // the same SQLite write. A concurrent modifier is also detected rather

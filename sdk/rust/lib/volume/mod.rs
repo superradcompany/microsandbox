@@ -872,7 +872,7 @@ where
         .await?;
 
     for sandbox in sandboxes {
-        let config: SandboxConfig = crate::db::config::decode(&sandbox.config)?;
+        let config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&sandbox.config)?;
         if config.spec.mounts.iter().any(|mount| {
             matches!(
                 mount,

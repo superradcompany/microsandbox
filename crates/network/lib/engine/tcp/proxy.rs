@@ -20,6 +20,7 @@ use super::connection::ProxyConnectState;
 #[cfg(test)]
 use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
+use crate::engine::http_deny::{classify_http_request, http_forbidden_response};
 use crate::engine::secrets::config::SecretsConfigExt;
 use crate::engine::tls::proxy::TlsProxy;
 use crate::engine::tls::sni;
@@ -43,11 +44,11 @@ const SERVER_READ_BUF_SIZE: usize = 16384;
 const CONNECT_RESP_LIMIT: usize = 8192;
 
 /// Max bytes to buffer while peeking for the ClientHello's SNI.
-const PEEK_BUF_SIZE: usize = 16384;
+pub(crate) const PEEK_BUF_SIZE: usize = 16384;
 
 /// Upper bound on time spent buffering the first flight before
 /// falling back to a cache-only egress decision.
-const PEEK_BUDGET: Duration = Duration::from_secs(5);
+pub(crate) const PEEK_BUDGET: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -214,7 +215,8 @@ impl TcpProxy {
         // *not* gate the connect, so they no longer force a peek here — that work is
         // deferred to `classify_first_flight` after the socket is open, where it can
         // run without stalling server-first protocols (see below).
-        let (initial_buf, sni) = if hostname_policy_deferred {
+        let peek_started = tokio::time::Instant::now();
+        let (mut initial_buf, sni) = if hostname_policy_deferred {
             peek_for_sni(&mut from_smoltcp, PEEK_BUF_SIZE, PEEK_BUDGET).await
         } else {
             (Vec::new(), None)
@@ -261,15 +263,45 @@ impl TcpProxy {
                         source = source.label(),
                         "TCP egress denied by domain policy",
                     );
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    if shared.http_deny_response_enabled() {
+                        initial_buf = peek_for_http_request(
+                            &mut from_smoltcp,
+                            initial_buf,
+                            PEEK_BUF_SIZE,
+                            PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
+                        )
+                        .await;
+                    }
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
                 EgressEvaluation::DeferUntilHostname => {
                     debug_assert!(false, "DeferUntilHostname leaked into TCP proxy task");
-                    proxy_connect.mark_policy_denied();
-                    shared.proxy_wake.wake();
-                    return Ok(());
+                    if shared.http_deny_response_enabled() {
+                        initial_buf = peek_for_http_request(
+                            &mut from_smoltcp,
+                            initial_buf,
+                            PEEK_BUF_SIZE,
+                            PEEK_BUDGET.saturating_sub(peek_started.elapsed()),
+                        )
+                        .await;
+                    }
+                    return deny_http_or_close(
+                        guest_dst,
+                        sni.as_deref(),
+                        &initial_buf,
+                        to_smoltcp,
+                        &shared,
+                        &proxy_connect,
+                    )
+                    .await;
                 }
             }
         }
@@ -391,7 +423,6 @@ impl TcpProxy {
                     // that actually carries a placeholder is reallocated.
                     Ok(cow) => cow,
                     Err(action) => {
-                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation in first flight");
                         if matches!(action, SecretViolationAction::BlockAndTerminate) {
                             shared.trigger_termination();
                         }
@@ -457,7 +488,6 @@ impl TcpProxy {
                                 Some(h) => match h.substitute(&bytes) {
                                     Ok(cow) => cow,
                                     Err(action) => {
-                                        tracing::warn!(dst = %connect_dst, violation = ?action, "secret violation");
                                         if matches!(action, SecretViolationAction::BlockAndTerminate)
                                         {
                                             shared.trigger_termination();
@@ -608,23 +638,19 @@ async fn handle_connect_tunnel(
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     preconnected_proxy: Option<TcpStream>,
 ) -> io::Result<()> {
-    let proxy_dst = proxy_target.primary();
     let connect_req =
         parse_connect_request(buffer_connect_request(initial_buf, &mut from_smoltcp).await?)?;
 
-    let connect_headers = match sanitize_connect_headers(
-        connect_req.header_bytes(),
-        &tls_state.secrets.load(),
-    ) {
-        Ok(headers) => headers,
-        Err(action) => {
-            tracing::warn!(dst = %proxy_dst, violation = ?action, "secret violation in CONNECT headers");
-            if matches!(action, SecretViolationAction::BlockAndTerminate) {
-                shared.trigger_termination();
+    let connect_headers =
+        match sanitize_connect_headers(connect_req.header_bytes(), &tls_state.secrets.load()) {
+            Ok(headers) => headers,
+            Err(action) => {
+                if matches!(action, SecretViolationAction::BlockAndTerminate) {
+                    shared.trigger_termination();
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-    };
+        };
 
     // Dial the proxy and forward the CONNECT request so it opens the tunnel.
     let mut proxy_stream = match preconnected_proxy {
@@ -1015,6 +1041,48 @@ fn connect_response_is_success(headers: &[u8]) -> bool {
             .is_ok_and(|code| (200..300).contains(&code))
 }
 
+/// Close a denied TCP connection, answering HTTP clients with 403.
+///
+/// TLS first-flights stay silent: injecting plaintext HTTP into a TLS
+/// stream is worse than a reset, and intercepted HTTPS is handled by
+/// [`crate::engine::tls::proxy`].
+pub(crate) async fn deny_http_or_close(
+    guest_dst: SocketAddr,
+    sni: Option<&str>,
+    initial_buf: &[u8],
+    to_smoltcp: mpsc::Sender<Bytes>,
+    shared: &SharedState,
+    proxy_connect: &ProxyConnectState,
+) -> io::Result<()> {
+    // Reply only once a complete HTTP/1.x request line identifies the protocol.
+    let answer = shared.http_deny_response_enabled() && first_flight_is_http(initial_buf);
+    if answer {
+        let host = denied_host_label(sni, initial_buf, guest_dst);
+        let body = shared.http_deny_body(&host);
+        let _ = to_smoltcp
+            .send(Bytes::from(http_forbidden_response(&body)))
+            .await;
+        shared.proxy_wake.wake();
+    }
+    proxy_connect.mark_policy_denied();
+    shared.proxy_wake.wake();
+    Ok(())
+}
+
+fn first_flight_is_http(buf: &[u8]) -> bool {
+    classify_http_request(buf) == Some(true)
+}
+
+fn denied_host_label(sni: Option<&str>, buf: &[u8], guest_dst: SocketAddr) -> String {
+    if let Some(name) = sni.filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(host) = extract_http_host(buf) {
+        return host;
+    }
+    guest_dst.ip().to_string()
+}
+
 /// Extract the `Host:` header value from an already-buffered HTTP header block.
 ///
 /// Returns `None` if:
@@ -1138,6 +1206,53 @@ async fn classify_first_flight(
     }
 }
 
+/// Buffer a denied plaintext first flight through its HTTP headers, or until
+/// the shared peek budget/cap is exhausted.
+///
+/// Unlike [`peek_for_sni`], this does not return on the first non-TLS chunk:
+/// a request method may be split across chunks (`GE` then `T / ...`). It stops
+/// once the headers are complete so the denial can include the Host header,
+/// or immediately for a conclusively non-HTTP prefix. No upstream connection
+/// exists on this path.
+pub(crate) async fn peek_for_http_request(
+    rx: &mut mpsc::Receiver<Bytes>,
+    mut buf: Vec<u8>,
+    max: usize,
+    budget: Duration,
+) -> Vec<u8> {
+    buf.truncate(max);
+    let timeout_fut = tokio::time::sleep(budget);
+    tokio::pin!(timeout_fut);
+
+    while buf.len() < max {
+        match classify_http_request(&buf) {
+            Some(false) => break,
+            Some(true) => {
+                let mut request = buf.as_slice();
+                while let Some(rest) = request.strip_prefix(b"\r\n") {
+                    request = rest;
+                }
+                if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            None => {}
+        }
+        tokio::select! {
+            biased;
+            _ = &mut timeout_fut => break,
+            data = rx.recv() => match data {
+                Some(bytes) => {
+                    let remaining = max - buf.len();
+                    buf.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                }
+                None => break,
+            }
+        }
+    }
+    buf
+}
+
 /// Buffer the first flight until SNI can be extracted, or until one
 /// of the bail-out conditions hits (channel close, buffer cap,
 /// timeout). Never errors; non-TLS / slow / malformed input all
@@ -1147,7 +1262,7 @@ async fn classify_first_flight(
 /// for byte-equal matching against rule destinations. The returned
 /// buffer must be replayed verbatim to upstream before the caller
 /// starts its relay loop.
-async fn peek_for_sni(
+pub(crate) async fn peek_for_sni(
     rx: &mut mpsc::Receiver<Bytes>,
     max: usize,
     budget: Duration,
@@ -1369,6 +1484,32 @@ mod tests {
         assert!(!could_be_connect_request(b"GET / HTTP/1.1\r\n"));
     }
 
+    #[test]
+    fn first_flight_http_accepts_partial_and_complete_http() {
+        assert!(!first_flight_is_http(b"GET /index.html"));
+        assert!(first_flight_is_http(b"GET /x HTTP/1.1\r\nHost: a\r\n"));
+        assert!(first_flight_is_http(b"\r\nGET /x HTTP/1.0\r\n"));
+        // HTTP/2 must never receive an HTTP/1.1 response.
+        assert!(!first_flight_is_http(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"));
+        // A complete line is judged by its version, so custom methods pass.
+        assert!(first_flight_is_http(b"QUERY /x HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn first_flight_http_rejects_split_non_http_banners() {
+        assert!(!first_flight_is_http(b""));
+        assert!(!first_flight_is_http(&synthetic_client_hello(
+            "example.com"
+        )));
+        assert!(!first_flight_is_http(b"GE"));
+        assert!(!first_flight_is_http(b"PRI"));
+        // Split before its first CRLF, an SSH banner or SMTP greeting is a
+        // valid ASCII token but no HTTP method.
+        assert!(!first_flight_is_http(b"SSH-2.0-OpenSSH_9.9"));
+        assert!(!first_flight_is_http(b"EHLO mail.example.com"));
+        assert!(!first_flight_is_http(b"QUERY /x"));
+    }
+
     #[tokio::test]
     async fn buffer_connect_request_reads_split_headers() {
         let (tx, mut rx) = mpsc::channel(4);
@@ -1427,6 +1568,131 @@ mod tests {
         assert!(!connect_response_is_success(b"HTTP/1.1 2000 Weird\r\n\r\n"));
         assert!(!connect_response_is_success(b"HTTP/1.1 199 Nope\r\n\r\n"));
         assert!(!connect_response_is_success(b"NOTHTTP 200 OK\r\n\r\n"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_for_http_request_joins_a_fragmented_method() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"GE")).await.unwrap();
+        tx.send(Bytes::from_static(b"T / HTTP/1.1\r\nHost: x\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, Vec::new(), PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        assert!(first_flight_is_http(&buf));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_for_http_request_joins_a_fragmented_non_http_line() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"EH")).await.unwrap();
+        tx.send(Bytes::from_static(b"LO mail.example.com\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+
+        let buf = peek_for_http_request(&mut rx, Vec::new(), PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert_eq!(buf, b"EHLO mail.example.com\r\n");
+        assert!(!first_flight_is_http(&buf));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denied_http_peek_preserves_seed_and_split_leading_crlf() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::from_static(b"\nGE")).await.unwrap();
+        tx.send(Bytes::from_static(b"T / HTTP/1.1\r"))
+            .await
+            .unwrap();
+        tx.send(Bytes::from_static(b"\nHost: blocked.example\r\n\r\n"))
+            .await
+            .unwrap();
+        drop(tx);
+        let buf = peek_for_http_request(&mut rx, b"\r".to_vec(), PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        assert!(first_flight_is_http(&buf));
+        assert_eq!(extract_http_host(&buf).as_deref(), Some("blocked.example"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denied_http_peek_bounds_incomplete_requests() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Bytes::from_static(b"GET /an-overlong-request"))
+            .await
+            .unwrap();
+        let buf = peek_for_http_request(&mut rx, Vec::new(), 8, PEEK_BUDGET).await;
+        assert_eq!(buf.len(), 8);
+        assert!(!first_flight_is_http(&buf));
+        let buf = peek_for_http_request(
+            &mut rx,
+            b"GE".to_vec(),
+            PEEK_BUF_SIZE,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(buf, b"GE");
+        assert!(!first_flight_is_http(&buf));
+    }
+
+    #[tokio::test]
+    async fn domain_denial_joins_fragmented_request_without_dialing_upstream() {
+        for enabled in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let dst = listener.local_addr().unwrap();
+            let shared = Arc::new(shared_with("blocked.example", "127.0.0.1"));
+            shared.set_http_config(microsandbox_types::HttpConfig {
+                deny_response: enabled,
+                deny_message: Some("blocked {host}".into()),
+            });
+            let policy = Arc::new(NetworkPolicy {
+                default_egress: Action::Deny,
+                default_ingress: Action::Allow,
+                rules: vec![allow_tcp("allowed.example", dst.port())],
+            });
+            let status = Arc::new(ProxyConnectState::new());
+            let (from_tx, from_rx) = mpsc::channel(4);
+            let (to_tx, mut to_rx) = mpsc::channel(4);
+            from_tx.send(Bytes::from_static(b"GE")).await.unwrap();
+            from_tx
+                .send(Bytes::from_static(b"T / HTTP/1.1\r\n"))
+                .await
+                .unwrap();
+            from_tx
+                .send(Bytes::from_static(b"Host: blocked.example\r\n\r\n"))
+                .await
+                .unwrap();
+            drop(from_tx);
+            TcpProxy::new(
+                dst,
+                UpstreamTcpTarget::direct(dst),
+                from_rx,
+                to_tx,
+                shared,
+                policy,
+                Arc::new(SecretsConfig::default()),
+                None,
+                false,
+                status.clone(),
+                None,
+            )
+            .try_run()
+            .await
+            .unwrap();
+            let response = to_rx.recv().await;
+            if enabled {
+                let response = response.unwrap();
+                assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
+                assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
+            } else {
+                assert!(response.is_none(), "disabled responses must close silently");
+            }
+            assert_eq!(status.status(), ProxyConnectStatus::PolicyDenied);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1782,6 +2048,15 @@ mod tests {
     fn extract_http_host_tls_first_byte() {
         let buf = [0x16u8, 0x03, 0x01, 0x00, 0x01];
         assert_eq!(extract_http_host(&buf), None);
+    }
+
+    #[test]
+    fn http_403_answers_only_confirmed_http1() {
+        let get = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(first_flight_is_http(get));
+        assert!(!first_flight_is_http(b""));
+        assert!(!first_flight_is_http(&[0x16, 0x03, 0x01]));
+        assert!(!first_flight_is_http(b"\x00\x01binary"));
     }
 
     #[test]
