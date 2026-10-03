@@ -397,6 +397,16 @@ describe("SandboxBuilder.build", () => {
     expect(builder.externalMountPolicy(policy)).toBe(builder);
   });
 
+  it("accepts a host disk image as a restore volume", () => {
+    const builder = Sandbox.restore("saved").name("disk-volume");
+    expect(builder.volume("/data2", (m) => m.disk("/images/seed.img").fstype("ext4").readonly()))
+      .toBe(builder);
+    expect(new MountBuilder("/data2").disk("/images/seed.img").fstype("ext4").readonly().build())
+      .toMatchObject({
+        kind: "disk", guest: "/data2", host: "/images/seed.img", fstype: "ext4", readonly: true,
+      });
+  });
+
   it("rejects unknown external mount policies without consuming the builder", async () => {
     const builder = Sandbox.restore("saved").name("external-policy");
     expect(() => builder.externalMountPolicy("unsafe" as "strict"))

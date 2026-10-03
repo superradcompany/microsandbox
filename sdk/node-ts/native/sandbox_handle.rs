@@ -1,8 +1,12 @@
-use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxHandle, SandboxStatus};
+use microsandbox::sandbox::{
+    DestroyOptions, ForkBuilder, ForkManyBuilder, MountBuilder as RustMountBuilder, RestartOptions,
+    SandboxHandle, SandboxStatus,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::mount_builder::JsMountBuilder;
 use crate::sandbox::Sandbox;
 use crate::storage::{StorageItemUsageJs, item_to_js};
 use crate::types::*;
@@ -41,6 +45,44 @@ pub struct SandboxDestroyOptions {
 impl JsSandboxHandle {
     pub fn from_rust(handle: SandboxHandle) -> Self {
         Self { inner: handle }
+    }
+
+    async fn fork_with(
+        builder: ForkBuilder,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Vec<(String, RustMountBuilder)>,
+    ) -> Result<Sandbox> {
+        let mut builder =
+            builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        for (guest, mount) in volumes {
+            builder = builder.volume(guest, |_| mount);
+        }
+        Ok(Sandbox::from_rust(
+            builder.fork().await.map_err(to_napi_error)?,
+        ))
+    }
+
+    async fn fork_many_with(
+        builder: ForkManyBuilder,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Vec<(String, RustMountBuilder)>,
+    ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
+        let mut builder =
+            builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+        if record_integrity.unwrap_or(false) {
+            builder = builder.record_integrity();
+        }
+        for (guest, mount) in volumes {
+            builder = builder.volume(guest, |_| mount);
+        }
+        Ok(crate::sandbox::branch_outcomes(
+            builder.fork().await.map_err(to_napi_error)?,
+        ))
     }
 }
 
@@ -244,16 +286,35 @@ impl JsSandboxHandle {
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
     ) -> Result<crate::sandbox::Sandbox> {
-        let mut builder = self
-            .inner
-            .fork(name)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(crate::sandbox::Sandbox::from_rust(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        Self::fork_with(
+            self.inner.fork(name),
+            record_integrity,
+            guest_flush,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Fork, rebinding captured volumes to the given mounts.
+    #[napi(js_name = "forkWithVolumes", ts_return_type = "Promise<Sandbox>")]
+    pub fn fork_with_volumes<'env>(
+        &self,
+        env: &'env Env,
+        name: String,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Vec<&mut JsMountBuilder>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        // Consume the mounts on the JS thread so later changes to them or to the
+        // working directory do not affect this fork.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes,
+            self.inner.backend_kind().as_str() == "local",
+        );
+        let builder = self.inner.fork(name);
+        env.spawn_future(async move {
+            Self::fork_with(builder, record_integrity, guest_flush, volumes?).await
+        })
     }
 
     /// Capture once and return individual child startup outcomes.
@@ -264,16 +325,36 @@ impl JsSandboxHandle {
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
     ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
-        let mut builder = self
-            .inner
-            .fork_many(names)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(crate::sandbox::branch_outcomes(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        Self::fork_many_with(
+            self.inner.fork_many(names),
+            record_integrity,
+            guest_flush,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Fork many, rebinding captured volumes to the given mounts.
+    #[napi(
+        js_name = "forkManyWithVolumes",
+        ts_return_type = "Promise<Array<JsBranchOutcome>>"
+    )]
+    pub fn fork_many_with_volumes<'env>(
+        &self,
+        env: &'env Env,
+        names: Vec<String>,
+        record_integrity: Option<bool>,
+        guest_flush: Option<String>,
+        volumes: Vec<&mut JsMountBuilder>,
+    ) -> Result<PromiseRaw<'env, Vec<crate::sandbox::JsBranchOutcome>>> {
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes,
+            self.inner.backend_kind().as_str() == "local",
+        );
+        let builder = self.inner.fork_many(names);
+        env.spawn_future(async move {
+            Self::fork_many_with(builder, record_integrity, guest_flush, volumes?).await
+        })
     }
 
     /// Explicit resident pause through host control.

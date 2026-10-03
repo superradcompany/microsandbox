@@ -2035,6 +2035,14 @@ pub fn apply_explicit_disk_mount(
     builder: SandboxBuilder,
     spec: &str,
 ) -> anyhow::Result<SandboxBuilder> {
+    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+    Ok(builder.volume(guest, |_| mount))
+}
+
+/// Parse a `--mount-disk` spec into its guest path and configured mount.
+///
+/// Shared by create, restore, and both fork forms.
+pub(crate) fn parse_explicit_disk_mount(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     let parsed = parse_cli_mount_spec(
         "mount-disk",
         spec,
@@ -2045,19 +2053,16 @@ pub fn apply_explicit_disk_mount(
         },
     )?;
 
-    let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
     let options = parsed.options;
-    Ok(builder.volume(guest, move |mut m| {
-        m = m.disk(&source);
-        if let Some(format) = options.format {
-            m = m.format(format);
-        }
-        if let Some(fstype) = options.fstype.as_deref() {
-            m = m.fstype(fstype);
-        }
-        apply_common_mount_options(m, options)
-    }))
+    let mut mount = MountBuilder::new(&guest).disk(parsed.source);
+    if let Some(format) = options.format {
+        mount = mount.format(format);
+    }
+    if let Some(fstype) = options.fstype.as_deref() {
+        mount = mount.fstype(fstype);
+    }
+    Ok((guest, apply_common_mount_options(mount, options)))
 }
 
 /// Apply a `--mount-named` spec to the builder.

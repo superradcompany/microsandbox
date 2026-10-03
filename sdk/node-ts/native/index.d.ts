@@ -1127,8 +1127,12 @@ export declare class Sandbox {
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
   fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Fork, rebinding captured volumes to the given mounts. */
+  forkWithVolumes(name: string, recordIntegrity: boolean | undefined | null, guestFlush: string | undefined | null, volumes: Array<MountBuilder>): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
   forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Fork many, rebinding captured volumes to the given mounts. */
+  forkManyWithVolumes(names: Array<string>, recordIntegrity: boolean | undefined | null, guestFlush: string | undefined | null, volumes: Array<MountBuilder>): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1534,8 +1538,12 @@ export declare class SandboxHandle {
   branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
   fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  /** Fork, rebinding captured volumes to the given mounts. */
+  forkWithVolumes(name: string, recordIntegrity: boolean | undefined | null, guestFlush: string | undefined | null, volumes: Array<MountBuilder>): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
   forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  /** Fork many, rebinding captured volumes to the given mounts. */
+  forkManyWithVolumes(names: Array<string>, recordIntegrity: boolean | undefined | null, guestFlush: string | undefined | null, volumes: Array<MountBuilder>): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */

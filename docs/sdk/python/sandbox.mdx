@@ -26,18 +26,22 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### fork() and fork_many()
 
 ```python
 async def fork(self, name: str, *, record_integrity: bool = False,
-               guest_flush: GuestFlush | None = None) -> Sandbox: ...
+               guest_flush: GuestFlush | None = None,
+               volumes: Mapping[str, MountConfig] | None = None) -> Sandbox: ...
 async def fork_many(self, names: list[str], *, record_integrity: bool = False,
-                    guest_flush: GuestFlush | None = None) -> list[ForkOutcome]: ...
+                    guest_flush: GuestFlush | None = None,
+                    volumes: Mapping[str, MountConfig] | None = None) -> list[ForkOutcome]: ...
 ```
 
 `record_integrity` records disk hashes. `guest_flush` accepts `GuestFlush.AUTO`, `REQUIRED`, or `SKIP`; omitting it uses `AUTO`. Import `GuestFlush` from `microsandbox`.
+
+`volumes` rebinds a captured disk to a host image consistent with the captured state, for example `volumes={"/data": Volume.disk("./seed.img")}`; a fork cannot add a new block device. Each child attaches the image directly, without a private copy, so batch forks shouldn't share a writable image. Use separate fork calls with separate images for writable disks. To share one image in a batch, capture the disk read-only and keep the supplied binding read-only.
 
 ### ForkOutcome
 

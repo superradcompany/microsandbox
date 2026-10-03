@@ -877,7 +877,7 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `WithRestoreDisableNetwork` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `WithRestoreSecurityProfile` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `WithRestoreMaxDuration, WithRestoreIdleTimeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. |
+| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. A host disk image: `"/data": m.Mount.Disk("./seed.img", m.DiskOptions{Fstype: "ext4"})`. |
 | `Ports` | Bind destination TCP or UDP ports. |
 | `Vsock` | Bind destination vsock endpoints. |
 | `User, LogLevel` | Default user for new execs and host runtime log level. |

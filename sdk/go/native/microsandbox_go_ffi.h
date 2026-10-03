@@ -224,6 +224,17 @@ char *msb_sandbox_branch_many(uint64_t cancel_id,
                               uintptr_t buf_len);
 
 /**
+ * `msb_sandbox_branch_many` for requests carrying `volumes`; older libraries lack this symbol.
+ */
+char *msb_sandbox_branch_many_with_volumes(uint64_t cancel_id,
+                                           Handle handle,
+                                           const char *source,
+                                           const char *names,
+                                           bool record_integrity,
+                                           unsigned char *buf,
+                                           uintptr_t buf_len);
+
+/**
  * Branch with explicit disk content integrity, retaining the original branch ABI.
  */
 char *msb_sandbox_branch_with_options(uint64_t cancel_id,

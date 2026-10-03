@@ -130,6 +130,7 @@ typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint6
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
 typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
+typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_with_volumes_fn;
 typedef char *(*msb_sandbox_resume_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_pause_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_resume_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -310,6 +311,7 @@ static msb_sandbox_pause_with_guest_flush_fn ptr_msb_sandbox_pause_with_guest_fl
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
+static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many_with_volumes = NULL;
 static msb_sandbox_resume_fn ptr_msb_sandbox_resume = NULL;
 static msb_sandbox_handle_pause_fn ptr_msb_sandbox_handle_pause = NULL;
 static msb_sandbox_handle_resume_fn ptr_msb_sandbox_handle_resume = NULL;
@@ -512,6 +514,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
+	RESOLVE_OPTIONAL(msb_sandbox_branch_many_with_volumes);
 	RESOLVE(msb_sandbox_resume);
 	RESOLVE(msb_sandbox_handle_pause);
 	RESOLVE(msb_sandbox_handle_resume);
@@ -762,6 +765,10 @@ char *call_msb_sandbox_pause_with_guest_flush(uint64_t cancel_id, uint64_t handl
 bool has_branch_many(void) { return ptr_msb_sandbox_branch_many != NULL; }
 char *call_msb_sandbox_branch_many(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_many ? ptr_msb_sandbox_branch_many(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
+}
+bool has_branch_many_volumes(void) { return ptr_msb_sandbox_branch_many_with_volumes != NULL; }
+char *call_msb_sandbox_branch_many_with_volumes(uint64_t cancel_id, uint64_t handle, const char *source, const char *names, bool record_integrity, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_branch_many_with_volumes ? ptr_msb_sandbox_branch_many_with_volumes(cancel_id, handle, source, names, record_integrity, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_branch_with_options(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_branch_with_options ? ptr_msb_sandbox_branch_with_options(cancel_id, handle, source, child, record_integrity, buf, buf_len) : NULL;
@@ -2796,18 +2803,18 @@ type BranchOutcome struct {
 	Error   error
 }
 
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	// Zero selects name lookup in the shared native entry point. A closed live handle
 	// must not take that path, including when Close races with this call.
 	handle := s.handle.Load()
 	if handle == 0 {
 		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
 	}
-	return BranchManyByName(ctx, handle, s.name, "", names, integrity, policy...)
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity, volumes, policy...)
 }
 
 // BranchManyByName uses one native operation, never a loop of branch captures.
-func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2821,14 +2828,18 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 	if err := checkGuestFlush(flush, false); err != nil {
 		return nil, err
 	}
+	if err := validateForkVolumesSupport(volumes, bool(C.has_branch_many_volumes())); err != nil {
+		return nil, err
+	}
 	if names == nil {
 		names = []string{}
 	}
 	encoded, err := json.Marshal(struct {
-		Names      []string `json:"names"`
-		Identity   string   `json:"source_identity"`
-		GuestFlush string   `json:"guest_flush,omitempty"`
-	}{names, identity, flush})
+		Names      []string             `json:"names"`
+		Identity   string               `json:"source_identity"`
+		GuestFlush string               `json:"guest_flush,omitempty"`
+		Volumes    map[string]MountSpec `json:"volumes,omitempty"`
+	}{names, identity, flush, volumes})
 	if err != nil {
 		return nil, err
 	}
@@ -2836,6 +2847,9 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 	defer C.free(unsafe.Pointer(cSource))
 	defer C.free(unsafe.Pointer(cNames))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+		if len(volumes) > 0 {
+			return C.call_msb_sandbox_branch_many_with_volumes(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
+		}
 		return C.call_msb_sandbox_branch_many(cancelID, C.uint64_t(handle), cSource, cNames, C.bool(integrity), buf, size)
 	})
 	if err != nil {
@@ -2869,18 +2883,18 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, policy...)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, policy...)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, 0, source, name, recordIntegrity)
@@ -2936,6 +2950,14 @@ func validateGuestFlushSupport(policy string, diskOnly, supported bool) error {
 	}
 	if (diskOnly || (policy != "" && policy != "auto")) && !supported {
 		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support guest flush policies; update the native SDK"}
+	}
+	return nil
+}
+
+// validateForkVolumesSupport prevents older native libraries from silently ignoring fork volumes.
+func validateForkVolumesSupport(volumes map[string]MountSpec, supported bool) error {
+	if len(volumes) > 0 && !supported {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support fork volumes; update the native SDK"}
 	}
 	return nil
 }

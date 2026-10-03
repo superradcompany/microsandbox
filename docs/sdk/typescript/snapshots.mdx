@@ -945,7 +945,7 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `volume()` | Map host volumes or select captured private volumes. |
+| `volume()` | Map host volumes or select captured private volumes. A host disk image: `.volume("/data", v => v.disk("./seed.img").fstype("ext4"))`. |
 | `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |

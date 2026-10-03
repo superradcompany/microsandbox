@@ -2,7 +2,7 @@
 
 import pytest
 
-from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
+from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile, Volume
 
 
 @pytest.mark.parametrize(
@@ -142,6 +142,16 @@ async def test_restore_accept_queue_size_reaches_artifact_validation(tmp_path, m
             await result
         else:
             await result.result()
+
+
+@pytest.mark.asyncio
+async def test_restore_disk_volume_reaches_artifact_validation(tmp_path):
+    # A missing artifact proves the disk mount was parsed and accepted by restore.
+    with pytest.raises(FileNotFoundError):
+        await Sandbox.restore(
+            tmp_path / "missing", name="restore-disk",
+            volumes={"/data2": Volume.disk("/images/seed.img", fstype="ext4", readonly=True)},
+        )
 
 
 @pytest.mark.parametrize("method", ["restore", "restore_with_progress"])

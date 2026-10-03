@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
 use crate::error::to_py_err;
-use crate::helpers::{extract_str_enum, str_enum_member};
+use crate::helpers::{apply_fork_volumes, extract_str_enum, prepare_fork_volumes, str_enum_member};
 use crate::metrics::convert_metrics;
 use crate::sandbox::{
     PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
@@ -389,13 +389,14 @@ impl PySandboxHandle {
     }
 
     /// Deprecated: use fork for live execution duplication.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -405,17 +406,18 @@ impl PySandboxHandle {
                 2,
             ),
         )?;
-        self.fork(py, name, record_integrity, guest_flush)
+        self.fork(py, name, record_integrity, guest_flush, volumes)
     }
 
     /// Deprecated: use fork_many for live execution duplication.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -425,18 +427,23 @@ impl PySandboxHandle {
                 2,
             ),
         )?;
-        self.fork_many(py, names, record_integrity, guest_flush)
+        self.fork_many(py, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes = prepare_fork_volumes(
+            volumes.as_ref().map(|v| v.bind(py)),
+            self.inner.backend_kind().as_str() == "local",
+        )?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.clone();
@@ -446,6 +453,7 @@ impl PySandboxHandle {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             Ok(PySandbox::from_rust(
                 builder.fork().await.map_err(to_py_err)?,
             ))
@@ -453,14 +461,19 @@ impl PySandboxHandle {
     }
 
     /// Capture once for all names; return individual child outcomes in input order.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes = prepare_fork_volumes(
+            volumes.as_ref().map(|v| v.bind(py)),
+            self.inner.backend_kind().as_str() == "local",
+        )?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut builder = inner
@@ -469,6 +482,7 @@ impl PySandboxHandle {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             crate::sandbox::branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }

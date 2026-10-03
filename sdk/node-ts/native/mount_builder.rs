@@ -61,6 +61,7 @@ pub struct JsBuiltVolumeMount {
 /// Validation is deferred to the terminal `.build()` call.
 #[napi(js_name = "MountBuilder")]
 pub struct JsMountBuilder {
+    guest: String,
     inner: Option<RustMountBuilder>,
 }
 
@@ -81,7 +82,8 @@ impl JsMountBuilder {
     #[napi(constructor)]
     pub fn new(guest: String) -> Self {
         Self {
-            inner: Some(RustMountBuilder::new(guest)),
+            inner: Some(RustMountBuilder::new(guest.clone())),
+            guest,
         }
     }
 
@@ -596,5 +598,55 @@ impl JsMountBuilder {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("MountBuilder already consumed"))
+    }
+
+    /// Internal: extract the guest path and builder of each mount for a fork.
+    /// A local backend anchors relative host paths now rather than when the fork runs.
+    pub(crate) fn take_fork_volumes(
+        volumes: Vec<&mut JsMountBuilder>,
+        local: bool,
+    ) -> Result<Vec<(String, RustMountBuilder)>> {
+        volumes
+            .into_iter()
+            .map(|volume| {
+                let guest = volume.guest.clone();
+                let mount = volume.take_inner_builder()?;
+                let mount = if local {
+                    mount.capture_local_host_paths().map_err(to_napi_error)?
+                } else {
+                    mount
+                };
+                Ok((guest, mount))
+            })
+            .collect()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox::sandbox::VolumeMount;
+
+    use super::*;
+
+    fn disk_host(local: bool) -> PathBuf {
+        let mut mount = JsMountBuilder::new("/data".into());
+        mount.disk("./seed.img".into());
+        let mut volumes = JsMountBuilder::take_fork_volumes(vec![&mut mount], local).unwrap();
+        let (guest, builder) = volumes.remove(0);
+        assert_eq!(guest, "/data");
+        match builder.build().unwrap() {
+            VolumeMount::DiskImage { host, .. } => host,
+            _ => panic!("expected a disk mount"),
+        }
+    }
+
+    #[test]
+    fn fork_volumes_anchor_relative_disk_paths_for_a_local_backend() {
+        assert!(disk_host(true).is_absolute());
+        assert_eq!(disk_host(false), PathBuf::from("./seed.img"));
     }
 }

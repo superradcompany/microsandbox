@@ -357,6 +357,10 @@ export interface NapiSandbox {
   /** @deprecated Use fork() instead. */
   branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
   forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** Missing from older native libraries. */
+  forkWithVolumes?(name: string, recordIntegrity: boolean | undefined, guestFlush: string | undefined, volumes: NapiMountBuilder[]): Promise<NapiSandbox>;
+  /** Missing from older native libraries. */
+  forkManyWithVolumes?(names: string[], recordIntegrity: boolean | undefined, guestFlush: string | undefined, volumes: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   /** @deprecated Use forkMany() instead. */
   branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;
@@ -401,6 +405,10 @@ export interface NapiSandboxHandle {
   /** @deprecated Use fork() instead. */
   branch(name: string, recordIntegrity?: boolean, guestFlush?: string): Promise<NapiSandbox>;
   forkMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
+  /** Missing from older native libraries. */
+  forkWithVolumes?(name: string, recordIntegrity: boolean | undefined, guestFlush: string | undefined, volumes: NapiMountBuilder[]): Promise<NapiSandbox>;
+  /** Missing from older native libraries. */
+  forkManyWithVolumes?(names: string[], recordIntegrity: boolean | undefined, guestFlush: string | undefined, volumes: NapiMountBuilder[]): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   /** @deprecated Use forkMany() instead. */
   branchMany(names: string[], recordIntegrity?: boolean, guestFlush?: string): Promise<{name: string; sandbox?: NapiSandbox; error?: string}[]>;
   pause(guestFlush?: string): Promise<void>;

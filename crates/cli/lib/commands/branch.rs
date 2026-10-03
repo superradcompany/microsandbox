@@ -136,4 +136,17 @@ mod tests {
             assert!(Command::try_parse_from(args).is_err());
         }
     }
+
+    #[test]
+    fn both_fork_forms_accept_mount_disk() {
+        let spec = "/images/seed.img:/data:ro";
+        let single =
+            Command::try_parse_from(["msb", "source", "--name", "child", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(single.branch.resources.mount_disk, [spec]);
+        let batch =
+            Command::try_parse_from(["msb", "source", "--names", "a", "b", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(batch.branch.resources.mount_disk, [spec]);
+    }
 }
