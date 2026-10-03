@@ -824,7 +824,7 @@ jobs:
 
       - name: Check Rust SDK feature surfaces
         run: |
-          cargo +stable check -p microsandbox --no-default-features --features cloud,net
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --test api_compat
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
           cargo +stable check -p microsandbox-network --no-default-features
@@ -1546,15 +1546,28 @@ jobs:
           done
           exit "$status"
 
+      - name: Stage snapshot smoke reports and logs
+        if: always()
+        shell: bash
+        run: |
+          # Avoid walking sandbox filesystems when the upload action expands globs.
+          shopt -s nullglob
+          for source in /tmp/msb-smoke-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"-*; do
+            destination="$RUNNER_TEMP/snapshot-smoke-reports/$(basename "$source")"
+            for file in "$source/report.json" "$source"/logs/*.log; do
+              if [[ -f "$file" ]]; then
+                mkdir -p "$destination"
+                cp -- "$file" "$destination/"
+              fi
+            done
+          done
+
       - name: Upload snapshot smoke reports and logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: snapshot-branch-smoke-linux-x86_64
-          # Keep text evidence, not the potentially large guest RAM/disk artifacts.
-          path: |
-            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/report.json
-            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/logs/*.log
+          path: ${{ runner.temp }}/snapshot-smoke-reports/
           if-no-files-found: warn
 
       - name: Disk usage
