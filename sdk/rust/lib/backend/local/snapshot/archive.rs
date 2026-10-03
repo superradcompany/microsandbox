@@ -3876,8 +3876,11 @@ async fn install_staged_cache(
             .await
             .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
     }
+    // The archive may describe an image already installed under this reference. Publish under
+    // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
+    let archived_metadata = tokio::fs::read(&metadata_path).await?;
     cache
-        .write_image_metadata_async(&image_ref, &metadata)
+        .install_image_metadata_if_compatible_async(&image_ref, archived_metadata)
         .await?;
 
     Ok(cache)

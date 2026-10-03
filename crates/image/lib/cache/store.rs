@@ -708,6 +708,78 @@ impl GlobalCache {
             .map_err(std::io::Error::other)?
     }
 
+    /// Install archived metadata without replacing an equivalent local entry. Recheck under
+    /// the same publication gate used by image pulls, so a concurrent retag cannot be lost.
+    pub async fn install_image_metadata_if_compatible_async(
+        &self,
+        reference: &Reference,
+        archived_bytes: Vec<u8>,
+    ) -> ImageResult<()> {
+        let cache = self.clone();
+        let reference = reference.clone();
+        tokio::task::spawn_blocking(move || {
+            cache.install_image_metadata_if_compatible(&reference, &archived_bytes)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    fn install_image_metadata_if_compatible(
+        &self,
+        reference: &Reference,
+        archived_bytes: &[u8],
+    ) -> ImageResult<()> {
+        use std::io::Write;
+
+        crate::snapshot::manifest::reject_duplicate_json_keys(archived_bytes)
+            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+        let metadata: CachedImageMetadata = serde_json::from_slice(archived_bytes)
+            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+        let path = self.image_metadata_path(reference);
+        let mut paths = self.metadata_paths(&metadata)?;
+        paths.push(path.clone());
+        let _leases = self.lease_paths(paths)?;
+        let _gate =
+            crate::storage_lease::StorageLease::exclusive(&path.with_extension("publication"))?;
+
+        match std::fs::symlink_metadata(&path) {
+            Ok(existing) if existing.file_type().is_file() => {
+                let existing_bytes = std::fs::read(&path)?;
+                if image_metadata_json_equivalent(archived_bytes, &existing_bytes) {
+                    return Ok(());
+                }
+                return Err(ImageError::Cache {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "cache target already exists with different content",
+                    ),
+                });
+            }
+            Ok(_) => {
+                return Err(ImageError::Cache {
+                    path,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "cache target is not a regular file",
+                    ),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(ImageError::Cache { path, source }),
+        }
+
+        // The gate also covers the existing writer's .json.part path. Preserve the archive's
+        // bytes on first install, then publish only after the complete file is durable.
+        let temporary_path = path.with_extension("json.part");
+        let mut temporary = std::fs::File::create(&temporary_path)?;
+        temporary.write_all(archived_bytes)?;
+        temporary.sync_all()?;
+        std::fs::rename(temporary_path, path)?;
+        sync_directory(&self.manifests_dir)?;
+        Ok(())
+    }
+
     /// Delete cached metadata for an image reference.
     pub fn delete_image_metadata(&self, reference: &Reference) -> ImageResult<()> {
         let path = self.image_metadata_path(reference);
@@ -751,6 +823,21 @@ fn image_cache_key(reference: &Reference) -> String {
     let mut hasher = Sha256::new();
     hasher.update(reference.to_string().as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn image_metadata_json_equivalent(left: &[u8], right: &[u8]) -> bool {
+    if crate::snapshot::manifest::reject_duplicate_json_keys(left).is_err()
+        || crate::snapshot::manifest::reject_duplicate_json_keys(right).is_err()
+    {
+        return false;
+    }
+    matches!(
+        (
+            serde_json::from_slice::<serde_json::Value>(left),
+            serde_json::from_slice::<serde_json::Value>(right),
+        ),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 #[cfg(unix)]
@@ -847,6 +934,45 @@ mod tests {
         format!("sha256:{}", byte.to_string().repeat(64))
             .parse()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn archived_metadata_rechecks_after_a_concurrent_retag() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap().operation();
+        let reference: Reference = "example.com/test:latest".parse().unwrap();
+        let archived = CachedImageMetadata {
+            manifest_digest: digest('a').to_string(),
+            config_digest: digest('a').to_string(),
+            raw_manifest_json: "{}".into(),
+            raw_config_json: "{}".into(),
+            config: ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        let archived_bytes = serde_json::to_vec(&archived).unwrap();
+        cache.write_image_metadata(&reference, &archived).unwrap();
+        let path = cache.image_metadata_path(&reference);
+        assert!(image_metadata_json_equivalent(
+            &archived_bytes,
+            &std::fs::read(&path).unwrap()
+        ));
+
+        // Model another image pull changing the mutable tag after archive preflight.
+        let mut retagged = archived.clone();
+        retagged.manifest_digest = digest('b').to_string();
+        cache.write_image_metadata(&reference, &retagged).unwrap();
+        let retagged_bytes = std::fs::read(&path).unwrap();
+
+        let error = cache
+            .install_image_metadata_if_compatible_async(&reference, archived_bytes)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cache target already exists with different content")
+        );
+        assert_eq!(std::fs::read(path).unwrap(), retagged_bytes);
     }
 
     #[test]
