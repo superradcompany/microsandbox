@@ -41,6 +41,8 @@ pub struct JsSecretEntry {
 #[napi(object, js_name = "SecretSubstitution")]
 pub struct JsSecretSubstitution {
     pub headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    pub header_fields: Vec<String>,
     pub query: bool,
     pub body: bool,
 }
@@ -133,6 +135,19 @@ impl JsSecretBuilder {
     pub fn substitute_in_headers(&mut self, enabled: bool) -> &Self {
         let prev = self.take_inner();
         self.inner = Some(prev.substitute_in_headers(enabled));
+        self
+    }
+
+    /// Enable header substitution but restrict it to the given header fields.
+    ///
+    /// An empty list restores the default of substituting in every header.
+    /// Prefer restricting to the credential header the API reads: substituting
+    /// in every header lets an untrusted guest place the placeholder in a
+    /// header the upstream host reflects back, leaking the real secret.
+    #[napi(js_name = "substituteInHeaderFields")]
+    pub fn substitute_in_header_fields(&mut self, fields: Vec<String>) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.substitute_in_header_fields(fields));
         self
     }
 
@@ -252,6 +267,7 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
         }),
         substitution: JsSecretSubstitution {
             headers: entry.substitution.headers,
+            header_fields: entry.substitution.header_fields,
             query: entry.substitution.query,
             body: entry.substitution.body,
         },

@@ -189,6 +189,48 @@ mod tests {
     }
 
     #[test]
+    fn header_field_scope_is_rejected_for_targets_that_cannot_preserve_it() {
+        // Released v0.6 and v0.7.0-v0.7.2 deserialize substitution leniently and
+        // would drop the allowlist, substituting in every header. The downgrade
+        // must refuse rather than silently broadening the scope.
+        let raw = serde_json::json!({"network":{"secrets":{"secrets":[{
+            "env_var":"TOKEN", "value":"synthetic", "placeholder":"$TOKEN",
+            "allowed_hosts":[{"exact":"allowed.example"}],
+            "substitution":{"headers":true,"header_fields":["authorization"],"query":false,"body":false}
+        }]}}})
+        .to_string();
+        for version in ["0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2"] {
+            let target = Version::parse(version).unwrap();
+            let error = to_previous_version(&raw, &target).unwrap_err();
+            assert!(error.contains("header-field"), "{version}: {error}");
+            assert!(!error.contains("synthetic"), "{version}: {error}");
+        }
+        // An absent allowlist means every header and is representable.
+        let representable = serde_json::json!({"network":{"secrets":{"secrets":[{
+            "env_var":"TOKEN", "value":"synthetic", "placeholder":"$TOKEN",
+            "allowed_hosts":[{"exact":"allowed.example"}],
+            "substitution":{"headers":true,"query":false,"body":false}
+        }]}}})
+        .to_string();
+        assert!(to_previous_version(&representable, &Version::new(0, 6, 18)).is_ok());
+        assert!(to_previous_version(&representable, &Version::new(0, 7, 0)).is_ok());
+
+        // A list that cannot take effect because headers are disabled is inert:
+        // dropping it does not widen the policy, so it must not block the
+        // downgrade even though the allowlist is present.
+        let inert = serde_json::json!({"network":{"secrets":{"secrets":[{
+            "env_var":"TOKEN", "value":"synthetic", "placeholder":"$TOKEN",
+            "allowed_hosts":[{"exact":"allowed.example"}],
+            "substitution":{"headers":false,"header_fields":["authorization"],"query":true,"body":false}
+        }]}}})
+        .to_string();
+        for version in ["0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2"] {
+            let target = Version::parse(version).unwrap();
+            assert!(to_previous_version(&inert, &target).is_ok(), "{version}");
+        }
+    }
+
+    #[test]
     fn downgrade_target_gates_include_released_v0_7_only() {
         for version in ["0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2"] {
             assert!(requires_downgrade(&Version::parse(version).unwrap()));

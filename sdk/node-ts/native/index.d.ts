@@ -1616,6 +1616,15 @@ export declare class SecretBuilder {
   allowPassthroughFor(host: string): this
   /** Configure header substitution (default: true). */
   substituteInHeaders(enabled: boolean): this
+  /**
+   * Enable header substitution but restrict it to the given header fields.
+   *
+   * An empty list restores the default of substituting in every header.
+   * Prefer restricting to the credential header the API reads: substituting
+   * in every header lets an untrusted guest place the placeholder in a
+   * header the upstream host reflects back, leaking the real secret.
+   */
+  substituteInHeaderFields(fields: Array<string>): this
   /** Configure URL query parameter substitution (default: false). */
   substituteInQuery(enabled: boolean): this
   /** Configure request body substitution (default: false). */
@@ -2604,6 +2613,8 @@ export interface SecretSourceInput {
 /** Injection sites for a secret value. */
 export interface SecretSubstitution {
   headers: boolean
+  /** When non-empty, restrict header substitution to these field names. */
+  headerFields: Array<string>
   query: boolean
   body: boolean
 }

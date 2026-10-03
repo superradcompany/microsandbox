@@ -63,6 +63,12 @@ export interface NetworkRateLimiterConfig {
 /** Where in the HTTP request the secret value can be substituted. */
 export interface SecretSubstitution {
   readonly headers?: boolean;
+  /**
+   * When set and non-empty, restrict header substitution to these field
+   * names (for example `["authorization"]`). A placeholder in any other
+   * header is treated as a disabled location.
+   */
+  readonly headerFields?: readonly string[];
   readonly query?: boolean;
   readonly body?: boolean;
 }

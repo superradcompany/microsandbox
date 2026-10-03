@@ -156,6 +156,9 @@ struct Http2State {
     preface_seen: bool,
     buffer: Vec<u8>,
     header_block: Option<Http2HeaderBlock>,
+    /// Highest client-initiated stream id seen so far. New client streams must
+    /// use strictly increasing ids; a reused id is a protocol violation.
+    highest_client_stream_id: u32,
     open_request_streams: HashSet<u32>,
     data_tails: HashMap<u32, Vec<u8>>,
     request_summaries: HashMap<u32, RequestSummary>,
@@ -257,6 +260,8 @@ struct EligibleSecret {
     /// linger in freed memory.
     value: zeroize::Zeroizing<String>,
     substitute_headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    header_fields: Vec<String>,
     substitute_query: bool,
     substitute_body: bool,
     require_tls_identity: bool,
@@ -340,6 +345,12 @@ impl EligibleSecret {
         self.substitute_headers || self.substitute_query
     }
 
+    /// Returns true when this secret may be substituted in a header with the
+    /// given field name.
+    fn header_field_allowed(&self, name: &[u8]) -> bool {
+        header_field_allowed(self.substitute_headers, &self.header_fields, name)
+    }
+
     /// Returns true when the current header bytes contain this secret's
     /// placeholder in a header-substitution scope.
     fn may_substitute_in_headers(&self, headers: &[u8]) -> bool {
@@ -390,16 +401,16 @@ impl EligibleSecret {
                 .flatten();
         }
 
-        if self.substitute_headers
-            && is_authorization_header(line)
+        if !self.header_field_allowed(header_field_name(line.as_bytes())) {
+            return None;
+        }
+
+        if is_authorization_header(line)
             && let Some(replaced) = self.substitute_basic_auth_header(line)
         {
             return Some(replaced);
         }
-        if self.substitute_headers {
-            return Some(line.replace(&self.placeholder, &self.value));
-        }
-        None
+        Some(line.replace(&self.placeholder, &self.value))
     }
 
     /// Decode `Basic <base64>` credentials, substitute the placeholder in the
@@ -494,6 +505,7 @@ impl Default for Http2State {
             preface_seen: false,
             buffer: Vec::new(),
             header_block: None,
+            highest_client_stream_id: 0,
             open_request_streams: HashSet::new(),
             data_tails: HashMap::new(),
             request_summaries: HashMap::new(),
@@ -654,6 +666,7 @@ impl SecretsHandler {
                     placeholder: secret.placeholder.clone(),
                     value: secret.value.clone(),
                     substitute_headers: secret.substitution.headers,
+                    header_fields: secret.substitution.header_fields.clone(),
                     substitute_query: secret.substitution.query,
                     substitute_body: secret.substitution.body,
                     require_tls_identity: secret.require_tls_identity,
@@ -1437,6 +1450,7 @@ impl SecretsHandler {
 
             for (name, value) in headers.iter_mut() {
                 let is_pseudo = name.starts_with(b":");
+                let header_allowed = !is_pseudo && secret.header_field_allowed(name);
 
                 if name.eq_ignore_ascii_case(b":path")
                     && secret.substitute_query
@@ -1447,9 +1461,8 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
+                if header_allowed
                     && name.eq_ignore_ascii_case(b"authorization")
-                    && secret.substitute_headers
                     && let Ok(header_value) = std::str::from_utf8(value)
                     && let Some(replaced) = substitute_basic_auth_value(
                         header_value,
@@ -1460,10 +1473,7 @@ impl SecretsHandler {
                     *value = replaced.into_bytes();
                 }
 
-                if !is_pseudo
-                    && secret.substitute_headers
-                    && contains_bytes(value, secret.placeholder.as_bytes())
-                {
+                if header_allowed && contains_bytes(value, secret.placeholder.as_bytes()) {
                     let replaced =
                         String::from_utf8_lossy(value).replace(&secret.placeholder, &secret.value);
                     *value = replaced.into_bytes();
@@ -1955,9 +1965,16 @@ impl Http2State {
         let mut headers = self.decode_headers(&block.block)?;
         let is_initial_request = !self.open_request_streams.contains(&block.stream_id);
         if is_initial_request {
+            // Client-initiated HTTP/2 stream ids must strictly increase. A
+            // reused id would let a previously completed stream be presented
+            // as a fresh request, so fail closed before substitution runs.
+            if block.stream_id <= self.highest_client_stream_id {
+                return Err(SecretViolationAction::Block);
+            }
             if self.open_request_streams.len() >= MAX_HTTP2_TRACKED_STREAMS {
                 return Err(SecretViolationAction::Block);
             }
+            self.highest_client_stream_id = block.stream_id;
             self.open_request_streams.insert(block.stream_id);
         } else if !block.end_stream {
             return Err(SecretViolationAction::Block);
@@ -2064,6 +2081,26 @@ impl Http2State {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Returns true when `name` is an allowed header field name.
+///
+/// `headers_enabled` gates all header substitution; an empty `header_fields`
+/// allowlist means every field name is allowed.
+fn header_field_allowed(headers_enabled: bool, header_fields: &[String], name: &[u8]) -> bool {
+    headers_enabled
+        && (header_fields.is_empty()
+            || header_fields
+                .iter()
+                .any(|field| name.eq_ignore_ascii_case(field.as_bytes())))
+}
+
+/// Returns the field-name portion of a header line.
+fn header_field_name(line: &[u8]) -> &[u8] {
+    match line.iter().position(|byte| *byte == b':') {
+        Some(end) => &line[..end],
+        None => line,
+    }
+}
 
 /// Returns true if `line` starts with the `Authorization:` header name
 /// (case-insensitive).
@@ -3569,6 +3606,7 @@ mod tests {
     fn basic_auth_only() -> SecretSubstitution {
         SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: false,
             body: false,
         }
@@ -4107,6 +4145,154 @@ mod tests {
             String::from_utf8(output.into_owned()).unwrap(),
             "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\n\r\n"
         );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_substitution() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nAuthorization: Bearer $KEY\r\nX-Trace: redacted\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nAuthorization: Bearer real-secret\r\nX-Trace: redacted\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_forwards_placeholder_in_other_headers() {
+        // A placeholder in a non-allowlisted header is a disabled location: on
+        // a trusted destination it is forwarded unchanged, not substituted.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Other: $KEY\r\nAuthorization: Bearer redacted\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(output.as_ref(), input);
+    }
+
+    #[test]
+    fn empty_header_field_allowlist_substitutes_every_header() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let input = b"GET / HTTP/1.1\r\nX-Custom: $KEY\r\n\r\n";
+        let output = handler.substitute(input).unwrap();
+        assert_eq!(
+            String::from_utf8(output.into_owned()).unwrap(),
+            "GET / HTTP/1.1\r\nX-Custom: real-secret\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_basic_auth() {
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        let auth = String::from_utf8(output.into_owned())
+            .unwrap()
+            .split("Authorization: Basic ")
+            .nth(1)
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(BASE64.decode(auth).unwrap(), b"user:real-secret");
+    }
+
+    #[test]
+    fn header_field_allowlist_forwards_basic_auth_when_authorization_excluded() {
+        // Excluding `authorization` from the allowlist leaves the encoded Basic
+        // credential placeholder unchanged on a trusted destination.
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["x-api-key".into()];
+        let config = make_config(vec![secret]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+
+        let encoded = BASE64.encode(b"user:$KEY");
+        let input = format!("GET / HTTP/1.1\r\nAuthorization: Basic {encoded}\r\n\r\n");
+        let output = handler.substitute(input.as_bytes()).unwrap();
+        assert_eq!(output.as_ref(), input.as_bytes());
+    }
+
+    #[test]
+    fn header_field_allowlist_scopes_http2_substitution() {
+        let ip = Ipv4Addr::new(203, 0, 113, 60);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
+        secret.substitution.header_fields = vec!["authorization".into()];
+        let config = make_config(vec![secret]);
+
+        let allowed = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(&allowed).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
+
+        let forwarded = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/"),
+                (b"x-trace", b"$KEY"),
+            ],
+            true,
+        );
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+        let output = handler.substitute(&forwarded).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(h2_header_value(&headers, b"x-trace"), "$KEY");
+    }
+
+    #[test]
+    fn tls_intercepted_http2_encoded_query_is_forwarded_when_query_scope_disabled() {
+        let ip = Ipv4Addr::new(203, 0, 113, 61);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        // Default substitution enables headers but not the query. On a trusted
+        // destination a percent-encoded placeholder in the `:path` query is a
+        // disabled location and is forwarded unchanged.
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/?token=%24KEY"),
+            ],
+            true,
+        );
+        let output = handler.substitute(&request).unwrap().into_owned();
+        let headers = decode_first_h2_headers(&output);
+        assert_eq!(h2_header_value(&headers, b":path"), "/?token=%24KEY");
     }
 
     #[test]
@@ -5231,6 +5417,7 @@ mod tests {
         let mut secret = make_secret("$MSB_PASSWORD", "s3cr3t", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: false,
             body: true,
         };
@@ -5250,6 +5437,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -5269,6 +5457,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: false,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -6145,6 +6334,7 @@ mod tests {
         let mut secret = make_secret("$KEY", "real-secret", "api.openai.com");
         secret.substitution = SecretSubstitution {
             headers: true,
+            header_fields: Vec::new(),
             query: true,
             body: false,
         };
@@ -6483,6 +6673,130 @@ mod tests {
         }
 
         assert!(handler.substitute(&request).is_ok());
+    }
+
+    // The HTTP/2 stream-id reuse checks below are ported from #1227
+    // (originally authored by Liraz Siri). They fail closed when a client
+    // presents a completed stream id as a new request.
+
+    #[test]
+    fn tls_intercepted_http2_rejects_reused_stream_id_after_headers_end_stream() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            true,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_rejects_reused_stream_id_after_data_end_stream() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"POST"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            false,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut completed = Vec::new();
+        append_http2_frame(
+            &mut completed,
+            HTTP2_FRAME_DATA,
+            HTTP2_FLAG_END_STREAM,
+            1,
+            b"",
+        )
+        .unwrap();
+        handler.substitute(&completed).unwrap();
+
+        let mut reused = Vec::new();
+        append_h2_headers(
+            &mut reused,
+            1,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/reused"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            handler.substitute(&reused).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_allows_higher_stream_id_after_close() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler = SecretsHandler::new(&config, "api.openai.com", true);
+        let request = h2_request(
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/first"),
+            ],
+            true,
+        );
+        handler.substitute(&request).unwrap();
+
+        let mut next = Vec::new();
+        append_h2_headers(
+            &mut next,
+            3,
+            &[
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"api.openai.com"),
+                (b":path", b"/next"),
+                (b"authorization", b"Bearer $KEY"),
+            ],
+            true,
+        );
+
+        let output = handler.substitute(&next).unwrap();
+        let mut framed = HTTP2_PREFACE.to_vec();
+        framed.extend_from_slice(&output);
+        let headers = decode_first_h2_headers(&framed);
+        assert_eq!(
+            h2_header_value(&headers, b"authorization"),
+            "Bearer real-secret"
+        );
     }
 
     #[test]

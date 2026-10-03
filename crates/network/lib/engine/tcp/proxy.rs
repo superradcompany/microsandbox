@@ -2092,6 +2092,7 @@ mod tests {
                 allowed_hosts: vec![HostPattern::Any],
                 substitution: SecretSubstitution {
                     headers: true,
+                    header_fields: Vec::new(),
                     query: false,
                     body: false,
                 },
@@ -2683,6 +2684,7 @@ mod tests {
                 allowed_hosts: vec![HostPattern::Exact("example.com".into())],
                 substitution: SecretSubstitution {
                     headers: true,
+                    header_fields: Vec::new(),
                     query: false,
                     body: false,
                 },

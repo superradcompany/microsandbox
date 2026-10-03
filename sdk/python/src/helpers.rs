@@ -1897,16 +1897,17 @@ fn apply_secret(
     let require_tls: Option<bool> = extract_opt(secret, "require_tls_identity")?;
     let passthrough: Vec<String> = extract_opt(secret, "passthrough")?.unwrap_or_default();
 
-    let (substitute_headers, substitute_query, substitute_body) =
+    let (substitute_headers, substitute_header_fields, substitute_query, substitute_body) =
         if let Some(substitution_obj) = secret.get_item("substitution")? {
             let substitution: Bound<'_, PyDict> = substitution_obj.downcast::<PyDict>()?.clone();
             (
                 extract_opt::<bool>(&substitution, "headers")?,
+                extract_opt::<Vec<String>>(&substitution, "header_fields")?,
                 extract_opt::<bool>(&substitution, "query")?,
                 extract_opt::<bool>(&substitution, "body")?,
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
     Ok(builder.secret(|s| {
@@ -1930,6 +1931,12 @@ fn apply_secret(
         if let Some(req) = require_tls {
             s = s.require_tls_identity(req);
         }
+        if let Some(v) = substitute_header_fields {
+            s = s.substitute_in_header_fields(v);
+        }
+        // Apply the explicit enabled/disabled switch after the header list:
+        // `substitute_in_header_fields` enables header substitution, so a
+        // caller that sets `headers=false` must win regardless of ordering.
         if let Some(v) = substitute_headers {
             s = s.substitute_in_headers(v);
         }

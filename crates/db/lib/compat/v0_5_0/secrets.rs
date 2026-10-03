@@ -31,6 +31,7 @@ pub fn to_previous_version(raw: &str) -> Result<Option<String>, &'static str> {
     else {
         return Ok(None);
     };
+    crate::compat::reject_scoped_header_fields(secrets)?;
     let current = secrets.get("violation_action").is_some()
         || secrets.get("passthrough_hosts").is_some()
         || secrets

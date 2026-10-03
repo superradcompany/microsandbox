@@ -1027,6 +1027,8 @@ struct SecretOpts {
 struct SecretSubstitutionOpts {
     headers: Option<bool>,
     #[serde(default)]
+    header_fields: Vec<String>,
+    #[serde(default)]
     query: bool,
     #[serde(default)]
     body: bool,
@@ -1930,6 +1932,12 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
+        if !s.substitution.header_fields.is_empty() {
+            sb = sb.substitute_in_header_fields(s.substitution.header_fields.clone());
+        }
+        // Apply the explicit enabled/disabled switch after the header list:
+        // `substitute_in_header_fields` enables header substitution, so a
+        // caller that sets `headers=false` must win regardless of ordering.
         if let Some(headers) = s.substitution.headers {
             sb = sb.substitute_in_headers(headers);
         }
@@ -7791,6 +7799,34 @@ mod tests {
         };
         let config = builder.build().await.unwrap();
         assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
+    }
+
+    #[tokio::test]
+    async fn explicit_header_disable_wins_over_header_fields() {
+        // `substitute_in_header_fields` enables header substitution, so the
+        // adapter must apply the explicit `headers` switch last. Otherwise a
+        // caller that sets `headers=false` would silently re-enable it.
+        let secret: super::SecretOpts = serde_json::from_value(serde_json::json!({
+            "env_var": "TOKEN",
+            "value": "synthetic",
+            "allow": ["example.com"],
+            "substitution": {"headers": false, "header_fields": ["authorization"], "query": true},
+        }))
+        .unwrap();
+        let builder = microsandbox::Sandbox::builder("secret-headers").image("alpine");
+        let Ok(builder) = super::apply_secret(builder, &secret) else {
+            panic!("apply_secret rejected valid options");
+        };
+        // The explicit disable must win, so the now-inert allowlist is rejected
+        // by validation. If the adapter re-enabled header substitution by
+        // applying the list last, the config would build successfully instead.
+        let error = builder.build().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("header field substitutions require header substitution"),
+            "{error}"
+        );
     }
 
     use super::*;

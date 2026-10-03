@@ -276,6 +276,23 @@ fn apply_secret_args(
                     }
                 }
                 existing.substitute_headers &= parsed.substitute_headers;
+                if existing.substitute_headers {
+                    match common::intersect_header_fields(
+                        &existing.substitute_header_fields,
+                        &parsed.substitute_header_fields,
+                    ) {
+                        Some(merged) => existing.substitute_header_fields = merged,
+                        None => {
+                            // The scopes share no field: the empty allowlist is
+                            // equivalent to disabling header substitution and
+                            // must not fall back to substituting in every header.
+                            existing.substitute_headers = false;
+                            existing.substitute_header_fields.clear();
+                        }
+                    }
+                } else {
+                    existing.substitute_header_fields.clear();
+                }
                 existing.substitute_query |= parsed.substitute_query;
                 existing.substitute_body |= parsed.substitute_body;
             }
@@ -290,6 +307,11 @@ fn apply_secret_args(
                 .source(SecretSource::Env { var: name.clone() })
                 .substitution(microsandbox_types::SecretSubstitution {
                     headers: spec.substitute_headers,
+                    header_fields: if spec.substitute_headers {
+                        spec.substitute_header_fields.clone()
+                    } else {
+                        Vec::new()
+                    },
                     query: spec.substitute_query,
                     body: spec.substitute_body,
                 });
