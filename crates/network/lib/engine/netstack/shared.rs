@@ -28,6 +28,10 @@ use crate::engine::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
 /// Default frame queue capacity. Matches libkrun's virtio queue size.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
+/// Most addresses kept per hostname and address family. Past it, a new
+/// address replaces the one closest to expiry.
+const MAX_RESOLVED_ADDRESSES_PER_HOSTNAME: usize = 64;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -127,7 +131,9 @@ impl SharedState {
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
-            resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
+            resolved_hostnames: RwLock::new(TtlReverseIndex::with_member_limit(
+                MAX_RESOLVED_ADDRESSES_PER_HOSTNAME,
+            )),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
             nat64_prefixes: OnceLock::new(),
@@ -202,10 +208,12 @@ impl SharedState {
 
     /// Record resolved addresses for a hostname within the given address family.
     ///
-    /// Addresses from earlier answers stay bound until their own TTL expires.
-    /// Resolvers that rotate their answers hand concurrent lookups of one name
-    /// different addresses, and a connection dialed on any of them must still
-    /// match the name's domain rules.
+    /// Addresses from earlier answers stay bound until the TTL of the answer
+    /// that returned them expires. Resolvers that rotate their answers hand
+    /// concurrent lookups of one name different addresses, and a connection
+    /// dialed on any of them must still match the name's domain rules. At most
+    /// `MAX_RESOLVED_ADDRESSES_PER_HOSTNAME` addresses are kept per name and
+    /// family; past that, a new address replaces the one closest to expiry.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
