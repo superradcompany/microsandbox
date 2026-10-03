@@ -27,11 +27,11 @@ pub struct TreeArgs {
     levels: Option<usize>,
 
     /// Show only commands, hiding flags and arguments (requires --tree).
-    #[arg(long, global = true, requires = "tree")]
+    #[arg(short = 'C', long, global = true, requires = "tree")]
     commands: bool,
 
     /// Omit descriptions from the command tree (requires --tree).
-    #[arg(long, global = true, requires = "tree")]
+    #[arg(short = 'b', long, global = true, requires = "tree")]
     brief: bool,
 }
 
@@ -546,6 +546,16 @@ fn try_show_tree_from(cmd: &Command, args: &[String]) -> Result<Option<String>, 
                 }
             }
             "--tree" | "--commands" | "--brief" => tree_args.push(arg),
+            _ if arg.starts_with("-C") || arg.starts_with("-b") => {
+                tree_args.push(arg);
+                // Clap handles short-option clusters. Only a trailing -L needs another token,
+                // as in `-CbL 2`; `-CbL2` already carries its own depth value.
+                if arg[1..].trim_start_matches(['C', 'b']) == "L"
+                    && let Some(value) = remaining.next()
+                {
+                    tree_args.push(value);
+                }
+            }
             _ if arg.starts_with("-L")
                 || arg.starts_with("--levels=")
                 || arg.starts_with("--commands=")
@@ -692,6 +702,35 @@ mod tests {
             tree(&["msb", "--brief", "img", "--tree", "-L1"]).unwrap(),
             tree(&["msb", "img", "--tree", "--brief", "-L1"]).unwrap()
         );
+    }
+
+    #[test]
+    fn short_controls_and_clusters_match_long_forms() {
+        let expected = tree(&["msb", "image", "--tree", "--commands", "--brief", "-L1"]).unwrap();
+        for args in [
+            vec!["msb", "image", "--tree", "-C", "-b", "-L1"],
+            vec!["msb", "-Cb", "image", "--tree", "-L1"],
+            vec!["msb", "image", "--tree", "-bC", "-L1"],
+            vec!["msb", "image", "--tree", "-CbL1"],
+            vec!["msb", "-bCL", "1", "image", "--tree"],
+        ] {
+            assert_eq!(tree(&args).unwrap(), expected, "{args:?}");
+        }
+        assert_eq!(
+            tree(&["msb", "--tree", "-C"]).unwrap(),
+            tree(&["msb", "--tree", "--commands"]).unwrap()
+        );
+        assert_eq!(
+            tree(&["msb", "--tree", "-b"]).unwrap(),
+            tree(&["msb", "--tree", "--brief"]).unwrap()
+        );
+        for args in [
+            vec!["msb", "--tree", "-CbL"],
+            vec!["msb", "--tree", "-CbLbad"],
+            vec!["msb", "--tree", "-b=1"],
+        ] {
+            assert!(tree(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

@@ -1022,6 +1022,8 @@ mod sandbox_command_tests {
             vec!["msb", "image", "ls", "--tree", "-L2", "--commands"],
             vec!["msb", "--tree", "--brief", "image", "ls"],
             vec!["msb", "image", "ls", "--tree", "--brief"],
+            vec!["msb", "--tree", "-C", "-b", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-CbL2"],
             vec![
                 "msb",
                 "image",
@@ -1034,7 +1036,15 @@ mod sandbox_command_tests {
         ] {
             Cli::try_parse_from(args).unwrap();
         }
-        for flag in ["-L2", "--levels=2", "--commands", "--brief"] {
+        for flag in [
+            "-L2",
+            "--levels=2",
+            "--commands",
+            "--brief",
+            "-C",
+            "-b",
+            "-Cb",
+        ] {
             let error = Cli::try_parse_from(["msb", "image", "ls", flag])
                 .err()
                 .unwrap();
