@@ -1546,15 +1546,34 @@ jobs:
           done
           exit "$status"
 
+      - name: Collect snapshot smoke reports and logs
+        if: always()
+        run: |
+          # Pass a single bounded directory to upload-artifact; its /tmp glob inputs
+          # failed with a stack overflow before any reports were uploaded.
+          stage="${{ runner.temp }}/snapshot-branch-smoke-${{ github.run_id }}-${{ github.run_attempt }}"
+          mkdir -p "$stage"
+          for layout in managed flat; do
+            source="/tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout"
+            destination="$stage/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-$layout"
+            if [ -f "$source/report.json" ]; then
+              mkdir -p "$destination"
+              cp -- "$source/report.json" "$destination/report.json"
+            fi
+            for log in "$source"/logs/*.log; do
+              [ -f "$log" ] || continue
+              mkdir -p "$destination/logs"
+              cp -- "$log" "$destination/logs/"
+            done
+          done
+
       - name: Upload snapshot smoke reports and logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: snapshot-branch-smoke-linux-x86_64
           # Keep text evidence, not the potentially large guest RAM/disk artifacts.
-          path: |
-            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/report.json
-            /tmp/msb-smoke-${{ github.run_id }}-${{ github.run_attempt }}-*/logs/*.log
+          path: ${{ runner.temp }}/snapshot-branch-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
 
       - name: Disk usage

@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -185,13 +184,5 @@ fn to_py_err_agent(err: microsandbox::AgentClientError) -> PyErr {
 }
 
 fn timeout_duration(timeout: Option<f64>) -> PyResult<Option<Duration>> {
-    match timeout {
-        Some(timeout) if timeout.is_finite() && timeout >= 0.0 => {
-            Ok(Some(Duration::from_secs_f64(timeout)))
-        }
-        Some(_) => Err(PyValueError::new_err(
-            "timeout must be a non-negative finite number",
-        )),
-        None => Ok(None),
-    }
+    crate::sandbox::optional_duration(timeout)
 }

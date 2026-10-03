@@ -4,6 +4,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::sandbox::Sandbox;
+use crate::storage::{StorageItemUsageJs, item_to_js};
 use crate::types::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -80,6 +81,13 @@ impl JsSandboxHandle {
     pub async fn refresh(&self) -> Result<JsSandboxHandle> {
         let handle = self.inner.refresh().await.map_err(to_napi_error)?;
         Ok(JsSandboxHandle::from_rust(handle))
+    }
+
+    /// Observe this sandbox's managed directory through its captured backend.
+    #[napi(js_name = "storageUsage")]
+    pub async fn storage_usage(&self) -> Result<StorageItemUsageJs> {
+        let report = self.inner.storage_usage().await.map_err(to_napi_error)?;
+        Ok(item_to_js(report))
     }
 
     /// Creation timestamp as ms since Unix epoch.

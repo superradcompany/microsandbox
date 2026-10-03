@@ -1,3 +1,4 @@
+import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
 import {
@@ -719,18 +720,4 @@ function sandboxStopResultFromNapi(result: {
     observedAt: new Date(result.observedAt),
     source: result.source ?? null,
   };
-}
-
-const snakeToCamel = (k: string): string =>
-  k.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase());
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function remapKeysToCamel(v: any): any {
-  if (Array.isArray(v)) return v.map(remapKeysToCamel);
-  if (v && typeof v === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeysToCamel(val);
-    return out;
-  }
-  return v;
 }

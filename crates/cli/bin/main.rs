@@ -12,7 +12,7 @@ use microsandbox_cli::{
         sandbox::{self, SandboxCommands},
         self_cmd,
         snapshot::{self, SnapshotCommands},
-        uninstall, volume,
+        storage, uninstall, volume,
     },
     log_args::{self, LogArgs},
     machine_cmd::{self, MachineArgs},
@@ -37,7 +37,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         heading: "Storage",
-        commands: &["volume", "snapshot"],
+        commands: &["df", "prune", "volume", "snapshot"],
     },
     CommandGroup {
         heading: "Installation",
@@ -147,6 +147,12 @@ enum Commands {
     /// Remove a cached image (alias for `image rm`).
     #[command(hide = true)]
     Rmi(image::ImageRemoveArgs),
+
+    /// Show aggregate local storage usage.
+    Df(storage::DfArgs),
+
+    /// Remove unused runtime memory cache files.
+    Prune(storage::PruneArgs),
 
     /// Manage named volumes.
     #[command(visible_alias = "vol")]
@@ -655,6 +661,7 @@ fn run_async_command_anyhow(
     let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
+        let mut cleanup_backend = None;
         // Stale-sandbox reaping and ephemeral cleanup are owned by host
         // runtime processes (`msb machine`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
@@ -669,10 +676,11 @@ fn run_async_command_anyhow(
             {
                 local.prepare_cli_catalog().await?;
             }
+            cleanup_backend = Some(backend.clone());
             microsandbox::set_default_backend(backend);
         }
 
-        match command {
+        let result = match command {
             Commands::Machine(_) | Commands::LaunchProtocol => {
                 unreachable!("handled before Tokio starts")
             }
@@ -710,6 +718,8 @@ fn run_async_command_anyhow(
                 .await
             }
             Commands::Rmi(args) => image::run_remove(args).await,
+            Commands::Df(args) => storage::run_df(args).await,
+            Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
             Commands::Install(args) => install::run(args).await,
@@ -719,7 +729,16 @@ fn run_async_command_anyhow(
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
             Commands::Completion(args) => completion::run(args, Cli::command()),
+        };
+        // A CLI runtime would cancel the deferred worker when this function returns.
+        // Drain after dispatch so graceful-stop deadlines still cover only VM teardown.
+        if let Some(local) = cleanup_backend
+            .as_ref()
+            .and_then(|backend| backend.as_local())
+        {
+            local.finish_stopped_memory_cleanup().await;
         }
+        result
     })
 }
 
@@ -837,6 +856,26 @@ mod command_tests {
             &context.command
         ));
         assert!(!is_backend_independent_maintenance_command(&create.command));
+    }
+
+    #[test]
+    fn storage_commands_parse_and_use_backend_resolution() {
+        let df = Cli::try_parse_from(["msb", "df", "--verbose"]).unwrap();
+        assert!(matches!(df.command, Commands::Df(_)));
+        assert!(!is_backend_independent_maintenance_command(&df.command));
+        assert!(!requires_current_catalog(&df.command));
+        assert!(Cli::try_parse_from(["msb", "df", "-q"]).is_err());
+        let prune =
+            Cli::try_parse_from(["msb", "prune", "--dry-run", "--older-than", "2h"]).unwrap();
+        assert!(matches!(prune.command, Commands::Prune(_)));
+        assert!(!is_backend_independent_maintenance_command(&prune.command));
+        assert!(!requires_current_catalog(&prune.command));
+        let storage = TOP_LEVEL_COMMAND_GROUPS
+            .iter()
+            .find(|group| group.heading == "Storage")
+            .unwrap();
+        assert!(storage.commands.contains(&"df"));
+        assert!(storage.commands.contains(&"prune"));
     }
 
     #[test]

@@ -4,16 +4,18 @@
 //! OCI image metadata in the database. The on-disk layer cache is managed
 //! by [`microsandbox_image::GlobalCache`]; this module owns the DB lifecycle.
 
-use std::{collections::HashSet, path::Path};
+mod cleanup;
+mod cleanup_journal;
+
+use std::path::Path;
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, Set,
+    ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
     sea_query::{Expr, OnConflict},
 };
 
 use microsandbox_image::{
-    CachedImageMetadata, CachedLayerMetadata, Digest, GlobalCache, ImageArchiveFormat, ImageConfig,
+    CachedImageMetadata, CachedLayerMetadata, GlobalCache, ImageArchiveFormat, ImageConfig,
     ImageLoadOptions, ImageSaveRequest, Platform, Reference,
 };
 
@@ -23,7 +25,6 @@ use crate::{
     db::entity::{
         config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
         manifest as manifest_entity, manifest_layer as manifest_layer_entity,
-        sandbox_rootfs as sandbox_rootfs_entity, snapshot as snapshot_entity,
     },
     error::Operation,
 };
@@ -117,14 +118,8 @@ pub struct ImagePruneReport {
     pub vmdk_removed: u32,
     /// Best-effort count of bytes reclaimed from deleted on-disk artifacts.
     pub bytes_reclaimed: Option<u64>,
-}
-
-/// Disk artifacts to clean up after a successful image prune transaction.
-#[derive(Debug, Default)]
-struct ImagePruneCleanup {
-    references: Vec<String>,
-    manifest_digests: Vec<String>,
-    layer_diff_ids: Vec<String>,
+    /// Independently locked image references, manifests, or layers skipped because they are busy.
+    pub skipped_in_use: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -193,6 +188,16 @@ impl Image {
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
+        let cache = GlobalCache::new(&local.cache_dir())?;
+        let mut paths = cache.metadata_paths(&metadata)?;
+        paths.push(
+            cache.image_metadata_path(
+                &reference
+                    .parse::<Reference>()
+                    .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?,
+            ),
+        );
+        let _leases = cache.lease_paths_async(paths).await?;
         let pools = local.db().await?;
         let db = pools.write();
         let reference = reference.to_string();
@@ -290,8 +295,9 @@ impl Image {
 
     /// Remove an image from the active local backend.
     ///
-    /// If `force` is false and the image is referenced by any sandbox, returns
-    /// [`MicrosandboxError::ImageInUse`].
+    /// Referenced images require `force` to untag, while their backing remains available to
+    /// sandboxes and snapshots. Active storage operations always return
+    /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
         let backend = crate::backend::default_backend();
         let local = backend
@@ -472,130 +478,15 @@ impl Image {
 
     /// Remove an image from the database and clean up orphaned layers on disk.
     ///
-    /// If `force` is false and the image is referenced by any sandbox, returns
-    /// [`MicrosandboxError::ImageInUse`].
+    /// Referenced images require `force` to untag, while their backing remains available to
+    /// sandboxes and snapshots. Active storage operations always return
+    /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove_local(
         local: &LocalBackend,
         reference: &str,
         force: bool,
     ) -> MicrosandboxResult<()> {
-        let pools = local.db().await?;
-        let db = pools.write();
-
-        let image_ref_model = image_ref_entity::Entity::find()
-            .filter(image_ref_entity::Column::Reference.eq(reference))
-            .one(pools.read())
-            .await?
-            .ok_or_else(|| MicrosandboxError::ImageNotFound(reference.into()))?;
-
-        let manifest_id = image_ref_model.manifest_id;
-        let image_ref_id = image_ref_model.id;
-
-        let (layer_diff_ids, flat_manifest_digest) = db
-            .transaction(|txn| async move {
-                // Check sandbox references inside transaction to avoid TOCTOU.
-                if !force {
-                    let refs = microsandbox_db::catalog::rootfs_query(&txn)
-                        .await?
-                        .filter(sandbox_rootfs_entity::Column::ManifestId.eq(manifest_id))
-                        .all(&txn)
-                        .await?;
-                    if !refs.is_empty() {
-                        let sandbox_ids: Vec<String> =
-                            refs.iter().map(|r| r.sandbox_id.to_string()).collect();
-                        return Err(MicrosandboxError::ImageInUse(sandbox_ids.join(", ")));
-                    }
-                }
-
-                let manifest_digest = manifest_entity::Entity::find_by_id(manifest_id)
-                    .one(&txn)
-                    .await?
-                    .map(|manifest| manifest.digest);
-
-                // Collect layer diff_ids before cascade delete removes junction rows.
-                let layer_diff_ids: Vec<String> = layer_entity::Entity::find()
-                    .join(
-                        JoinType::InnerJoin,
-                        layer_entity::Relation::ManifestLayer.def(),
-                    )
-                    .filter(manifest_layer_entity::Column::ManifestId.eq(manifest_id))
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .map(|l| l.diff_id)
-                    .collect();
-
-                // Delete the image_ref.
-                image_ref_entity::Entity::delete_by_id(image_ref_id)
-                    .exec(&txn)
-                    .await?;
-
-                // Check if any other image_refs still point to this manifest.
-                let remaining_refs = image_ref_entity::Entity::find()
-                    .filter(image_ref_entity::Column::ManifestId.eq(manifest_id))
-                    .count(&txn)
-                    .await?;
-
-                if remaining_refs == 0 {
-                    // No more references — delete manifest (cascades to config, manifest_layers).
-                    manifest_entity::Entity::delete_by_id(manifest_id)
-                        .exec(&txn)
-                        .await?;
-
-                    // Clean up orphaned layers with zero remaining manifest refs.
-                    let mut orphaned = Vec::new();
-                    for diff_id in &layer_diff_ids {
-                        let refs = manifest_layer_entity::Entity::find()
-                            .join(
-                                JoinType::InnerJoin,
-                                manifest_layer_entity::Relation::Layer.def(),
-                            )
-                            .filter(layer_entity::Column::DiffId.eq(diff_id.as_str()))
-                            .count(&txn)
-                            .await?;
-
-                        if refs == 0 {
-                            layer_entity::Entity::delete_many()
-                                .filter(layer_entity::Column::DiffId.eq(diff_id.as_str()))
-                                .exec(&txn)
-                                .await?;
-                            orphaned.push(diff_id.clone());
-                        }
-                    }
-
-                    return Ok((txn, (orphaned, manifest_digest)));
-                }
-
-                Ok((txn, (Vec::new(), None)))
-            })
-            .await?;
-
-        // Best-effort on-disk cleanup (outside transaction).
-        let cache_dir = local.cache_dir();
-        if let Ok(cache) = GlobalCache::new(&cache_dir) {
-            for diff_id_str in &layer_diff_ids {
-                if let Ok(diff_id) = diff_id_str.parse::<Digest>() {
-                    let _ = tokio::fs::remove_file(cache.layer_erofs_path(&diff_id)).await;
-                    let _ = tokio::fs::remove_file(cache.layer_erofs_lock_path(&diff_id)).await;
-                }
-            }
-
-            if let Some(manifest_digest) = flat_manifest_digest
-                && let Ok(digest) = manifest_digest.parse::<Digest>()
-            {
-                let _ = tokio::fs::remove_file(cache.fsmeta_erofs_path(&digest)).await;
-                let _ = tokio::fs::remove_file(cache.fsmeta_erofs_lock_path(&digest)).await;
-                let _ = tokio::fs::remove_file(cache.vmdk_path(&digest)).await;
-                let _ = tokio::fs::remove_file(cache.vmdk_lock_path(&digest)).await;
-            }
-
-            if let Ok(image_ref) = reference.parse::<Reference>() {
-                let _ = cache.delete_image_metadata(&image_ref);
-                let _ = tokio::fs::remove_file(cache.image_lock_path(&image_ref)).await;
-            }
-        }
-
-        Ok(())
+        cleanup::remove(local, reference, force).await
     }
 
     /// Remove cached image data that is not used by any sandbox or indexed snapshot.
@@ -604,149 +495,7 @@ impl Image {
     /// that become unreachable. Images used by existing sandboxes or snapshots
     /// are preserved.
     pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
-        let pools = local.db().await?;
-        let db = pools.write();
-
-        let (mut report, cleanup) = db
-            .transaction(|txn| async move {
-                let sandbox_refs = microsandbox_db::catalog::rootfs_query(&txn)
-                    .await?
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .filter_map(|r| r.manifest_id)
-                    .collect::<HashSet<_>>();
-
-                let snapshot_refs = snapshot_entity::Entity::find()
-                    .all(&txn)
-                    .await?
-                    .into_iter()
-                    .map(|s| s.image_manifest_digest)
-                    .collect::<HashSet<_>>();
-
-                let mut report = ImagePruneReport::default();
-                let mut cleanup = ImagePruneCleanup::default();
-
-                let image_refs = image_ref_entity::Entity::find()
-                    .find_also_related(manifest_entity::Entity)
-                    .all(&txn)
-                    .await?;
-
-                for (image_ref, manifest) in image_refs {
-                    let Some(manifest) = manifest else {
-                        continue;
-                    };
-                    if sandbox_refs.contains(&manifest.id)
-                        || snapshot_refs.contains(manifest.digest.as_str())
-                    {
-                        continue;
-                    }
-
-                    image_ref_entity::Entity::delete_by_id(image_ref.id)
-                        .exec(&txn)
-                        .await?;
-                    cleanup.references.push(image_ref.reference);
-                    report.image_refs_removed += 1;
-                }
-
-                let manifests = manifest_entity::Entity::find().all(&txn).await?;
-                for manifest in manifests {
-                    if sandbox_refs.contains(&manifest.id)
-                        || snapshot_refs.contains(manifest.digest.as_str())
-                    {
-                        continue;
-                    }
-
-                    let remaining_refs = image_ref_entity::Entity::find()
-                        .filter(image_ref_entity::Column::ManifestId.eq(manifest.id))
-                        .count(&txn)
-                        .await?;
-                    if remaining_refs > 0 {
-                        continue;
-                    }
-
-                    manifest_entity::Entity::delete_by_id(manifest.id)
-                        .exec(&txn)
-                        .await?;
-
-                    cleanup.manifest_digests.push(manifest.digest);
-                    report.manifests_removed += 1;
-                }
-
-                let orphaned_layers = layer_entity::Entity::find()
-                    .left_join(manifest_layer_entity::Entity)
-                    .filter(manifest_layer_entity::Column::Id.is_null())
-                    .all(&txn)
-                    .await?;
-
-                for layer in orphaned_layers {
-                    layer_entity::Entity::delete_by_id(layer.id)
-                        .exec(&txn)
-                        .await?;
-                    cleanup.layer_diff_ids.push(layer.diff_id);
-                    report.layers_removed += 1;
-                }
-
-                cleanup.layer_diff_ids.sort();
-                cleanup.layer_diff_ids.dedup();
-
-                Ok::<_, MicrosandboxError>((txn, (report, cleanup)))
-            })
-            .await?;
-
-        let cache_dir = local.cache_dir();
-        if let Ok(cache) = GlobalCache::new(&cache_dir) {
-            let mut bytes_reclaimed = 0u64;
-            let mut measured = false;
-
-            for reference in &cleanup.references {
-                if let Ok(image_ref) = reference.parse::<Reference>() {
-                    let (removed, bytes) =
-                        remove_file_measured(&cache.image_metadata_path(&image_ref)).await;
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-
-                    let _ = tokio::fs::remove_file(cache.image_lock_path(&image_ref)).await;
-                }
-            }
-
-            for diff_id_str in &cleanup.layer_diff_ids {
-                if let Ok(diff_id) = diff_id_str.parse::<Digest>() {
-                    let (removed, bytes) =
-                        remove_file_measured(&cache.layer_erofs_path(&diff_id)).await;
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.layer_erofs_lock_path(&diff_id)).await;
-                }
-            }
-
-            for manifest_digest in &cleanup.manifest_digests {
-                if let Ok(digest) = manifest_digest.parse::<Digest>() {
-                    let (removed, bytes) =
-                        remove_file_measured(&cache.fsmeta_erofs_path(&digest)).await;
-                    if removed {
-                        report.fsmeta_removed += 1;
-                    }
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.fsmeta_erofs_lock_path(&digest)).await;
-
-                    let (removed, bytes) = remove_file_measured(&cache.vmdk_path(&digest)).await;
-                    if removed {
-                        report.vmdk_removed += 1;
-                    }
-                    measured |= removed;
-                    bytes_reclaimed = bytes_reclaimed.saturating_add(bytes);
-                    let _ = tokio::fs::remove_file(cache.vmdk_lock_path(&digest)).await;
-                }
-            }
-
-            if measured {
-                report.bytes_reclaimed = Some(bytes_reclaimed);
-            }
-        }
-
-        Ok(report)
+        cleanup::prune(local).await
     }
 
     /// Load images from a local archive into an explicit local backend's cache.
@@ -759,20 +508,26 @@ impl Image {
         input: &Path,
         tags: Vec<String>,
     ) -> MicrosandboxResult<Vec<ImageHandle>> {
-        let cache_dir = local.cache_dir();
-        let loaded = microsandbox_image::load_archive(
-            &cache_dir,
+        let cache = GlobalCache::new(&local.cache_dir())?;
+        let loaded = microsandbox_image::load_archive_with(
+            &cache,
             input,
             ImageLoadOptions {
                 tags,
                 progress: None,
             },
+            |image| async move {
+                Self::persist(local, &image.reference, image.metadata)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| {
+                        microsandbox_image::ImageError::Io(std::io::Error::other(error))
+                    })
+            },
         )
         .await?;
-
         let mut handles = Vec::with_capacity(loaded.len());
         for image in loaded {
-            Self::persist(local, &image.reference, image.metadata).await?;
             handles.push(Self::get_local(local, &image.reference).await?);
         }
         Ok(handles)
@@ -795,7 +550,7 @@ impl Image {
         // Metadata reads and the archive write are all blocking filesystem
         // work, so the whole save runs off the async runtime.
         tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
-            let cache = GlobalCache::new(&cache_dir)?;
+            let cache = GlobalCache::new(&cache_dir)?.operation();
 
             let mut requests = Vec::with_capacity(references.len());
             for reference in references {
@@ -840,19 +595,6 @@ fn build_handle_from_parts(
         total_size_bytes: manifest.and_then(|m| m.total_size_bytes),
         created_at: model.created_at.map(|dt| dt.and_utc()),
         updated_at: model.updated_at.map(|dt| dt.and_utc()),
-    }
-}
-
-/// Remove a file and return whether it existed plus its measured size.
-async fn remove_file_measured(path: &Path) -> (bool, u64) {
-    let bytes = tokio::fs::metadata(path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or_default();
-
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => (true, bytes),
-        Err(_) => (false, 0),
     }
 }
 

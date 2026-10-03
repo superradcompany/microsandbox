@@ -34,6 +34,7 @@ mod pull;
 mod registry;
 pub mod snapshot;
 pub(crate) mod stitch;
+pub mod storage_lease;
 pub mod tar;
 pub mod tree;
 
@@ -43,7 +44,8 @@ pub mod tree;
 
 pub use archive::{
     ImageArchiveFormat, ImageLoadOptions, ImageSaveConfig, ImageSaveLayer, ImageSaveRequest,
-    LoadedImage, load_archive, save_archive, save_docker_archive,
+    LoadedImage, load_archive, load_archive_into, load_archive_with, save_archive,
+    save_docker_archive,
 };
 pub use cache::{CachedImageMetadata, CachedLayerMetadata, FlatRootfsRef, GlobalCache};
 pub use config::ImageConfig;

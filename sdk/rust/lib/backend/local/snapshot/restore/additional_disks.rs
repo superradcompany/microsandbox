@@ -130,7 +130,9 @@ pub(crate) async fn materialize_additional_disks(
         let expected_integrity = layer.integrity_root.clone();
         let expected_size = layer.file_size;
         let qcow2 = layer.format == "qcow2";
+        let pin = super::super::lease::pin_source(&source)?;
         let worker = tokio::task::spawn_blocking(move || {
+            let _pin = pin;
             stage_additional_disk(
                 &source,
                 &staging_parent,

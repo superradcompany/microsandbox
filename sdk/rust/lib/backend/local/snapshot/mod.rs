@@ -4,12 +4,15 @@ pub(super) mod archive;
 mod artifact;
 mod copy;
 mod create;
+pub(crate) mod deletion;
 mod dispatch;
 pub mod downgrade;
 mod group;
+mod lease;
 pub(crate) mod lineage;
 mod metadata;
 pub(super) mod migration;
+pub(crate) mod publication;
 mod restore;
 mod store;
 mod verify;
@@ -35,4 +38,6 @@ pub(crate) use restore::{
     materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
 };
 
+pub(crate) use archive::save_snapshot_expected;
 pub(super) use store::looks_like_path;
+pub(crate) use store::remove_snapshot_expected;

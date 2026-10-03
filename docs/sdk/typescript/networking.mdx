@@ -631,7 +631,7 @@ Omitted restore limits use destination defaults; zero selects unlimited. The sam
 maxTcpConnections(max: number): this
 ```
 
-Limit the maximum number of concurrent network connections from the sandbox.
+Limit the maximum number of concurrent network connections from the sandbox. TCP and UDP connection limits must be non-negative safe integers; zero explicitly selects unlimited. Fractional, negative, non-finite, and unsafe integers are rejected instead of being truncated or wrapped.
 
 <p className="msb-label">Parameters</p>
 

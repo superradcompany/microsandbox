@@ -56,7 +56,8 @@ impl JsRestoreBuilder {
 
     /// Set destination CPUs; full execution restore requires the captured count.
     #[napi]
-    pub fn cpus(&mut self, count: u32) -> Result<&Self> {
+    pub fn cpus(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::uint32(count, "count")?;
         let count =
             u8::try_from(count).map_err(|_| napi::Error::from_reason("cpus out of u8 range"))?;
         self.inner = Some(self.take_inner()?.cpus(count));
@@ -65,7 +66,8 @@ impl JsRestoreBuilder {
 
     /// Set destination memory in MiB; full execution restore requires captured geometry.
     #[napi]
-    pub fn memory(&mut self, mib: u32) -> Result<&Self> {
+    pub fn memory(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
         self.inner = Some(self.take_inner()?.memory(Mebibytes::from(mib)));
         Ok(self)
     }
@@ -105,20 +107,22 @@ impl JsRestoreBuilder {
 
     /// @deprecated Use maxTcpConnections instead.
     #[napi(js_name = "maxConnections")]
-    pub fn max_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_connections(&mut self, count: f64) -> Result<&Self> {
         self.max_tcp_connections(count)
     }
 
     /// Cap destination host-side TCP connections; zero selects unlimited.
     #[napi(js_name = "maxTcpConnections")]
-    pub fn max_tcp_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_tcp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
         self.inner = Some(self.take_inner()?.max_tcp_connections(count as usize));
         Ok(self)
     }
 
     /// Cap destination host-side UDP sessions; zero selects unlimited.
     #[napi(js_name = "maxUdpConnections")]
-    pub fn max_udp_connections(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_udp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
         self.inner = Some(self.take_inner()?.max_udp_connections(count as usize));
         Ok(self)
     }
@@ -278,7 +282,9 @@ impl JsRestoreBuilder {
 
     /// Publish a TCP port from host -> guest.
     #[napi]
-    pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -290,7 +296,9 @@ impl JsRestoreBuilder {
 
     /// Publish a TCP port from host -> guest on a specific host bind address.
     #[napi(js_name = "portBind")]
-    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_bind(&mut self, bind: String, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -303,7 +311,9 @@ impl JsRestoreBuilder {
 
     /// Publish a UDP port from host -> guest.
     #[napi(js_name = "portUdp")]
-    pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_udp(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -318,9 +328,11 @@ impl JsRestoreBuilder {
     pub fn port_udp_bind(
         &mut self,
         bind: String,
-        host_port: u32,
-        guest_port: u32,
+        host_port: f64,
+        guest_port: f64,
     ) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -341,7 +353,8 @@ impl JsRestoreBuilder {
 
     /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
     #[napi]
-    pub fn vsock(&mut self, host_path: String, port: u32) -> Result<&Self> {
+    pub fn vsock(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner()?;
         self.inner = Some(prev.vsock(host_path, port));
         Ok(self)
@@ -349,7 +362,8 @@ impl JsRestoreBuilder {
 
     /// Expose a host Unix datagram socket on a guest-to-host vsock port.
     #[napi(js_name = "vsockDgram")]
-    pub fn vsock_dgram(&mut self, host_path: String, port: u32) -> Result<&Self> {
+    pub fn vsock_dgram(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner()?;
         self.inner = Some(prev.vsock_dgram(host_path, port));
         Ok(self)

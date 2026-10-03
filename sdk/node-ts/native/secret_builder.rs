@@ -28,6 +28,8 @@ pub struct JsSecretEntry {
     pub passthrough_hosts: Vec<String>,
     /// Require verified TLS identity before substituting (default: true).
     pub require_tls_identity: bool,
+    /// Per-secret override of the network violation action.
+    pub violation_action: Option<String>,
     /// Where the secret may be injected into requests.
     // Keep the public name stable when napi-rs renders this renamed nested object.
     #[napi(ts_type = "SecretSubstitution")]
@@ -236,6 +238,18 @@ pub(crate) fn to_js_secret_entry(entry: RustSecretEntry) -> JsSecretEntry {
             .map(host_pattern_string)
             .collect(),
         require_tls_identity: entry.require_tls_identity,
+        violation_action: entry.violation_action.map(|action| {
+            match action {
+                microsandbox_network::secrets::config::SecretViolationAction::Block => "block",
+                microsandbox_network::secrets::config::SecretViolationAction::BlockAndLog => {
+                    "block-and-log"
+                }
+                microsandbox_network::secrets::config::SecretViolationAction::BlockAndTerminate => {
+                    "block-and-terminate"
+                }
+            }
+            .to_string()
+        }),
         substitution: JsSecretSubstitution {
             headers: entry.substitution.headers,
             query: entry.substitution.query,

@@ -120,7 +120,9 @@ impl SnapshotBackend for LocalBackend {
             if may_be_archive && Path::new(&selector).is_file() {
                 config.snapshot_archive_source = Some(PathBuf::from(selector));
             } else {
-                let snapshot = from_artifact(backend, store::open_snapshot(self, &selector).await?);
+                let artifact = store::open_snapshot_leased(self, &selector).await?;
+                config.snapshot_lease = artifact.lease.clone();
+                let snapshot = from_artifact(backend, artifact);
                 crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
             }
             // The create path also admits deferred references; successful preparation
@@ -142,12 +144,15 @@ impl SnapshotBackend for LocalBackend {
         snapshot: &'a Snapshot,
     ) -> BoxFuture<'a, MicrosandboxResult<SnapshotVerifyReport>> {
         Box::pin(async move {
-            let mut artifact = artifact::Snapshot::from_parts(
-                snapshot.path()?.to_path_buf(),
-                snapshot.digest().into(),
-                snapshot.manifest().clone(),
-                snapshot.labels().clone(),
-            );
+            let mut artifact =
+                store::open_snapshot_leased(self, snapshot.path()?.to_string_lossy().as_ref())
+                    .await?;
+            if artifact.digest() != snapshot.digest() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
+            // Keep the exact legacy flat-payload binding from the opened handle.
             artifact.previous_upper = snapshot.previous_upper.clone();
             verify::verify_snapshot(&artifact).await
         })
@@ -162,6 +167,15 @@ impl SnapshotBackend for LocalBackend {
     ) -> BoxFuture<'a, MicrosandboxResult<Manifest>> {
         Box::pin(async move {
             let out = std::path::absolute(out)?;
+            let artifact =
+                store::open_snapshot_leased(self, snapshot.path()?.to_string_lossy().as_ref())
+                    .await?;
+            if artifact.digest() != snapshot.digest() {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot was replaced since this handle was opened".into(),
+                ));
+            }
+            // The leased artifact stays alive through the copy's final awaited write.
             copy::copy_snapshot_archive(snapshot, &out, labels, record_integrity).await
         })
     }

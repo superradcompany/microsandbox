@@ -72,6 +72,7 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 | [`snap`](/cli/snapshot-commands) | Save and restore state |
 | [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
 | [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |
+| [`df`, `prune`](/cli/storage-commands) | Inspect local storage and reclaim unused runtime RAM |
 | [`pull`, `load`, `save`, `images`, `rmi`, `image`](/cli/image-commands) | Manage cached images |
 | [`registry`, `registries`](/cli/registry-commands) | Manage registry credentials |
 | [`context`](/cli/management#msb-context) | Show the active backend |
@@ -100,6 +101,12 @@ msb rm worker
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+## Output formatting
+
+Progress, styled action confirmations, warnings, and errors go to stderr. Tables, inspection results, and JSON go to stdout. Empty-list messages retain their command-specific behavior: the registry empty-list message goes to stdout, while listing installed aliases produces no output when none exist. The plain `snapshot reindex` completion message also remains on stdout.
+
+Indented output uses two spaces, with nested content at four spaces. Human-readable image, snapshot, and volume sizes use binary units (KiB, MiB, GiB, TiB); JSON retains its documented numeric fields.
 
 ## Shell completion
 

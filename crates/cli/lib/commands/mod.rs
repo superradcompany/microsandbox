@@ -38,6 +38,7 @@ pub mod snapshot;
 pub mod ssh;
 pub mod start;
 pub mod stop;
+pub mod storage;
 pub mod touch;
 pub mod uninstall;
 pub mod volume;
@@ -51,10 +52,21 @@ pub mod wait;
 ///
 /// When connecting to an already-running sandbox, this is a no-op.
 pub async fn maybe_stop(sandbox: &Sandbox) {
-    if sandbox.owns_lifecycle()
-        && let Err(e) = sandbox.stop().await
-    {
-        ui::warn(&format!("failed to stop sandbox: {e}"));
+    if sandbox.owns_lifecycle() {
+        if let Err(e) = sandbox.stop().await {
+            ui::warn(&format!("failed to stop sandbox: {e}"));
+        }
+        // Exec, run and SSH can exit with the guest's status before main's
+        // finalizer runs. Complete any scheduled cleanup before that exit.
+        finish_stopped_memory_cleanup().await;
+    }
+}
+
+/// Finish local stop cleanup before a command calls `process::exit`.
+pub(crate) async fn finish_stopped_memory_cleanup() {
+    let backend = microsandbox::backend::default_backend();
+    if let Some(local) = backend.as_local() {
+        local.finish_stopped_memory_cleanup().await;
     }
 }
 

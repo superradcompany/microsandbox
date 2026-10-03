@@ -199,6 +199,7 @@ typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, cons
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_shell_path_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_shell_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_all_sandbox_metrics_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_metrics_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
@@ -223,6 +224,9 @@ typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_
 typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_storage_usage_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_storage_usage_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_storage_prune_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_load_fn)(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_save_fn)(uint64_t cancel_id, const char *references_json, const char *output_path, const char *format, uint8_t *buf, size_t buf_len);
 
@@ -370,6 +374,7 @@ static msb_exec_id_fn              ptr_msb_exec_id              = NULL;
 static msb_sandbox_attach_fn      ptr_msb_sandbox_attach      = NULL;
 static msb_sandbox_attach_default_fn ptr_msb_sandbox_attach_default = NULL;
 static msb_sandbox_attach_shell_fn ptr_msb_sandbox_attach_shell = NULL;
+static msb_sandbox_shell_path_fn ptr_msb_sandbox_shell_path = NULL;
 static msb_all_sandbox_metrics_fn  ptr_msb_all_sandbox_metrics  = NULL;
 static msb_sandbox_handle_metrics_fn ptr_msb_sandbox_handle_metrics = NULL;
 static msb_sandbox_logs_fn          ptr_msb_sandbox_logs          = NULL;
@@ -407,6 +412,9 @@ static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
 static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
+static msb_storage_usage_fn       ptr_msb_storage_usage       = NULL;
+static msb_sandbox_storage_usage_fn ptr_msb_sandbox_storage_usage = NULL;
+static msb_storage_prune_fn       ptr_msb_storage_prune       = NULL;
 static msb_image_load_fn           ptr_msb_image_load           = NULL;
 static msb_image_save_fn           ptr_msb_image_save           = NULL;
 static msb_sandbox_handle_snapshot_fn ptr_msb_sandbox_handle_snapshot = NULL;
@@ -568,6 +576,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_attach);
 	RESOLVE(msb_sandbox_attach_default);
 	RESOLVE(msb_sandbox_attach_shell);
+	RESOLVE_OPTIONAL(msb_sandbox_shell_path);
 	RESOLVE(msb_all_sandbox_metrics);
 	RESOLVE(msb_sandbox_handle_metrics);
 	RESOLVE(msb_sandbox_logs);
@@ -605,6 +614,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_inspect);
 	RESOLVE(msb_image_remove);
 	RESOLVE(msb_image_prune);
+	RESOLVE_OPTIONAL(msb_storage_usage);
+	RESOLVE_OPTIONAL(msb_sandbox_storage_usage);
+	RESOLVE_OPTIONAL(msb_storage_prune);
 	RESOLVE(msb_image_load);
 	RESOLVE(msb_image_save);
 	RESOLVE(msb_sandbox_handle_snapshot);
@@ -652,6 +664,10 @@ void call_msb_cancel_trigger(uint64_t id) {
 }
 void call_msb_cancel_unregister(uint64_t id) {
 	if (ptr_msb_cancel_unregister) ptr_msb_cancel_unregister(id);
+}
+bool has_sandbox_shell_path(void) { return ptr_msb_sandbox_shell_path != NULL; }
+char *call_msb_sandbox_shell_path(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_sandbox_shell_path ? ptr_msb_sandbox_shell_path(cancel_id, handle, buf, buf_len) : NULL;
 }
 bool has_sandbox_restore(void) { return ptr_msb_sandbox_restore != NULL; }
 char *call_msb_sandbox_restore(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
@@ -1052,6 +1068,18 @@ char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool forc
 }
 char *call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_prune ? ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
+}
+bool has_msb_storage_usage(void) { return ptr_msb_storage_usage != NULL; }
+bool has_msb_sandbox_storage_usage(void) { return ptr_msb_sandbox_storage_usage != NULL; }
+char *call_msb_sandbox_storage_usage(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_storage_usage ? ptr_msb_sandbox_storage_usage(cancel_id, handle, buf, buf_len) : NULL;
+}
+bool has_msb_storage_prune(void) { return ptr_msb_storage_prune != NULL; }
+char *call_msb_storage_usage(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_storage_usage ? ptr_msb_storage_usage(cancel_id, buf, buf_len) : NULL;
+}
+char *call_msb_storage_prune(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_storage_prune ? ptr_msb_storage_prune(cancel_id, options_json, buf, buf_len) : NULL;
 }
 char *call_msb_image_load(uint64_t cancel_id, const char *input_path, const char *tags_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_load ? ptr_msb_image_load(cancel_id, input_path, tags_json, buf, buf_len) : NULL;
@@ -3151,6 +3179,29 @@ type ExecResult struct {
 	ExitCode int // -1 if the guest did not report a code
 }
 
+// ShellPath reads from the native handle, avoiding a lookup through a changed default backend.
+func (s *Sandbox) ShellPath(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_sandbox_shell_path()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "configured shell execution requires an updated microsandbox native library"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_shell_path(cancelID, s.h(), buf, bufLen)
+	})
+	if err != nil {
+		return "", err
+	}
+	var response struct {
+		Shell string `json:"shell"`
+	}
+	if err := json.Unmarshal([]byte(out), &response); err != nil {
+		return "", fmt.Errorf("parse shell path: %w", err)
+	}
+	return response.Shell, nil
+}
+
 // Exec runs cmd in the sandbox and collects its output.
 func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*ExecResult, error) {
 	if err := ensureLoaded(); err != nil {
@@ -3171,19 +3222,7 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, opts ExecOptions) (*Exec
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // ExecDefault runs the sandbox's effective OCI entrypoint and CMD and collects its output.
@@ -3204,19 +3243,7 @@ func (s *Sandbox) ExecDefault(ctx context.Context, opts ExecOptions) (*ExecResul
 	if err != nil {
 		return nil, err
 	}
-	var raw struct {
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		ExitCode *int   `json:"exit_code"`
-	}
-	if err := json.Unmarshal([]byte(out), &raw); err != nil {
-		return nil, fmt.Errorf("parse exec_default response: %w", err)
-	}
-	code := -1
-	if raw.ExitCode != nil {
-		code = *raw.ExitCode
-	}
-	return &ExecResult{Stdout: raw.Stdout, Stderr: raw.Stderr, ExitCode: code}, nil
+	return decodeCollectedOutput(out)
 }
 
 // =============================================================================
@@ -5174,6 +5201,7 @@ type ImageDetailInfo struct {
 
 // ImagePruneReportInfo is the JSON shape returned by image prune.
 type ImagePruneReportInfo struct {
+	SkippedInUse     uint32  `json:"skipped_in_use"`
 	ImageRefsRemoved uint32  `json:"image_refs_removed"`
 	ManifestsRemoved uint32  `json:"manifests_removed"`
 	LayersRemoved    uint32  `json:"layers_removed"`
@@ -5270,6 +5298,98 @@ func ImagePrune(ctx context.Context) (*ImagePruneReportInfo, error) {
 		return nil, fmt.Errorf("parse image_prune: %w", err)
 	}
 	return &info, nil
+}
+
+// StorageUsage observes this live sandbox through its retained native backend and identity.
+func (s *Sandbox) StorageUsage(ctx context.Context) (*StorageItemUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	handle := s.handle.Load()
+	if handle == 0 {
+		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_sandbox_storage_usage()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support sandbox storage usage; update the native SDK"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_storage_usage(cancelID, C.uint64_t(handle), buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StorageItemUsage
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse sandbox storage usage: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no sandbox storage usage report")
+	}
+	return report, nil
+}
+
+// StorageUsage observes storage in the selected backend. Older native bundles remain loadable;
+// only this new capability returns unsupported when its optional symbol is absent.
+func StorageUsage(ctx context.Context) (*StorageUsageReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_storage_usage()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support storage usage; update the native SDK"}
+	}
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_storage_usage(cancelID, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StorageUsageReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse storage usage: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no storage usage report")
+	}
+	return report, nil
+}
+
+// PruneStorage revalidates runtime cache ownership before removal and never prompts.
+func PruneStorage(ctx context.Context, options StoragePruneOptions) (*StoragePruneReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_storage_prune()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support storage pruning; update the native SDK"}
+	}
+	payload, err := json.Marshal(options)
+	if err != nil {
+		return nil, err
+	}
+	cOptions := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(cOptions))
+	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_storage_prune(cancelID, cOptions, buf, bufLen)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var report *StoragePruneReport
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		return nil, fmt.Errorf("parse storage prune: %w", err)
+	}
+	if report == nil {
+		return nil, fmt.Errorf("native SDK returned no storage prune report")
+	}
+	return report, nil
 }
 
 // ImageLoad imports images from a local archive into the cache and returns

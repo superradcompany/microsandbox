@@ -509,10 +509,8 @@ export declare class NetworkBuilder {
   /** 4-arg shorthand: add a secret with explicit placeholder. */
   secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
   /**
-   * 3-arg shorthand matching the Rust core's `secret_env(env_var,
-   * value, allowed_host)`. The placeholder defaults to the original
-   * value (env-var injection only — header injection is disabled
-   * without an explicit placeholder).
+   * Add a secret using the same generated placeholder as SandboxBuilder.
+   * Enables TLS interception while preserving existing TLS settings.
    */
   secretEnvSimple(envVar: string, value: string, allowedHost: string): this
   /**
@@ -1466,6 +1464,8 @@ export type JsSandboxFsOps = SandboxFsOps
  * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
  */
 export declare class SandboxHandle {
+  /** Observe object storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */
@@ -1658,6 +1658,8 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
+  /** Observe object storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
@@ -1779,6 +1781,8 @@ export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
+  /** Observe object storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   get group(): string | null
   get headUpdate(): HeadUpdate | null
   get id(): string
@@ -2137,6 +2141,7 @@ export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /** Summary of artifacts removed by `imagePrune`. */
 export interface ImagePruneReportJs {
+  skippedInUse: number
   imageRefsRemoved: number
   manifestsRemoved: number
   layersRemoved: number
@@ -2146,8 +2151,8 @@ export interface ImagePruneReportJs {
 }
 
 /**
- * Remove a cached image. Pass `force = true` to delete even when a
- * sandbox references it.
+ * Remove an image reference. Force permits untagging dependencies while retaining
+ * their backing; active storage operations are never bypassed.
  */
 export declare function imageRemove(reference: string, force?: boolean | undefined | null): Promise<void>
 
@@ -2568,6 +2573,8 @@ export interface SecretEntry {
   passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
+  /** Per-secret override of the network violation action. */
+  violationAction?: string
   /** Where the secret may be injected into requests. */
   substitution: SecretSubstitution
 }
@@ -2828,4 +2835,64 @@ export interface VolumeMount {
    * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
+}
+
+
+/** Observe storage in the selected local backend without removing files. */
+export declare function storageUsage(): Promise<StorageUsageJs>
+
+/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
+export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
+
+/** Aggregate storage usage. Unknown measurements remain nullable. */
+export interface StorageUsageJs {
+  images: StorageCategoryUsageJs
+  snapshots: StorageCategoryUsageJs
+  sandboxes: StorageCategoryUsageJs
+  volumes: StorageCategoryUsageJs
+  branchMemory: StorageCategoryUsageJs
+  snapshotMemory: StorageCategoryUsageJs
+  notes: Array<string>
+}
+
+/** Counts and observed bytes in one managed storage category. */
+export interface StorageCategoryUsageJs {
+  count?: number
+  inUse?: number
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  reclaimableLogicalBytes?: bigint
+  items: Array<StorageItemUsageJs>
+  notes: Array<string>
+}
+
+/** One object's storage usage and retention explanations. */
+export interface StorageItemUsageJs {
+  name: string
+  path: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  inUse?: boolean
+  reclaimable?: boolean
+  reasons: Array<string>
+}
+
+/** Per-file reclamation result, including ownership exclusions and errors. */
+export interface MemoryCacheEntryJs {
+  path: string
+  kind: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  state: string
+  error?: string
+}
+
+/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
+export interface MemoryCacheReportJs {
+  dryRun: boolean
+  entries: Array<MemoryCacheEntryJs>
+  filesRemoved: number
+  logicalBytesRemoved: bigint
+  physicalBytesReclaimed?: bigint
+  truncated: boolean
 }
