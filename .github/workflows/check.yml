@@ -824,7 +824,7 @@ jobs:
 
       - name: Check Rust SDK feature surfaces
         run: |
-          cargo +stable check -p microsandbox --no-default-features --features cloud,net
+          cargo +stable test -p microsandbox --no-default-features --features cloud,net --test api_compat
           cargo +stable check -p microsandbox --no-default-features --features local,net
           cargo +stable check -p microsandbox-runtime --no-default-features --features client,net
           cargo +stable check -p microsandbox-network --no-default-features

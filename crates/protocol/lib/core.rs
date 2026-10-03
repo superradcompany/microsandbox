@@ -234,7 +234,9 @@ pub struct RootDiskState {
 /// Sent when a peer can identify a recoverable protocol error for a specific
 /// correlation ID. Unrecoverable frame-level errors, such as stream
 /// desynchronization or impossible frame lengths, should close the transport
-/// instead.
+/// instead. Before `core.ready`, agentd may send `InitializationFailed` with
+/// id=0 and the terminal flag. The host saves this fatal startup error before sending
+/// `core.init.ack` with `failure=true`, allowing the guest to exit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoreError {
     /// Machine-readable error kind.
@@ -247,9 +249,26 @@ pub struct CoreError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offending_type: Option<String>,
 
+    /// Typed reason for a fatal guest initialization failure, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_failure: Option<InitFailureReason>,
+
     /// Attempt-scoped freezer disposition. Absence is ambiguous, not proof that no work froze.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_failure: Option<WorkloadFailure>,
+}
+
+/// Guest initialization failures with actionable configuration guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InitFailureReason {
+    /// The configured named user does not exist in the guest image.
+    UserNotFound,
+    /// The configured named group does not exist in the guest image.
+    GroupNotFound,
+    /// A reason introduced by a newer guest; no specific hint is available.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Additional recovery information for a workload control error.
@@ -278,6 +297,9 @@ pub enum WorkloadFailureDisposition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreErrorKind {
+    /// Guest initialization failed before the agent became ready.
+    InitializationFailed,
+
     /// The protocol message envelope could not be decoded.
     MalformedMessage,
 
@@ -324,9 +346,13 @@ pub struct ResolvedUser {
 /// Payload for `core.init.ack` messages.
 ///
 /// Sent by the host after it has consumed the init context and completed any
-/// dependent setup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitAck {}
+/// dependent setup, or saved a fatal guest initialization error.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct InitAck {
+    /// True only when acknowledging a persisted initialization failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failure: bool,
+}
 
 /// Payload for `core.relay.client.disconnected` messages.
 ///

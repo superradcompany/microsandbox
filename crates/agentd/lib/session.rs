@@ -1453,7 +1453,7 @@ fn resolve_user_spec(spec: &str) -> AgentdResult<ResolvedUser> {
         lookup_passwd_by_uid(uid)?
     } else {
         lookup_passwd_by_name(user_part)?
-            .ok_or_else(|| AgentdError::ExecSession(format!("guest user not found: {user_part}")))?
+            .ok_or_else(|| AgentdError::UserNotFound(user_part.to_owned()))?
             .into()
     };
 
@@ -1510,7 +1510,7 @@ fn resolve_group_spec(spec: &str) -> AgentdResult<libc::gid_t> {
 
     lookup_group_by_name(spec)?
         .map(|entry| entry.gid)
-        .ok_or_else(|| AgentdError::ExecSession(format!("guest group not found: {spec}")))
+        .ok_or_else(|| AgentdError::GroupNotFound(spec.to_owned()))
 }
 
 fn parse_id(value: &str) -> Result<u32, std::num::ParseIntError> {
