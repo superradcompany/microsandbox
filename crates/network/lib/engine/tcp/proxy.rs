@@ -2415,6 +2415,222 @@ mod tests {
         assert_eq!(wire, b"GET /one HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
     }
 
+    /// Relay `chunks` as separate guest reads through a proxy with one domain
+    /// rule and no secrets. The guest side stays open, so the proxy must close
+    /// the connection by itself. Returns the bytes upstream received and
+    /// whether sandbox termination was requested.
+    ///
+    /// Both the proxy and the upstream sink are bounded. A regression that
+    /// refuses the guest *before* dialing leaks the proxy future but never
+    /// connects the sink, so the sink wait has its own deadline and aborts the
+    /// task instead of hanging `cargo test` forever.
+    async fn relay_h2c_until_proxy_closes(chunks: Vec<Vec<u8>>) -> (Vec<u8>, bool) {
+        let (addr, mut sink) = spawn_sink().await;
+        let shared = Arc::new(shared_with("allowed.example", "127.0.0.1"));
+        let terminated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = terminated.clone();
+        shared.set_termination_hook(Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![allow_tcp("allowed.example", addr.port())],
+        });
+        let (from_tx, from_rx) = mpsc::channel::<Bytes>(chunks.len());
+        let (to_tx, _to_rx) = mpsc::channel::<Bytes>(8);
+        for chunk in chunks {
+            from_tx.send(Bytes::from(chunk)).await.unwrap();
+        }
+
+        let proxy = TcpProxy::new(
+            addr,
+            UpstreamTcpTarget::direct(addr),
+            from_rx,
+            to_tx,
+            shared,
+            policy,
+            Arc::new(SecretsConfig::default()),
+            None,
+            false,
+            Arc::new(ProxyConnectState::new()),
+            None,
+        )
+        .try_run();
+        tokio::time::timeout(Duration::from_secs(5), proxy)
+            .await
+            .expect("proxy kept the guest connection open")
+            .unwrap();
+        drop(from_tx);
+
+        let wire = match tokio::time::timeout(Duration::from_secs(5), &mut sink).await {
+            Ok(wire) => wire.unwrap(),
+            Err(_) => {
+                sink.abort();
+                panic!(
+                    "upstream sink never accepted a connection; the proxy refused the guest before dialing"
+                );
+            }
+        };
+        (wire, terminated.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// A valid h2c first request: preface, empty SETTINGS, then `:method GET`,
+    /// `:scheme http`, `:path /` and an incrementally indexed `:authority`
+    /// (index 62).
+    fn h2c_first_request(authority: &[u8]) -> Vec<u8> {
+        let mut block = vec![0x82, 0x86, 0x84, 0x41, authority.len() as u8];
+        block.extend_from_slice(authority);
+        let mut first = H2_PREFACE.to_vec();
+        first.extend(h2_frame(H2_SETTINGS, 0, 0, &[]));
+        first.extend(h2_frame(
+            H2_HEADERS,
+            H2_END_STREAM | H2_END_HEADERS,
+            1,
+            &block,
+        ));
+        first
+    }
+
+    /// The wire bytes for [`h2c_first_request`]: the proxy re-encodes every
+    /// field as a never-indexed raw literal.
+    fn h2c_first_request_wire(authority: &[u8]) -> Vec<u8> {
+        let mut expected_block = Vec::new();
+        for (name, value) in [
+            (&b":method"[..], &b"GET"[..]),
+            (b":scheme", b"http"),
+            (b":path", b"/"),
+            (b":authority", authority),
+        ] {
+            expected_block.extend_from_slice(&[0x10, name.len() as u8]);
+            expected_block.extend_from_slice(name);
+            expected_block.push(value.len() as u8);
+            expected_block.extend_from_slice(value);
+        }
+        let mut expected = H2_PREFACE.to_vec();
+        expected.extend(h2_frame(H2_SETTINGS, 0, 0, &[]));
+        expected.extend(h2_frame(
+            H2_HEADERS,
+            H2_END_STREAM | H2_END_HEADERS,
+            1,
+            &expected_block,
+        ));
+        expected
+    }
+
+    /// One HTTP/2 frame.
+    fn h2_frame(kind: u8, flags: u8, stream_id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut frame = (payload.len() as u32).to_be_bytes()[1..].to_vec();
+        frame.extend_from_slice(&[kind, flags]);
+        frame.extend_from_slice(&stream_id.to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    const H2_HEADERS: u8 = 0x1;
+    const H2_SETTINGS: u8 = 0x4;
+    const H2_CONTINUATION: u8 = 0x9;
+    const H2_END_STREAM: u8 = 0x1;
+    const H2_END_HEADERS: u8 = 0x4;
+
+    #[tokio::test]
+    async fn h2c_malformed_hpack_block_is_blocked_under_domain_policy() {
+        // Prior-knowledge HTTP/2 whose only HEADERS block is `ff`: a truncated
+        // indexed-field integer. A domain rule alone installs the secrets
+        // handler here, with no secrets configured.
+        let mut request = H2_PREFACE.to_vec();
+        request.extend(h2_frame(
+            H2_HEADERS,
+            H2_END_STREAM | H2_END_HEADERS,
+            1,
+            &[0xff],
+        ));
+
+        let (wire, terminated) = relay_h2c_until_proxy_closes(vec![request]).await;
+
+        // The whole first flight is rejected, so not even the preface is sent.
+        assert!(
+            wire.is_empty(),
+            "malformed block reached upstream: {wire:02x?}"
+        );
+        assert!(!terminated);
+    }
+
+    #[tokio::test]
+    async fn h2c_late_hpack_error_closes_connection_after_valid_blocks() {
+        // `82 86 84` = GET, http, `/`. `41 0f ...` adds `:authority` to the
+        // guest's dynamic table, and `be` refers to it. The second block ends
+        // with a truncated integer (`ff`), so the structural check rejects it
+        // before the decoder runs; the third block is never reached.
+        let authority = b"allowed.example";
+        let first = h2c_first_request(authority);
+        let flags = H2_END_STREAM | H2_END_HEADERS;
+        let second = h2_frame(H2_HEADERS, flags, 3, &[0x82, 0x86, 0x84, 0xbe, 0xff]);
+        let third = h2_frame(H2_HEADERS, flags, 5, &[0x82, 0x86, 0x84, 0xbe]);
+
+        let (wire, terminated) = relay_h2c_until_proxy_closes(vec![first, second, third]).await;
+
+        // The first request is re-encoded as never-indexed raw literals;
+        // nothing from stream 3 or 5 is forwarded.
+        assert_eq!(wire, h2c_first_request_wire(authority));
+        assert!(!terminated);
+    }
+
+    #[tokio::test]
+    async fn h2c_decoder_error_after_partial_insertion_closes_connection() {
+        // The failing block is structurally complete, so the structural check
+        // accepts it and the decoder runs. `82 86 84` = GET, http, `/`; `be` is
+        // the authority inserted at index 62 by the first block. `40 03 78 2d
+        // 61 01 31` is an incremental literal that inserts `x-a: 1` at index 62
+        // (moving the authority to 63), and the final `80` is an indexed field
+        // with the invalid index 0. `httlib-hpack` has already applied the
+        // insertion when it reports the error. The third request would now
+        // reference the authority through index `bf` (63), but the connection
+        // must be closed first, so nothing leaks upstream and the sandbox is
+        // not terminated.
+        let authority = b"allowed.example";
+        let first = h2c_first_request(authority);
+        let flags = H2_END_STREAM | H2_END_HEADERS;
+        let failing = h2_frame(
+            H2_HEADERS,
+            flags,
+            3,
+            &[
+                0x82, 0x86, 0x84, 0xbe, 0x40, 0x03, 0x78, 0x2d, 0x61, 0x01, 0x31, 0x80,
+            ],
+        );
+        let third = h2_frame(H2_HEADERS, flags, 5, &[0x82, 0x86, 0x84, 0xbf]);
+
+        let (wire, terminated) = relay_h2c_until_proxy_closes(vec![first, failing, third]).await;
+
+        assert_eq!(wire, h2c_first_request_wire(authority));
+        assert!(!terminated);
+    }
+
+    #[tokio::test]
+    async fn h2c_fragmented_malformed_hpack_block_is_blocked() {
+        // The block `7f c5` (truncated integer) is split across HEADERS and
+        // CONTINUATION, and every frame is split across guest reads.
+        let settings = h2_frame(H2_SETTINGS, 0, 0, &[]);
+        let headers = h2_frame(H2_HEADERS, H2_END_STREAM, 1, &[0x7f]);
+        let continuation = h2_frame(H2_CONTINUATION, H2_END_HEADERS, 1, &[0xc5]);
+        let (preface_head, preface_tail) = H2_PREFACE.split_at(18);
+        let chunks = vec![
+            preface_head.to_vec(),
+            [preface_tail, &settings[..4]].concat(),
+            [&settings[4..], &headers[..9]].concat(),
+            headers[9..].to_vec(),
+            continuation[..5].to_vec(),
+            continuation[5..].to_vec(),
+        ];
+
+        let (wire, terminated) = relay_h2c_until_proxy_closes(chunks).await;
+
+        assert_eq!(wire, [H2_PREFACE, &settings[..]].concat());
+        assert!(!terminated);
+    }
+
     #[test]
     fn strict_hostname_allow_blocks_sni_authority_before_tcp_dial() {
         let dst = SocketAddr::new("127.0.0.1".parse().unwrap(), 443);

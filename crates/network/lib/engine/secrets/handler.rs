@@ -14,6 +14,7 @@ use httlib_hpack::{Decoder as HpackDecoder, Encoder as HpackEncoder};
 use percent_encoding::percent_decode;
 
 use super::config::SecretsConfigExt;
+use super::hpack::check_header_block;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{
@@ -2008,6 +2009,12 @@ impl Http2State {
     }
 
     fn decode_headers(&mut self, block: &[u8]) -> Result<Http2Headers, SecretViolationAction> {
+        // `httlib-hpack` panics on a truncated representation instead of
+        // returning an error, so it only gets structurally complete blocks.
+        check_header_block(block).map_err(|err| {
+            tracing::debug!(error = %err, "rejecting guest HTTP/2 header block");
+            SecretViolationAction::Block
+        })?;
         let mut block = block.to_vec();
         let mut headers = Vec::new();
         let mut decoded_bytes = 0usize;
@@ -3407,6 +3414,7 @@ impl SecretViolationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::secrets::hpack::tests::{PANICKING_BLOCKS, Rng, random_block};
     use crate::netstack::shared::{ResolvedHostnameFamily, SharedState};
     use crate::secrets::config::SecretSubstitution;
     use microsandbox_types::compat;
@@ -6527,5 +6535,432 @@ mod tests {
             b"GET /b HTTP/1.1\r\nHost: example.com\r\nAuth: real-secret\r\n\r\n",
         );
         assert_eq!(out3.as_ref(), expected.as_slice());
+    }
+
+    /// Frames carrying `block` as one request header block on `stream_id`,
+    /// split across HEADERS and CONTINUATION when `split_at` falls inside it.
+    fn append_h2_raw_block(out: &mut Vec<u8>, stream_id: u32, block: &[u8], split_at: usize) {
+        let end = HTTP2_FLAG_END_HEADERS | HTTP2_FLAG_END_STREAM;
+        if split_at == 0 || split_at >= block.len() {
+            append_http2_frame(out, HTTP2_FRAME_HEADERS, end, stream_id, block).unwrap();
+            return;
+        }
+        let (head, tail) = block.split_at(split_at);
+        append_http2_frame(
+            out,
+            HTTP2_FRAME_HEADERS,
+            HTTP2_FLAG_END_STREAM,
+            stream_id,
+            head,
+        )
+        .unwrap();
+        append_http2_frame(out, HTTP2_FRAME_CONTINUATION, end, stream_id, tail).unwrap();
+    }
+
+    #[test]
+    fn http2_malformed_hpack_block_is_blocked() {
+        // Each block made httlib-hpack 0.1.3 index out of bounds, which aborts
+        // the sandbox process in release builds (`panic = "abort"`).
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for block in PANICKING_BLOCKS {
+            for split_at in 0..block.len() {
+                let mut request = HTTP2_PREFACE.to_vec();
+                append_h2_raw_block(&mut request, 1, block, split_at);
+                let handlers = [
+                    SecretsHandler::new(&config, "a.example", false),
+                    SecretsHandler::new(&config, "a.example", true),
+                    // A domain egress rule alone installs a handler on plain
+                    // TCP, with no secrets configured.
+                    plain_http_policy_handler(&make_config(Vec::new())),
+                ];
+                for mut handler in handlers {
+                    assert_eq!(
+                        handler.substitute(&request).unwrap_err(),
+                        SecretViolationAction::Block,
+                        "{block:02x?} split at {split_at}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http2_random_header_blocks_never_panic() {
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let request_prefix = encode_h2_header_block(&[
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut processed = [0usize; 3];
+        for _ in 0..500 {
+            // Up to three requests on one connection, so later blocks decode
+            // against dynamic-table entries added by earlier ones. Half of the
+            // blocks start with a valid request, so they also reach the checks
+            // that run after decoding.
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            for stream_id in [1, 3, 5].into_iter().take(1 + rng.below(3)) {
+                let mut block = Vec::new();
+                if rng.below(2) == 0 {
+                    block.extend_from_slice(&request_prefix);
+                }
+                block.extend(random_block(&mut rng));
+                let split_at = rng.below(block.len() + 1);
+                append_h2_raw_block(&mut request, stream_id, &block, split_at);
+            }
+            let handlers = [
+                SecretsHandler::new(&config, "a.example", false),
+                SecretsHandler::new(&config, "a.example", true),
+                plain_http_policy_handler(&make_config(Vec::new())),
+            ];
+            for (index, mut handler) in handlers.into_iter().enumerate() {
+                if handler.substitute(&request).is_ok() {
+                    processed[index] += 1;
+                }
+            }
+        }
+        // Coverage witness: a parser regression that rejected every flight
+        // early would otherwise leave this test passing without exercising the
+        // decode path. Each handler variant must process at least one request.
+        for (index, count) in processed.iter().enumerate() {
+            assert!(
+                *count > 0,
+                "handler {index} never processed a random request successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn http2_dynamic_table_reference_across_streams_is_decoded() {
+        // Deterministic later-stream dynamic reference: stream 1 inserts
+        // `x-a: 1` with incremental indexing, so index 62 names it; stream 3
+        // sends only `be` (indexed field 62). A successful decode proves the
+        // dynamic table carries across streams instead of every flight being
+        // rejected before it can reference an earlier entry.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let fields: [(&[u8], &[u8]); 4] = [
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ];
+        let mut request_block = encode_h2_header_block(&fields);
+        request_block.extend_from_slice(&[0x40, 0x03, b'x', b'-', b'a', 0x01, b'1']);
+        let mut reference_block = encode_h2_header_block(&fields);
+        reference_block.push(0xbe);
+
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &request_block).unwrap();
+        handler.substitute(&request).unwrap();
+
+        let mut next = Vec::new();
+        append_http2_header_frames(&mut next, 3, true, &reference_block).unwrap();
+        let mut output = HTTP2_PREFACE.to_vec();
+        output.extend_from_slice(&handler.substitute(&next).unwrap());
+        assert_eq!(
+            h2_header_value(&decode_first_h2_headers(&output), b"x-a"),
+            "1"
+        );
+    }
+
+    #[test]
+    fn tls_intercepted_http2_output_is_unchanged_for_indexed_guest_blocks() {
+        let ip = Ipv4Addr::new(203, 0, 113, 45);
+        let shared = SharedState::new(16);
+        cache_host(&shared, "api.openai.com", ip);
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "api.openai.com")]);
+        let mut handler =
+            SecretsHandler::new_tls_intercepted(&config, "api.openai.com", IpAddr::V4(ip), &shared);
+
+        // The guest indexes every field (Huffman-coded) in the first block, so
+        // the second block is made only of dynamic-table references.
+        let flags = HpackEncoder::WITH_INDEXING
+            | HpackEncoder::HUFFMAN_NAME
+            | HpackEncoder::HUFFMAN_VALUE
+            | HpackEncoder::BEST_FORMAT;
+        let fields: [(&[u8], &[u8]); 5] = [
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"api.openai.com"),
+            (b":path", b"/"),
+            (b"authorization", b"Bearer $KEY"),
+        ];
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        for stream_id in [1, 3] {
+            let mut block = Vec::new();
+            for (name, value) in fields {
+                encoder
+                    .encode((name.to_vec(), value.to_vec(), flags), &mut block)
+                    .unwrap();
+            }
+            if stream_id == 3 {
+                assert!(block.iter().all(|octet| octet & 0x80 != 0), "{block:02x?}");
+            }
+            append_http2_header_frames(&mut request, stream_id, true, &block).unwrap();
+        }
+
+        let output = handler.substitute(&request).unwrap().into_owned();
+
+        // Every output field is a never-indexed literal with raw strings, so
+        // the bytes do not depend on how the guest encoded its block.
+        let mut substituted = fields;
+        substituted[4].1 = b"Bearer real-secret";
+        let mut expected = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut expected, 0x4, 0, 0, &[]).unwrap();
+        append_h2_headers(&mut expected, 1, &substituted, true);
+        append_h2_headers(&mut expected, 3, &substituted, true);
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn http2_size_update_only_trailer_block_is_accepted_and_applied() {
+        // A trailer block may hold only table size updates (RFC 7541 §4.2).
+        // The request adds `x-a: 1` to the guest's dynamic table; `be` in the
+        // next request refers to it. `20` (size 0) evicts it, so that
+        // reference must fail after the update and succeed without it.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let fields: [(&[u8], &[u8]); 4] = [
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ];
+        let mut request_block = encode_h2_header_block(&fields);
+        request_block.extend_from_slice(&[0x40, 0x03, b'x', b'-', b'a', 0x01, b'1']);
+        let mut next_block = encode_h2_header_block(&fields);
+        next_block.push(0xbe);
+
+        for (trailer, evicted) in [
+            (&[][..], false),
+            (&[0x20][..], true),
+            (&[0x20, 0x3f, 0xe1, 0x1f][..], true),
+        ] {
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, false, &request_block).unwrap();
+            append_http2_header_frames(&mut request, 1, true, trailer).unwrap();
+            let output = handler.substitute(&request).unwrap().into_owned();
+            // The trailer is forwarded as an empty header block.
+            let mut empty_trailer = Vec::new();
+            append_http2_header_frames(&mut empty_trailer, 1, true, &[]).unwrap();
+            assert!(output.ends_with(&empty_trailer), "{trailer:02x?}");
+
+            let mut next = Vec::new();
+            append_http2_header_frames(&mut next, 3, true, &next_block).unwrap();
+            let result = handler.substitute(&next);
+            if evicted {
+                assert_eq!(
+                    result.unwrap_err(),
+                    SecretViolationAction::Block,
+                    "{trailer:02x?}"
+                );
+            } else {
+                let mut output = HTTP2_PREFACE.to_vec();
+                output.extend_from_slice(&result.unwrap());
+                assert_eq!(
+                    h2_header_value(&decode_first_h2_headers(&output), b"x-a"),
+                    "1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn http2_header_block_limit_is_64_kib_across_continuation_frames() {
+        // A trailer has no pseudo-header fields, so one raw literal can fill
+        // the block while its decoded size (name + value + 4) stays below the
+        // decoded-size limit. The block is sent as HEADERS plus three 16 KiB
+        // CONTINUATION frames.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for extra in [0, 1] {
+            let mut request = h2_request(
+                &[
+                    (b":method", b"POST"),
+                    (b":scheme", b"https"),
+                    (b":authority", b"a.example"),
+                    (b":path", b"/"),
+                ],
+                false,
+            );
+            let value = vec![b'v'; 64 * 1024 - 12 + extra];
+            let block = encode_h2_header_block(&[(b"x-fill", &value)]);
+            assert_eq!(block.len(), MAX_HTTP2_HEADER_BLOCK_BYTES + extra);
+            append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if extra == 0 {
+                // Re-encoding uses the same never-indexed raw literals.
+                assert_eq!(result.unwrap().into_owned(), request);
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    /// A request header block with the four pseudo-headers followed by one
+    /// `a: <value>` field whose value is Huffman-compressed. The decoded value
+    /// is exactly `value_len` bytes, so the caller controls the decoder's
+    /// decoded-size total. `b'a'` has a 5-bit Huffman code (the shortest), so
+    /// even a 100,000-byte value compresses to about 62.5 KiB and stays under
+    /// the 64 KiB block cap.
+    fn h2_request_block_with_huffman_value(value_len: usize) -> Vec<u8> {
+        let mut block = encode_h2_header_block(&[
+            (b":method", b"GET"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+        let mut encoder = HpackEncoder::with_dynamic_size(4096);
+        encoder
+            .encode(
+                (
+                    b"a".to_vec(),
+                    vec![b'a'; value_len],
+                    HpackEncoder::NEVER_INDEXED | HpackEncoder::HUFFMAN_VALUE,
+                ),
+                &mut block,
+            )
+            .unwrap();
+        block
+    }
+
+    /// A trailer block of `unit` repetitions filled to the 64 KiB block cap.
+    fn h2_size_update_storm_block(unit: &[u8]) -> Vec<u8> {
+        let mut block = Vec::new();
+        while block.len() + unit.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES {
+            block.extend_from_slice(unit);
+        }
+        block
+    }
+
+    #[test]
+    fn http2_header_field_count_boundary_is_1024() {
+        // The field limit is checked before each field is pushed, so exactly
+        // 1,024 fields decode and the 1,025th blocks.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for (extra, accepted) in [(1020usize, true), (1021, false)] {
+            let mut fields: Vec<(&[u8], &[u8])> = vec![
+                (b":method", b"GET"),
+                (b":scheme", b"https"),
+                (b":authority", b"a.example"),
+                (b":path", b"/"),
+            ];
+            for _ in 0..extra {
+                fields.push((b"x-a", b"1"));
+            }
+            let request = h2_request(&fields, true);
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if accepted {
+                assert!(result.is_ok(), "1,024 fields must be accepted");
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    #[test]
+    fn http2_decoded_size_boundary_is_exact_for_huffman_values() {
+        // Decoded size is `name + value + 4` per field; the four pseudo-headers
+        // contribute 63 bytes, so value length 65,468 reaches exactly 65,536
+        // and 65,469 reaches 65,537. Both Huffman-compressed blocks are far
+        // below the 64 KiB block cap, so only the decoded-size check decides.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        for (value_len, accepted) in [(65_468usize, true), (65_469, false)] {
+            let block = h2_request_block_with_huffman_value(value_len);
+            assert!(block.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let result = handler.substitute(&request);
+            if accepted {
+                assert!(result.is_ok(), "decoded size at the limit must be accepted");
+            } else {
+                assert_eq!(result.unwrap_err(), SecretViolationAction::Block);
+            }
+        }
+    }
+
+    #[test]
+    fn http2_block_under_the_cap_can_expand_past_the_decoded_limit() {
+        // A block under the 64 KiB cap can still expand past 64 KiB decoded: a
+        // ~62.5 KiB Huffman value decodes to 100,000 bytes, so only the
+        // decoded-size check can reject it.
+        let block = h2_request_block_with_huffman_value(100_000);
+        assert!(block.len() <= MAX_HTTP2_HEADER_BLOCK_BYTES);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &block).unwrap();
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        assert_eq!(
+            handler.substitute(&request).unwrap_err(),
+            SecretViolationAction::Block
+        );
+    }
+
+    #[test]
+    fn http2_size_update_storm_is_bounded_and_terminates() {
+        // Pre-existing behaviour, not introduced by the guard: `httlib-hpack`
+        // drains the front of its buffer once per representation, so a 64 KiB
+        // block that is almost all one-byte size updates moves on the order of
+        // 2 GiB and costs time quadratic in the capped block size. The guard
+        // itself is linear and allocation-free. This pins that the handler
+        // still completes with bounded decoder state; in a debug build 64 KiB
+        // takes about 40 ms.
+        let config = make_config(vec![make_secret("$KEY", "real-secret", "a.example")]);
+        let request_block = encode_h2_header_block(&[
+            (b":method", b"POST"),
+            (b":scheme", b"https"),
+            (b":authority", b"a.example"),
+            (b":path", b"/"),
+        ]);
+
+        // Size-update-only trailers: `20` (size 0) and alternating 0/4096.
+        for unit in [&[0x20u8][..], &[0x20, 0x3f, 0xe1, 0x1f][..]] {
+            let trailer = h2_size_update_storm_block(unit);
+            let mut handler = SecretsHandler::new(&config, "a.example", false);
+            let mut request = HTTP2_PREFACE.to_vec();
+            append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+            append_http2_header_frames(&mut request, 1, false, &request_block).unwrap();
+            append_http2_header_frames(&mut request, 1, true, &trailer).unwrap();
+            let output = handler.substitute(&request).unwrap();
+            // A trailer of size updates decodes to no fields and is forwarded
+            // as an empty header block.
+            let mut empty_trailer = Vec::new();
+            append_http2_header_frames(&mut empty_trailer, 1, true, &[]).unwrap();
+            assert!(output.ends_with(&empty_trailer), "{unit:02x?}");
+        }
+
+        // Updates interspersed with indexed fields, as one request block: the
+        // pseudo-headers plus indexed `cookie` fields (every 64 bytes) and `20`
+        // updates filling the rest. The field count stays under the 1,024
+        // limit and the decoded size under 64 KiB, so the whole block decodes.
+        let mut interspersed = request_block;
+        let mut fields = 4usize;
+        while interspersed.len() < MAX_HTTP2_HEADER_BLOCK_BYTES {
+            if fields < MAX_HTTP2_HEADER_FIELDS && interspersed.len().is_multiple_of(64) {
+                // `a0` indexes static-table entry 32 (`cookie`).
+                interspersed.push(0xa0);
+                fields += 1;
+            } else {
+                interspersed.push(0x20);
+            }
+        }
+        let mut handler = SecretsHandler::new(&config, "a.example", false);
+        let mut request = HTTP2_PREFACE.to_vec();
+        append_http2_frame(&mut request, 0x4, 0, 0, &[]).unwrap();
+        append_http2_header_frames(&mut request, 1, true, &interspersed).unwrap();
+        assert!(handler.substitute(&request).is_ok());
     }
 }
