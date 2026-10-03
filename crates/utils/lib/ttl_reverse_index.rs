@@ -63,8 +63,10 @@ where
 {
     /// Create an index that keeps at most `limit` members per key.
     ///
-    /// Binding a new member to a key that is already full drops the member
-    /// of that key closest to expiry. A `limit` of zero is treated as one.
+    /// Binding new members to a key that is already full drops the members
+    /// of that key closest to expiry. Members bound by the same call are
+    /// never dropped for each other, so a call with more than `limit`
+    /// members keeps them all. A `limit` of zero is treated as one.
     pub fn with_member_limit(limit: usize) -> Self {
         Self {
             member_limit: Some(limit.max(1)),
@@ -88,7 +90,7 @@ where
     /// bound keeps the later of its current expiry and `now + ttl`, so a
     /// shorter TTL never cuts an earlier binding short. An empty `members`
     /// changes nothing. With a member limit, a full key drops its members
-    /// closest to expiry to make room.
+    /// closest to expiry to make room, never one of `members`.
     pub fn extend<I>(&mut self, key: K, members: I, ttl: Duration, now: Instant)
     where
         I: IntoIterator<Item = M>,
@@ -138,23 +140,21 @@ where
     where
         I: IntoIterator<Item = M>,
     {
-        for member in members {
-            self.bind(&key, member, expires_at);
+        let members: HashSet<M> = members.into_iter().collect();
+        for member in &members {
+            self.bind(&key, member.clone(), expires_at);
         }
+        self.trim_to_limit(&key, &members);
     }
 
     fn bind(&mut self, key: &K, member: M, expires_at: Instant) {
-        let (current, len) = self.by_key.get(key).map_or((None, 0), |bindings| {
-            (
-                bindings.get(&member).map(|binding| binding.expires_at),
-                bindings.len(),
-            )
-        });
+        let current = self
+            .by_key
+            .get(key)
+            .and_then(|bindings| bindings.get(&member))
+            .map(|binding| binding.expires_at);
         if current.is_some_and(|current| current >= expires_at) {
             return;
-        }
-        if current.is_none() && self.member_limit.is_some_and(|limit| len >= limit) {
-            self.unbind_earliest(key);
         }
 
         let version = self.next_version;
@@ -186,15 +186,26 @@ where
         self.compact_expirations();
     }
 
-    /// Drop the member of `key` closest to expiry.
-    fn unbind_earliest(&mut self, key: &K) {
-        let earliest = self.by_key.get(key).and_then(|bindings| {
-            bindings
-                .iter()
-                .min_by_key(|(_, binding)| binding.expires_at)
-                .map(|(member, _)| member.clone())
-        });
-        if let Some(member) = earliest {
+    /// Drop the members of `key` closest to expiry until it is back within
+    /// the member limit, sparing the members in `kept`.
+    fn trim_to_limit(&mut self, key: &K, kept: &HashSet<M>) {
+        let Some(limit) = self.member_limit else {
+            return;
+        };
+        let Some(bindings) = self.by_key.get(key) else {
+            return;
+        };
+        let excess = bindings.len().saturating_sub(limit);
+        if excess == 0 {
+            return;
+        }
+        let mut droppable: Vec<(Instant, M)> = bindings
+            .iter()
+            .filter(|(member, _)| !kept.contains(*member))
+            .map(|(member, binding)| (binding.expires_at, member.clone()))
+            .collect();
+        droppable.sort_by_key(|(expires_at, _)| *expires_at);
+        for (_, member) in droppable.into_iter().take(excess) {
             self.unbind(key, &member);
         }
     }
@@ -699,6 +710,31 @@ mod tests {
         index.extend("alpha", [2], Duration::from_secs(40), now);
         assert!(index.member_matches(&3, now, |key| key == &"alpha"));
         assert_eq!(index.live_bindings, 2);
+    }
+
+    #[test]
+    fn member_limit_keeps_every_member_of_one_call() {
+        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(2);
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(60), now);
+        index.extend("alpha", [2, 3, 4], Duration::from_secs(10), now);
+
+        // The answer's own members all stay, and the older member makes room.
+        assert!(!index.member_matches(&1, now, |_| true));
+        for i in 2..=4 {
+            assert!(index.member_matches(&i, now, |key| key == &"alpha"));
+        }
+
+        // The next answer trims the key back to the limit.
+        index.extend("alpha", [5], Duration::from_secs(30), now);
+        assert_eq!(index.by_key["alpha"].len(), 2);
+        assert!(index.member_matches(&5, now, |key| key == &"alpha"));
+        assert_eq!(index.live_bindings, 2);
+
+        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(2);
+        index.insert("alpha", [1, 2, 3], Duration::from_secs(10), now);
+        assert_eq!(index.by_key["alpha"].len(), 3);
     }
 
     #[test]
