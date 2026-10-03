@@ -177,6 +177,8 @@ Domain blocking and rebinding protection apply only to DNS traffic that microsan
 
 microsandbox records the IP addresses returned for each domain. A domain rule matches a later connection only when that sandbox resolved the domain to that IP.
 
+Each recorded address stays valid until its own DNS TTL expires, even after later answers for the same domain return other addresses. Concurrent lookups of a CDN-hosted domain often get different answers, and connections to any of them match.
+
 An application that connects directly to a hard-coded IP does not match a domain rule. Use an IP or CIDR rule for that traffic.
 
 ## Reference

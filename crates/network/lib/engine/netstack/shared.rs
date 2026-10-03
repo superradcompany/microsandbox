@@ -200,7 +200,12 @@ impl SharedState {
         }
     }
 
-    /// Replace the resolved addresses for a hostname within the given address family.
+    /// Record resolved addresses for a hostname within the given address family.
+    ///
+    /// Addresses from earlier answers stay bound until their own TTL expires.
+    /// Resolvers that rotate their answers hand concurrent lookups of one name
+    /// different addresses, and a connection dialed on any of them must still
+    /// match the name's domain rules.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
@@ -213,7 +218,7 @@ impl SharedState {
         let addrs = addrs.into_iter().map(normalize_ip_addr);
         self.resolved_hostnames
             .write()
-            .insert(key, addrs, ttl, Instant::now());
+            .extend(key, addrs, ttl, Instant::now());
     }
 
     /// Clear the resolved addresses for a hostname within the given address family.
@@ -370,6 +375,30 @@ mod tests {
         assert!(state.any_resolved_hostname(v4, |h| h == "example.com"));
         assert!(state.any_resolved_hostname(v6, |h| h == "example.com"));
         assert!(!state.any_resolved_hostname(v4, |h| h == "other.example"));
+    }
+
+    #[test]
+    fn resolved_hostnames_keep_earlier_answers() {
+        let state = SharedState::new(4);
+        let first: IpAddr = "142.250.0.1".parse().unwrap();
+        let second: IpAddr = "142.250.0.2".parse().unwrap();
+
+        // Two concurrent lookups of one name, answered with different addresses.
+        for addr in [first, second] {
+            state.cache_resolved_hostname(
+                "fonts.example",
+                ResolvedHostnameFamily::Ipv4,
+                [addr],
+                Duration::from_secs(30),
+            );
+        }
+
+        assert!(state.any_resolved_hostname(first, |h| h == "fonts.example"));
+        assert!(state.any_resolved_hostname(second, |h| h == "fonts.example"));
+
+        state.clear_resolved_hostname("fonts.example", ResolvedHostnameFamily::Ipv4);
+        assert!(!state.any_resolved_hostname(first, |h| h == "fonts.example"));
+        assert!(!state.any_resolved_hostname(second, |h| h == "fonts.example"));
     }
 
     #[test]

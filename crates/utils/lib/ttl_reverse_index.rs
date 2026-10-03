@@ -1,10 +1,11 @@
 //! TTL-indexed reverse map from keys to members, with fast member-to-keys
 //! lookup.
 //!
-//! Each key owns a set of members and a single TTL. A reverse index
-//! (member -> keys) answers "which keys currently contain this member?" in
-//! amortized O(1). Expiration uses a min-heap of versioned events so a
-//! stale timer cannot remove a newer replacement of the same key.
+//! Each key owns a set of members, and each member of a key carries its own
+//! expiry. A reverse index (member -> keys) answers "which keys currently
+//! contain this member?" in amortized O(1). Expiration uses a min-heap of
+//! versioned events so a stale timer cannot remove a newer binding of the
+//! same key and member.
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
@@ -15,26 +16,26 @@ use std::time::{Duration, Instant};
 /// TTL-indexed reverse map from keys to members and members back to keys.
 #[derive(Debug)]
 pub struct TtlReverseIndex<K, M> {
-    by_key: HashMap<K, IndexedEntry<M>>,
+    by_key: HashMap<K, HashMap<M, Binding>>,
     by_member: HashMap<M, HashSet<K>>,
-    expirations: BinaryHeap<Reverse<ExpiryEvent<K>>>,
+    expirations: BinaryHeap<Reverse<ExpiryEvent<K, M>>>,
     next_version: u64,
     next_sequence: u64,
 }
 
-#[derive(Debug)]
-struct IndexedEntry<M> {
-    members: HashSet<M>,
+#[derive(Debug, Clone, Copy)]
+struct Binding {
     expires_at: Instant,
     version: u64,
 }
 
 #[derive(Debug, Clone)]
-struct ExpiryEvent<K> {
+struct ExpiryEvent<K, M> {
     expires_at: Instant,
     sequence: u64,
     version: u64,
     key: K,
+    member: M,
 }
 
 impl<K, M> Default for TtlReverseIndex<K, M> {
@@ -60,42 +61,22 @@ where
         I: IntoIterator<Item = M>,
     {
         self.evict_expired(now);
-
-        let members: HashSet<M> = members.into_iter().collect();
-        if members.is_empty() {
-            self.remove(&key, now);
-            return;
-        }
-
         self.remove_key(&key);
+        self.bind_all(key, members, now + ttl);
+    }
 
-        let expires_at = now + ttl;
-        let version = self.next_version;
-        self.next_version = self.next_version.wrapping_add(1);
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-
-        for member in &members {
-            self.by_member
-                .entry(member.clone())
-                .or_default()
-                .insert(key.clone());
-        }
-
-        self.by_key.insert(
-            key.clone(),
-            IndexedEntry {
-                members,
-                expires_at,
-                version,
-            },
-        );
-        self.expirations.push(Reverse(ExpiryEvent {
-            expires_at,
-            sequence,
-            version,
-            key,
-        }));
+    /// Add `members` to the set for `key`, keeping the members already there.
+    ///
+    /// Each member stays bound until its own expiry. A member that is already
+    /// bound keeps the later of its current expiry and `now + ttl`, so a
+    /// shorter TTL never cuts an earlier binding short. An empty `members`
+    /// changes nothing.
+    pub fn extend<I>(&mut self, key: K, members: I, ttl: Duration, now: Instant)
+    where
+        I: IntoIterator<Item = M>,
+    {
+        self.evict_expired(now);
+        self.bind_all(key, members, now + ttl);
     }
 
     /// Remove the entry for `key` if present.
@@ -116,25 +97,73 @@ where
             keys.iter().any(|key| {
                 self.by_key
                     .get(key)
-                    .is_some_and(|entry| entry.expires_at > now && predicate(key))
+                    .and_then(|bindings| bindings.get(member))
+                    .is_some_and(|binding| binding.expires_at > now && predicate(key))
             })
         })
     }
 
-    /// Evict all entries whose TTL has expired by `now`.
+    /// Evict all bindings whose TTL has expired by `now`.
     pub fn evict_expired(&mut self, now: Instant) {
         while let Some(Reverse(expiry)) = self.expirations.peek() {
             if expiry.expires_at > now {
                 break;
             }
             let expiry = self.expirations.pop().unwrap().0;
-            let should_remove = self.by_key.get(&expiry.key).is_some_and(|entry| {
-                entry.version == expiry.version && entry.expires_at == expiry.expires_at
-            });
+            let should_remove = self
+                .by_key
+                .get(&expiry.key)
+                .and_then(|bindings| bindings.get(&expiry.member))
+                .is_some_and(|binding| {
+                    binding.version == expiry.version && binding.expires_at == expiry.expires_at
+                });
             if should_remove {
-                self.remove_key(&expiry.key);
+                self.unbind(&expiry.key, &expiry.member);
             }
         }
+    }
+
+    fn bind_all<I>(&mut self, key: K, members: I, expires_at: Instant)
+    where
+        I: IntoIterator<Item = M>,
+    {
+        for member in members {
+            self.bind(&key, member, expires_at);
+        }
+    }
+
+    fn bind(&mut self, key: &K, member: M, expires_at: Instant) {
+        let bindings = self.by_key.entry(key.clone()).or_default();
+        if bindings
+            .get(&member)
+            .is_some_and(|binding| binding.expires_at >= expires_at)
+        {
+            return;
+        }
+
+        let version = self.next_version;
+        self.next_version = self.next_version.wrapping_add(1);
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+
+        bindings.insert(
+            member.clone(),
+            Binding {
+                expires_at,
+                version,
+            },
+        );
+        self.by_member
+            .entry(member.clone())
+            .or_default()
+            .insert(key.clone());
+        self.expirations.push(Reverse(ExpiryEvent {
+            expires_at,
+            sequence,
+            version,
+            key: key.clone(),
+            member,
+        }));
     }
 
     fn remove_key(&mut self, key: &K) {
@@ -142,32 +171,47 @@ where
             return;
         };
 
-        for member in removed.members {
-            if let Some(keys) = self.by_member.get_mut(&member) {
-                keys.remove(key);
-                if keys.is_empty() {
-                    self.by_member.remove(&member);
-                }
+        for member in removed.into_keys() {
+            self.forget_reverse(&member, key);
+        }
+    }
+
+    fn unbind(&mut self, key: &K, member: &M) {
+        let Some(bindings) = self.by_key.get_mut(key) else {
+            return;
+        };
+        bindings.remove(member);
+        if bindings.is_empty() {
+            self.by_key.remove(key);
+        }
+        self.forget_reverse(member, key);
+    }
+
+    fn forget_reverse(&mut self, member: &M, key: &K) {
+        if let Some(keys) = self.by_member.get_mut(member) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.by_member.remove(member);
             }
         }
     }
 }
 
-impl<K> PartialEq for ExpiryEvent<K> {
+impl<K, M> PartialEq for ExpiryEvent<K, M> {
     fn eq(&self, other: &Self) -> bool {
         self.expires_at == other.expires_at && self.sequence == other.sequence
     }
 }
 
-impl<K> Eq for ExpiryEvent<K> {}
+impl<K, M> Eq for ExpiryEvent<K, M> {}
 
-impl<K> PartialOrd for ExpiryEvent<K> {
+impl<K, M> PartialOrd for ExpiryEvent<K, M> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<K> Ord for ExpiryEvent<K> {
+impl<K, M> Ord for ExpiryEvent<K, M> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.expires_at
             .cmp(&other.expires_at)
@@ -460,5 +504,94 @@ mod tests {
         assert!(index.member_matches(&1, now, |key| key == &"beta"));
         assert!(index.member_matches(&3, now, |key| key == &"beta"));
         assert!(index.member_matches(&4, now, |key| key == &"alpha"));
+    }
+
+    #[test]
+    fn extend_keeps_members_from_earlier_calls() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(30), now);
+        index.extend("alpha", [2], Duration::from_secs(30), now);
+
+        assert!(index.member_matches(&1, now, |key| key == &"alpha"));
+        assert!(index.member_matches(&2, now, |key| key == &"alpha"));
+    }
+
+    #[test]
+    fn extend_expires_each_member_on_its_own_ttl() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(5), now);
+        index.extend(
+            "alpha",
+            [2],
+            Duration::from_secs(5),
+            now + Duration::from_secs(3),
+        );
+
+        let between = now + Duration::from_secs(6);
+        assert!(!index.member_matches(&1, between, |key| key == &"alpha"));
+        assert!(index.member_matches(&2, between, |key| key == &"alpha"));
+
+        // Evicting the first member must leave the second one bound.
+        index.evict_expired(between);
+        assert!(index.member_matches(&2, between, |key| key == &"alpha"));
+
+        let after = now + Duration::from_secs(9);
+        index.evict_expired(after);
+        assert!(!index.member_matches(&2, after, |_| true));
+        assert!(index.by_key.is_empty());
+        assert!(index.by_member.is_empty());
+    }
+
+    #[test]
+    fn extend_keeps_the_later_expiry_of_a_rebound_member() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(10), now);
+        // A shorter TTL does not cut the earlier binding short.
+        index.extend("alpha", [1], Duration::from_secs(2), now);
+        assert!(index.member_matches(&1, now + Duration::from_secs(5), |key| key == &"alpha"));
+
+        // A longer one extends it, and the first timer no longer removes it.
+        index.extend("alpha", [1], Duration::from_secs(20), now);
+        index.evict_expired(now + Duration::from_secs(11));
+        assert!(index.member_matches(&1, now + Duration::from_secs(15), |key| key == &"alpha"));
+        assert!(!index.member_matches(&1, now + Duration::from_secs(21), |key| key == &"alpha"));
+    }
+
+    #[test]
+    fn extend_with_no_members_keeps_existing_ones() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(30), now);
+        index.extend("alpha", std::iter::empty(), Duration::from_secs(30), now);
+
+        assert!(index.member_matches(&1, now, |key| key == &"alpha"));
+    }
+
+    #[test]
+    fn insert_and_remove_drop_every_extended_member() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+
+        index.extend("alpha", [1], Duration::from_secs(30), now);
+        index.extend("alpha", [2], Duration::from_secs(30), now);
+        index.insert("alpha", [3], Duration::from_secs(30), now);
+
+        assert!(!index.member_matches(&1, now, |_| true));
+        assert!(!index.member_matches(&2, now, |_| true));
+        assert!(index.member_matches(&3, now, |key| key == &"alpha"));
+
+        index.extend("alpha", [4], Duration::from_secs(30), now);
+        index.remove(&"alpha", now);
+
+        assert!(!index.member_matches(&3, now, |_| true));
+        assert!(!index.member_matches(&4, now, |_| true));
+        assert!(index.by_member.is_empty());
     }
 }
