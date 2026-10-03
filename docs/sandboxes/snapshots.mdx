@@ -643,7 +643,7 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Full restore requires all captured external filesystems and additional disks to be available.
+Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Restore requires a destination for every external mount the snapshot recorded, and a full restore also requires its captured additional disks, unless you opt out with `allow_missing_resources`. Older disk snapshots do not record their mounts and restore as before.
 
 For either a disk or full snapshot, mount a host directory like this:
 
