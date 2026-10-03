@@ -46,7 +46,9 @@ async fn logs_captures_exec_stdout_from_running_sandbox() {
         .expect("create sandbox");
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker}")]).capture(true)
+        })
         .await
         .expect("exec");
 
@@ -108,7 +110,9 @@ async fn log_stream_follow_catches_live_writes() {
         .expect("open log stream");
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker}")]).capture(true)
+        })
         .await
         .expect("exec");
 
@@ -149,7 +153,9 @@ async fn log_stream_resume_from_cursor_excludes_replayed_entries() {
         .expect("create sandbox");
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker_a}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker_a}")]).capture(true)
+        })
         .await
         .expect("exec A");
 
@@ -166,7 +172,9 @@ async fn log_stream_resume_from_cursor_excludes_replayed_entries() {
         .clone();
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker_b}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker_b}")]).capture(true)
+        })
         .await
         .expect("exec B");
 
@@ -202,4 +210,38 @@ fn contains(entry: &microsandbox::logs::LogEntry, needle: &str) -> bool {
     std::str::from_utf8(&entry.data)
         .map(|s| s.contains(needle))
         .unwrap_or(false)
+}
+
+/// Capture is opt-in per exec: a plain `exec` that does not ask leaves
+/// nothing in `exec.log`, so an ad-hoc session's output never reaches the
+/// host's disk unless its caller wants it there.
+#[msb_test]
+async fn logs_do_not_record_an_exec_that_did_not_ask() {
+    let name = "log-stream-e2e-uncaptured";
+    let marker = "log-e2e-uncaptured-marker-51c2";
+
+    let sandbox = Sandbox::builder(name)
+        .image(ALPINE)
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    sandbox
+        .exec("sh", ["-c", &format!("echo {marker}")])
+        .await
+        .expect("exec");
+
+    let entries = sandbox
+        .logs(&LogOptions::default())
+        .await
+        .expect("read logs");
+    stop_and_remove(name).await;
+
+    assert!(
+        !entries.iter().any(|e| contains(e, marker)),
+        "an exec that did not ask for capture was recorded"
+    );
 }

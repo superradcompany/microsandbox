@@ -15,7 +15,7 @@ func TestSandboxLogs(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	if _, err := sb.Shell(ctx, "echo log-out; echo log-err >&2"); err != nil {
+	if _, err := sb.Shell(ctx, "echo log-out; echo log-err >&2", microsandbox.WithExecCapture(true)); err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 
@@ -46,11 +46,11 @@ func TestSandboxHandleLogsWithFilters(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	if _, err := sb.Shell(ctx, "echo old-log-line"); err != nil {
+	if _, err := sb.Shell(ctx, "echo old-log-line", microsandbox.WithExecCapture(true)); err != nil {
 		t.Fatalf("Shell old: %v", err)
 	}
 	since := time.Now().Add(-1 * time.Second)
-	if _, err := sb.Shell(ctx, "echo recent-log-line"); err != nil {
+	if _, err := sb.Shell(ctx, "echo recent-log-line", microsandbox.WithExecCapture(true)); err != nil {
 		t.Fatalf("Shell recent: %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestSandboxHandleLogsWorksAfterStop(t *testing.T) {
 	sb := newTestSandbox(t)
 	ctx := integrationCtx(t)
 
-	if _, err := sb.Shell(ctx, "echo stopped-log-line"); err != nil {
+	if _, err := sb.Shell(ctx, "echo stopped-log-line", microsandbox.WithExecCapture(true)); err != nil {
 		t.Fatalf("Shell: %v", err)
 	}
 	name := sb.Name()
@@ -103,5 +103,29 @@ func TestSandboxHandleLogsWorksAfterStop(t *testing.T) {
 	}
 	if !strings.Contains(combined.String(), "stopped-log-line") {
 		t.Fatalf("logs after stop missing output: %q", combined.String())
+	}
+}
+
+// Capture is opt-in per exec: a Shell that does not ask leaves nothing in
+// exec.log, so an ad-hoc command's output never reaches the host's disk
+// unless its caller wants it there.
+func TestSandboxLogsSkipUncapturedExec(t *testing.T) {
+	sb := newTestSandbox(t)
+	ctx := integrationCtx(t)
+
+	if _, err := sb.Shell(ctx, "echo uncaptured-log-line"); err != nil {
+		t.Fatalf("Shell: %v", err)
+	}
+
+	entries, err := sb.Logs(ctx, microsandbox.LogOptions{
+		Sources: []microsandbox.LogSource{microsandbox.LogSourceStdout},
+	})
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Text(), "uncaptured-log-line") {
+			t.Fatalf("an exec that did not ask for capture was recorded: %q", entry.Text())
+		}
 	}
 }

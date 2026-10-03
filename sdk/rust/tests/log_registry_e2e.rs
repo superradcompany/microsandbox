@@ -68,7 +68,9 @@ async fn registry_reads_sandbox_logs() {
     assert_eq!(registry.stats().registered_dirs, 1);
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker}")]).capture(true)
+        })
         .await
         .expect("exec");
 
@@ -116,7 +118,9 @@ async fn registry_follow_catches_live_writes() {
         .expect("open registry stream");
 
     sandbox
-        .exec("sh", ["-c", &format!("echo {marker}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker}")]).capture(true)
+        })
         .await
         .expect("exec");
 
@@ -164,11 +168,15 @@ async fn registry_serves_two_sandboxes() {
     assert_eq!(registry.stats().registered_dirs, 2);
 
     sandbox_a
-        .exec("sh", ["-c", &format!("echo {marker_a}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker_a}")]).capture(true)
+        })
         .await
         .expect("exec a");
     sandbox_b
-        .exec("sh", ["-c", &format!("echo {marker_b}")])
+        .exec_with("sh", |e| {
+            e.args(["-c", &format!("echo {marker_b}")]).capture(true)
+        })
         .await
         .expect("exec b");
 

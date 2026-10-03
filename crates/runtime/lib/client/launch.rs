@@ -58,6 +58,11 @@ pub struct LaunchCapabilities {
     /// Older probes omit this feature; ordinary protocol-2 launches are unchanged.
     #[serde(default)]
     pub required_restore_backing: bool,
+    /// `LaunchConfig::disable_exec_log` is honoured. Older probes omit this feature; releases
+    /// that predate the probe would ignore the field or reject it as unknown.
+    #[serde(default)]
+    pub disable_exec_log: bool,
+
     /// Published-port listeners honor `network.tcp_accept_queue_size`. Older runtimes omit this
     /// feature and would silently ignore the field, so the SDK refuses to send it to them.
     #[serde(default)]
@@ -123,6 +128,11 @@ pub struct LaunchConfig {
 
     /// Directory for log files.
     pub log_dir: PathBuf,
+
+    /// Do not record exec output to `exec.log` at all. Omitted unless set, so
+    /// an older runtime rejects the request instead of recording anyway.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_exec_log: bool,
 
     /// Runtime directory (scripts, heartbeat).
     pub runtime_dir: PathBuf,

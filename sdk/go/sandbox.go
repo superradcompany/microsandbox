@@ -178,6 +178,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 		Ephemeral:         o.Ephemeral,
 		LogLevel:          string(o.LogLevel),
 		QuietLogs:         o.QuietLogs,
+		DisableExecLog:    o.DisableExecLog,
 		Scripts:           o.Scripts,
 		PullPolicy:        string(o.PullPolicy),
 		MaxDurationSecs:   durationSecsCeil(o.MaxDuration),
@@ -1365,6 +1366,7 @@ func (s *Sandbox) AttachDefault(ctx context.Context, opts ...AttachOption) (int,
 		User:       o.User,
 		Env:        o.Env,
 		DetachKeys: o.DetachKeys,
+		Capture:    o.Capture,
 	})
 	return code, wrapFFI(err)
 }
@@ -1383,6 +1385,7 @@ func (s *Sandbox) AttachWith(ctx context.Context, cmd string, args []string, opt
 		User:       o.User,
 		Env:        o.Env,
 		DetachKeys: o.DetachKeys,
+		Capture:    o.Capture,
 	})
 	return code, wrapFFI(err)
 }

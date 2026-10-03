@@ -1150,6 +1150,11 @@ pub struct SandboxRuntimeOptions {
     /// Force-disable metrics sampling regardless of `metrics_sample_interval_ms`.
     pub disable_metrics_sample: bool,
 
+    /// Do not record exec output to the sandbox's `exec.log` at all — not
+    /// even the startup command's. For workloads whose output must not reach
+    /// the host's disk; `logs` then has nothing to return.
+    pub disable_exec_log: bool,
+
     /// Host control over the guest wall clock. `None` selects [`GuestClockPolicy::Sync`];
     /// a full snapshot restore without an explicit value keeps the policy recorded in the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1896,6 +1901,7 @@ impl Default for SandboxRuntimeOptions {
             log_level: None,
             metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
             disable_metrics_sample: false,
+            disable_exec_log: false,
             guest_clock: None,
         }
     }
