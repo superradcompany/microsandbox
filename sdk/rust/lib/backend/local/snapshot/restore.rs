@@ -60,7 +60,9 @@ pub(crate) async fn materialize_checkpoint_for_child(
     let closure_destination = child_stage.join(CHILD_CHECKPOINT_DIRECTORY);
     let source_path = source.closure.clone();
     let destination_for_copy = closure_destination.clone();
+    let pin = super::lease::pin_source(&source_path)?;
     tokio::task::spawn_blocking(move || {
+        let _lease = pin;
         stage_checkpoint_closure(&source_path, &destination_for_copy)
     })
     .await
@@ -195,7 +197,9 @@ pub(crate) async fn materialize_file_snapshot_for_child(
         let predecessor = layers
             .last()
             .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
+        let pin = super::lease::pin_source(&source_path)?;
         tokio::task::spawn_blocking(move || {
+            let _lease = pin;
             copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
         })
         .await
@@ -402,7 +406,9 @@ async fn materialize_checkpoint_disk_layers(
         let predecessor = upper_layers
             .last()
             .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
+        let pin = super::lease::pin_source(&source_for_copy)?;
         tokio::task::spawn_blocking(move || {
+            let _pin = pin;
             copy_child_disk_layer(&source_for_copy, &target_for_copy, predecessor.as_deref())
         })
         .await

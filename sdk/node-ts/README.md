@@ -105,6 +105,30 @@ const restarted = await stopped.restart();
 await restarted.destroy();
 ```
 
+## Local Storage Usage And Cleanup
+
+`Storage.usage()` reports images, saved snapshots, sandboxes, volumes, branch RAM, and rebuildable snapshot RAM for the selected local backend. Unknown measurements are `null`. Logical byte counts and allocated blocks do not measure exclusive physical ownership because files can share disk blocks. All byte fields are `bigint`, preserving the full unsigned 64-bit range; object counts are numbers. To serialize a report with `JSON.stringify`, supply a replacer that converts bigints to decimal strings.
+
+```typescript
+import { Storage } from "microsandbox";
+
+const usage = await Storage.usage();
+console.log(usage.branchMemory.logicalBytes); // bigint | null
+
+const preview = await Storage.prune({ dryRun: true, olderThanSeconds: 3600 });
+console.log(preview.entries);
+
+const result = await Storage.prune({ olderThanSeconds: 3600 });
+console.log(result.logicalBytesRemoved);
+for (const entry of result.entries) {
+  if (entry.error !== null) console.error(entry.path, entry.error);
+}
+```
+
+Pruning removes only unused published runtime RAM. Live mappings, retained baselines, and pending handoffs remain protected. Saved snapshots, images, sandbox disks, volumes, and stable lock files are retained. `olderThanSeconds` must be a whole non-negative safe integer; the default is zero. `dryRun` defaults to false. The SDK does not prompt for confirmation, and each apply call rechecks ownership. Individual failures remain in `entries` alongside completed removals; `physicalBytesReclaimed` is unknown (`null`). Cloud backends reject these local-only operations. Each call captures its backend before returning the promise; changing the default while it runs cannot redirect it. An older native addon without these methods raises `UnsupportedOperationError` when they are called.
+
+`SandboxHandle.storageUsage()`, `Snapshot.storageUsage()`, and `SnapshotHandle.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. Snapshot records returned by `Snapshot.list()` contain metadata only; fetch a native handle with `Snapshot.get()` before inspecting its storage.
+
 ## Common Examples
 
 These snippets assume you already have a live `sandbox: Sandbox`.

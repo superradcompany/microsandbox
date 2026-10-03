@@ -39,6 +39,7 @@ mod creation_progress;
 mod exec_adapter;
 mod restore;
 mod setup;
+mod storage;
 mod volume_fs;
 
 use std::{
@@ -6319,6 +6320,7 @@ pub unsafe extern "C" fn msb_image_prune(
                 "layers_removed": report.layers_removed,
                 "fsmeta_removed": report.fsmeta_removed,
                 "vmdk_removed": report.vmdk_removed,
+                "skipped_in_use": report.skipped_in_use,
                 "bytes_reclaimed": report.bytes_reclaimed,
             })
             .to_string())

@@ -93,6 +93,7 @@ pub struct PyImagePruneReport {
     fsmeta_removed: u32,
     vmdk_removed: u32,
     bytes_reclaimed: Option<u64>,
+    skipped_in_use: u32,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -573,12 +574,19 @@ impl PyImagePruneReport {
             fsmeta_removed: inner.fsmeta_removed,
             vmdk_removed: inner.vmdk_removed,
             bytes_reclaimed: inner.bytes_reclaimed,
+            skipped_in_use: inner.skipped_in_use,
         }
     }
 }
 
 #[pymethods]
 impl PyImagePruneReport {
+    /// Number of busy cache entries skipped by cleanup.
+    #[getter]
+    fn skipped_in_use(&self) -> u32 {
+        self.skipped_in_use
+    }
+
     #[getter]
     fn image_refs_removed(&self) -> u32 {
         self.image_refs_removed

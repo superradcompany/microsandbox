@@ -23,6 +23,56 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Locks an immutable descriptor without locking its readable byte range on Windows.
+/// Closing the file releases the marker; callers must not call `unlock` for this lock.
+pub fn lock_descriptor(file: &File, exclusive: bool, nonblocking: bool) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        if exclusive {
+            lock_exclusive_inner(file, nonblocking)
+        } else {
+            lock_shared(file).map(|()| true)
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows byte locks affect I/O through other handles, unlike flock. Reserve a
+        // marker beyond any descriptor payload so cooperating readers can still read JSON.
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.Anonymous.Anonymous.Offset = u32::MAX - 1;
+        overlapped.Anonymous.Anonymous.OffsetHigh = u32::MAX;
+        let flags = if exclusive {
+            LOCKFILE_EXCLUSIVE_LOCK
+        } else {
+            0
+        } | if nonblocking {
+            LOCKFILE_FAIL_IMMEDIATELY
+        } else {
+            0
+        };
+        let result = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as HANDLE,
+                flags,
+                0,
+                1,
+                0,
+                &mut overlapped,
+            )
+        };
+        if result != 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if nonblocking
+            && matches!(error.raw_os_error(), Some(code) if code as u32 == ERROR_LOCK_VIOLATION || code as u32 == ERROR_IO_PENDING)
+        {
+            return Ok(false);
+        }
+        Err(error)
+    }
+}
+
 /// Opens or creates an owner-only lock file without truncating it.
 pub fn open_lock_file(path: &Path) -> io::Result<File> {
     open_lock_file_with(path, true, false)

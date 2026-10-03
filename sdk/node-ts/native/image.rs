@@ -76,6 +76,7 @@ pub struct ImagePruneReportJs {
     pub layers_removed: u32,
     pub fsmeta_removed: u32,
     pub vmdk_removed: u32,
+    pub skipped_in_use: u32,
     pub bytes_reclaimed: Option<f64>,
 }
 
@@ -173,8 +174,8 @@ pub async fn image_inspect(reference: String) -> Result<ImageDetailJs> {
     Ok(image_detail_to_js(detail))
 }
 
-/// Remove a cached image. Pass `force = true` to delete even when a
-/// sandbox references it.
+/// Remove an image reference. Force permits untagging dependencies while retaining
+/// their backing; active storage operations are never bypassed.
 #[napi(js_name = "imageRemove")]
 pub async fn image_remove(reference: String, force: Option<bool>) -> Result<()> {
     let backend = resolve_local()?;
@@ -301,6 +302,7 @@ fn image_prune_report_to_js(report: ImagePruneReport) -> ImagePruneReportJs {
         layers_removed: report.layers_removed,
         fsmeta_removed: report.fsmeta_removed,
         vmdk_removed: report.vmdk_removed,
+        skipped_in_use: report.skipped_in_use,
         bytes_reclaimed: report.bytes_reclaimed.map(|n| n as f64),
     }
 }

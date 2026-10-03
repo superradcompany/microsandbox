@@ -72,6 +72,7 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 | [`snap`](/cli/snapshot-commands) | Save and restore state |
 | [`ssh`](/cli/ssh-commands) | SSH sessions, keys, and listeners |
 | [`volume`, `volumes`](/cli/volume-commands) | Manage named storage |
+| [`df`, `prune`](/cli/storage-commands) | Inspect local storage and reclaim unused runtime RAM |
 | [`pull`, `load`, `save`, `images`, `rmi`, `image`](/cli/image-commands) | Manage cached images |
 | [`registry`, `registries`](/cli/registry-commands) | Manage registry credentials |
 | [`context`](/cli/management#msb-context) | Show the active backend |
@@ -95,11 +96,20 @@ msb rm worker
 | Flag | Description |
 |------|-------------|
 | `--tree` | Display the complete command tree with descriptions |
+| `-L, --levels <N>` | Limit tree depth, counting the selected root as level 0 (requires `--tree`) |
+| `-C, --commands` | Hide flags and arguments in the command tree (requires `--tree`) |
+| `-b, --brief` | Omit descriptions from the command tree (requires `--tree`) |
 | `--error` | Show only errors |
 | `--warn` | Show warnings and errors |
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+## Output formatting
+
+Progress, styled action confirmations, warnings, and errors go to stderr. Tables, inspection results, and JSON go to stdout. Empty-list messages retain their command-specific behavior: the registry empty-list message goes to stdout, while listing installed aliases produces no output when none exist. The plain `snapshot reindex` completion message also remains on stdout.
+
+Indented output uses two spaces, with nested content at four spaces. Human-readable image, snapshot, and volume sizes use binary units (KiB, MiB, GiB, TiB); JSON retains its documented numeric fields.
 
 ## Shell completion
 
@@ -160,3 +170,17 @@ msb run --tree      # Show all flags for run
 msb sandbox --tree  # Show the canonical sandbox command group
 msb sbx run --tree  # Show run flags through the group alias
 ```
+
+Limit the depth or hide flags and arguments for a compact command overview:
+
+```bash
+msb --tree -L 2
+msb --tree --commands
+msb image --tree --commands -L 1
+msb --tree --brief --commands -L 2
+msb --tree -Cb -L 2
+```
+
+`-L N` (or `--levels N`) counts the selected root as level 0, so `-L 1` shows its immediate children and `-L 0` shows only the root. Omitting the limit shows all levels. At the depth limit, an inline marker such as `… 4 subcommands, 2 arguments` counts the immediate children that were collapsed; arguments include both flags and positional arguments. Hidden commands and options are excluded, and `--commands` excludes arguments from both the tree and these counts.
+
+`--brief` omits command and argument descriptions and their alignment padding, while retaining names, aliases, value placeholders, and collapse counts. It works with both `-L` and `--commands`.

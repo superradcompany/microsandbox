@@ -30,6 +30,25 @@ pub(super) async fn open_snapshot(
     local: &LocalBackend,
     path_or_name: &str,
 ) -> MicrosandboxResult<Snapshot> {
+    let mut snapshot = open_snapshot_leased(local, path_or_name).await?;
+    // Metadata handles do not represent active reads. Operation entry points explicitly
+    // retain the lease while using payload paths; listing/inspection releases it here.
+    snapshot.lease = None;
+    Ok(snapshot)
+}
+
+pub(super) async fn open_snapshot_leased(
+    local: &LocalBackend,
+    path_or_name: &str,
+) -> MicrosandboxResult<Snapshot> {
+    open_snapshot_impl(local, path_or_name, true).await
+}
+
+async fn open_snapshot_impl(
+    local: &LocalBackend,
+    path_or_name: &str,
+    reader: bool,
+) -> MicrosandboxResult<Snapshot> {
     if path_or_name.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "snapshot path or name must not be empty".into(),
@@ -37,6 +56,21 @@ pub(super) async fn open_snapshot(
     }
 
     let dir = resolve_path(local, path_or_name).await?;
+    let mut lease = if reader {
+        Some(
+            super::lease::reader_async(canonical_path(&dir))
+                .await
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        MicrosandboxError::SnapshotNotFound(format!("{}: {error}", dir.display()))
+                    } else {
+                        error.into()
+                    }
+                })?,
+        )
+    } else {
+        None
+    };
 
     if !dir.exists() {
         return Err(MicrosandboxError::SnapshotNotFound(
@@ -46,7 +80,13 @@ pub(super) async fn open_snapshot(
 
     let manifest_path = dir.join(DESCRIPTOR_FILENAME);
     if !manifest_path.exists() && dir.join(V066_DESCRIPTOR_FILENAME).exists() {
+        // Migration changes the descriptor inode. Keep the namespace admitted until
+        // the reader has transferred protection to the newly published descriptor.
+        let _namespace = microsandbox_image::storage_lease::StorageLease::shared(&dir)?;
         super::migration::reconcile_explicit(local.db().await?, &dir).await?;
+        if reader {
+            lease = Some(super::lease::reader_async(canonical_path(&dir)).await?);
+        }
     }
     let bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
         MicrosandboxError::SnapshotNotFound(format!("{}: {e}", manifest_path.display()))
@@ -128,6 +168,7 @@ pub(super) async fn open_snapshot(
 
     let labels = super::metadata::read(&dir, &manifest, translated_labels).await?;
     let mut snap = Snapshot::from_parts(dir.clone(), digest.clone(), manifest, labels);
+    snap.lease = lease;
     snap.previous_upper = previous_upper;
 
     // Published managed members and explicitly opened flat artifacts remain discoverable for
@@ -141,7 +182,8 @@ pub(super) async fn open_snapshot(
                 .components()
                 .all(|part| !part.as_os_str().to_string_lossy().starts_with('.'))
         });
-    if managed
+    if reader
+        && managed
         && (super::group::group_path(&dir).is_some()
             || dir.parent() == Some(snapshots_dir.as_path()))
         && let Ok(existing) = indexed_path(local, &dir).await
@@ -161,8 +203,51 @@ pub(super) async fn index_upsert(
     digest: &str,
     manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
-    let db = local.db().await?.write();
+    // Lock and reread first. Metadata captured by list/reindex may describe an artifact
+    // removed or replaced while waiting for image admission.
+    let _artifact_lease = super::lease::reader_async(canonical_path(artifact_path)).await?;
+    let bytes = tokio::fs::read(artifact_path.join(DESCRIPTOR_FILENAME)).await?;
+    let current = Manifest::from_bytes(&bytes)
+        .or_else(|_| {
+            microsandbox_image::snapshot::migration::translate_released_flat_forward(&bytes)
+                .map(|translation| translation.target)
+        })
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if current
+        .digest()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?
+        != digest
+    {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot changed before indexing".into(),
+        ));
+    }
+    let cache = microsandbox_image::GlobalCache::new(&local.cache_dir())?;
+    let digest_id: microsandbox_image::Digest = manifest.image.manifest_digest.parse()?;
+    let _image_lease = cache
+        .lease_paths_async(vec![cache.fsmeta_erofs_path(&digest_id)])
+        .await?;
+    index_write(
+        local.db().await?.write(),
+        artifact_path,
+        digest,
+        manifest,
+        "ready",
+        None,
+    )
+    .await
+}
 
+/// Existing snapshot rows are also durable image roots. Pending publication uses the same
+/// ownership relation as ready snapshots; no new schema or archive field is required.
+pub(super) async fn index_write(
+    db: &microsandbox_db::DbWriteConnection,
+    artifact_path: &Path,
+    digest: &str,
+    manifest: &Manifest,
+    availability: &str,
+    name: Option<String>,
+) -> MicrosandboxResult<()> {
     let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.capture.created_at)
         .map(|d| d.naive_utc())
         .unwrap_or_else(|_| Utc::now().naive_utc());
@@ -175,18 +260,22 @@ pub(super) async fn index_upsert(
         .as_ref()
         .and_then(|path| path.file_name())
         .map(|name| name.to_string_lossy().into_owned());
-    let artifact_name = super::group::member_name(&artifact_path)?.or_else(|| {
-        artifact_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-    });
+    let artifact_name = name
+        .or(super::group::member_name(&artifact_path)?)
+        .or_else(|| {
+            artifact_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
     let group_path = group_path.map(|path| path.display().to_string());
 
     // Portable identities may occur in multiple groups. Replace only this local address,
     // never another copy that happens to share descriptor bytes, identity, or member name.
     let mut supersede = sea_orm::Condition::any()
         .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()));
-    if let (Some(group), Some(name)) = (&group_path, &artifact_name) {
+    if let (Some(group), Some(name)) = (&group_path, &artifact_name)
+        && availability == "ready"
+    {
         supersede = supersede.add(
             sea_orm::Condition::all()
                 .add(snapshot_entity::Column::GroupPath.eq(group.clone()))
@@ -245,7 +334,7 @@ pub(super) async fn index_upsert(
         size_bytes: Set(size_bytes),
         locality: Set("embedded".into()),
         storage_binding_id: Set(None),
-        availability: Set("ready".into()),
+        availability: Set(availability.into()),
         migration_state: Set("canonical".into()),
         migration_error_code: Set(None),
         created_at: Set(created_at),
@@ -296,8 +385,25 @@ pub(crate) fn looks_like_path(s: &str) -> bool {
 }
 
 pub(super) async fn list_indexed(local: &LocalBackend) -> MicrosandboxResult<Vec<SnapshotHandle>> {
+    super::publication::recover(local).await?;
+    let mut parents = snapshot_entity::Entity::find()
+        .all(local.db().await?.read())
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            PathBuf::from(row.artifact_path)
+                .parent()
+                .map(Path::to_path_buf)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    parents.extend(super::deletion::recovery_parents(local)?);
+    for parent in parents {
+        super::deletion::recover_parent(local, &parent).await?;
+    }
+
     let db = local.db().await?.read();
     let rows = snapshot_entity::Entity::find()
+        .filter(snapshot_entity::Column::Availability.ne("publishing"))
         .order_by_desc(snapshot_entity::Column::CreatedAt)
         .all(db)
         .await?;
@@ -366,7 +472,32 @@ pub(super) async fn remove_snapshot(
     path_or_name: &str,
     force: bool,
 ) -> MicrosandboxResult<()> {
+    remove_snapshot_expected(local, path_or_name, force, None).await
+}
+
+pub(crate) async fn remove_snapshot_expected(
+    local: &LocalBackend,
+    path_or_name: &str,
+    force: bool,
+    expected: Option<&str>,
+) -> MicrosandboxResult<()> {
+    let path = canonical_path(&resolve_path(local, path_or_name).await?);
+    // Initialize/reconcile before taking the deletion lock: migration itself pins the
+    // namespace, so starting it while holding that namespace exclusively would deadlock.
     let pools = local.db().await?;
+    if !path.join(DESCRIPTOR_FILENAME).exists() && path.join(V066_DESCRIPTOR_FILENAME).exists() {
+        super::migration::reconcile_explicit(pools, &path).await?;
+    }
+    if let Some(parent) = path.parent() {
+        super::deletion::register_parent(local, parent)?;
+        super::deletion::recover_parent(local, parent).await?;
+    }
+    let _deletion = super::lease::deletion(&path)?.ok_or_else(|| {
+        MicrosandboxError::Custom(format!(
+            "snapshot is in use by an active operation: {}",
+            path.display()
+        ))
+    })?;
     let read_db = pools.read();
     let write_db = pools.write();
 
@@ -379,6 +510,11 @@ pub(super) async fn remove_snapshot(
         && row.group_path.is_none()
         && super::group::group_path(Path::new(path_or_name)).is_none()
     {
+        if expected.is_some_and(|expected| expected != row.digest) {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "snapshot handle refers to a replaced artifact".into(),
+            ));
+        }
         if row.child_count > 0 && !force {
             return Err(MicrosandboxError::Custom(format!(
                 "snapshot {} has {} indexed child snapshot(s); pass --force to remove anyway",
@@ -392,7 +528,12 @@ pub(super) async fn remove_snapshot(
         return Ok(());
     }
 
-    let snapshot = open_snapshot(local, path_or_name).await?;
+    let snapshot = open_snapshot_impl(local, path.to_string_lossy().as_ref(), false).await?;
+    if expected.is_some_and(|expected| expected != snapshot.digest()) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot handle refers to a replaced artifact".into(),
+        ));
+    }
     let artifact_path = canonical_path(snapshot.path());
     let artifact_key = artifact_path.display().to_string();
 
@@ -413,13 +554,26 @@ pub(super) async fn remove_snapshot(
 
     // The group helper validates head removal and removes the member under its publication
     // lock. Even --force must not leave a group's head dangling while other members remain.
-    if !super::group::remove_member(&artifact_path).await? && artifact_path.exists() {
-        tokio::fs::remove_dir_all(&artifact_path).await?;
+    if !super::group::remove_member_leased(&artifact_path, _deletion.clone()).await?
+        && artifact_path.exists()
+    {
+        let path = artifact_path.clone();
+        let lease = _deletion.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lease = lease;
+            super::deletion::quarantine(&path)
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Custom(format!("snapshot removal task: {error}")))??;
     }
     snapshot_entity::Entity::delete_by_id(artifact_key)
         .exec(write_db)
         .await?;
     recompute_children(write_db).await?;
+    drop(_deletion);
+    if let Some(parent) = artifact_path.parent() {
+        super::deletion::recover_parent(local, parent).await?;
+    }
     Ok(())
 }
 
@@ -518,7 +672,7 @@ async fn resolve_path(local: &LocalBackend, selector: &str) -> MicrosandboxResul
     super::group::resolve(&local.snapshots_dir(), selector).await
 }
 
-fn canonical_path(path: &Path) -> PathBuf {
+pub(super) fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -546,7 +700,7 @@ fn unique_identity_match(
     Ok(rows.pop())
 }
 
-async fn recompute_children<C: ConnectionTrait>(db: &C) -> Result<(), sea_orm::DbErr> {
+pub(super) async fn recompute_children<C: ConnectionTrait>(db: &C) -> Result<(), sea_orm::DbErr> {
     // Repeated imports are instances, not additional lineage edges. Apply the same number of
     // distinct child identities to every local copy of a parent.
     db.execute_unprepared(
@@ -757,6 +911,299 @@ mod tests {
             });
         std::env::set_current_dir(original_cwd).unwrap();
         println!("snapshot path lifetime checked");
+    }
+
+    #[tokio::test]
+    async fn retained_sdk_handles_reject_replacement_before_export_or_removal() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let artifact = local.snapshots_dir().join("flat");
+        std::fs::create_dir_all(&artifact).unwrap();
+        let original = manifest(920, None);
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            original.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
+        crate::with_backend(backend, async {
+            let opened = crate::Snapshot::open(artifact.to_str().unwrap())
+                .await
+                .unwrap();
+            let handle = crate::Snapshot::list().await.unwrap().pop().unwrap();
+            remove_snapshot(&local, artifact.to_str().unwrap(), false)
+                .await
+                .unwrap();
+            let replacement = manifest(921, None);
+            std::fs::create_dir(&artifact).unwrap();
+            std::fs::write(
+                artifact.join(DESCRIPTOR_FILENAME),
+                replacement.to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+            // Retained values must not resolve a reused path into a different generation.
+            let out = home.path().join("unexpected.tar.zst");
+            for result in [
+                opened
+                    .save_to(&out, crate::snapshot::SaveOpts::default())
+                    .await,
+                handle
+                    .save_to(&out, crate::snapshot::SaveOpts::default())
+                    .await,
+                handle.remove(false).await,
+                handle.remove(true).await,
+            ] {
+                assert!(matches!(
+                    result,
+                    Err(MicrosandboxError::SnapshotIntegrity(_))
+                ));
+            }
+            assert!(!out.exists());
+            assert_eq!(
+                open_snapshot(&local, artifact.to_str().unwrap())
+                    .await
+                    .unwrap()
+                    .digest(),
+                replacement.digest().unwrap(),
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pending_publication_recovers_both_sides_of_the_rename() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("pending"))
+            .await
+            .unwrap();
+        for published in [false, true] {
+            let data = manifest(if published { 910 } else { 911 }, None);
+            let path = group.join(data.snapshot_id.as_str());
+            let lease = microsandbox_image::storage_lease::StorageLease::shared(&path).unwrap();
+            super::super::publication::prepare(
+                local.db().await.unwrap().write(),
+                &path,
+                &data.digest().unwrap(),
+                &data,
+            )
+            .await
+            .unwrap();
+            super::super::publication::recover(&local).await.unwrap();
+            assert_eq!(
+                indexed_path(&local, &path)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .availability,
+                "publishing"
+            );
+            if published {
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(
+                    path.join(DESCRIPTOR_FILENAME),
+                    data.to_canonical_bytes().unwrap(),
+                )
+                .unwrap();
+            }
+            drop(lease); // Simulate process exit on either side of filesystem publication.
+            super::super::publication::recover(&local).await.unwrap();
+            let row = indexed_path(&local, &path).await.unwrap();
+            if published {
+                assert_eq!(row.unwrap().availability, "ready");
+            } else {
+                assert!(row.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_finds_quarantine_after_last_index_row_is_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        for parent in [local.snapshots_dir(), external.path().to_path_buf()] {
+            std::fs::create_dir_all(&parent).unwrap();
+            super::super::deletion::register_parent(&local, &parent).unwrap();
+            let journal = parent.join(".snapshot-deletions/delete-interrupted");
+            std::fs::create_dir_all(journal.join("payload")).unwrap();
+            std::fs::write(journal.join("payload/bytes"), b"retained").unwrap();
+            std::fs::write(journal.join("source.json"), br#""missing-snapshot""#).unwrap();
+            microsandbox_utils::process_lock::open_lock_file(&journal.join("active.lock")).unwrap();
+            assert!(list_indexed(&local).await.unwrap().is_empty());
+            assert!(!journal.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_metadata_cannot_resurrect_a_removed_snapshot() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let data = manifest(900, None);
+        let path = install(&local, "stale", "baseline", &data).await;
+        let opened = open_snapshot(&local, path.to_str().unwrap()).await.unwrap();
+        remove_snapshot(&local, path.to_str().unwrap(), true)
+            .await
+            .unwrap();
+        assert!(
+            index_upsert(&local, &path, opened.digest(), opened.manifest())
+                .await
+                .is_err()
+        );
+        assert!(indexed_path(&local, &path).await.unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn migrated_reader_pins_the_published_descriptor() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        local.db().await.unwrap();
+        let path = home.path().join("external-legacy");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("upper.ext4"), b"hello").unwrap();
+        std::fs::write(path.join(V066_DESCRIPTOR_FILENAME), br#"{"schema":1,"format":"raw","fstype":"ext4","image":{"ref":"docker.io/library/alpine:3.20","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"parent":null,"created_at":"2026-07-01T10:00:00Z","labels":{},"upper":{"file":"upper.ext4","size_bytes":5,"integrity":null},"source_sandbox":"box"}"#).unwrap();
+        let reader = open_snapshot_leased(&local, path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(path.join(DESCRIPTOR_FILENAME).exists());
+        // The legacy inode has been retired. Protection must follow snapshot.json.
+        assert!(super::super::lease::deletion(&path).unwrap().is_none());
+        drop(reader);
+        remove_snapshot(&local, path.to_str().unwrap(), true)
+            .await
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_external_snapshot_needs_no_sidecar_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let path = external.path().join("readonly");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(
+            path.join(DESCRIPTOR_FILENAME),
+            manifest(901, None).to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(external.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = open_snapshot_leased(&local, path.to_str().unwrap()).await;
+        std::fs::set_permissions(external.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let reader = result.unwrap();
+        assert!(!external.path().join(".msb-leases").exists());
+        assert!(super::super::lease::deletion(&path).unwrap().is_none());
+        drop(reader);
+        assert!(super::super::lease::deletion(&path).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn active_snapshot_reader_protects_only_its_installed_copy_even_from_force() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let snapshot = manifest(77, None);
+        let first = install(&local, "first", "baseline", &snapshot).await;
+        let second = install(&local, "second", "baseline", &snapshot).await;
+        let reader = open_snapshot_leased(&local, first.to_str().unwrap())
+            .await
+            .unwrap();
+        let error = remove_snapshot(&local, first.to_str().unwrap(), true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("active operation"), "{error}");
+        remove_snapshot(&local, second.to_str().unwrap(), false)
+            .await
+            .unwrap();
+        assert!(!second.exists());
+        assert!(first.join(DESCRIPTOR_FILENAME).exists());
+        drop(reader);
+        remove_snapshot(&local, first.to_str().unwrap(), false)
+            .await
+            .unwrap();
+        assert!(!first.exists());
+    }
+
+    #[tokio::test]
+    async fn retired_snapshot_recovers_stale_index_without_deleting_new_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let parent = local.snapshots_dir();
+        let artifact = parent.join("flat");
+        let snapshot = manifest(78, None);
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        let opened = open_snapshot(&local, artifact.to_str().unwrap())
+            .await
+            .unwrap();
+        index_upsert(&local, &artifact, opened.digest(), opened.manifest())
+            .await
+            .unwrap();
+        let lease = microsandbox_image::storage_lease::StorageLease::try_exclusive(&artifact)
+            .unwrap()
+            .unwrap();
+        super::super::deletion::quarantine(&artifact).unwrap();
+        drop(lease);
+        // Simulate a crash before removing the index row.
+        super::super::deletion::recover_parent(&local, &parent)
+            .await
+            .unwrap();
+        assert!(indexed_path(&local, &artifact).await.unwrap().is_none());
+
+        std::fs::create_dir(&artifact).unwrap();
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        index_upsert(&local, &artifact, opened.digest(), opened.manifest())
+            .await
+            .unwrap();
+        super::super::deletion::quarantine(&artifact).unwrap();
+        // A complete new generation at the same address must survive recovery.
+        std::fs::create_dir(&artifact).unwrap();
+        std::fs::write(
+            artifact.join(DESCRIPTOR_FILENAME),
+            snapshot.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        super::super::deletion::recover_parent(&local, &parent)
+            .await
+            .unwrap();
+        assert!(indexed_path(&local, &artifact).await.unwrap().is_some());
+        assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
     }
 
     #[tokio::test]

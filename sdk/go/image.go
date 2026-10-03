@@ -207,6 +207,7 @@ type ImageLayer struct {
 
 // ImagePruneReport summarizes artifacts removed by Image.Prune.
 type ImagePruneReport struct {
+	SkippedInUse     uint32
 	ImageRefsRemoved uint32
 	ManifestsRemoved uint32
 	LayersRemoved    uint32
@@ -247,6 +248,7 @@ func imageDetailFromInfo(info *ffi.ImageDetailInfo) *ImageDetail {
 
 func imagePruneReportFromInfo(info *ffi.ImagePruneReportInfo) *ImagePruneReport {
 	return &ImagePruneReport{
+		SkippedInUse:     info.SkippedInUse,
 		ImageRefsRemoved: info.ImageRefsRemoved,
 		ManifestsRemoved: info.ManifestsRemoved,
 		LayersRemoved:    info.LayersRemoved,

@@ -29,6 +29,7 @@ pub mod sandbox;
 #[cfg(feature = "local")]
 pub mod setup;
 pub mod snapshot;
+pub mod storage;
 pub mod volume;
 
 pub use agent::{
@@ -103,4 +104,5 @@ pub use snapshot::{
     SnapshotScope, SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity,
     UpperVerifyStatus,
 };
+pub use storage::{Storage, StorageCategoryUsage, StorageItemUsage, StorageUsage};
 pub use volume::{Volume, VolumeConfig, VolumeHandle, VolumeKind, VolumeSpec};

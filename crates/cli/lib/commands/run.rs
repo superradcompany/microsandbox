@@ -260,6 +260,7 @@ async fn run_new(
         {
             ui::warn(&format!("failed to stop sandbox: {error}"));
         }
+        super::finish_stopped_memory_cleanup().await;
         return handle_exit(result?);
     }
 
@@ -270,6 +271,7 @@ async fn run_new(
             if let Err(e) = sandbox.stop().await {
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
+            super::finish_stopped_memory_cleanup().await;
             return Ok(());
         }
     };
@@ -281,6 +283,7 @@ async fn run_new(
     if let Err(e) = sandbox.stop().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }
+    super::finish_stopped_memory_cleanup().await;
 
     handle_exit(result?)
 }
