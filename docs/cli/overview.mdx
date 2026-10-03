@@ -96,6 +96,9 @@ msb rm worker
 | Flag | Description |
 |------|-------------|
 | `--tree` | Display the complete command tree with descriptions |
+| `-L, --levels <N>` | Limit tree depth, counting the selected root as level 0 (requires `--tree`) |
+| `-C, --commands` | Hide flags and arguments in the command tree (requires `--tree`) |
+| `-b, --brief` | Omit descriptions from the command tree (requires `--tree`) |
 | `--error` | Show only errors |
 | `--warn` | Show warnings and errors |
 | `--info` | Show info, warnings, and errors |
@@ -167,3 +170,17 @@ msb run --tree      # Show all flags for run
 msb sandbox --tree  # Show the canonical sandbox command group
 msb sbx run --tree  # Show run flags through the group alias
 ```
+
+Limit the depth or hide flags and arguments for a compact command overview:
+
+```bash
+msb --tree -L 2
+msb --tree --commands
+msb image --tree --commands -L 1
+msb --tree --brief --commands -L 2
+msb --tree -Cb -L 2
+```
+
+`-L N` (or `--levels N`) counts the selected root as level 0, so `-L 1` shows its immediate children and `-L 0` shows only the root. Omitting the limit shows all levels. At the depth limit, an inline marker such as `… 4 subcommands, 2 arguments` counts the immediate children that were collapsed; arguments include both flags and positional arguments. Hidden commands and options are excluded, and `--commands` excludes arguments from both the tree and these counts.
+
+`--brief` omits command and argument descriptions and their alignment padding, while retaining names, aliases, value placeholders, and collapse counts. It works with both `-L` and `--commands`.
