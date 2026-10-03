@@ -207,6 +207,7 @@ struct ActivityTracker {
 #[derive(Default)]
 pub struct BootConsoleState {
     input: Vec<u8>,
+    init_failure_ack: bool,
 }
 
 #[derive(Clone)]
@@ -1649,7 +1650,7 @@ pub fn open_and_bind_bulk_port() -> AgentdResult<Option<BoundBulkPort>> {
     set_nonblocking(fd)?;
 
     let connection_id = random_connection_id()?;
-    write_all_to_fd(fd, &encode_bulk_hello(connection_id), deadline)?;
+    write_all_to_fd(fd, &encode_bulk_hello(connection_id), Some(deadline))?;
 
     let mut ack = [0u8; BULK_BINDING_SIZE];
     read_exact_from_fd(fd, &mut ack, deadline, "bulk binding acknowledgement")?;
@@ -1678,8 +1679,9 @@ pub fn receive_bootstrap(port_file: &File) -> AgentdResult<(GuestBootstrap, Boot
     set_nonblocking(fd)?;
     let deadline = init_ack_deadline();
     let mut state = BootConsoleState::default();
-    let msg = read_boot_message(fd, &mut state, deadline, "guest bootstrap")?;
+    let msg = read_boot_message(fd, &mut state, Some(deadline), "guest bootstrap")?;
     let bootstrap = decode_bootstrap_message(msg)?;
+    state.init_failure_ack = bootstrap.init_failure_ack;
     Ok((bootstrap, state))
 }
 
@@ -1731,21 +1733,26 @@ pub fn report_init_context(
     let mut out = Vec::new();
     codec::encode_to_buf(&msg, &mut out)
         .map_err(|e| AgentdError::ExecSession(format!("encode init context frame: {e}")))?;
-    write_all_to_fd(fd, &out, deadline)?;
+    write_all_to_fd(fd, &out, Some(deadline))?;
     wait_for_init_ack(fd, boot_console, deadline)
 }
 
 /// Reports a fatal startup error before exiting the guest.
 ///
 /// The host acknowledges only after saving the diagnostic for CLI and SDK
-/// callers. Older hosts discard this report, so waiting is bounded.
+/// callers. Supporting hosts control shutdown; older hosts discard the
+/// report, so only their wait is bounded.
 pub fn report_init_failure(
     port_file: &File,
     boot_console: &mut BootConsoleState,
     message: &str,
     error: &AgentdError,
 ) -> AgentdResult<()> {
-    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = if boot_console.init_failure_ack {
+        None
+    } else {
+        Some(Instant::now() + std::time::Duration::from_secs(2))
+    };
     let fd = port_file.as_raw_fd();
     set_nonblocking(fd)?;
     let msg = Message::with_payload(
@@ -3852,7 +3859,7 @@ fn read_exact_from_fd(
     label: &str,
 ) -> AgentdResult<()> {
     while !buf.is_empty() {
-        if !poll_fd_until(fd, libc::POLLIN, deadline)? {
+        if !poll_fd_until(fd, libc::POLLIN, Some(deadline))? {
             return Err(AgentdError::ExecSession(format!(
                 "timed out waiting for {label}"
             )));
@@ -3891,7 +3898,7 @@ fn wait_for_init_ack(
     boot_console: &mut BootConsoleState,
     deadline: Instant,
 ) -> AgentdResult<()> {
-    let msg = read_boot_message(fd, boot_console, deadline, "init ack")?;
+    let msg = read_boot_message(fd, boot_console, Some(deadline), "init ack")?;
     if msg.t == MessageType::InitAck {
         let _: InitAck = msg
             .payload()
@@ -3908,7 +3915,7 @@ fn wait_for_init_ack(
 fn read_boot_message(
     fd: i32,
     state: &mut BootConsoleState,
-    deadline: Instant,
+    deadline: Option<Instant>,
     context: &str,
 ) -> AgentdResult<Message> {
     let mut read_buf = [0u8; 4096];
@@ -3951,15 +3958,18 @@ fn read_boot_message(
     }
 }
 
-fn poll_fd_until(fd: i32, events: i16, deadline: Instant) -> AgentdResult<bool> {
+fn poll_fd_until(fd: i32, events: i16, deadline: Option<Instant>) -> AgentdResult<bool> {
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-
-        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let timeout_ms = if timeout_ms == 0 { 1 } else { timeout_ms };
+        let timeout_ms = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                remaining.as_millis().clamp(1, i32::MAX as u128) as i32
+            }
+            None => -1,
+        };
         let mut pfd = libc::pollfd {
             fd,
             events,
@@ -3990,7 +4000,7 @@ fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Instant) -> AgentdResult<()> {
+fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Option<Instant>) -> AgentdResult<()> {
     while !buf.is_empty() {
         match write_to_fd(fd, buf) {
             Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
@@ -4878,6 +4888,76 @@ mod tests {
     }
 
     #[test]
+    fn init_failure_waits_for_slow_supporting_host_but_bounds_legacy_wait() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        for supported in [false, true] {
+            let (guest, mut host) = UnixStream::pair().unwrap();
+            let guest = File::from(OwnedFd::from(guest));
+            let mut bootstrap = Vec::new();
+            codec::encode_to_buf(
+                &Message::with_payload(
+                    MessageType::Bootstrap,
+                    0,
+                    &GuestBootstrap {
+                        init_failure_ack: supported,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+                &mut bootstrap,
+            )
+            .unwrap();
+            host.write_all(&bootstrap).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let (_, mut state) = receive_bootstrap(&guest).unwrap();
+                let result = report_init_failure(
+                    &guest,
+                    &mut state,
+                    "missing user",
+                    &AgentdError::UserNotFound("iggy".into()),
+                );
+                done_tx.send(result).unwrap();
+            });
+            let report = read_boot_message(
+                host.as_raw_fd(),
+                &mut BootConsoleState::default(),
+                Some(Instant::now() + std::time::Duration::from_secs(5)),
+                "startup error",
+            )
+            .unwrap();
+            assert_eq!(report.t, MessageType::CoreError);
+
+            let result = done_rx.recv_timeout(std::time::Duration::from_secs(3));
+            if supported {
+                assert!(
+                    matches!(result, Err(mpsc::RecvTimeoutError::Timeout)),
+                    "supporting host must be allowed to save beyond the legacy timeout"
+                );
+                let mut ack = Vec::new();
+                codec::encode_to_buf(
+                    &Message::with_payload(MessageType::InitAck, 0, &InitAck { failure: true })
+                        .unwrap(),
+                    &mut ack,
+                )
+                .unwrap();
+                host.write_all(&ack).unwrap();
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+            } else {
+                assert!(result.expect("legacy host wait must be bounded").is_err());
+            }
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn coalesced_bootstrap_and_init_ack_retain_the_second_frame() {
         let bootstrap = GuestBootstrap::default();
         let bootstrap_message =
@@ -4891,7 +4971,7 @@ mod tests {
         let decoded = read_boot_message(
             -1,
             &mut state,
-            Instant::now() + std::time::Duration::from_secs(1),
+            Some(Instant::now() + std::time::Duration::from_secs(1)),
             "guest bootstrap",
         )
         .unwrap();

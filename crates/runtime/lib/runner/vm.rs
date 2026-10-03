@@ -1870,6 +1870,7 @@ fn build_vm(
         })
         .transpose()?;
     let mut bootstrap = vm.bootstrap.clone();
+    bootstrap.init_failure_ack = true;
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));
