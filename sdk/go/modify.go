@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -74,6 +75,16 @@ type ModifyOptions struct {
 
 	// SecretsRemove removes secrets by name.
 	SecretsRemove []string
+
+	// Mounts adds mounts, keyed by guest path. A mount at a guest path that
+	// already has one replaces it. Named volumes must already exist, and
+	// owned mounts cannot be added. Mount changes take effect on the next
+	// start.
+	Mounts map[string]MountConfig
+
+	// MountsRemove removes mounts by guest path. Takes effect on the next
+	// start.
+	MountsRemove []string
 
 	// Policy selects the apply policy. Defaults to ModificationPolicyNoRestart.
 	Policy ModificationPolicy
@@ -173,6 +184,9 @@ type ResourceResizeStatus struct {
 // Modify plans or applies a sandbox modification on this live sandbox.
 // With DryRun the plan is computed without applying anything.
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
+	if err := checkModifyMounts(opts); err != nil {
+		return nil, err
+	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
@@ -187,6 +201,9 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 // Modify plans or applies a sandbox modification by name. It does not start
 // stopped sandboxes; next-start changes persist for the next boot.
 func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
+	if err := checkModifyMounts(opts); err != nil {
+		return nil, err
+	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
 		return nil, err
@@ -218,6 +235,34 @@ type modifyPatch struct {
 	Workdir         *string        `json:"workdir,omitempty"`
 	Secrets         []modifySecret `json:"secrets,omitempty"`
 	SecretsRemove   []string       `json:"secrets_remove,omitempty"`
+	Mounts          []modifyMount  `json:"mounts,omitempty"`
+	MountsRemove    []string       `json:"mounts_remove,omitempty"`
+}
+
+// modifyMount mirrors the core VolumeMount serde shape, tagged on "type"
+// ("Bind", "Named", "Tmpfs", or "DiskImage"), not the flat create-time spec.
+type modifyMount struct {
+	Type               string             `json:"type"`
+	Host               string             `json:"host,omitempty"`
+	Name               string             `json:"name,omitempty"`
+	Guest              string             `json:"guest"`
+	Format             string             `json:"format,omitempty"`
+	Fstype             string             `json:"fstype,omitempty"`
+	SizeMiB            uint32             `json:"size_mib,omitempty"`
+	QuotaMiB           uint32             `json:"quota_mib,omitempty"`
+	StatVirtualization string             `json:"stat_virtualization,omitempty"`
+	HostPermissions    string             `json:"host_permissions,omitempty"`
+	Options            modifyMountOptions `json:"options"`
+}
+
+// modifyMountOptions mirrors the core MountOptions serde shape.
+type modifyMountOptions struct {
+	Readonly    bool    `json:"readonly"`
+	Noexec      bool    `json:"noexec"`
+	Nosuid      bool    `json:"nosuid"`
+	Nodev       bool    `json:"nodev"`
+	OverrideUID *uint32 `json:"override_uid,omitempty"`
+	OverrideGID *uint32 `json:"override_gid,omitempty"`
 }
 
 // modifySecret mirrors the core SecretModificationPatch serde shape. Value is
@@ -285,6 +330,14 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 		}
 		patch.Secrets = append(patch.Secrets, entry)
 	}
+	patch.MountsRemove = opts.MountsRemove
+	for _, guest := range sortedKeys(opts.Mounts) {
+		entry, err := buildModifyMount(guest, opts.Mounts[guest])
+		if err != nil {
+			return "", err
+		}
+		patch.Mounts = append(patch.Mounts, entry)
+	}
 
 	raw, err := json.Marshal(modifyRequest{
 		Patch:  patch,
@@ -330,6 +383,121 @@ func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error)
 		entry.Placeholder = &placeholder
 	}
 	return entry, nil
+}
+
+// buildModifyMount converts one MountConfig into the core VolumeMount shape.
+// Named volume creation settings are ignored: modify never provisions volumes.
+func buildModifyMount(guest string, mount MountConfig) (modifyMount, error) {
+	entry := modifyMount{
+		Guest: guest,
+		Options: modifyMountOptions{
+			Readonly: mount.Readonly,
+			Noexec:   mount.Noexec,
+			Nosuid:   mount.Nosuid,
+			Nodev:    mount.Nodev,
+		},
+	}
+	if mount.Owner != nil {
+		uid, gid := mount.Owner.UID, mount.Owner.GID
+		entry.Options.OverrideUID, entry.Options.OverrideGID = &uid, &gid
+	}
+	if bad := inapplicableMountOptions(mount); len(bad) > 0 {
+		return modifyMount{}, fmt.Errorf("mount %q: %s not valid for this kind of mount", guest, strings.Join(bad, ", "))
+	}
+	switch mount.Kind() {
+	case MountKindBind:
+		entry.Type, entry.Host, entry.QuotaMiB = "Bind", mount.Bind, mount.QuotaMiB
+		entry.StatVirtualization = string(mount.StatVirtualization)
+		entry.HostPermissions = string(mount.HostPermissions)
+	case MountKindNamed:
+		entry.Type, entry.Name = "Named", mount.Named
+		entry.StatVirtualization = string(mount.StatVirtualization)
+		entry.HostPermissions = string(mount.HostPermissions)
+	case MountKindTmpfs:
+		entry.Type, entry.SizeMiB = "Tmpfs", mount.SizeMiB
+	case MountKindDisk:
+		entry.Type, entry.Host, entry.Fstype = "DiskImage", mount.Disk, mount.Fstype
+		format, err := diskImageFormat(mount.Format, mount.Disk)
+		if err != nil {
+			return modifyMount{}, fmt.Errorf("mount %q: %w", guest, err)
+		}
+		entry.Format = format
+	default:
+		return modifyMount{}, fmt.Errorf("mount %q: modify supports bind, named, tmpfs, and disk mounts", guest)
+	}
+	return entry, nil
+}
+
+// inapplicableMountOptions lists options unsupported by the mount kind.
+// Named-volume provisioning settings (NamedMode, NamedKind, SizeMiB,
+// QuotaMiB) are ignored because modify does not provision volumes.
+func inapplicableMountOptions(mount MountConfig) []string {
+	kind := mount.Kind()
+	virtiofs := kind == MountKindBind || kind == MountKindNamed
+	var bad []string
+	add := func(set bool, name string) {
+		if set {
+			bad = append(bad, name)
+		}
+	}
+	add(mount.QuotaMiB != 0 && !virtiofs, "QuotaMiB")
+	add(mount.SizeMiB != 0 && kind != MountKindTmpfs && kind != MountKindNamed, "SizeMiB")
+	add((mount.NamedMode != "" || mount.NamedKind != "") && kind != MountKindNamed, "NamedMode/NamedKind")
+	add(mount.Format != "" && kind != MountKindDisk, "Format")
+	add(mount.Fstype != "" && kind != MountKindDisk, "Fstype")
+	add(mount.StatVirtualization != "" && !virtiofs, "StatVirtualization")
+	add(mount.HostPermissions != "" && !virtiofs, "HostPermissions")
+	add(mount.Owner != nil && !virtiofs, "Owner")
+	return bad
+}
+
+// diskImageFormat returns the core format name. With no explicit format it is
+// inferred from the file extension as the core builder does: case-sensitive,
+// ".qcow2" and ".vmdk" only, anything else (including a bare dotfile such as
+// ".qcow2") raw. An explicit format must be raw, qcow2, or vmdk.
+func diskImageFormat(format, host string) (string, error) {
+	if format == "" {
+		format = "raw"
+		if base := filepath.Base(host); filepath.Ext(base) != base {
+			switch ext := filepath.Ext(base); ext {
+			case ".qcow2", ".vmdk":
+				format = strings.TrimPrefix(ext, ".")
+			}
+		}
+	}
+	switch format {
+	case "raw":
+		return "Raw", nil
+	case "qcow2":
+		return "Qcow2", nil
+	case "vmdk":
+		return "Vmdk", nil
+	default:
+		return "", fmt.Errorf("unknown disk image format: %s", format)
+	}
+}
+
+// modifyMountsSupported probes the loaded native library; tests replace it to
+// simulate an older library.
+var modifyMountsSupported = ffi.ModifyMountsSupported
+
+// checkModifyMounts rejects mount changes when the loaded native library
+// predates them, since it would silently drop the unknown patch fields.
+func checkModifyMounts(opts ModifyOptions) error {
+	if len(opts.Mounts) == 0 && len(opts.MountsRemove) == 0 {
+		return nil
+	}
+	supported, err := modifyMountsSupported()
+	if err != nil {
+		return wrapFFI(err)
+	}
+	if !supported {
+		return wrapFFI(&ffi.Error{
+			Kind:    ffi.KindUnsupportedOperation,
+			Message: "native SDK does not support modifying mounts; update the native SDK",
+		})
+	}
+	return nil
 }
 
 func parseModificationPlan(raw string) (*SandboxModificationPlan, error) {

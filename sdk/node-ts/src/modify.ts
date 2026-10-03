@@ -1,4 +1,9 @@
-import type { NapiSandboxModifyOptions } from "./internal/napi.js";
+import { UnsupportedOperationError } from "./errors.js";
+import {
+  napi,
+  type NapiSandboxModifyOptions,
+  type NapiVolumeMount as VolumeMount,
+} from "./internal/napi.js";
 
 // The wire contract for these shapes is generated from the Rust types in
 // packages/microsandbox-types (see packages/microsandbox-types/typescript/src/index.ts,
@@ -73,6 +78,13 @@ export interface ModifyOptions {
   secrets?: Record<string, SecretModifySpec>;
   /** Secret names to remove. */
   secretsRemove?: string[];
+  /**
+   * Mounts to add, built with `MountBuilder`. A mount at a guest path that
+   * already has one replaces it. Takes effect on the next start.
+   */
+  mounts?: VolumeMount[];
+  /** Guest paths whose mounts are removed. Takes effect on the next start. */
+  mountsRemove?: string[];
   /** Apply policy. Defaults to `"no_restart"`. */
   policy?: ModificationPolicy;
   /** Compute the plan without applying anything. Defaults to `false`. */
@@ -162,6 +174,22 @@ export interface SandboxModificationPlan {
   resizeStatus: ResourceResizeStatus[];
 }
 
+/**
+ * Refuse mount changes before dispatch when the loaded native addon predates
+ * them, so an older addon cannot silently drop `mounts` / `mountsRemove` from
+ * a mixed request.
+ */
+export function assertModifyMountsSupported(opts?: ModifyOptions): void {
+  if (
+    (opts?.mounts?.length || opts?.mountsRemove?.length) &&
+    napi.supportsModifyMounts?.() !== true
+  ) {
+    throw new UnsupportedOperationError(
+      "Native SDK does not support modifying mounts; update the native SDK",
+    );
+  }
+}
+
 /** Map TS modify options onto the native option object. */
 export function modifyOptionsToNapi(
   opts?: ModifyOptions,
@@ -180,6 +208,8 @@ export function modifyOptionsToNapi(
     workdir: opts.workdir,
     secrets: opts.secrets,
     secretsRemove: opts.secretsRemove,
+    mounts: opts.mounts,
+    mountsRemove: opts.mountsRemove,
     policy: opts.policy,
     dryRun: opts.dryRun,
   };

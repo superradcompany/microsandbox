@@ -2825,6 +2825,8 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | Workdir | `string` | Working directory for future execs |
 | Secrets | `map[string]SecretModifySpec` | Desired secret specs keyed by stable secret name |
 | SecretsRemove | `[]string` | Secret names to remove explicitly |
+| Mounts | `map[string]MountConfig` | Mounts to add keyed by guest path; replaces a mount at the same path. Named volumes must already exist and owned mounts are rejected. Applies on restart or next start |
+| MountsRemove | `[]string` | Guest paths whose mounts are removed; applies on restart or next start |
 | Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
 | DryRun | `bool` | Compute the plan without applying anything |
 

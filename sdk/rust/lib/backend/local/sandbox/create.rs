@@ -1813,6 +1813,31 @@ impl LocalBackend {
         run_dir: &Path,
         name: &str,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
+        Self::acquire_sandbox_transition_guard_with_timeout(run_dir, name, None).await
+    }
+
+    /// Like [`Self::acquire_sandbox_transition_guard`], but `Some(timeout)` gives up with a
+    /// runtime error instead of waiting indefinitely behind another lifecycle operation.
+    pub(crate) async fn acquire_sandbox_transition_guard_with_timeout(
+        run_dir: &Path,
+        name: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> MicrosandboxResult<SandboxTransitionGuard> {
+        let acquire = Self::acquire_sandbox_transition_guard_unbounded(run_dir, name);
+        match timeout {
+            None => acquire.await,
+            Some(timeout) => tokio::time::timeout(timeout, acquire).await.map_err(|_| {
+                crate::MicrosandboxError::Runtime(format!(
+                    "sandbox {name:?}: timed out waiting for a concurrent lifecycle operation"
+                ))
+            })?,
+        }
+    }
+
+    async fn acquire_sandbox_transition_guard_unbounded(
+        run_dir: &Path,
+        name: &str,
+    ) -> MicrosandboxResult<SandboxTransitionGuard> {
         let path = sandbox_transition_lock_path(run_dir, name);
         let parent = path.parent().ok_or_else(|| {
             std::io::Error::new(

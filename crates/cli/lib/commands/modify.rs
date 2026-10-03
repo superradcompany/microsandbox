@@ -23,7 +23,7 @@ pub struct ModifyArgs {
     pub name: String,
 
     /// Compact sealed layers of the root and sandbox-owned data disks without changing snapshots.
-    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "next_start", "restart"])]
+    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "volume", "volume_remove", "next_start", "restart"])]
     pub compact: bool,
 
     /// Merge up to N oldest sealed physical layers per disk, including the base (minimum 2).
@@ -102,6 +102,15 @@ pub struct ModifyArgs {
     #[arg(long = "secret-rm", value_name = "NAME")]
     pub secret_remove: Vec<String>,
 
+    /// Add a mount, replacing any mount at the same guest path (`SOURCE:DEST[:OPTIONS]`).
+    /// Needs a restart or the next start.
+    #[arg(short = 'v', long = "volume", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub volume: Vec<String>,
+
+    /// Remove the mount at a guest path. Private volumes cannot be removed.
+    #[arg(long = "volume-rm", value_name = "GUEST")]
+    pub volume_remove: Vec<String>,
+
     /// Show the plan without applying anything.
     #[arg(long)]
     pub dry_run: bool,
@@ -178,6 +187,7 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
 
     builder = apply_resource_args(builder, &args)?;
     builder = apply_spec_args(builder, &args)?;
+    builder = apply_mount_args(builder, &args)?;
     builder = apply_secret_args(builder, &args)?;
 
     let plan = builder.clone().dry_run().await?;
@@ -247,6 +257,21 @@ fn apply_spec_args(
     }
     if let Some(workdir) = &args.workdir {
         builder = builder.workdir(workdir);
+    }
+    Ok(builder)
+}
+
+fn apply_mount_args(
+    mut builder: SandboxModificationBuilder,
+    args: &ModifyArgs,
+) -> anyhow::Result<SandboxModificationBuilder> {
+    // Same parser as create, so `-v` accepts the same spec and options.
+    for entry in &args.volume {
+        let (_, mount) = common::volume_mount(entry)?;
+        builder = builder.mount(mount.build()?);
+    }
+    for guest in &args.volume_remove {
+        builder = builder.remove_mount(guest);
     }
     Ok(builder)
 }
@@ -685,6 +710,12 @@ fn replayed_args(args: &ModifyArgs) -> String {
     if let Some(workdir) = &args.workdir {
         rendered.push(format!("--workdir {workdir}"));
     }
+    for entry in &args.volume {
+        rendered.push(format!("--volume {entry}"));
+    }
+    for guest in &args.volume_remove {
+        rendered.push(format!("--volume-rm {guest}"));
+    }
     for secret in &args.secrets {
         let sanitized = common::parse_secret(secret, "modify")
             .map(|parsed| format!("{}@{}", parsed.env_var, parsed.allowed_hosts.join(",")))
@@ -842,6 +873,49 @@ mod tests {
         assert_eq!(args.labels, vec!["team=infra"]);
         assert_eq!(args.label_remove, vec!["old"]);
         assert_eq!(args.workdir.as_deref(), Some("/srv"));
+    }
+
+    #[test]
+    fn parses_volume_flags() {
+        let args = parse_modify_args(&[
+            "worker",
+            "-v",
+            "/host/apps:/opt/apps:ro",
+            "--volume-rm",
+            "/opt/old",
+            "--next-start",
+        ]);
+
+        assert_eq!(args.volume, vec!["/host/apps:/opt/apps:ro"]);
+        assert_eq!(args.volume_remove, vec!["/opt/old"]);
+        assert!(args.next_start);
+    }
+
+    #[test]
+    fn volume_flags_conflict_with_compact() {
+        for flags in [
+            vec!["worker", "--compact", "-v", "/a:/b"],
+            vec!["worker", "--compact", "--volume-rm", "/b"],
+        ] {
+            assert!(
+                TestCli::try_parse_from(std::iter::once("msb").chain(flags)).is_err(),
+                "--compact must conflict with mount flags"
+            );
+        }
+    }
+
+    #[test]
+    fn volume_flag_reuses_create_parser() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+
+        let (guest, mount) =
+            common::volume_mount(&format!("{}:/opt/apps:ro", dir.display())).unwrap();
+        assert_eq!(guest, "/opt/apps");
+        assert!(matches!(
+            mount.build().unwrap(),
+            microsandbox::sandbox::VolumeMount::Bind { host, options, .. }
+                if host == dir && options.readonly
+        ));
     }
 
     #[test]

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use napi_derive::napi;
 
+use crate::mount_builder::JsBuiltVolumeMount;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -51,6 +53,8 @@ pub struct SandboxModifyOptions {
     pub workdir: Option<String>,
     pub secrets: Option<HashMap<String, SecretModifySpec>>,
     pub secrets_remove: Option<Vec<String>>,
+    pub mounts: Option<Vec<JsBuiltVolumeMount>>,
+    pub mounts_remove: Option<Vec<String>>,
     pub policy: Option<String>,
     pub dry_run: Option<bool>,
 }

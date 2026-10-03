@@ -507,6 +507,8 @@ msb modify api -c 4                         # Live when 4 <= max_cpus
 msb modify api -e MODE=prod --restart       # Restart to apply now
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
+msb modify api -v /host/apps:/opt/apps:ro --next-start # Add a mount on next start
+msb modify api --volume-rm /opt/apps --restart         # Remove a mount now
 ```
 
 Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
@@ -528,6 +530,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
+| `--volume` | Add a mount (`SOURCE:DEST[:OPTIONS]`, same syntax as create). A mount at a guest path that already has one replaces it. Restart-backed |
+| `--volume-rm` | Remove the mount at a guest path. Restart-backed. Private volumes (`--mount-owned`) cannot be added or removed |
 | `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
 | `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
 | `--dry-run` | Show the plan without applying anything |

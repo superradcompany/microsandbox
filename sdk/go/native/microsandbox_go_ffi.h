@@ -60,6 +60,12 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+/**
+ * Capability marker: this library's modify patch understands `mounts` and
+ * `mounts_remove`. Older libraries lack the symbol and would ignore the fields.
+ */
+bool msb_sandbox_modify_mounts_supported(void);
+
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,

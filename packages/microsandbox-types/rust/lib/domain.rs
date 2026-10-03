@@ -1629,7 +1629,8 @@ pub fn canonicalize_volume_mounts(mounts: &mut [VolumeMount]) -> TypesResult<()>
     Ok(())
 }
 
-fn canonical_guest_mount_path(guest: &str) -> TypesResult<String> {
+/// Validates a guest mount path and returns its canonical form.
+pub fn canonical_guest_mount_path(guest: &str) -> TypesResult<String> {
     let path = Utf8UnixPath::new(guest);
 
     if !path.is_valid() {

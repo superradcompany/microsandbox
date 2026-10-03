@@ -594,6 +594,8 @@ async def modify(
     workdir: str | None = None,
     secrets: Mapping[str, SecretModifySpec] | None = None,
     secrets_rm: list[str] | None = None,
+    mounts: Mapping[str, MountConfig] | None = None,
+    mounts_rm: list[str] | None = None,
     policy: ModificationPolicy | None = None,
     dry_run: bool = False,
 ) -> SandboxModificationPlan
@@ -714,6 +716,14 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   <div className="msb-param">
     <div className="msb-param-key"><code>secrets_rm</code><span className="msb-type">list[str] | None</span></div>
     <div className="msb-param-desc">Secret names to remove explicitly.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mounts</code><span className="msb-type">Mapping[str, MountConfig] | None</span></div>
+    <div className="msb-param-desc">Mounts to add keyed by guest path; replaces a mount at the same path. Named volumes must already exist and owned mounts are rejected. Applies on restart or next start.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mounts_rm</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Guest paths whose mounts are removed. Applies on restart or next start.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>policy</code><a className="msb-type" href="#modificationpolicy">ModificationPolicy | None</a></div>

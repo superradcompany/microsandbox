@@ -880,6 +880,10 @@ impl PySandbox {
     /// `secrets` maps secret names to spec dicts with at most one of
     /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
     /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    ///
+    /// `mounts` maps guest paths to `MountConfig` values and replaces any
+    /// mount already at that path; `mounts_rm` removes mounts by guest path.
+    /// Mount changes take effect on the next start.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -894,6 +898,8 @@ impl PySandbox {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        mounts = None,
+        mounts_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -913,11 +919,14 @@ impl PySandbox {
         workdir: Option<String>,
         secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
         secrets_rm: Option<Vec<String>>,
+        mounts: Option<Py<PyAny>>,
+        mounts_rm: Option<Vec<String>>,
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
+        let mounts = crate::helpers::parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
         let patch = build_modify_patch(
             cpus,
             max_cpus,
@@ -931,6 +940,8 @@ impl PySandbox {
             workdir,
             secrets,
             secrets_rm,
+            mounts,
+            mounts_rm,
         );
         let policy = policy
             .as_ref()
@@ -1439,6 +1450,8 @@ pub(crate) fn build_modify_patch(
     workdir: Option<String>,
     secrets: Vec<microsandbox::sandbox::SecretModificationPatch>,
     secrets_rm: Option<Vec<String>>,
+    mounts: Vec<microsandbox::sandbox::VolumeMount>,
+    mounts_rm: Option<Vec<String>>,
 ) -> microsandbox::sandbox::SandboxModificationPatch {
     let mut env_pairs: Vec<_> = env.unwrap_or_default().into_iter().collect();
     env_pairs.sort();
@@ -1461,6 +1474,8 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
+        mounts,
+        mounts_remove: mounts_rm.unwrap_or_default(),
     }
 }
 
@@ -2592,9 +2607,20 @@ mod tests {
                 secret_patch("STRIPE_KEY", None, "sk_test_123"),
             ],
             Some(vec!["OLD".to_string()]),
+            vec![
+                microsandbox::sandbox::MountBuilder::new("/data")
+                    .bind("/srv/data")
+                    .readonly()
+                    .build()
+                    .expect("build mount"),
+            ],
+            Some(vec!["/old".to_string()]),
         );
 
         let json = serde_json::to_value(&patch).expect("serialize patch");
+        assert_eq!(json["mounts"][0]["type"], "Bind");
+        assert_eq!(json["mounts"][0]["guest"], "/data");
+        assert_eq!(json["mounts_remove"][0], "/old");
         assert_eq!(json["root_disk_size_mib"], 8192);
         let secrets = json["secrets"].as_array().expect("secrets array");
         assert_eq!(secrets.len(), 3);

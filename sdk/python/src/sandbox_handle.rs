@@ -177,6 +177,10 @@ impl PySandboxHandle {
     /// `secrets` maps secret names to spec dicts with at most one of
     /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
     /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    ///
+    /// `mounts` maps guest paths to `MountConfig` values and replaces any
+    /// mount already at that path; `mounts_rm` removes mounts by guest path.
+    /// Mount changes take effect on the next start.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -191,6 +195,8 @@ impl PySandboxHandle {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        mounts = None,
+        mounts_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -212,11 +218,14 @@ impl PySandboxHandle {
             std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
         >,
         secrets_rm: Option<Vec<String>>,
+        mounts: Option<Py<PyAny>>,
+        mounts_rm: Option<Vec<String>>,
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
+        let mounts = crate::helpers::parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
         let patch = crate::sandbox::build_modify_patch(
             cpus,
             max_cpus,
@@ -230,6 +239,8 @@ impl PySandboxHandle {
             workdir,
             secrets,
             secrets_rm,
+            mounts,
+            mounts_rm,
         );
         let policy = policy
             .as_ref()

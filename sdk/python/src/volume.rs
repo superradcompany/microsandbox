@@ -582,3 +582,124 @@ fn set_mount_metadata_options(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+
+    use pyo3::types::PyDict;
+
+    use super::*;
+    use crate::helpers::parse_mount_patches;
+
+    /// Make the pure-Python SDK types importable without the native extension that
+    /// `microsandbox/__init__.py` would require.
+    fn with_sdk_types<R>(f: impl FnOnce(Python<'_>) -> PyResult<R>) -> R {
+        static INIT: Once = Once::new();
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            INIT.call_once(|| {
+                let package = PyModule::new(py, "microsandbox").unwrap();
+                let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+                package.setattr("__path__", vec![dir]).unwrap();
+                py.import("sys")
+                    .unwrap()
+                    .getattr("modules")
+                    .unwrap()
+                    .set_item("microsandbox", package)
+                    .unwrap();
+            });
+            f(py).unwrap()
+        })
+    }
+
+    #[test]
+    fn volume_mount_configs_parse_into_modify_mounts() {
+        let mounts = with_sdk_types(|py| {
+            let owner = |id: u32| id.into_pyobject(py).map(|id| id.into_any().unbind());
+            let mounts = PyDict::new(py);
+            mounts.set_item(
+                "/scratch",
+                PyVolume::tmpfs(py, Some(64), false, true, false, false)?,
+            )?;
+            mounts.set_item(
+                "/code",
+                PyVolume::bind(
+                    py,
+                    "/srv/code".into(),
+                    true,
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                    Some(owner(1000)?),
+                    Some(owner(1000)?),
+                )?,
+            )?;
+            mounts.set_item(
+                "/data",
+                PyVolume::named(
+                    py,
+                    "shared".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?,
+            )?;
+            mounts.set_item(
+                "/disk",
+                PyVolume::disk(
+                    "/srv/data.qcow2".into(),
+                    None,
+                    Some("ext4".into()),
+                    false,
+                    false,
+                    false,
+                    false,
+                )?,
+            )?;
+            parse_mount_patches(Some(mounts.as_any()))
+        });
+
+        let json = serde_json::to_value(&mounts).unwrap();
+        let guests: Vec<_> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| &m["guest"])
+            .collect();
+        assert_eq!(guests, ["/code", "/data", "/disk", "/scratch"]);
+        assert_eq!(json[0]["type"], "Bind");
+        assert_eq!(json[0]["host"], "/srv/code");
+        assert_eq!(json[0]["options"]["readonly"], true);
+        assert_eq!(json[0]["options"]["override_uid"], 1000);
+        assert_eq!(json[1]["type"], "Named");
+        assert_eq!(json[1]["name"], "shared");
+        assert_eq!(json[2]["type"], "DiskImage");
+        assert_eq!(json[2]["format"], "Qcow2");
+        assert_eq!(json[2]["fstype"], "ext4");
+        assert_eq!(json[3]["type"], "Tmpfs");
+        assert_eq!(json[3]["size_mib"], 64);
+        assert_eq!(json[3]["options"]["noexec"], true);
+    }
+
+    #[test]
+    fn plain_dicts_are_not_accepted_as_modify_mounts() {
+        with_sdk_types(|py| {
+            let mounts = PyDict::new(py);
+            mounts.set_item("/scratch", PyDict::new(py))?;
+            assert!(parse_mount_patches(Some(mounts.as_any())).is_err());
+            Ok(())
+        });
+    }
+}

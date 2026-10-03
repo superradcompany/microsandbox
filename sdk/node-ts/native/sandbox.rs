@@ -1163,6 +1163,14 @@ pub(crate) fn configure_modify(
         .map(|(name, spec)| secret_patch_from_spec(name, spec))
         .collect::<Result<Vec<_>>>()?;
 
+    let mounts = options
+        .mounts
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mount| mount.into_core())
+        .collect::<Result<Vec<_>>>()?;
+
     let patch = SandboxModificationPatch {
         cpus: options.cpus.map(cpu_count_u8).transpose()?,
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
@@ -1179,6 +1187,8 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        mounts,
+        mounts_remove: options.mounts_remove.clone().unwrap_or_default(),
     };
 
     let builder = builder.with_patch(patch);

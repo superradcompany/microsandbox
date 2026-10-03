@@ -2712,6 +2712,13 @@ struct SandboxModifyOpts {
     dry_run: bool,
 }
 
+/// Capability marker: this library's modify patch understands `mounts` and
+/// `mounts_remove`. Older libraries lack the symbol and would ignore the fields.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_sandbox_modify_mounts_supported() -> bool {
+    true
+}
+
 fn parse_sandbox_modify_opts(raw: &str) -> Result<SandboxModifyOpts, FfiError> {
     serde_json::from_str(raw)
         .map_err(|e| FfiError::invalid_argument(format!("invalid modify opts JSON: {e}")))

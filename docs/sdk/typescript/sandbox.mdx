@@ -2877,6 +2877,8 @@ A requested sandbox modification. Omitted fields are left unchanged.
 | workdir | `string` | Working directory for future execs |
 | secrets | `Record<string, SecretModifySpec>` | Desired secret specs keyed by stable secret name |
 | secretsRemove | `string[]` | Secret names to remove explicitly |
+| mounts | `VolumeMount[]` | Mounts to add, built with `MountBuilder`; replaces a mount at the same guest path. Named volumes must already exist and owned mounts are rejected. Applies on restart or next start |
+| mountsRemove | `string[]` | Guest paths whose mounts are removed; applies on restart or next start |
 | policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
 | dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
 
