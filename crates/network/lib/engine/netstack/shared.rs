@@ -28,6 +28,10 @@ use crate::engine::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
 /// Default frame queue capacity. Matches libkrun's virtio queue size.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
+/// Most addresses kept per hostname and address family. Past it, a new
+/// address replaces the one closest to expiry.
+const MAX_RESOLVED_ADDRESSES_PER_HOSTNAME: usize = 64;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -127,7 +131,9 @@ impl SharedState {
             tx_wake: WakePipe::new(),
             proxy_wake: WakePipe::new(),
             termination_hook: Mutex::new(None),
-            resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
+            resolved_hostnames: RwLock::new(TtlReverseIndex::with_member_limit(
+                MAX_RESOLVED_ADDRESSES_PER_HOSTNAME,
+            )),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
             nat64_prefixes: OnceLock::new(),
@@ -200,7 +206,14 @@ impl SharedState {
         }
     }
 
-    /// Replace the resolved addresses for a hostname within the given address family.
+    /// Record resolved addresses for a hostname within the given address family.
+    ///
+    /// Addresses from earlier answers stay bound until the TTL of the answer
+    /// that returned them expires. Resolvers that rotate their answers hand
+    /// concurrent lookups of one name different addresses, and a connection
+    /// dialed on any of them must still match the name's domain rules. At most
+    /// `MAX_RESOLVED_ADDRESSES_PER_HOSTNAME` addresses are kept per name and
+    /// family; past that, a new address replaces the one closest to expiry.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
@@ -213,7 +226,7 @@ impl SharedState {
         let addrs = addrs.into_iter().map(normalize_ip_addr);
         self.resolved_hostnames
             .write()
-            .insert(key, addrs, ttl, Instant::now());
+            .extend(key, addrs, ttl, Instant::now());
     }
 
     /// Clear the resolved addresses for a hostname within the given address family.
@@ -370,6 +383,30 @@ mod tests {
         assert!(state.any_resolved_hostname(v4, |h| h == "example.com"));
         assert!(state.any_resolved_hostname(v6, |h| h == "example.com"));
         assert!(!state.any_resolved_hostname(v4, |h| h == "other.example"));
+    }
+
+    #[test]
+    fn resolved_hostnames_keep_earlier_answers() {
+        let state = SharedState::new(4);
+        let first: IpAddr = "142.250.0.1".parse().unwrap();
+        let second: IpAddr = "142.250.0.2".parse().unwrap();
+
+        // Two concurrent lookups of one name, answered with different addresses.
+        for addr in [first, second] {
+            state.cache_resolved_hostname(
+                "fonts.example",
+                ResolvedHostnameFamily::Ipv4,
+                [addr],
+                Duration::from_secs(30),
+            );
+        }
+
+        assert!(state.any_resolved_hostname(first, |h| h == "fonts.example"));
+        assert!(state.any_resolved_hostname(second, |h| h == "fonts.example"));
+
+        state.clear_resolved_hostname("fonts.example", ResolvedHostnameFamily::Ipv4);
+        assert!(!state.any_resolved_hostname(first, |h| h == "fonts.example"));
+        assert!(!state.any_resolved_hostname(second, |h| h == "fonts.example"));
     }
 
     #[test]
