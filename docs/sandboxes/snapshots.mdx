@@ -169,6 +169,8 @@ Local snapshots use `group:member` selectors, such as `baseline:ready`. For clou
 
 Capture a running workload to resume its processes and memory later. A running source briefly pauses during capture, then resumes; an already-paused source stays paused.
 
+On Windows, full snapshots now preserve all tracked hardlink names for bind mounts. Runtimes that support this format can still restore the previous Windows filesystem format. Older runtimes cannot restore snapshots written with the new bind-mount format; use the updated runtime when restoring them. This does not change disk-only snapshot compatibility.
+
 <Steps>
 <Step title="Capture">
 

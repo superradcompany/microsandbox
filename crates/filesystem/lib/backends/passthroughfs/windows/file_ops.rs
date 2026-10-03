@@ -27,7 +27,12 @@ impl PassthroughFs {
             return Err(linux_error(LINUX_EISDIR));
         }
 
-        let file = self.open_inode_file(&data, flags)?;
+        let file = if flags & LINUX_O_TRUNC as u32 != 0 {
+            self.resize_inode(inode, || self.open_inode_file(&data, flags))?
+        } else {
+            self.open_inode_file(&data, flags)?
+        };
+
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
         if kill_priv && flags as i32 & LINUX_O_TRUNC != 0 {
             self.clear_priv_bits(data.as_ref())?;

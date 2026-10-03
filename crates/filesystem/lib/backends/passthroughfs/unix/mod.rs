@@ -6,6 +6,8 @@
 
 pub(crate) mod builder;
 mod create_ops;
+#[cfg(target_os = "linux")]
+mod dax;
 mod dir_ops;
 mod file_ops;
 mod host_mode;
@@ -344,8 +346,13 @@ impl PassthroughFs {
             .map_or_else(|| root_fd.as_raw_fd(), AsRawFd::as_raw_fd);
         probe_strict_xattr_support(&cfg, probe_fd)?;
 
-        // Create the init binary file.
-        let init_file = init_binary::create_init_file()?;
+        // Create the init binary file. Mounts that do not inject the virtual
+        // init binary use an empty file and never touch the Agentd payload.
+        let init_file = if cfg.inject_init {
+            init_binary::create_init_file()?
+        } else {
+            init_binary::create_empty_init_file()?
+        };
 
         // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
         #[cfg(target_os = "linux")]
@@ -971,6 +978,43 @@ impl DynFileSystem for PassthroughFs {
             self, ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len,
             flags,
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn setupmapping(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        _handle: u64,
+        foffset: u64,
+        len: u64,
+        flags: u64,
+        moffset: u64,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_setupmapping(
+            self,
+            inode,
+            foffset,
+            len,
+            flags,
+            moffset,
+            host_shm_base,
+            shm_size,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn removemapping(
+        &self,
+        _ctx: Context,
+        requests: Vec<crate::RemovemappingOne>,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_removemapping(&requests, host_shm_base, shm_size)
     }
 }
 

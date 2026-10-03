@@ -26,13 +26,13 @@ impl PassthroughFs {
         data: &InodeData,
     ) -> io::Result<stat64> {
         if !self.cfg.stat_virtualization_enabled() {
-            return self.owned_stat_link_count(host_stat_from_metadata(metadata, data.inode), data);
+            return self.stat_link_count(host_stat_from_metadata(metadata, data.inode), data);
         }
 
         if let Some(override_stat) = owned_metadata::read_retained_stat(data)? {
             let mut st = host_stat_from_metadata(metadata, data.inode);
             apply_override_stat(&mut st, override_stat);
-            return self.owned_stat_link_count(st, data);
+            return self.stat_link_count(st, data);
         }
 
         if let Some(store) = &self.stat_store
@@ -47,7 +47,7 @@ impl PassthroughFs {
                 st.st_uid = uid;
                 st.st_gid = gid;
             }
-            return self.owned_stat_link_count(st, data);
+            return self.stat_link_count(st, data);
         }
 
         // Storeless path (e.g. relaxed mode with no persistent stat store):
@@ -61,7 +61,7 @@ impl PassthroughFs {
             st.st_uid = uid;
             st.st_gid = gid;
         }
-        self.owned_stat_link_count(st, data)
+        self.stat_link_count(st, data)
     }
 
     pub(super) fn entry_from_metadata(
@@ -146,7 +146,7 @@ impl PassthroughFs {
         {
             store.write(&data.path(), uid, gid, mode, rdev)?;
         }
-        self.propagate_owned_sidecar_stat(data, stat)?;
+        self.propagate_sidecar_stat(data, stat)?;
 
         if (self.cfg.mirror_host_permissions() || !self.cfg.stat_virtualization_enabled())
             && mirror_eligible_type(mode & S_IFMT)
@@ -222,16 +222,22 @@ impl PassthroughFs {
                 .st_size
                 .try_into()
                 .map_err(|_| linux_error(LINUX_EINVAL))?;
+
             if let Some(handle) = handle {
                 let handle = self.handle(inode, handle)?;
-                let file = handle.file.lock().unwrap();
-                self.quota_charge_growth(metadata.len(), size)?;
-                file.set_len(size).map_err(host_error)?;
+                let state = self.dax_files.get(&handle.file.lock().unwrap())?;
+                self.with_file_mappings_suspended(&state, || {
+                    let file = handle.file.lock().unwrap();
+                    self.quota_charge_growth(metadata.len(), size)?;
+                    file.set_len(size).map_err(host_error)
+                })?;
             } else {
-                let file = self.open_inode_file(&data, LINUX_O_WRONLY as u32)?;
-                reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-                self.quota_charge_growth(metadata.len(), size)?;
-                file.set_len(size).map_err(host_error)?;
+                self.resize_inode(inode, || {
+                    let file = self.open_inode_file(&data, LINUX_O_WRONLY as u32)?;
+                    reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
+                    self.quota_charge_growth(metadata.len(), size)?;
+                    file.set_len(size).map_err(host_error)
+                })?;
             }
         }
 
