@@ -535,9 +535,21 @@ fn try_show_tree_from(cmd: &Command, args: &[String]) -> Result<Option<String>, 
     }
 
     let mut tree_args = vec!["msb"];
-    let mut command_args = vec!["msb".to_string()];
+    let mut path = vec![cmd.get_name().to_string()];
+    let mut current = cmd;
     let mut remaining = args.iter().skip(1);
     while let Some(arg) = remaining.next() {
+        // Values of options such as `run --init-arg` can look like tree controls or
+        // subcommand names. Consume them before interpreting either kind of token.
+        if let Some(name) = arg.strip_prefix("--")
+            && current.get_arguments().any(|option| {
+                option.get_long() == Some(name) && option.is_allow_hyphen_values_set()
+            })
+        {
+            remaining.next();
+            continue;
+        }
+
         match arg.as_str() {
             "-L" | "--levels" => {
                 tree_args.push(arg);
@@ -563,43 +575,30 @@ fn try_show_tree_from(cmd: &Command, args: &[String]) -> Result<Option<String>, 
             {
                 tree_args.push(arg);
             }
-            _ => command_args.push(arg.clone()),
+            _ => {
+                if let Some(sub) = current.find_subcommand(arg)
+                    && !sub.is_hide_set()
+                {
+                    path.push(arg.clone());
+                    current = sub;
+                }
+            }
         }
+    }
+
+    // A --tree token consumed as an option value must not activate tree mode.
+    if !tree_args.contains(&"--tree") {
+        return Ok(None);
     }
 
     // Reuse the clap definitions advertised in help, including validation of missing/invalid N.
     let matches = TreeArgs::augment_args(Command::new("msb").disable_help_flag(true))
         .try_get_matches_from(tree_args)?;
     let options = TreeArgs::from_arg_matches(&matches)?;
-    let (path, deepest) = find_deepest_subcommand(cmd, &command_args);
     let mut builder = TreeBuilder::new();
     builder.options = options;
 
-    Ok(Some(builder.build(&deepest, &path.join(" "))))
-}
-
-/// Walk non-tree arguments to find the deepest visible subcommand the user specified.
-fn find_deepest_subcommand(cmd: &Command, args: &[String]) -> (Vec<String>, Command) {
-    let mut path = vec![cmd.get_name().to_string()];
-    let mut current = cmd.clone();
-
-    // Skip argv[0] (program name).
-    for arg in args.iter().skip(1) {
-        // Ignore flags when resolving the command path.
-        if arg.starts_with('-') {
-            continue;
-        }
-
-        if let Some(sub) = current.find_subcommand(arg) {
-            if sub.is_hide_set() {
-                continue;
-            }
-            path.push(arg.to_string());
-            current = sub.clone();
-        }
-    }
-
-    (path, current)
+    Ok(Some(builder.build(current, &path.join(" "))))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -854,6 +853,68 @@ mod tests {
         assert_eq!(
             tree(&["msb", "image", "--tree", "--", "pull", "-L0"]).unwrap(),
             tree(&["msb", "image", "--tree"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn hyphen_values_do_not_configure_tree_or_select_subcommands() {
+        let cmd = TreeArgs::augment_args(Command::new("msb")).subcommand(
+            Command::new("run")
+                .visible_alias("r")
+                .arg(
+                    clap::Arg::new("init_arg")
+                        .long("init-arg")
+                        .allow_hyphen_values(true)
+                        .action(clap::ArgAction::Append),
+                )
+                .subcommand(Command::new("child")),
+        );
+        for scope in ["run", "r"] {
+            let baseline = ["msb", scope, "--tree"].map(String::from);
+            let expected = try_show_tree_from(&cmd, &baseline).unwrap();
+            for value in [
+                "-Lfoo",
+                "-L2",
+                "-C",
+                "-b",
+                "-CbL2",
+                "--levels=0",
+                "--commands",
+                "--brief",
+                "--tree",
+                "child",
+            ] {
+                for args in [
+                    vec!["msb", scope, "--tree", "--init-arg", value],
+                    vec!["msb", scope, "--init-arg", value, "--tree"],
+                ] {
+                    let args: Vec<_> = args.into_iter().map(String::from).collect();
+                    assert_eq!(
+                        try_show_tree_from(&cmd, &args).unwrap(),
+                        expected,
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+        let args = ["msb", "run", "--init-arg", "--tree"].map(String::from);
+        assert!(try_show_tree_from(&cmd, &args).unwrap().is_none());
+
+        let args = [
+            "msb",
+            "run",
+            "--init-arg",
+            "-Lfoo",
+            "--init-arg",
+            "--brief",
+            "--tree",
+            "-CbL0",
+        ]
+        .map(String::from);
+        let baseline = ["msb", "run", "--tree", "-CbL0"].map(String::from);
+        assert_eq!(
+            try_show_tree_from(&cmd, &args).unwrap(),
+            try_show_tree_from(&cmd, &baseline).unwrap()
         );
     }
 }
