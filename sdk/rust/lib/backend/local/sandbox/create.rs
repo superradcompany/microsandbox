@@ -309,6 +309,7 @@ impl LocalBackend {
                 let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
                     &restore.closure,
                     Some(&expected),
+                    self.config().fs_state_limit(),
                 )
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
                 let overrides = config.restore_overrides;
@@ -398,6 +399,7 @@ impl LocalBackend {
                         &sandbox_dir,
                         &root_layout,
                         &config.restore_resources,
+                        self.config().fs_state_limit(),
                     )
                     .await?;
                     config.checkpoint_restore = Some(materialized.restore);
@@ -411,6 +413,7 @@ impl LocalBackend {
                         &sandbox_dir,
                         &root_layout,
                         &config.restore_resources,
+                        self.config().fs_state_limit(),
                     )
                     .await?;
                     crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);

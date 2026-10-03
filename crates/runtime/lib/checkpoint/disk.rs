@@ -1859,7 +1859,12 @@ mod tests {
         let bytes = checkpoint.to_canonical_bytes().unwrap();
         let id = ObjectId::from_bytes(&bytes).unwrap();
         std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
-        CheckpointClosure::open(root, Some(&id)).unwrap()
+        CheckpointClosure::open(
+            root,
+            Some(&id),
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap()
     }
 
     #[cfg(feature = "runner")]
@@ -1883,6 +1888,7 @@ mod tests {
             cpu_placement: Default::default(),
             placement_profile_name: None,
             placement_profile: None,
+            fs_state_limit_bytes: None,
             block_writeback_limit_bytes: None,
             rootfs_path: None,
             rootfs_follow_root_symlinks: false,

@@ -171,13 +171,13 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             .collect::<io::Result<_>>()?,
     };
     validate(fs, &state, &snapshot)?;
-    let bytes = mobility::encode(KIND, &state)?;
+    let bytes = mobility::encode(KIND, &state, fs.cfg.max_state_bytes)?;
     checkpoint.completed(snapshot)?;
     Ok(bytes)
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
-    let state: OwnedState = mobility::decode(KIND, bytes)?;
+    let state: OwnedState = mobility::decode(KIND, bytes, fs.cfg.max_state_bytes)?;
     let generation = fs
         .cfg
         .owned_checkpoint

@@ -90,6 +90,15 @@ pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 /// a user-facing knob.
 pub const RUNTIME_FS_QUOTA_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Default per-device virtio-fs state budget, in MiB.
+pub const FS_STATE_LIMIT_DEFAULT_MIB: u32 = 4;
+
+/// Smallest configurable per-device virtio-fs state budget, in MiB.
+pub const FS_STATE_LIMIT_MIN_MIB: u32 = 1;
+
+/// Largest configurable per-device virtio-fs state budget, in MiB. The state framing is 32-bit.
+pub const FS_STATE_LIMIT_MAX_MIB: u32 = 4095;
+
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
 

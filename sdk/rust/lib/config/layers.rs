@@ -147,6 +147,7 @@ impl BackendConfig {
         let mut resolved = self.global_layers().build().into_config();
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
+        resolved.validate_snapshots()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
         Ok(self)
     }
@@ -722,5 +723,47 @@ mod tests {
         assert_eq!(earlier.sandbox_defaults.workdir, None);
         assert_eq!(earlier.registries.hosts.len(), 1);
         assert!(!earlier.registries.hosts["admin.example"].insecure);
+    }
+
+    #[test]
+    fn snapshot_budget_obeys_layers_and_rejects_invalid_values() {
+        let user: GlobalConfigPatch =
+            serde_json::from_str(r#"{"snapshots":{"max_filesystem_state_mib":16}}"#).unwrap();
+        let managed: GlobalConfigPatch =
+            serde_json::from_str(r#"{"snapshots":{"max_filesystem_state_mib":64}}"#).unwrap();
+        let builder = GlobalConfigPatch::new()
+            .snapshots(crate::config::SnapshotsConfigPatch::new().max_filesystem_state_mib(32));
+        let backend = BackendConfig::new(user.clone(), GlobalConfigPatch::new())
+            .prepare_for_local_backend(builder.clone())
+            .unwrap();
+        assert_eq!(
+            backend.resolved_config().snapshots.max_filesystem_state_mib,
+            32
+        );
+        let backend = BackendConfig::new(user, managed)
+            .prepare_for_local_backend(builder)
+            .unwrap();
+        assert_eq!(
+            backend.resolved_config().snapshots.max_filesystem_state_mib,
+            64
+        );
+        assert_eq!(
+            GlobalConfig::default().snapshots.max_filesystem_state_mib,
+            4
+        );
+        for mib in [0, 4096, u32::MAX] {
+            let patch = GlobalConfigPatch::new().snapshots(
+                crate::config::SnapshotsConfigPatch::new().max_filesystem_state_mib(mib),
+            );
+            let error = BackendConfig::new(patch, GlobalConfigPatch::new())
+                .prepare_for_local_backend(GlobalConfigPatch::new())
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib")
+            );
+        }
     }
 }

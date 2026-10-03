@@ -22,8 +22,11 @@ pub struct Snapshot {
 
 impl Snapshot {
     /// Verify the local closure through the single local verification engine.
-    pub async fn verify(&self) -> MicrosandboxResult<crate::snapshot::SnapshotVerifyReport> {
-        super::verify::verify_snapshot(self).await
+    pub async fn verify(
+        &self,
+        fs_state_limit: usize,
+    ) -> MicrosandboxResult<crate::snapshot::SnapshotVerifyReport> {
+        super::verify::verify_snapshot(self, fs_state_limit).await
     }
 
     /// Path to the artifact directory.

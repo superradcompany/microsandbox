@@ -26,6 +26,7 @@ use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 #[cfg(feature = "net")]
 use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
 use microsandbox_protocol::{
+    FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
     bootstrap::{BootstrapBlockRoot, GuestBootstrap},
     codec,
     message::{Message, MessageType},
@@ -311,6 +312,9 @@ pub struct VmConfig {
     /// Host-resolved placement behavior.
     pub placement_profile: Option<microsandbox_types::PlacementProfile>,
 
+    /// Virtio-fs backend state budget in bytes; the msb_krun default when unset.
+    pub fs_state_limit_bytes: Option<u64>,
+
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
 
@@ -469,6 +473,30 @@ struct RestoreEndpointPublication {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl VmConfig {
+    /// Virtio-fs backend state budget in bytes.
+    pub fn fs_state_limit(&self) -> usize {
+        self.fs_state_limit_bytes
+            .map_or(msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES, |bytes| {
+                bytes as usize
+            })
+    }
+
+    /// Check a launch-supplied virtio-fs state budget, which the SDK configures in whole MiB.
+    pub fn validate_fs_state_limit(bytes: Option<u64>) -> Result<(), String> {
+        const MIB: u64 = 1024 * 1024;
+        let range =
+            u64::from(FS_STATE_LIMIT_MIN_MIB) * MIB..=u64::from(FS_STATE_LIMIT_MAX_MIB) * MIB;
+        match bytes {
+            Some(bytes) if !range.contains(&bytes) => Err(format!(
+                "filesystem state budget must be between {FS_STATE_LIMIT_MIN_MIB} MiB and \
+                 {FS_STATE_LIMIT_MAX_MIB} MiB, got {bytes} bytes"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl AgentTransportProfile {
     /// Whether this boot should provision the optional bulk port and advertise its kernel hint.
     ///
@@ -535,6 +563,7 @@ impl std::fmt::Debug for VmConfig {
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
             .field("placement_profile_name", &self.placement_profile_name)
+            .field("fs_state_limit_bytes", &self.fs_state_limit_bytes)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -1851,11 +1880,13 @@ fn build_vm(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
                     restore.memory_descriptor,
+                    vm.fs_state_limit(),
                 )
             } else {
                 crate::checkpoint::PreparedCheckpointRestore::open(
                     restore.closure.clone(),
                     &restore.checkpoint_root,
+                    vm.fs_state_limit(),
                 )
             }
             .map_err(|error| {
@@ -1877,7 +1908,10 @@ fn build_vm(
     let bind_identity_map = BindIdentityMapRegistration::new();
 
     let kernel_cmdline = agent_kernel_cmdline(vm.thp, config.agent_transport);
+    let device_state_limits =
+        msb_krun::DeviceStateLimits::default().with_fs_state_limit(vm.fs_state_limit());
     let mut builder = VmBuilder::new()
+        .device_state_limits(device_state_limits)
         .machine(|m| {
             let mut m = m
                 .vcpus(vm.vcpus)
@@ -1923,18 +1957,23 @@ fn build_vm(
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        let backend = bind_rootfs_backend(rootfs_path, vm.rootfs_follow_root_symlinks)?;
+        let backend = bind_rootfs_backend(
+            rootfs_path,
+            vm.rootfs_follow_root_symlinks,
+            vm.fs_state_limit(),
+        )?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
         {
-            let backend = bootstrap_trampoline_backend()?;
+            let backend = bootstrap_trampoline_backend(vm.fs_state_limit())?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
         #[cfg(windows)]
         {
             let backend = AgentBootstrapFs::new()
+                .map(|fs| fs.with_state_limit(vm.fs_state_limit()))
                 .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -1977,12 +2016,13 @@ fn build_vm(
     } else if vm.rootfs_disk_spec.is_some() || vm.rootfs_disk.is_some() {
         #[cfg(unix)]
         {
-            let backend = bootstrap_trampoline_backend()?;
+            let backend = bootstrap_trampoline_backend(vm.fs_state_limit())?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
         #[cfg(windows)]
         {
             let backend = AgentBootstrapFs::new()
+                .map(|fs| fs.with_state_limit(vm.fs_state_limit()))
                 .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -2030,6 +2070,7 @@ fn build_vm(
     {
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
+            max_state_bytes: vm.fs_state_limit(),
             root_dir: canonicalize_owned_mount_root(&config.runtime_dir)?,
             inject_init: false,
             quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
@@ -2093,8 +2134,10 @@ fn build_vm(
             // failing strict validation. Keep its guest device but grant no host access.
             let tag = binding.mount.tag.clone();
             builder = builder.fs(move |fs| {
-                fs.tag(&tag)
-                    .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                fs.tag(&tag).custom(Box::new(
+                    microsandbox_filesystem::UnavailableFs::default()
+                        .with_state_limit(vm.fs_state_limit()),
+                ))
             });
             external_mount_reports.push(crate::checkpoint::ExternalMountReport {
                 guest_path: binding.mount.guest_path.clone(),
@@ -2133,6 +2176,7 @@ fn build_vm(
             });
         }
         let cfg = PassthroughConfig {
+            max_state_bytes: vm.fs_state_limit(),
             external_checkpoint: Some(external_options),
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
@@ -2164,8 +2208,10 @@ fn build_vm(
                         "external file cannot be opened: {error}; filesystem operations return EIO"
                     ));
                     builder = builder.fs(move |fs| {
-                        fs.tag(&tag)
-                            .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                        fs.tag(&tag).custom(Box::new(
+                            microsandbox_filesystem::UnavailableFs::default()
+                                .with_state_limit(vm.fs_state_limit()),
+                        ))
                     });
                     continue;
                 }
@@ -2229,8 +2275,10 @@ fn build_vm(
             {
                 let tag = binding.mount.tag.clone();
                 builder = builder.fs(move |fs| {
-                    fs.tag(&tag)
-                        .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                    fs.tag(&tag).custom(Box::new(
+                        microsandbox_filesystem::UnavailableFs::default()
+                            .with_state_limit(vm.fs_state_limit()),
+                    ))
                 });
                 external_mount_reports.push(crate::checkpoint::ExternalMountReport {
                     guest_path: binding.mount.guest_path.clone(),
@@ -2296,6 +2344,7 @@ fn build_vm(
             });
         }
         let cfg = PassthroughConfig {
+            max_state_bytes: vm.fs_state_limit(),
             root_dir: host_path.clone(),
             external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
             owned_checkpoint,
@@ -2317,7 +2366,7 @@ fn build_vm(
             Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
                 && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
                 external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
-                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
+                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default().with_state_limit(vm.fs_state_limit()))));
                 continue;
             }
             result => result,
@@ -2899,7 +2948,7 @@ fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
 /// A restored virtio-fs session retains their inode numbers, so the destination
 /// provider must recreate the same pathname namespace before backend restore.
 #[cfg(unix)]
-fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
+fn bootstrap_trampoline_backend(limit: usize) -> RuntimeResult<PassthroughFs> {
     let trampoline = tempfile::tempdir()?;
     for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
         std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
@@ -2907,6 +2956,7 @@ fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
         })?;
     }
     let cfg = PassthroughConfig {
+        max_state_bytes: limit,
         root_dir: canonicalize_owned_mount_root(trampoline.path())?,
         no_symlink_root: true,
         ..Default::default()
@@ -2958,8 +3008,10 @@ fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> Runt
 fn bind_rootfs_backend(
     rootfs_path: &Path,
     follow_root_symlinks: bool,
+    limit: usize,
 ) -> RuntimeResult<PassthroughFs> {
     let cfg = PassthroughConfig {
+        max_state_bytes: limit,
         root_dir: rootfs_path.to_path_buf(),
         no_symlink_root: !follow_root_symlinks,
         ..Default::default()
@@ -3705,6 +3757,7 @@ fn agent_kernel_cmdline(
 
 #[cfg(test)]
 mod tests {
+    use super::VmConfig;
     #[cfg(feature = "net")]
     use super::to_krun_network_rate_limiters;
     use super::{
@@ -3752,6 +3805,33 @@ mod tests {
             readonly,
             snapshot_owned: true,
             lifecycle_owned: true,
+        }
+    }
+
+    #[test]
+    fn fs_state_limit_accepts_only_the_configurable_range() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            u64::from(microsandbox_protocol::FS_STATE_LIMIT_DEFAULT_MIB) * MIB,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES as u64
+        );
+        for bytes in [
+            None,
+            Some(MIB),
+            Some(4 * MIB),
+            Some(64 * MIB),
+            Some(4095 * MIB),
+        ] {
+            assert!(
+                VmConfig::validate_fs_state_limit(bytes).is_ok(),
+                "{bytes:?}"
+            );
+        }
+        for bytes in [0, MIB - 1, 4096 * MIB] {
+            assert!(
+                VmConfig::validate_fs_state_limit(Some(bytes)).is_err(),
+                "{bytes}"
+            );
         }
     }
 
@@ -4001,7 +4081,12 @@ mod tests {
 
         // follow=true: the tempdir path may traverse a symlinked prefix (macOS
         // `/var`); this test exercises backend behavior, not root protection.
-        let fs = bind_rootfs_backend(rootfs.path(), true).unwrap();
+        let fs = bind_rootfs_backend(
+            rootfs.path(),
+            true,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
         fs.init(FsOptions::empty()).unwrap();
 
         let host = fs.lookup(fs_context(), 1, c"host.txt").unwrap();
@@ -4014,7 +4099,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_trampoline_recreates_agent_mountpoints() {
-        let fs = bootstrap_trampoline_backend().unwrap();
+        let fs =
+            bootstrap_trampoline_backend(msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
         fs.init(FsOptions::empty()).unwrap();
         for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
             fs.lookup(fs_context(), 1, &std::ffi::CString::new(directory).unwrap())

@@ -805,6 +805,7 @@ mod tests {
             "sandbox_defaults":{"workdir":null,"metrics_sample_interval_ms":0,"oci":{"root_disk":{"kind":"tmpfs","size_mib":2048}}},
             "runtime":{"block_writeback":{"mode":"off"}},"deployment_profile":"multi-tenant",
             "ssh":{"inactivity_timeout_secs":42},"metrics":{"capacity":128},
+            "snapshots":{"max_filesystem_state_mib":64},
             "registries":{"hosts":{"example.com":{"insecure":false}}}
         }}"#).unwrap();
         let managed = ManagedConfig::load(Some(&path)).unwrap();
@@ -830,6 +831,7 @@ mod tests {
         );
         assert_eq!(config.ssh.inactivity_timeout_secs, 42);
         assert_eq!(config.metrics.capacity, 128);
+        assert_eq!(config.snapshots.max_filesystem_state_mib, 64);
         assert!(!config.registries.hosts["example.com"].insecure);
         fs::write(&path, r#"{"version":1,"overrides":{"deployment_profile":null,"sandbox_defaults":{"metrics_sample_interval_ms":null}}}"#).unwrap();
         let clear = ManagedConfig::load(Some(&path)).unwrap();

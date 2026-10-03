@@ -103,6 +103,9 @@ Relative host paths stored in this file resolve from the file's directory, inclu
   "metrics": {
     "capacity": 4096
   },
+  "snapshots": {
+    "max_filesystem_state_mib": 4
+  },
   "active_profile": "prod",
   "profiles": {
     "prod": {
@@ -131,6 +134,7 @@ Relative host paths stored in this file resolve from the file's directory, inclu
 | `registries` | [reference](#registries) | Container registry authentication |
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
+| `snapshots` | [reference](#snapshots) | Full snapshot capture and restore limits |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
 | `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
 
@@ -388,6 +392,18 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 | Field | Default | Description |
 |-------|---------|-------------|
 | `capacity` | `0` | Number of slots reserved in the live metrics shared-memory registry. `0` uses the built-in default. Stop all sandboxes for the same home before changing this value. |
+
+## `snapshots`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
+
+The budget applies per virtio-fs device to capture, verification, export, import, restore, and live forks. A sandbox reads it when it starts, so restart a running sandbox after changing it; until then it keeps the budget it started with.
+
+Snapshot admission uses the current host budget even when the source sandbox started with a larger one. Lowering the setting can therefore refuse a full snapshot from an already-running sandbox; keep a sufficient budget until those snapshots are saved. Values below `4` can also refuse snapshots that hosts with the default budget accept.
+
+Every machine that reads a snapshot needs a budget at least as large as the one that captured it, and a reader with a smaller budget refuses the snapshot before changing anything. A larger budget lets a snapshot use more memory on restore, so raise it on a host that restores imported archives only for archives you trust.
 
 ## `profiles`
 

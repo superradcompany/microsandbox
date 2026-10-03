@@ -21,6 +21,7 @@ imago.workspace = true
 libc.workspace = true
 microsandbox-types.workspace = true
 microsandbox-utils.workspace = true
+msb_krun = { workspace = true, features = ["blk"] }
 oci-client.workspace = true
 oci-spec.workspace = true
 rand.workspace = true

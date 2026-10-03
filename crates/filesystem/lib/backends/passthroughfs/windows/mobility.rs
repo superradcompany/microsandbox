@@ -211,12 +211,13 @@ fn capture_linked(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Pa
 }
 
 pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::capture(fs);
     }
     let state = capture_linked(fs, &BTreeSet::new())?;
     if fs.cfg.external_checkpoint.is_none() {
-        return mobility::encode(KIND, &state);
+        return mobility::encode(KIND, &state, limit);
     }
     if fs
         .invalid_inodes
@@ -259,15 +260,17 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             identities,
             invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
         },
+        limit,
     )
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::prepare(fs, bytes);
     }
     if let Some(options) = &fs.cfg.external_checkpoint {
-        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
         validate_external_shape(&external)?;
         validate_quota(fs, &external.state)?;
         validate_shape(
@@ -327,7 +330,7 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         prepared.invalid_inodes = invalid;
         return Ok(prepared);
     }
-    let state: PassthroughState = mobility::decode(KIND, bytes)?;
+    let state: PassthroughState = mobility::decode(KIND, bytes, limit)?;
     validate_semantics(fs, &state)?;
     rebuild(fs, state, None)
 }
@@ -351,8 +354,8 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Validate a missing export's payload without opening any host paths.
-pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
-    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+pub(super) fn validate_unavailable(bytes: &[u8], limit: usize) -> io::Result<()> {
+    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
     validate_external_shape(&external)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)
 }
@@ -361,11 +364,12 @@ pub(super) fn prepare_single_file_state(
     bytes: &[u8],
     source: &std::ffi::CStr,
     destination: &std::ffi::CStr,
+    limit: usize,
 ) -> io::Result<(
     Vec<u8>,
     crate::backends::passthroughfs::ExternalSingleFileIndex,
 )> {
-    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
     validate_external_shape(&external)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)?;
     let source = source
@@ -419,7 +423,7 @@ pub(super) fn prepare_single_file_state(
             .collect(),
         invalid_inodes: external.invalid_inodes.clone(),
     };
-    Ok((mobility::encode(EXTERNAL_KIND, &external)?, index))
+    Ok((mobility::encode(EXTERNAL_KIND, &external, limit)?, index))
 }
 
 //--------------------------------------------------------------------------------------------------
