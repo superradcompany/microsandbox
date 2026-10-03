@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bytes",
  "ciborium",
@@ -3879,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3897,7 +3897,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3944,7 +3944,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-control-client"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3960,7 +3960,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "async-trait",
  "microsandbox-types",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bincode",
  "hex",
@@ -3993,7 +3993,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "base64 0.23.1",
  "cap-std",
@@ -4012,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -4043,7 +4043,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "chrono",
  "libc",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "microsandbox-db",
  "microsandbox-types",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4137,7 +4137,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bytes",
  "chrono",
@@ -4154,7 +4154,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bytes",
  "chrono",
@@ -4171,7 +4171,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol-client"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "microsandbox-protocol",
  "serde",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "chrono",
  "futures",
@@ -4200,7 +4200,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4243,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "chrono",
  "dprint-plugin-typescript",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types-macros"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4271,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "dirs",
  "libc",
@@ -4284,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-vsock"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "libc",
  "msb_krun",
@@ -7725,14 +7725,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7741,7 +7741,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "tempfile",
  "test-macros",
