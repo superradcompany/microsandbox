@@ -5,6 +5,55 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Supported Linux capability names in kernel capability-number order.
+pub const EXEC_CAPABILITY_NAMES: &[&str] = &[
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETPCAP",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_ADMIN",
+    "CAP_NET_RAW",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_RAWIO",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_PACCT",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_NICE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_MKNOD",
+    "CAP_LEASE",
+    "CAP_AUDIT_WRITE",
+    "CAP_AUDIT_CONTROL",
+    "CAP_SETFCAP",
+    "CAP_MAC_OVERRIDE",
+    "CAP_MAC_ADMIN",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+    "CAP_BLOCK_SUSPEND",
+    "CAP_AUDIT_READ",
+    "CAP_PERFMON",
+    "CAP_BPF",
+    "CAP_CHECKPOINT_RESTORE",
+];
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -45,6 +94,38 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
+
+    /// Per-workload Linux security settings. Requires matching host/guest builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<ExecSecurity>,
+}
+
+/// Security settings applied to a guest child, never to the managing agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecSecurity {
+    /// Prevent gaining privileges through setuid or file-capability executables.
+    #[serde(default)]
+    pub no_new_privileges: bool,
+    /// Exact capability sets; absence retains the normal sandbox policy.
+    #[serde(default)]
+    pub capabilities: Option<ExecCapabilities>,
+}
+
+/// Linux capability names, using the OCI `CAP_*` spelling.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecCapabilities {
+    /// Ceiling on capabilities acquired through exec.
+    pub bounding: Vec<String>,
+    /// Capabilities used for permission checks.
+    pub effective: Vec<String>,
+    /// Capabilities the process may enable.
+    pub permitted: Vec<String>,
+    /// Capabilities inheritable through privileged executables.
+    pub inheritable: Vec<String>,
+    /// Capabilities retained across ordinary executable transitions.
+    pub ambient: Vec<String>,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -259,6 +340,32 @@ impl FromStr for ExecRlimit {
 #[cfg(test)]
 mod tests {
     use super::ExecRlimit;
+
+    #[test]
+    fn exec_security_preserves_absence_and_explicit_drop_all() {
+        let mut value = serde_json::json!({"cmd": "/bin/true"});
+        let request: super::ExecRequest = serde_json::from_value(value.clone()).unwrap();
+        assert!(request.security.is_none());
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("security")
+                .is_none()
+        );
+        value["security"] = serde_json::json!({"no_new_privileges": true, "capabilities": {}});
+        let request: super::ExecRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            request.security,
+            Some(super::ExecSecurity {
+                no_new_privileges: true,
+                capabilities: Some(Default::default()),
+            })
+        );
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&request, &mut encoded).unwrap();
+        let decoded: super::ExecRequest = ciborium::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.security, request.security);
+    }
 
     #[test]
     fn test_exec_rlimit_from_str_uses_soft_for_hard_when_omitted() {

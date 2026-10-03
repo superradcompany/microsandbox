@@ -59,7 +59,26 @@ Generation labels must be checked against actual historical agents. The current 
 
 ### Bootstrap and shutdown
 
+The current OCI implementation adds an optional `security` field to
+`core.exec.request`: `no_new_privileges` plus five named capability sets.
+Absent settings retain ordinary execution; explicit empty sets drop all
+capabilities. This OCI feature targets matching current `runmsb`, `msb`, and
+embedded agentd builds, by explicit contribution scope. It does not add a
+legacy security adapter or claim enforcement by older agents, which can ignore
+the field. Recreate VMs after rebuilding the embedded agent. Existing protocol
+generations, framing, and unrelated compatibility paths are unchanged.
+
 `core.bootstrap` is a one-shot startup frame sent before the ordinary `core.ready` exchange. It configures a newly launched VM with the agent bundled by the selected build. The guest validates its minimum generation and accepts newer bootstrap generations under the existing optional-field rules. This is distinct from connecting a new SDK to an already-running old VM, and it does not prove compatibility of the host SDK/runtime launch JSON or shared database.
+
+OCI read-only roots use the required `block_root.kind = "read-only-virtiofs"`
+variant, not an optional boolean that older agents could ignore. Old agents
+reject this unknown variant rather than booting a writable root. Before using
+it, the SDK requires launch protocol 2 and `oci_readonly_root: true` from the
+selected `msb`'s `__launch-protocol` response. Missing or false capability values
+reject this new workflow. Existing writable-root bootstraps and legacy launch
+encodings are unchanged. The legacy environment encoder explicitly refuses the
+new mode. Rebuild and embed the matching guest agent when enabling this feature;
+the host capability does not certify an externally overridden agent binary.
 
 Graceful shutdown is an existing uncorrelated agent operation. The SDK preserves its zero ID, shutdown flag, selected wire generation, and empty-unit payload through an explicit packet write, awaited before closing the client. It must not use the generic `send` API, which requires a live owned stream ID. A runtime process exiting is insufficient shutdown evidence: PID fallback can exit without the guest sync needed to preserve recent root-disk writes. The [SDK packet regression test](../../sdk/rust/lib/backend/local/sandbox/shutdown_tests.rs) checks the actual current and legacy packets; live SDK stop/restart tests separately check persistence without manual sync.
 

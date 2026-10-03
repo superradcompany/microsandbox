@@ -19,6 +19,10 @@ use microsandbox_types::EnvVar;
 /// Options for command execution (everything except the command itself).
 #[derive(Debug, Clone, Default)]
 pub struct ExecOptions {
+    /// OCI guest workload restrictions. Requires matching host and guest builds.
+    #[cfg(feature = "oci-runtime")]
+    pub security: Option<microsandbox_protocol::exec::ExecSecurity>,
+
     /// Arguments.
     pub args: Vec<String>,
 
@@ -155,6 +159,13 @@ pub struct ExecSink {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
+    /// Apply OCI security settings to this guest command.
+    #[cfg(feature = "oci-runtime")]
+    pub fn oci_security(mut self, security: microsandbox_protocol::exec::ExecSecurity) -> Self {
+        self.options.security = Some(security);
+        self
+    }
+
     /// Prepend arguments resolved by a higher-level execution helper.
     pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.options.args.splice(0..0, args);
@@ -505,6 +516,20 @@ impl ExecSink {
     }
 }
 
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn initial_stdin_messages(stdin_mode: &StdinMode) -> Vec<ExecStdin> {
+    match stdin_mode {
+        StdinMode::Null => vec![ExecStdin { data: Vec::new() }],
+        StdinMode::Pipe => Vec::new(),
+        StdinMode::Bytes(data) => vec![
+            ExecStdin { data: data.clone() },
+            ExecStdin { data: Vec::new() },
+        ],
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
@@ -518,7 +543,7 @@ pub(crate) mod agent {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
-        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdout},
         message::{Message, MessageType},
     };
     use tokio::sync::mpsc;
@@ -528,7 +553,10 @@ pub(crate) mod agent {
         sandbox::{SandboxConfig, build_exec_request},
     };
 
-    use super::{ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode};
+    use super::{
+        ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
+        initial_stdin_messages,
+    };
 
     pub(crate) async fn exec_stream(
         backend: &dyn crate::backend::Backend,
@@ -551,6 +579,8 @@ pub(crate) mod agent {
     ) -> MicrosandboxResult<ExecHandle> {
         let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
         let ExecOptions {
+            #[cfg(feature = "oci-runtime")]
+            security,
             args,
             cwd,
             user,
@@ -573,6 +603,8 @@ pub(crate) mod agent {
         let req = build_exec_request(
             config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
         );
+        #[cfg(feature = "oci-runtime")]
+        let req = microsandbox_protocol::exec::ExecRequest { security, ..req };
         let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         let stdin = match &stdin_mode {
@@ -580,14 +612,13 @@ pub(crate) mod agent {
             _ => None,
         };
 
-        if let StdinMode::Bytes(ref data) = stdin_mode {
-            let data = data.clone();
+        let initial_stdin = initial_stdin_messages(&stdin_mode);
+        if !initial_stdin.is_empty() {
             let bridge = Arc::clone(&client);
             tokio::spawn(async move {
-                let payload = ExecStdin { data };
-                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
-                let close = ExecStdin { data: Vec::new() };
-                let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
+                for payload in initial_stdin {
+                    let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                }
             });
         }
 
@@ -674,6 +705,37 @@ pub(crate) mod agent {
             code,
             success: code == 0,
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_stdin_sends_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Null);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].data.is_empty());
+    }
+
+    #[test]
+    fn pipe_stdin_leaves_stdin_open_for_caller() {
+        assert!(initial_stdin_messages(&StdinMode::Pipe).is_empty());
+    }
+
+    #[test]
+    fn byte_stdin_sends_data_then_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Bytes(b"hello".to_vec()));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].data, b"hello");
+        assert!(messages[1].data.is_empty());
     }
 }
 

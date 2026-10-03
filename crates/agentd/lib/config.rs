@@ -155,9 +155,11 @@ pub(crate) struct TmpfsSpec {
     pub readonly: bool,
 }
 
-/// Parsed block-device root specification with kind-based dispatch.
+/// Parsed guest root assembly specification with kind-based dispatch.
 #[derive(Debug)]
 pub(crate) enum BlockRootSpec {
+    /// Immutable virtiofs lower and a boot-only writable overlay.
+    ReadOnlyVirtiofs,
     /// Single disk image.
     DiskImage {
         device: String,
@@ -312,6 +314,7 @@ impl BootParams {
             BootstrapSecurityProfile::Restricted => SecurityProfile::Restricted,
         };
         let block_root = block_root.map(|root| match root {
+            BootstrapBlockRoot::ReadOnlyVirtiofs => BlockRootSpec::ReadOnlyVirtiofs,
             BootstrapBlockRoot::DiskImage { device, fstype } => {
                 BlockRootSpec::DiskImage { device, fstype }
             }
@@ -1310,6 +1313,7 @@ fn parse_handoff_env_pair(key: String, value: String) -> AgentdResult<(OsString,
 fn validate_guest_bootstrap(bootstrap: &GuestBootstrap) -> AgentdResult<()> {
     if let Some(root) = &bootstrap.block_root {
         match root {
+            BootstrapBlockRoot::ReadOnlyVirtiofs => {}
             BootstrapBlockRoot::DiskImage { device, fstype } => {
                 validate_absolute_guest_path("bootstrap block-root device", device)?;
                 if let Some(fstype) = fstype {
@@ -1599,6 +1603,21 @@ mod tests {
                 OsString::from("{\"enabled\":true}")
             )]
         );
+    }
+
+    #[test]
+    fn test_bootstrap_selects_readonly_root_assembly() {
+        let (params, _) = BootParams::from_bootstrap(GuestBootstrap {
+            block_root: Some(BootstrapBlockRoot::ReadOnlyVirtiofs),
+            ..GuestBootstrap::default()
+        })
+        .unwrap();
+        assert!(matches!(
+            params.block_root,
+            Some(BlockRootSpec::ReadOnlyVirtiofs)
+        ));
+        let (params, _) = BootParams::from_bootstrap(GuestBootstrap::default()).unwrap();
+        assert!(params.block_root.is_none());
     }
 
     #[test]
