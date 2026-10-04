@@ -7,6 +7,7 @@ require_relative "../lib/microsandbox"
 class ManagedJobsTest < Test::Unit::TestCase
   def test_job_errors_preserve_uncertain_launch_identity
     error = Microsandbox::JobError.new(JSON.generate(code: "launch_unconfirmed", message: "connection lost", job_id: "job_123"))
+    assert_kind_of Microsandbox::Error, error
     assert_equal "launch_unconfirmed", error.code
     assert_equal "connection lost", error.message
     assert_equal "job_123", error.job_id

@@ -862,7 +862,7 @@ Detached execution uses the existing terminal detection. `--tty` forces a PTY an
 
 | Command | Behavior |
 | --- | --- |
-| `msb jobs <sandbox> [--all] [--limit N] [--cursor ID] [--format json]` | List active jobs, or retained history with `--all`; no job selector applies to this listing |
+| `msb jobs <sandbox> [--all] [--limit N] [--cursor ID] [--format json]` | List active jobs, or retained history with `-a` / `--all`; no job selector applies to this listing |
 | `msb logs <sandbox> --job ID` | Read job output; existing `--follow`, `--tail`, time, source and output-format options apply |
 | `msb inspect <sandbox> --job ID [--format json]` | Inspect identity, command, state, PTY/input mode and exit result |
 | `msb attach <sandbox> --job ID [--read-only]` | Attach to the existing process; Ctrl-] detaches a terminal |

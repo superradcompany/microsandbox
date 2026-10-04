@@ -16,7 +16,7 @@ pub struct JobsArgs {
     /// Owning sandbox.
     pub name: String,
     /// Include retained completed jobs.
-    #[arg(long)]
+    #[arg(short = 'a', long)]
     pub all: bool,
     /// Maximum entries per page.
     #[arg(long, default_value_t = 50)]
