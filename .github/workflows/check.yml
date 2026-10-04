@@ -36,6 +36,10 @@ jobs:
   changes:
     name: Detect code changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # paths-filter reads the PR's changed files through the GitHub API.
+      pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
       ruby: ${{ steps.filter.outputs.ruby }}
