@@ -1,3 +1,4 @@
+import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
 import {
@@ -49,6 +50,13 @@ export type RestartOptions = NapiSandboxRestartOptions;
 export type DestroyOptions = NapiSandboxDestroyOptions;
 
 export class SandboxHandle {
+  async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
+  async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
+  async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
+    const b = configure(new JobListBuilder());
+    return jobPageFromJson(await jobCall(() => this.inner.listJobs(b.includeAll, b.pageSize, b.after)));
+  }
+
   private readonly inner: NapiSandboxHandle;
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   readonly name: string;

@@ -46,6 +46,7 @@ pub(super) struct Entry {
     changed: Notify,
     pub invalidated: CancellationToken,
     pub connector: Arc<dyn VerifiedControlConnector>,
+    pub job_requests: Arc<tokio::sync::Semaphore>,
 }
 
 enum EntryState {
@@ -157,6 +158,7 @@ impl ControlSessions {
                     changed: Notify::new(),
                     invalidated: CancellationToken::new(),
                     connector,
+                    job_requests: Arc::new(tokio::sync::Semaphore::new(4)),
                 });
                 entries.insert(key, entry.clone());
                 (entry, true)

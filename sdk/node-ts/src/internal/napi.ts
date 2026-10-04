@@ -321,6 +321,10 @@ export interface NapiSandboxDestroyOptions {
 }
 
 export interface NapiSandbox {
+  execDetached(cmd: string, args?: string[]): Promise<NapiJob>;
+  execDetachedWithBuilder(cmd: string, builder: NapiExecOptionsBuilder): Promise<NapiJob>;
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
   readonly backendKind: "local" | "cloud";
   readonly id: string;
   readonly ownsLifecycle: boolean;
@@ -375,6 +379,8 @@ export interface NapiSandbox {
 }
 
 export interface NapiSandboxHandle {
+  getJob(id: string): Promise<NapiJob>;
+  listJobs(all: boolean, limit: number, cursor?: string): Promise<string>;
   readonly id: string;
   readonly name: string;
   readonly status: string;
@@ -1402,4 +1408,26 @@ export interface NapiRootDiskBuilder {
   fstype(fstype: string): this;
   /** Private flat-root clone strategy. */
   cloneStrategy(strategy: "auto" | "copy" | "reflink"): this;
+}
+
+export interface NapiJob {
+  readonly id: string;
+  inspect(): Promise<string>;
+  wait(): Promise<string>;
+  signal(signal: number): Promise<void>;
+  kill(): Promise<void>;
+  eof(): Promise<void>;
+  logs(options: string): Promise<string>;
+  logStream(options: string): Promise<NapiJobLogStream>;
+  attach(readOnly: boolean, replayBytes?: number, cursor?: string): Promise<NapiJobAttachment>;
+}
+export interface NapiJobAttachment {
+  recv(): Promise<string | null>;
+  writeStdin(data: Buffer): Promise<void>;
+  resize(rows: number, cols: number): Promise<void>;
+  detach(): Promise<void>;
+}
+export interface NapiJobLogStream {
+  next(): Promise<string | null>;
+  close(): Promise<void>;
 }

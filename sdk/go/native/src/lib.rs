@@ -36,6 +36,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod creation_progress;
+mod jobs;
 mod restore;
 mod setup;
 mod volume_fs;

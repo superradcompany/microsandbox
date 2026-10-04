@@ -342,6 +342,33 @@ export declare class InterfaceOverridesBuilder {
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
 
+export declare class Job {
+  get id(): string
+  inspect(): Promise<string>
+  wait(): Promise<string>
+  signal(signal: number): Promise<void>
+  kill(): Promise<void>
+  eof(): Promise<void>
+  logs(options: string): Promise<string>
+  logStream(options: string): Promise<JobLogStream>
+  attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
+}
+export type JsJob = Job
+
+export declare class JobAttachment {
+  recv(): Promise<string | null>
+  writeStdin(data: Buffer): Promise<void>
+  resize(rows: number, cols: number): Promise<void>
+  detach(): Promise<void>
+}
+export type JsJobAttachment = JobAttachment
+
+export declare class JobLogStream {
+  next(): Promise<string | null>
+  close(): Promise<void>
+}
+export type JsJobLogStream = JobLogStream
+
 /**
  * A streaming subscription for sandbox log entries.
  *
@@ -1011,6 +1038,13 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
+  /** Launch with runtime-owned I/O, retaining pipe input by default. */
+  execDetached(cmd: string, args?: Array<string> | undefined | null): Promise<Job>
+  execDetachedWithBuilder(cmd: string, builder: ExecOptionsBuilder): Promise<Job>
   /**
    * Start an existing stopped sandbox (attached mode).
    *
@@ -1466,6 +1500,10 @@ export type JsSandboxFsOps = SandboxFsOps
  * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
  */
 export declare class SandboxHandle {
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */

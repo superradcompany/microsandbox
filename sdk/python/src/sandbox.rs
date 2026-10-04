@@ -233,6 +233,38 @@ impl PySandboxTouchResult {
 
 #[pymethods]
 impl PySandbox {
+    fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            Ok(crate::jobs::PyJob {
+                inner: sandbox.get_job(id).await.map_err(crate::jobs::job_error)?,
+            })
+        })
+    }
+    #[pyo3(signature = (*, all = false, limit = 50, cursor = None))]
+    fn list_jobs<'py>(
+        &self,
+        py: Python<'py>,
+        all: bool,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = crate::jobs::list_options(all, limit, cursor)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let page = sandbox
+                .list_jobs_with(|_| options)
+                .await
+                .map_err(crate::jobs::job_error)?;
+            crate::jobs::decode(
+                "page",
+                serde_json::to_value(page).map_err(crate::jobs::invalid)?,
+            )
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
@@ -609,6 +641,46 @@ impl PySandbox {
                 .await
                 .map_err(to_py_err)?;
             Ok(PyExecOutput::from_rust(output))
+        })
+    }
+
+    /// Execute a command with runtime-owned I/O.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        cmd,
+        args = None,
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        timeout = None,
+        stdin = None,
+        tty = false,
+        rlimits = None,
+    ))]
+    fn exec_detached<'py>(
+        &self,
+        py: Python<'py>,
+        cmd: String,
+        args: Option<&Bound<'py, PyAny>>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout: Option<f64>,
+        stdin: Option<&Bound<'py, PyAny>>,
+        tty: bool,
+        rlimits: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox
+                .exec_detached_with(&cmd, |e| apply_exec_options(e, args, opts))
+                .await
+                .map_err(crate::jobs::job_error)?;
+            Ok(crate::jobs::PyJob { inner: handle })
         })
     }
 

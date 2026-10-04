@@ -2,6 +2,8 @@ use microsandbox::sandbox::{DestroyOptions, RestartOptions, SandboxHandle, Sandb
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::jobs::{JsJob, job_error, json, list_options};
+
 use crate::error::to_napi_error;
 use crate::sandbox::Sandbox;
 use crate::types::*;
@@ -45,6 +47,23 @@ impl JsSandboxHandle {
 
 #[napi]
 impl JsSandboxHandle {
+    /// Retrieve a retained managed job in this sandbox.
+    #[napi]
+    pub async fn get_job(&self, id: String) -> Result<JsJob> {
+        let sb = &self.inner;
+        Ok(JsJob {
+            inner: sb.get_job(id).await.map_err(job_error)?,
+        })
+    }
+
+    /// List bounded managed-job metadata without creating processes.
+    #[napi]
+    pub async fn list_jobs(&self, all: bool, limit: u32, cursor: Option<String>) -> Result<String> {
+        let options = list_options(all, limit, cursor)?;
+        let sb = &self.inner;
+        json(sb.list_jobs_with(|_| options).await.map_err(job_error)?)
+    }
+
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[napi(getter)]
     pub fn name(&self) -> String {

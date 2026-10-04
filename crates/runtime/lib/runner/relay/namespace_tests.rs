@@ -91,6 +91,7 @@ async fn control_names_never_trigger_shutdown_or_new_sessions() {
                 let clients = Arc::new(Mutex::new(HashMap::from([(
                     0,
                     ClientState {
+                        exec_control: None,
                         incarnation: None,
                         active_sessions: HashSet::from([11]),
                         active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),

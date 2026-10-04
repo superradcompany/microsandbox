@@ -825,3 +825,66 @@ See [CLI management](/cli/management) for installation, updates, diagnostics, an
 <span id="msb-uninstall" />
 
 <span id="msb-self" />
+
+
+## Managed exec jobs
+
+`msb exec -d` starts a command owned by the sandbox runtime and prints its job ID after the guest confirms startup. The sandbox must already be running. Closing the launching terminal or dropping an SDK job handle does not terminate the command. Stopping or destroying the sandbox still terminates its processes.
+
+This self-contained walkthrough needs no script or counter file:
+
+```bash
+msb create alpine --name pause-walkthrough
+
+counter=$(msb exec -d --no-tty pause-walkthrough -- sh -c '
+  n=0
+  while true; do
+    n=$((n + 1))
+    echo "$n"
+    sleep 1
+  done
+')
+
+msb logs pause-walkthrough --job "$counter" --follow
+# Press Ctrl-C to stop following logs. The counter keeps running.
+
+msb pause pause-walkthrough
+msb logs pause-walkthrough --job "$counter" --tail 5
+# Wait a few seconds: the counter stays at the same value while paused.
+msb resume pause-walkthrough
+msb logs pause-walkthrough --job "$counter" --follow
+# Press Ctrl-C, then finish the demonstration:
+msb kill pause-walkthrough --job "$counter"
+msb inspect pause-walkthrough --job "$counter"
+```
+
+Detached execution uses the existing terminal detection. `--tty` forces a PTY and `--no-tty` forces pipes. Neither `--no-tty` nor detaching closes guest stdin: the runtime retains it for later attachment. `--no-stdin` explicitly gives the command EOF and disables automatic TTY allocation. Detached launch never reads the launching terminal's stdin; `--detach` conflicts with `--stream`.
+
+| Command | Behavior |
+| --- | --- |
+| `msb jobs <sandbox> [--all] [--limit N] [--cursor ID] [--format json]` | List active jobs, or retained history with `--all`; no job selector applies to this listing |
+| `msb logs <sandbox> --job ID` | Read job output; existing `--follow`, `--tail`, time, source and output-format options apply |
+| `msb inspect <sandbox> --job ID [--format json]` | Inspect identity, command, state, PTY/input mode and exit result |
+| `msb attach <sandbox> --job ID [--read-only]` | Attach to the existing process; Ctrl-] detaches a terminal |
+| `msb wait <sandbox> --job ID [--timeout 30s] [--format json]` | Wait for a confirmed exit; a wait timeout leaves the process running |
+| `msb signal <sandbox> --job ID --signal TERM` | Send a Linux guest signal to the process group |
+| `msb kill <sandbox> --job ID` | Request SIGKILL; use wait or inspect to confirm completion |
+| `msb eof <sandbox> --job ID` | Permanently close pipe input after queued bytes; PTYs use terminal Ctrl-D instead |
+
+Each command also has its full `msb sandbox ...` form. Without `--job`, `logs`, `inspect` and `wait` keep their existing sandbox meaning.
+
+For a reattachable shell:
+
+```bash
+shell_job=$(msb exec -d --tty pause-walkthrough -- sh)
+msb attach pause-walkthrough --job "$shell_job"
+# Ctrl-] returns to the host. Attach again using the same ID.
+```
+
+Only one attachment owns input at a time. Other clients can attach with `--read-only` or follow logs. Detach and host input EOF do not implicitly close guest stdin. Input ownership expires within 30 seconds after an abruptly disconnected client; explicit detach releases it immediately. PTY output is merged under source `output`; pipe mode preserves `stdout` and `stderr` separately.
+
+Job IDs are opaque, sandbox-scoped identities independent of guest PIDs and ordinary exec correlation IDs. Metadata and bounded output survive CLI disconnects and remain inspectable after sandbox shutdown. A runtime restart never reruns jobs: an unconfirmed former process is reported as `lost`. Up to 32 jobs can run per sandbox, with at most 256 retained histories and two 512 KiB output segments per job. Pruned history produces an explicit cursor-gap error rather than silently pretending the missing bytes were delivered. The runtime also bounds launch deduplication history; after 65,536 admissions, restart the sandbox before admitting more jobs.
+
+Execution `--timeout` remains enforced by the runtime after launch returns. Full snapshots and forks are rejected while managed jobs are active, because their host-side I/O ownership cannot yet be restored. Resident pause/resume remains supported. Older runtimes and unsupported backends reject job launch before dispatch; existing exec and sandbox APIs remain available.
+
+Signals and runtime deadlines remain deliverable when job stdin is full. Signals can interrupt queued input; stdin bytes and EOF otherwise keep their order. Pause delays physical signal delivery until resume. `kill` acknowledges the request; `wait` confirms process exit, and `inspect` reports delivery failures. Graceful sandbox stop interrupts queued exec input while preserving filesystem ordering. A stop timeout reports failure without forcing termination.

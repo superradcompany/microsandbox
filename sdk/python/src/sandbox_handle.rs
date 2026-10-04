@@ -35,6 +35,38 @@ impl PySandboxHandle {
 
 #[pymethods]
 impl PySandboxHandle {
+    fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = inner;
+            Ok(crate::jobs::PyJob {
+                inner: sandbox.get_job(id).await.map_err(crate::jobs::job_error)?,
+            })
+        })
+    }
+    #[pyo3(signature = (*, all = false, limit = 50, cursor = None))]
+    fn list_jobs<'py>(
+        &self,
+        py: Python<'py>,
+        all: bool,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = crate::jobs::list_options(all, limit, cursor)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = inner;
+            let page = sandbox
+                .list_jobs_with(|_| options)
+                .await
+                .map_err(crate::jobs::job_error)?;
+            crate::jobs::decode(
+                "page",
+                serde_json::to_value(page).map_err(crate::jobs::invalid)?,
+            )
+        })
+    }
+
     /// Sandbox name. Names are limited to 128 UTF-8 bytes.
     #[getter]
     fn name(&self) -> PyResult<String> {

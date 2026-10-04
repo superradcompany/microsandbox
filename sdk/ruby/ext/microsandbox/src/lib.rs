@@ -1,3 +1,5 @@
+mod jobs;
+
 use std::{
     ffi::c_void,
     future::Future,
@@ -2913,6 +2915,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     snap_handle.define_method("open", method!(RubySnapshotHandle::open, 0))?;
     snap_handle.define_method("save_to", method!(RubySnapshotHandle::save_to, -1))?;
 
+    jobs::init(ruby, module)?;
     Ok(())
 }
 

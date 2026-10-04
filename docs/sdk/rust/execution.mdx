@@ -1239,3 +1239,32 @@ POSIX resource limit identifiers. Each maps to an `RLIMIT_*` constant.
 | `Nice` | Max nice priority (`RLIMIT_NICE`) |
 | `Rtprio` | Max real-time priority (`RLIMIT_RTPRIO`) |
 | `Rttime` | Max real-time timeout (`RLIMIT_RTTIME`) |
+
+## Managed jobs
+
+```rust
+use microsandbox::jobs::{JobLogOptions, JobReplay};
+
+let job = sb.exec_detached_with("cat", |e| e.cwd("/tmp")).await?;
+let id = job.id().to_string();
+let io = job.attach().await?;
+io.write_stdin(b"hello\n").await?;
+io.detach().await?;
+
+let job = sb.get_job(&id).await?;
+job.eof().await?;
+let exit = job.wait().await?;
+let output = job.logs(&JobLogOptions::default()).await?;
+let page = sb.list_jobs_with(|b| b.all(true).limit(50)).await?;
+```
+
+`Sandbox::exec_detached(cmd, args)` and `exec_detached_with(cmd, configure)` return `JobResult<Job>`. The latter reuses `ExecOptionsBuilder`, including user, environment, working directory, timeout, resource limits, PTY and stdin settings. `stdin_null()` selects EOF; `stdin_bytes()` supplies finite bytes. Both `Sandbox` and `SandboxHandle` expose `get_job`, `list_jobs` and `list_jobs_with`.
+
+`Job` provides `id`, `inspect`, `wait`, `logs`, `log_stream`, `follow_logs`, `attach`, `attach_with`, `signal`, `kill` and `eof`. Configure an attachment with `read_only(true)` and `replay(JobReplay::Recent { max_bytes })` or `JobReplay::After(cursor)`. `JobAttachment` provides concurrent `recv`, `write_stdin`, `resize` and `detach`; only one receiver may run at once. `interact_terminal()` adds terminal input, resize, raw-mode restoration and Ctrl-] detach using those same operations. Cancelling a wait or input future never kills the job.
+
+
+Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
+
+A job handle exposes inspection, an output-independent wait, bounded logs, attachment, signal, kill and EOF. Only one attachment owns input; read-only observers may coexist. Dropping or detaching an attachment preserves the job and its stdin. Pipe EOF is permanent; PTYs reject EOF and use terminal control characters. Each input write admits at most 16 KiB. Finite launch input is limited to 64 KiB, followed by EOF; use attachment writes for larger streams.
+
+Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
