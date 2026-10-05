@@ -114,7 +114,8 @@ impl CheckpointClosure {
         validate_memory_objects(&root, &memory)?;
 
         // Execution/device codecs perform their own bounded semantic decoding in the runtime. At
-        // this layer we still prove that every named immutable object exists and matches its id.
+        // this layer we still prove that every named immutable object exists and matches its id,
+        // and decode virtio-fs states so a backend state over the budget is refused before restore.
         read_object_verified(
             &root,
             &checkpoint.execution_state,
@@ -125,7 +126,14 @@ impl CheckpointClosure {
             if device.is_virtio_fs() && object_len(&root, &device.state)? > max_len {
                 return checkpoint_error(fs_state_budget_error(fs_state_limit));
             }
-            read_object_verified(&root, &device.state, max_len)?;
+            let bytes = read_object_verified(&root, &device.state, max_len)?;
+            if device.is_virtio_fs() {
+                device
+                    .decode_virtio_state(&bytes, fs_state_limit)
+                    .map_err(|error| {
+                        checkpoint_error_value(format!("device {}: {error}", device.device_id))
+                    })?;
+            }
         }
 
         let mut disks = Vec::with_capacity(checkpoint.disks.len());
@@ -455,6 +463,30 @@ mod tests {
         ));
     }
 
+    /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
+    /// state, in the msb_krun device-state format.
+    fn virtio_fs_state(backend_len: usize) -> Vec<u8> {
+        let mut device_state = b"MSBKFS\0\0".to_vec();
+        device_state.extend_from_slice(&1u16.to_le_bytes());
+        device_state.extend_from_slice(&0u64.to_le_bytes());
+        device_state.extend_from_slice(&u32::try_from(backend_len).unwrap().to_le_bytes());
+        device_state.resize(device_state.len() + backend_len, 7);
+
+        let mut bytes = b"MSBKVIO\0\0".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(b"fs");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        // Feature, queue and shm selectors, status, config generation, interrupt status, no IRQ
+        // line, acked features and an empty queue list.
+        bytes.extend_from_slice(&[0; 6 * 4 + 8 + 1 + 8 + 4]);
+        bytes.extend_from_slice(&u32::try_from(device_state.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&device_state);
+        bytes
+    }
+
     fn fixture() -> (tempfile::TempDir, ObjectId) {
         let directory = tempfile::tempdir().unwrap();
         let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
@@ -608,24 +640,25 @@ mod tests {
     fn device_state_limit_depends_on_device_type_and_budget() {
         const MIB: usize = 1024 * 1024;
         const FS: u32 = 26;
-        // (device type, budget in MiB, state bytes, admitted)
+        // (device type, budget in MiB, state, admitted)
         let cases = [
-            (FS, 4, MIB + 1, true),
-            (FS, 4, 5 * MIB + 22, true),
-            (FS, 4, 5 * MIB + 23, false),
-            (FS, 64, 5 * MIB + 23, true),
-            (FS, 64, 65 * MIB + 22, true),
-            (FS, 64, 65 * MIB + 23, false),
-            (4, 64, MIB, true),
-            (4, 64, MIB + 1, false),
+            (FS, 4, virtio_fs_state(4 * MIB), true),
+            (FS, 4, virtio_fs_state(4 * MIB + 1), false),
+            (FS, 4, vec![7; 5 * MIB + 23], false),
+            (FS, 64, virtio_fs_state(4 * MIB + 1), true),
+            (FS, 64, virtio_fs_state(64 * MIB), true),
+            (FS, 64, virtio_fs_state(64 * MIB + 1), false),
+            (4, 64, vec![7; MIB], true),
+            (4, 64, vec![7; MIB + 1], false),
         ];
-        for (device_type, budget, len, admitted) in cases {
+        for (device_type, budget, state, admitted) in cases {
+            let len = state.len();
             let (directory, root) = fixture();
             let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
             let mut checkpoint =
                 CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
             checkpoint.devices[0].device_type = device_type;
-            checkpoint.devices[0].state = store.put_bytes(&vec![7; len]).unwrap();
+            checkpoint.devices[0].state = store.put_bytes(&state).unwrap();
             let root_bytes = checkpoint.to_canonical_bytes().unwrap();
             let root = ObjectId::from_bytes(&root_bytes).unwrap();
             std::fs::write(directory.path().join(CHECKPOINT_ROOT_FILE), root_bytes).unwrap();

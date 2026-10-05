@@ -509,9 +509,6 @@ fn decode_devices(
     object_len: impl Fn(&ObjectId) -> Result<u64, String>,
     mut read: impl FnMut(&ObjectId, u64) -> Result<Vec<u8>, String>,
 ) -> Result<Vec<PreparedDeviceRestore>, String> {
-    let codec = msb_krun::DeviceStateCodec::new(
-        msb_krun::DeviceStateLimits::default().with_fs_state_limit(fs_state_limit),
-    );
     let mut devices = Vec::with_capacity(references.len());
     for device in references {
         let max_state_bytes = device.max_state_bytes(fs_state_limit);
@@ -546,12 +543,14 @@ fn decode_devices(
                 state,
             });
         } else {
-            let state = codec.decode(&bytes).map_err(|error| {
-                format!(
-                    "decode checkpoint virtio device {}: {error}",
-                    device.device_id
-                )
-            })?;
+            let state = device
+                .decode_virtio_state(&bytes, fs_state_limit)
+                .map_err(|error| {
+                    format!(
+                        "decode checkpoint virtio device {}: {error}",
+                        device.device_id
+                    )
+                })?;
             if state.pause_generation != pause_generation || state.device_id != device.device_id {
                 return Err(format!(
                     "virtio device {} does not belong to the checkpoint binding/epoch",
@@ -717,6 +716,63 @@ mod tests {
         .err()
         .unwrap();
         assert!(error.contains("read reached"), "{error}");
+    }
+
+    #[test]
+    fn virtio_fs_backend_state_over_the_budget_names_the_setting() {
+        const MIB: usize = 1024 * 1024;
+        let references = [DeviceStateRef {
+            device_type: 26,
+            device_id: "fs".into(),
+            state: ObjectId::from_bytes(b"state").unwrap(),
+        }];
+        let state = virtio_fs_state(4 * MIB + 1);
+        let object_len = |_: &ObjectId| Ok(state.len() as u64);
+
+        let error = decode_devices(
+            &references,
+            1,
+            4 * MIB,
+            object_len,
+            |_, _| Ok(state.clone()),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.contains("snapshots.max_filesystem_state_mib"),
+            "{error}"
+        );
+
+        assert!(
+            decode_devices(&references, 1, 64 * MIB, object_len, |_, _| {
+                Ok(state.clone())
+            })
+            .is_ok()
+        );
+    }
+
+    /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
+    /// state, in the msb_krun device-state format.
+    fn virtio_fs_state(backend_len: usize) -> Vec<u8> {
+        let mut device_state = b"MSBKFS\0\0".to_vec();
+        device_state.extend_from_slice(&1u16.to_le_bytes());
+        device_state.extend_from_slice(&0u64.to_le_bytes());
+        device_state.extend_from_slice(&u32::try_from(backend_len).unwrap().to_le_bytes());
+        device_state.resize(device_state.len() + backend_len, 7);
+
+        let mut bytes = b"MSBKVIO\0\0".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(b"fs");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        // Feature, queue and shm selectors, status, config generation, interrupt status, no IRQ
+        // line, acked features and an empty queue list.
+        bytes.extend_from_slice(&[0; 6 * 4 + 8 + 1 + 8 + 4]);
+        bytes.extend_from_slice(&u32::try_from(device_state.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&device_state);
+        bytes
     }
 
     #[test]

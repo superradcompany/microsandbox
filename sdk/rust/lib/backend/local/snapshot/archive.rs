@@ -5220,7 +5220,7 @@ mod tests {
             .put_bytes(&memory.to_canonical_bytes().unwrap())
             .unwrap();
         let execution_id = store.put_bytes(b"execution").unwrap();
-        let fs_state_bytes = vec![0x5a; 6 * 1024 * 1024];
+        let fs_state_bytes = virtio_fs_state(crate::test_support::DEFAULT_FS_STATE_LIMIT + 1);
         let fs_state = store.put_bytes(&fs_state_bytes).unwrap();
         let layers = source.join("layers");
         std::fs::create_dir(&layers).unwrap();
@@ -5499,5 +5499,29 @@ mod tests {
                 .join(snapshot_id.as_str())
                 .exists()
         );
+    }
+
+    /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
+    /// state, in the msb_krun device-state format.
+    fn virtio_fs_state(backend_len: usize) -> Vec<u8> {
+        let mut device_state = b"MSBKFS\0\0".to_vec();
+        device_state.extend_from_slice(&1u16.to_le_bytes());
+        device_state.extend_from_slice(&0u64.to_le_bytes());
+        device_state.extend_from_slice(&u32::try_from(backend_len).unwrap().to_le_bytes());
+        device_state.resize(device_state.len() + backend_len, 0x5a);
+
+        let mut bytes = b"MSBKVIO\0\0".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(b"fs0");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        // Feature, queue and shm selectors, status, config generation, interrupt status, no IRQ
+        // line, acked features and an empty queue list.
+        bytes.extend_from_slice(&[0; 6 * 4 + 8 + 1 + 8 + 4]);
+        bytes.extend_from_slice(&u32::try_from(device_state.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&device_state);
+        bytes
     }
 }

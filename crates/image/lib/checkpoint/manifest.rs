@@ -207,6 +207,35 @@ impl DeviceStateRef {
         let limits = msb_krun::DeviceStateLimits::default().with_fs_state_limit(fs_state_limit);
         msb_krun::DeviceStateCodec::new(limits).max_state_bytes(self.device_type) as u64
     }
+
+    /// Decode this device's generic virtio state, refusing virtio-fs backend state larger than
+    /// `fs_state_limit` bytes.
+    ///
+    /// A virtio-fs state is framed with room for any backend length, so a backend state over the
+    /// budget is reported as such rather than as a malformed object.
+    pub fn decode_virtio_state(
+        &self,
+        bytes: &[u8],
+        fs_state_limit: usize,
+    ) -> Result<msb_krun::VirtioDeviceState, String> {
+        let frame_limit = if self.is_virtio_fs() {
+            fs_state_limit.max(bytes.len())
+        } else {
+            fs_state_limit
+        };
+        let limits = msb_krun::DeviceStateLimits::default().with_fs_state_limit(frame_limit);
+        let state = msb_krun::DeviceStateCodec::new(limits)
+            .decode(bytes)
+            .map_err(|error| error.to_string())?;
+        let backend_len = state
+            .device_state
+            .len()
+            .saturating_sub(msb_krun::FS_DEVICE_STATE_HEADER_BYTES);
+        if state.transport.device_type == VIRTIO_TYPE_FS && backend_len > fs_state_limit {
+            return Err(fs_state_budget_error(fs_state_limit));
+        }
+        Ok(state)
+    }
 }
 
 /// Error for a virtio-fs state object larger than the configured budget.
