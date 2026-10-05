@@ -1,25 +1,13 @@
 //! TTL-indexed reverse map from keys to members, with fast member-to-keys
 //! lookup.
 //!
-//! Each key owns a set of members, and each member of a key carries its own
-//! expiry. A reverse index (member -> keys) answers "which keys currently
-//! contain this member?" in amortized O(1). Expiration uses a min-heap of
-//! versioned events so a stale timer cannot remove a newer binding of the
-//! same key and member.
+//! Each key owns members with individual expiries. A reverse index maps
+//! members back to their keys. An ordered map holds exactly one expiry entry
+//! per binding; refreshing or removing a binding removes its old entry.
 
-use std::cmp::Ordering;
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
-
-//--------------------------------------------------------------------------------------------------
-// Constants
-//--------------------------------------------------------------------------------------------------
-
-/// Stale expiry events tolerated beyond twice the live bindings before the
-/// heap is compacted.
-const EXPIRATION_COMPACTION_SLACK: usize = 64;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,28 +16,18 @@ const EXPIRATION_COMPACTION_SLACK: usize = 64;
 /// TTL-indexed reverse map from keys to members and members back to keys.
 #[derive(Debug)]
 pub struct TtlReverseIndex<K, M> {
-    by_key: HashMap<K, HashMap<M, Binding>>,
+    by_key: HashMap<K, HashMap<M, Expiry>>,
     by_member: HashMap<M, HashSet<K>>,
-    expirations: BinaryHeap<Reverse<ExpiryEvent<K, M>>>,
-    live_bindings: usize,
-    member_limit: Option<usize>,
-    next_version: u64,
+    expirations: BTreeMap<Expiry, (K, M)>,
     next_sequence: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Binding {
-    expires_at: Instant,
-    version: u64,
-}
-
-#[derive(Debug, Clone)]
-struct ExpiryEvent<K, M> {
+/// The sequence distinguishes bindings with the same expiry without requiring
+/// keys or members to implement `Ord`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Expiry {
     expires_at: Instant,
     sequence: u64,
-    version: u64,
-    key: K,
-    member: M,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -61,19 +39,6 @@ where
     K: Eq + Hash + Clone,
     M: Eq + Hash + Clone,
 {
-    /// Create an index that keeps at most `limit` members per key.
-    ///
-    /// Binding new members to a key that is already full drops the members
-    /// of that key closest to expiry. Members bound by the same call are
-    /// never dropped for each other, so a call with more than `limit`
-    /// members keeps them all. A `limit` of zero is treated as one.
-    pub fn with_member_limit(limit: usize) -> Self {
-        Self {
-            member_limit: Some(limit.max(1)),
-            ..Self::default()
-        }
-    }
-
     /// Insert or replace the member set for `key` with a new TTL.
     pub fn insert<I>(&mut self, key: K, members: I, ttl: Duration, now: Instant)
     where
@@ -89,14 +54,53 @@ where
     /// Each member stays bound until its own expiry. A member that is already
     /// bound keeps the later of its current expiry and `now + ttl`, so a
     /// shorter TTL never cuts an earlier binding short. An empty `members`
-    /// changes nothing. With a member limit, a full key drops its members
-    /// closest to expiry to make room, never one of `members`.
+    /// changes nothing.
     pub fn extend<I>(&mut self, key: K, members: I, ttl: Duration, now: Instant)
     where
         I: IntoIterator<Item = M>,
     {
         self.evict_expired(now);
         self.bind_all(key, members, now + ttl);
+    }
+
+    /// Extend only if all new bindings fit within `capacity` after expiry cleanup.
+    ///
+    /// Returns `false` without changing any live bindings when the answer does
+    /// not fit. Duplicate members count once; existing bindings can refresh at
+    /// capacity. Temporary storage is also bounded by `capacity`.
+    pub fn try_extend<I>(
+        &mut self,
+        key: K,
+        members: I,
+        ttl: Duration,
+        now: Instant,
+        capacity: usize,
+    ) -> bool
+    where
+        I: IntoIterator<Item = M>,
+    {
+        self.evict_expired(now);
+
+        let remaining = capacity.saturating_sub(self.expirations.len());
+        let existing = self.by_key.get(&key);
+        let mut unique = HashSet::new();
+        let mut added = 0;
+
+        for member in members {
+            if unique.contains(&member) {
+                continue;
+            }
+            if !existing.is_some_and(|bindings| bindings.contains_key(&member)) {
+                added += 1;
+                if added > remaining {
+                    return false;
+                }
+            }
+            unique.insert(member);
+        }
+
+        self.bind_all(key, unique, now + ttl);
+        true
     }
 
     /// Remove the entry for `key` if present.
@@ -118,20 +122,20 @@ where
                 self.by_key
                     .get(key)
                     .and_then(|bindings| bindings.get(member))
-                    .is_some_and(|binding| binding.expires_at > now && predicate(key))
+                    .is_some_and(|expiry| expiry.expires_at > now && predicate(key))
             })
         })
     }
 
     /// Evict all bindings whose TTL has expired by `now`.
     pub fn evict_expired(&mut self, now: Instant) {
-        while let Some(Reverse(expiry)) = self.expirations.peek() {
-            if expiry.expires_at > now {
-                break;
-            }
-            let expiry = self.expirations.pop().unwrap().0;
-            if is_current(&self.by_key, &expiry) {
-                self.unbind(&expiry.key, &expiry.member);
+        while self
+            .expirations
+            .first_key_value()
+            .is_some_and(|(expiry, _)| expiry.expires_at <= now)
+        {
+            if let Some((_, (key, member))) = self.expirations.pop_first() {
+                self.unbind(&key, &member);
             }
         }
     }
@@ -140,85 +144,32 @@ where
     where
         I: IntoIterator<Item = M>,
     {
-        let members: HashSet<M> = members.into_iter().collect();
-        for member in &members {
-            self.bind(&key, member.clone(), expires_at);
+        for member in members {
+            self.bind(&key, member, expires_at);
         }
-        self.trim_to_limit(&key, &members);
     }
 
     fn bind(&mut self, key: &K, member: M, expires_at: Instant) {
-        let current = self
-            .by_key
-            .get(key)
-            .and_then(|bindings| bindings.get(&member))
-            .map(|binding| binding.expires_at);
-        if current.is_some_and(|current| current >= expires_at) {
-            return;
+        let bindings = self.by_key.entry(key.clone()).or_default();
+        if let Some(previous) = bindings.get(&member) {
+            if previous.expires_at >= expires_at {
+                return;
+            }
+            self.expirations.remove(previous);
         }
 
-        let version = self.next_version;
-        self.next_version = self.next_version.wrapping_add(1);
-        let sequence = self.next_sequence;
+        let expiry = Expiry {
+            expires_at,
+            sequence: self.next_sequence,
+        };
         self.next_sequence = self.next_sequence.wrapping_add(1);
 
-        let replaced = self.by_key.entry(key.clone()).or_default().insert(
-            member.clone(),
-            Binding {
-                expires_at,
-                version,
-            },
-        );
-        if replaced.is_none() {
-            self.live_bindings += 1;
-        }
+        bindings.insert(member.clone(), expiry);
         self.by_member
             .entry(member.clone())
             .or_default()
             .insert(key.clone());
-        self.expirations.push(Reverse(ExpiryEvent {
-            expires_at,
-            sequence,
-            version,
-            key: key.clone(),
-            member,
-        }));
-        self.compact_expirations();
-    }
-
-    /// Drop the members of `key` closest to expiry until it is back within
-    /// the member limit, sparing the members in `kept`.
-    fn trim_to_limit(&mut self, key: &K, kept: &HashSet<M>) {
-        let Some(limit) = self.member_limit else {
-            return;
-        };
-        let Some(bindings) = self.by_key.get(key) else {
-            return;
-        };
-        let excess = bindings.len().saturating_sub(limit);
-        if excess == 0 {
-            return;
-        }
-        let mut droppable: Vec<(Instant, M)> = bindings
-            .iter()
-            .filter(|(member, _)| !kept.contains(*member))
-            .map(|(member, binding)| (binding.expires_at, member.clone()))
-            .collect();
-        droppable.sort_by_key(|(expires_at, _)| *expires_at);
-        for (_, member) in droppable.into_iter().take(excess) {
-            self.unbind(key, &member);
-        }
-    }
-
-    /// Drop expiry events whose binding was refreshed or removed once they
-    /// outnumber the live bindings, so the heap stays proportional to them.
-    fn compact_expirations(&mut self) {
-        if self.expirations.len() <= 2 * self.live_bindings + EXPIRATION_COMPACTION_SLACK {
-            return;
-        }
-        let by_key = &self.by_key;
-        self.expirations
-            .retain(|Reverse(expiry)| is_current(by_key, expiry));
+        self.expirations.insert(expiry, (key.clone(), member));
     }
 
     fn remove_key(&mut self, key: &K) {
@@ -226,19 +177,19 @@ where
             return;
         };
 
-        self.live_bindings -= removed.len();
-        for member in removed.into_keys() {
+        for (member, expiry) in removed {
+            self.expirations.remove(&expiry);
             self.forget_reverse(&member, key);
         }
     }
 
+    /// Remove a binding whose expiry entry has already been popped.
     fn unbind(&mut self, key: &K, member: &M) {
         let Some(bindings) = self.by_key.get_mut(key) else {
             return;
         };
-        if bindings.remove(member).is_some() {
-            self.live_bindings -= 1;
-        }
+
+        bindings.remove(member);
         if bindings.is_empty() {
             self.by_key.remove(key);
         }
@@ -264,53 +215,10 @@ impl<K, M> Default for TtlReverseIndex<K, M> {
         Self {
             by_key: HashMap::new(),
             by_member: HashMap::new(),
-            expirations: BinaryHeap::new(),
-            live_bindings: 0,
-            member_limit: None,
-            next_version: 0,
+            expirations: BTreeMap::new(),
             next_sequence: 0,
         }
     }
-}
-
-impl<K, M> PartialEq for ExpiryEvent<K, M> {
-    fn eq(&self, other: &Self) -> bool {
-        self.expires_at == other.expires_at && self.sequence == other.sequence
-    }
-}
-
-impl<K, M> Eq for ExpiryEvent<K, M> {}
-
-impl<K, M> PartialOrd for ExpiryEvent<K, M> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<K, M> Ord for ExpiryEvent<K, M> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.expires_at
-            .cmp(&other.expires_at)
-            .then_with(|| self.sequence.cmp(&other.sequence))
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Functions
-//--------------------------------------------------------------------------------------------------
-
-/// Whether `expiry` still belongs to the live binding of its key and member.
-fn is_current<K, M>(by_key: &HashMap<K, HashMap<M, Binding>>, expiry: &ExpiryEvent<K, M>) -> bool
-where
-    K: Eq + Hash,
-    M: Eq + Hash,
-{
-    by_key
-        .get(&expiry.key)
-        .and_then(|bindings| bindings.get(&expiry.member))
-        .is_some_and(|binding| {
-            binding.version == expiry.version && binding.expires_at == expiry.expires_at
-        })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -517,8 +425,8 @@ mod tests {
     fn repeated_replaces_keep_reverse_index_consistent() {
         // Stress version of `stale_expiry_does_not_remove_newer_entry`:
         // churn the same key many times and confirm only the latest
-        // members are visible afterward, and earlier heap events do not
-        // wipe the live entry.
+        // members are visible afterward and expiry maintenance preserves
+        // the live entry.
         let mut index = TtlReverseIndex::<&str, i32>::default();
         let now = Instant::now();
 
@@ -535,8 +443,7 @@ mod tests {
         }
         assert!(index.member_matches(&63, now, |key| key == &"alpha"));
 
-        // Eviction past every scheduled expiry event for the churned key
-        // must not remove the final live entry (version guard).
+        // Maintenance before the final entry expires must leave it live.
         index.evict_expired(now + Duration::from_secs(3));
         assert!(index.member_matches(&63, now + Duration::from_secs(3), |key| key == &"alpha"));
     }
@@ -694,81 +601,144 @@ mod tests {
     }
 
     #[test]
-    fn member_limit_drops_the_member_closest_to_expiry() {
-        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(2);
-        let now = Instant::now();
-
-        index.extend("alpha", [1], Duration::from_secs(10), now);
-        index.extend("alpha", [2], Duration::from_secs(30), now);
-        index.extend("alpha", [3], Duration::from_secs(20), now);
-
-        assert!(!index.member_matches(&1, now, |_| true));
-        assert!(index.member_matches(&2, now, |key| key == &"alpha"));
-        assert!(index.member_matches(&3, now, |key| key == &"alpha"));
-
-        // Refreshing a member already bound does not count against the limit.
-        index.extend("alpha", [2], Duration::from_secs(40), now);
-        assert!(index.member_matches(&3, now, |key| key == &"alpha"));
-        assert_eq!(index.live_bindings, 2);
-    }
-
-    #[test]
-    fn member_limit_keeps_every_member_of_one_call() {
-        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(2);
-        let now = Instant::now();
-
-        index.extend("alpha", [1], Duration::from_secs(60), now);
-        index.extend("alpha", [2, 3, 4], Duration::from_secs(10), now);
-
-        // The answer's own members all stay, and the older member makes room.
-        assert!(!index.member_matches(&1, now, |_| true));
-        for i in 2..=4 {
-            assert!(index.member_matches(&i, now, |key| key == &"alpha"));
-        }
-
-        // The next answer trims the key back to the limit.
-        index.extend("alpha", [5], Duration::from_secs(30), now);
-        assert_eq!(index.by_key["alpha"].len(), 2);
-        assert!(index.member_matches(&5, now, |key| key == &"alpha"));
-        assert_eq!(index.live_bindings, 2);
-
-        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(2);
-        index.insert("alpha", [1, 2, 3], Duration::from_secs(10), now);
-        assert_eq!(index.by_key["alpha"].len(), 3);
-    }
-
-    #[test]
-    fn member_limit_bounds_a_rotating_answer() {
-        let mut index = TtlReverseIndex::<&str, i32>::with_member_limit(8);
-        let now = Instant::now();
-
-        for i in 0..1_000 {
-            index.extend("alpha", [i], Duration::from_secs(86_400), now);
-        }
-
-        assert_eq!(index.by_key["alpha"].len(), 8);
-        assert_eq!(index.by_member.len(), 8);
-        assert!(index.member_matches(&999, now, |key| key == &"alpha"));
-    }
-
-    #[test]
-    fn refreshes_and_removals_keep_the_expiry_heap_bounded() {
+    fn expiry_metadata_stays_bounded_during_refresh_and_remove_churn() {
         let mut index = TtlReverseIndex::<&str, i32>::default();
         let now = Instant::now();
 
-        // Each refresh with a longer TTL leaves the previous event stale.
-        for i in 1..=1_000 {
-            index.extend("alpha", [1], Duration::from_secs(i), now);
+        for i in 0..10_000 {
+            index.extend("alpha", [1], Duration::from_secs(60 + i), now);
         }
-        assert!(index.expirations.len() <= 2 * index.live_bindings + EXPIRATION_COMPACTION_SLACK);
-        assert!(index.member_matches(&1, now + Duration::from_secs(999), |key| key == &"alpha"));
+        assert_eq!(
+            index.expirations.len(),
+            1,
+            "refreshes retained stale timers"
+        );
+        assert!(index.member_matches(&1, now + Duration::from_secs(10_000), |_| true));
 
-        // Cleared keys leave their events behind until the next compaction.
-        for i in 0..1_000 {
-            index.insert("beta", [i], Duration::from_secs(86_400), now);
+        for i in 0..10_000 {
+            index.extend("beta", [i], Duration::from_secs(60), now);
             index.remove(&"beta", now);
         }
-        assert!(index.expirations.len() <= 2 * index.live_bindings + EXPIRATION_COMPACTION_SLACK);
-        assert_eq!(index.live_bindings, 1);
+        assert_eq!(index.expirations.len(), 1, "removals retained stale timers");
+        index.evict_expired(now + Duration::from_secs(10_060));
+        assert!(index.expirations.is_empty());
+        assert!(!index.member_matches(&1, now + Duration::from_secs(10_060), |_| true));
+
+        // Clearing a large live set must release its timers immediately,
+        // without relying on a later insertion to trigger maintenance.
+        index.extend("bulk", 0..20_000, Duration::from_secs(86_400), now);
+        index.remove(&"bulk", now);
+        assert!(index.expirations.is_empty());
+    }
+
+    #[test]
+    fn bounded_extend_is_atomic_and_reclaims_expired_capacity() {
+        let mut index = TtlReverseIndex::<&str, i32>::default();
+        let now = Instant::now();
+        let short = Duration::from_secs(10);
+        let long = Duration::from_secs(60);
+
+        assert!(index.try_extend("alpha", [1, 1], short, now, 3));
+        // Sharing an address across keys still consumes another binding.
+        assert!(index.try_extend("beta", [1], long, now, 3));
+        // One free slot cannot admit two new members. Neither the new members
+        // nor a longer deadline for an existing member may be partially applied.
+        assert!(!index.try_extend("alpha", [1, 2, 3], long, now, 3));
+        assert!(!index.member_matches(&2, now, |_| true));
+        assert!(!index.member_matches(&3, now, |_| true));
+        assert!(!index.member_matches(&1, now + short, |key| *key == "alpha"));
+        assert!(index.try_extend("gamma", [4], short, now, 3));
+        assert!(!index.try_extend("delta", [5], long, now, 3));
+        assert!(index.try_extend("beta", [1, 1], long, now + Duration::from_secs(1), 3));
+        assert!(index.member_matches(&1, now + long, |key| *key == "beta"));
+
+        // Exact expiry frees two slots, while the refreshed binding survives.
+        assert!(index.try_extend("delta", [5, 6], long, now + short, 3));
+        assert!(index.member_matches(&1, now + short, |key| *key == "beta"));
+        assert!(index.member_matches(&5, now + short, |key| *key == "delta"));
+        assert!(index.member_matches(&6, now + short, |key| *key == "delta"));
+        assert!(!index.try_extend("epsilon", [7], long, now + short, 3));
+        index.remove(&"delta", now + short);
+        assert!(index.try_extend("epsilon", [7, 8], long, now + short, 3));
+    }
+
+    #[test]
+    fn mixed_operations_match_a_flat_reference_model() {
+        // The reference has no reverse index or expiry queue: it answers each
+        // lookup by scanning a flat list of observations and their deadlines.
+        for seed in [1_u64, 42, 0xdead_beef] {
+            let mut random = seed;
+            let mut next = || {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                random >> 32
+            };
+            let mut index = TtlReverseIndex::<u8, u8>::default();
+            let mut observations: Vec<(u8, u8, Instant)> = Vec::new();
+            let mut now = Instant::now();
+
+            for step in 0..4_096 {
+                let key = (next() % 8) as u8;
+                let count = (next() % 5) as usize;
+                let members: Vec<u8> = (0..count).map(|_| (next() % 8) as u8).collect();
+                let ttl = Duration::from_secs([0, 1, 2, 8, 64][(next() % 5) as usize]);
+                let operation = next() % 6;
+                observations.retain(|&(_, _, expiry)| expiry > now);
+
+                match operation {
+                    0..=2 => {
+                        if operation == 0 {
+                            index.insert(key, members.iter().copied(), ttl, now);
+                            observations.retain(|&(owner, _, _)| owner != key);
+                        } else {
+                            index.extend(key, members.iter().copied(), ttl, now);
+                        }
+                        for member in members {
+                            // Preserve every observation independently. A binding
+                            // is live if any observation of that pair is live.
+                            observations.push((key, member, now + ttl));
+                        }
+                    }
+                    3 => {
+                        index.remove(&key, now);
+                        observations.retain(|&(owner, _, _)| owner != key);
+                    }
+                    4 => now += Duration::from_secs(next() % 4),
+                    _ => index.evict_expired(now),
+                }
+
+                // Reads must reject expired bindings even before maintenance.
+                for at in [now, now + Duration::from_secs(1)] {
+                    for member in 0..8 {
+                        for owner in 0..8 {
+                            let expected = observations
+                                .iter()
+                                .any(|&(k, m, expiry)| k == owner && m == member && expiry > at);
+                            assert_eq!(
+                                index.member_matches(&member, at, |k| *k == owner),
+                                expected,
+                                "seed {seed}, step {step}, key {owner}, member {member}"
+                            );
+                        }
+                    }
+                }
+
+                index.evict_expired(now);
+                let live: HashSet<_> = observations
+                    .iter()
+                    .filter(|(_, _, expiry)| *expiry > now)
+                    .map(|&(key, member, _)| (key, member))
+                    .collect();
+                assert_eq!(
+                    index.expirations.len(),
+                    live.len(),
+                    "expiry storage grew beyond live bindings at seed {seed}, step {step}"
+                );
+            }
+
+            index.evict_expired(now + Duration::from_secs(65));
+            assert!(index.expirations.is_empty());
+            assert!(index.by_key.is_empty());
+            assert!(index.by_member.is_empty());
+        }
     }
 }
