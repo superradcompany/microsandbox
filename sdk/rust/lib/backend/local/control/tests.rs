@@ -15,6 +15,10 @@ fn database_identity_detects_replacement_but_not_ordinary_writes() {
     std::fs::write(&path, b"updated contents").unwrap();
     identity.verify().unwrap();
     std::fs::rename(&path, directory.path().join("old")).unwrap();
+    assert!(matches!(
+        identity.verify(),
+        Err(microsandbox_control_client::ControlClientError::RuntimeChanged)
+    ));
     std::fs::write(&path, b"replacement").unwrap();
     assert!(matches!(
         identity.verify(),
