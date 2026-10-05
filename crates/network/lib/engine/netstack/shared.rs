@@ -31,6 +31,9 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 /// Maximum live hostname/address bindings retained by one sandbox.
 pub(crate) const MAX_RESOLVED_HOSTNAME_BINDINGS: usize = 16_384;
 
+/// Maximum live bindings for one normalized hostname, across both families.
+pub(crate) const MAX_BINDINGS_PER_HOSTNAME: usize = 1_024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -211,8 +214,8 @@ impl SharedState {
     /// different addresses, and a connection dialed on any of them must still
     /// match the name's domain rules.
     ///
-    /// Returns `false` if the complete answer would exceed the per-sandbox
-    /// binding limit; existing bindings are preserved on rejection.
+    /// Returns `false` if the complete answer would exceed either the hostname
+    /// or sandbox binding limit; existing bindings are preserved on rejection.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
@@ -223,13 +226,30 @@ impl SharedState {
         let hostname = normalize_hostname(domain);
         let key = ResolvedHostnameKey { hostname, family };
         let addrs = addrs.into_iter().map(normalize_ip_addr);
-        self.resolved_hostnames.write().try_extend(
-            key,
-            addrs,
-            ttl,
-            Instant::now(),
-            MAX_RESOLVED_HOSTNAME_BINDINGS,
-        )
+
+        let now = Instant::now();
+        let mut index = self.resolved_hostnames.write();
+        index.evict_expired(now);
+
+        let bindings_for = |family| {
+            index.member_count(&ResolvedHostnameKey {
+                hostname: key.hostname.clone(),
+                family,
+            })
+        };
+
+        let ipv4_bindings = bindings_for(ResolvedHostnameFamily::Ipv4);
+        let ipv6_bindings = bindings_for(ResolvedHostnameFamily::Ipv6);
+        let hostname_bindings = ipv4_bindings + ipv6_bindings;
+
+        let total_bindings = index.binding_count();
+        let hostname_slots = MAX_BINDINGS_PER_HOSTNAME.saturating_sub(hostname_bindings);
+        let sandbox_slots = MAX_RESOLVED_HOSTNAME_BINDINGS.saturating_sub(total_bindings);
+        let available_slots = hostname_slots.min(sandbox_slots);
+
+        // try_extend takes a total capacity; only new bindings consume slots.
+        let capacity = total_bindings + available_slots;
+        index.try_extend(key, addrs, ttl, now, capacity)
     }
 
     /// Clear the resolved addresses for a hostname within the given address family.

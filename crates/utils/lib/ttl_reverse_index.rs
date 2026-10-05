@@ -103,6 +103,17 @@ where
         true
     }
 
+    /// Number of stored bindings across all keys. Call [`Self::evict_expired`]
+    /// first when only live bindings should count toward a capacity limit.
+    pub fn binding_count(&self) -> usize {
+        self.expirations.len()
+    }
+
+    /// Number of stored members for `key`, including entries not yet evicted.
+    pub fn member_count(&self, key: &K) -> usize {
+        self.by_key.get(key).map_or(0, HashMap::len)
+    }
+
     /// Remove the entry for `key` if present.
     pub fn remove(&mut self, key: &K, now: Instant) {
         self.evict_expired(now);

@@ -384,7 +384,7 @@ impl DnsForwarder {
                     .shared
                     .cache_resolved_hostname(&domain, family, addrs, ttl)
                 {
-                    tracing::debug!(domain = %domain, "DNS hostname binding capacity exceeded");
+                    tracing::debug!(domain = %domain, "DNS binding capacity exceeded");
                     return build_status_response(&query_msg, ResponseCode::ServFail);
                 }
             } else {
@@ -1313,74 +1313,135 @@ mod tests {
 
     #[tokio::test]
     async fn full_hostname_cache_rejects_dns_answers_without_losing_live_bindings() {
-        use crate::netstack::shared::MAX_RESOLVED_HOSTNAME_BINDINGS;
+        use crate::netstack::shared::{MAX_BINDINGS_PER_HOSTNAME, MAX_RESOLVED_HOSTNAME_BINDINGS};
 
-        let answer = Ipv4Addr::new(93, 184, 216, 34);
-        let (upstream, hits) = responding_udp(answer).await;
-        let forwarder = forwarder_over(&[upstream]).await;
-        let old: IpAddr = "93.184.216.35".parse().unwrap();
-        assert!(forwarder.shared.cache_resolved_hostname(
-            "example.com",
-            ResolvedHostnameFamily::Ipv4,
-            [old],
-            Duration::from_secs(60),
-        ));
-        // Fill the remainder with another domain and family so the test proves
-        // the limit is sandbox-wide, not per domain or per address family.
-        assert!(
-            forwarder.shared.cache_resolved_hostname(
-                "other.example",
-                ResolvedHostnameFamily::Ipv6,
-                (1..MAX_RESOLVED_HOSTNAME_BINDINGS)
-                    .map(|n| IpAddr::V6(std::net::Ipv6Addr::from(n as u128))),
+        for hostname_full in [true, false] {
+            let answer = Ipv4Addr::new(93, 184, 216, 34);
+            let (upstream, hits) = responding_udp(answer).await;
+            let forwarder = forwarder_over(&[upstream]).await;
+            let old: IpAddr = "93.184.216.35".parse().unwrap();
+            assert!(forwarder.shared.cache_resolved_hostname(
+                "example.com",
+                ResolvedHostnameFamily::Ipv4,
+                [old],
                 Duration::from_secs(60),
-            )
-        );
-        let query = make_query("example.com.", RecordType::A);
-        let raw = query.to_bytes().unwrap();
-        let bytes = forwarder
-            .forward(
-                &raw,
-                Some("10.0.0.1".parse().unwrap()),
-                Transport::Udp,
-                None,
-            )
-            .await
-            .expect("capacity failure response");
-        let response = Message::from_bytes(&bytes).unwrap();
-        assert_eq!(
-            hits.load(Ordering::SeqCst),
-            1,
-            "upstream supplied an answer"
-        );
-        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
-        assert_eq!(response.metadata.id, query.metadata.id);
-        assert!(response.answers.is_empty());
-        assert!(
-            forwarder
-                .shared
-                .any_resolved_hostname(old, |h| h == "example.com")
-        );
-        assert!(
-            !forwarder
-                .shared
-                .any_resolved_hostname(answer.into(), |_| true)
-        );
+            ));
+            let freed_domain = if hostname_full {
+                // Mixed case and a trailing dot must share the same quota, and
+                // AAAA bindings must count against the next A answer's allowance.
+                assert!(
+                    forwarder.shared.cache_resolved_hostname(
+                        "EXAMPLE.COM.",
+                        ResolvedHostnameFamily::Ipv6,
+                        (1..MAX_BINDINGS_PER_HOSTNAME)
+                            .map(|n| IpAddr::V6(std::net::Ipv6Addr::from(n as u128))),
+                        Duration::from_secs(60),
+                    )
+                );
+                "example.com"
+            } else {
+                // Spread bindings across hostnames to hit the sandbox limit
+                // without overflowing any individual hostname quota.
+                let mut remaining = MAX_RESOLVED_HOSTNAME_BINDINGS - 1;
+                let mut n = 0;
+                while remaining > 0 {
+                    let count = remaining.min(MAX_BINDINGS_PER_HOSTNAME);
+                    assert!(forwarder.shared.cache_resolved_hostname(
+                        &format!("fill-{n}.example"),
+                        ResolvedHostnameFamily::Ipv6,
+                        (1..=count).map(|ip| IpAddr::V6(std::net::Ipv6Addr::from(ip as u128))),
+                        Duration::from_secs(60),
+                    ));
+                    remaining -= count;
+                    n += 1;
+                }
+                "fill-0.example"
+            };
+            assert!(
+                forwarder.shared.cache_resolved_hostname(
+                    "example.com",
+                    ResolvedHostnameFamily::Ipv4,
+                    [old, old],
+                    Duration::from_secs(120),
+                ),
+                "duplicates and refreshes must fit at either limit"
+            );
+            let query = make_query("example.com.", RecordType::A);
+            let raw = query.to_bytes().unwrap();
+            let bytes = forwarder
+                .forward(
+                    &raw,
+                    Some("10.0.0.1".parse().unwrap()),
+                    Transport::Udp,
+                    None,
+                )
+                .await
+                .expect("capacity failure response");
+            let response = Message::from_bytes(&bytes).unwrap();
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "upstream supplied an answer"
+            );
+            assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+            assert_eq!(response.metadata.id, query.metadata.id);
+            assert!(response.answers.is_empty());
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(old, |h| h == "example.com")
+            );
+            assert!(
+                !forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |_| true)
+            );
 
-        forwarder
-            .shared
-            .clear_resolved_hostname("other.example", ResolvedHostnameFamily::Ipv6);
-        assert_eq!(resolve_via_gateway(&forwarder).await, Some(answer));
-        assert!(
+            // A full hostname quota must not block another hostname. A full
+            // sandbox still rejects new bindings, regardless of hostname.
+            let unrelated_query = make_query("unrelated.example.", RecordType::A)
+                .to_bytes()
+                .unwrap();
+            let unrelated_bytes = forwarder
+                .forward(
+                    &unrelated_query,
+                    Some("10.0.0.1".parse().unwrap()),
+                    Transport::Udp,
+                    None,
+                )
+                .await
+                .unwrap();
+            let unrelated = Message::from_bytes(&unrelated_bytes).unwrap();
+            assert_eq!(
+                unrelated.metadata.response_code,
+                if hostname_full {
+                    ResponseCode::NoError
+                } else {
+                    ResponseCode::ServFail
+                }
+            );
+            assert_eq!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |h| h == "unrelated.example"),
+                hostname_full
+            );
+
             forwarder
                 .shared
-                .any_resolved_hostname(old, |h| h == "example.com")
-        );
-        assert!(
-            forwarder
-                .shared
-                .any_resolved_hostname(answer.into(), |h| h == "example.com")
-        );
+                .clear_resolved_hostname(freed_domain, ResolvedHostnameFamily::Ipv6);
+            assert_eq!(resolve_via_gateway(&forwarder).await, Some(answer));
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(old, |h| h == "example.com")
+            );
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |h| h == "example.com")
+            );
+        }
     }
 
     /// When every upstream is unusable the guest still gets a definite
