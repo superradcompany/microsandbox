@@ -73,7 +73,7 @@ remove memory or operating-system resource constraints. Closing sockets remain t
 until their TCP state permits removal. Host file descriptors and shared egress
 source ports impose additional constraints.
 
-For NAT64, Microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
+For NAT64, microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
 
 Custom NAT64 prefixes are supported only for local sandboxes. Cloud creation rejects non-default or empty prefix lists because the cloud API cannot carry this setting.
 

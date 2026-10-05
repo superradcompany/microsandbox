@@ -861,7 +861,7 @@ Require hostname-based policy allows to use an inspectable request authority. De
 fn tcp_accept_queue_size(self, size: u32) -> Self
 ```
 
-Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections — such as a reverse proxy fanning out one page load — exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
+Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
 
 `RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
 
