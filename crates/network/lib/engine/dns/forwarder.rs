@@ -1299,12 +1299,9 @@ mod tests {
         })
         .await
         .expect("CNAME TTL must expire both first-answer addresses");
-        for address in second {
-            assert!(
-                matches(address),
-                "first-answer expiry must not clear the later answer"
-            );
-        }
+        // Do not require the later answer to still be live here: a delayed
+        // test task may resume after both deadlines. Independent per-binding
+        // expiry is covered with explicit timestamps in TtlReverseIndex tests.
         tokio::time::timeout(Duration::from_secs(10), async {
             while second.into_iter().any(&matches) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
