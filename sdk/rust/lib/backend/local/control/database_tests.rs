@@ -113,15 +113,22 @@ async fn acknowledged_volumes_survive_other_processes_closing_catalog() {
         child(home.path(), "child-two").await;
 
         let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-        let shm = home.path().join("db/msb.db-shm");
+        let shm = home.path().canonicalize().unwrap().join("db/msb.db-shm");
         let mappings: Vec<_> = maps
             .lines()
             .filter(|line| line.contains(shm.to_str().unwrap()))
             .collect();
-        eprintln!("parent SHM mappings: {mappings:?}");
+        assert!(
+            !mappings.is_empty(),
+            "parent has no SHM mapping for {}: {maps}",
+            shm.display()
+        );
+        assert!(
+            !mappings.iter().any(|line| line.contains("(deleted)")),
+            "parent SHM mapping was deleted: {mappings:?}"
+        );
+
         child(home.path(), "read").await;
-        assert!(!mappings.is_empty(), "parent has no SHM mapping");
-        assert!(!mappings.iter().any(|line| line.contains("(deleted)")));
     })
     .await;
     close(&parent).await;
