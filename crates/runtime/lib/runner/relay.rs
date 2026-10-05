@@ -38,7 +38,8 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 #[cfg(test)]
 use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
-    CoreError, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw, WorkloadThawed,
+    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw,
+    WorkloadThawed,
 };
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
@@ -67,6 +68,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
+use crate::boot_error::BootError;
 use crate::checkpoint::RestoredAgentState;
 use crate::clock::{RestoreActivationMode, spawn_clock_sync_task};
 use crate::console::ConsoleSharedState;
@@ -476,6 +478,8 @@ pub struct AgentRelay {
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
+    /// Destination for startup diagnostics, saved before allowing guest exit.
+    boot_error_log_dir: Option<PathBuf>,
     /// Shared user-volume bind identity map to install before `core.ready`.
     #[cfg(unix)]
     bind_identity_map: Option<BindIdentityMapHandle>,
@@ -1139,6 +1143,7 @@ impl AgentRelay {
             kernel_clock_synchronized: false,
             guest_clock: Default::default(),
             log_writer: None,
+            boot_error_log_dir: None,
             #[cfg(unix)]
             bind_identity_map: None,
             #[cfg(unix)]
@@ -1169,6 +1174,7 @@ impl AgentRelay {
             kernel_clock_synchronized: false,
             guest_clock: Default::default(),
             log_writer: None,
+            boot_error_log_dir: None,
             #[cfg(unix)]
             bind_identity_map: None,
             #[cfg(unix)]
@@ -1207,6 +1213,12 @@ impl AgentRelay {
     /// guest has actually finished booting.
     pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
         self.log_writer = Some(writer);
+        self
+    }
+
+    /// Preserve fatal guest startup diagnostics before acknowledging them.
+    pub(crate) fn with_boot_error_log_dir(mut self, log_dir: PathBuf) -> Self {
+        self.boot_error_log_dir = Some(log_dir);
         self
     }
 
@@ -1261,8 +1273,8 @@ impl AgentRelay {
         Ok(())
     }
 
-    fn send_init_ack(&self) -> RuntimeResult<()> {
-        let msg = Message::with_payload(MessageType::InitAck, 0, &InitAck {})
+    fn send_init_ack(&self, failure: bool) -> RuntimeResult<()> {
+        let msg = Message::with_payload(MessageType::InitAck, 0, &InitAck { failure })
             .map_err(|e| RuntimeError::Custom(format!("encode init ack: {e}")))?;
         let mut frame = Vec::new();
         codec::encode_to_buf(&msg, &mut frame)
@@ -1378,8 +1390,35 @@ impl AgentRelay {
                     {
                         init_resolved = true;
                     }
-                    self.send_init_ack()?;
+                    self.send_init_ack(false)?;
                     continue;
+                }
+
+                if msg.t == MessageType::CoreError && msg.id == 0 && msg.flags == FLAG_TERMINAL {
+                    let error: CoreError = msg
+                        .payload()
+                        .map_err(|e| RuntimeError::Custom(format!("decode startup error: {e}")))?;
+                    if error.kind == CoreErrorKind::InitializationFailed {
+                        let error = RuntimeError::GuestInitialization {
+                            message: error.message,
+                            reason: error.init_failure,
+                        };
+                        if let Some(log_dir) = &self.boot_error_log_dir {
+                            // The SDK may observe process exit immediately after the ack.
+                            // Publish the cause first, while the guest is still alive.
+                            match BootError::from_runtime_error(&error).write_atomic(log_dir) {
+                                Ok(()) => {
+                                    if let Err(ack_error) = self.send_init_ack(true) {
+                                        tracing::warn!(%ack_error, "failed to acknowledge guest startup error");
+                                    }
+                                }
+                                Err(write_error) => tracing::error!(
+                                    %write_error, "failed to save guest startup diagnostic"
+                                ),
+                            }
+                        }
+                        return Err(error);
+                    }
                 }
 
                 tracing::debug!(
@@ -4451,6 +4490,7 @@ async fn client_reader_task(
                 kind: microsandbox_protocol::core::CoreErrorKind::InvalidSession,
                 message: "sandbox is paused; resume it before starting guest work".into(),
                 offending_type: None,
+                init_failure: None,
                 workload_failure: None,
             };
             let Ok(mut response) = Message::with_payload(MessageType::CoreError, frame.id, &error)
@@ -6701,6 +6741,64 @@ mod tests {
         };
         assert_eq!(output.as_ref(), frame);
         reader.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_ready_preserves_guest_failure_before_acknowledging_exit() {
+        for writable in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let log_dir = dir.path().join("logs");
+            if !writable {
+                std::fs::write(&log_dir, "not a directory").unwrap();
+            }
+            let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
+            let sock_path = test_agent_endpoint("startup-failure");
+            let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+                .await
+                .unwrap()
+                .with_boot_error_log_dir(log_dir.clone());
+            shared
+                .tx_ring
+                .push(encoded_message(
+                    MessageType::CoreError,
+                    &CoreError {
+                        kind: CoreErrorKind::InitializationFailed,
+                        message: "init failed: exec session error: guest user not found: iggy"
+                            .into(),
+                        offending_type: None,
+                        init_failure: Some(
+                            microsandbox_protocol::core::InitFailureReason::UserNotFound,
+                        ),
+                        workload_failure: None,
+                    },
+                ))
+                .unwrap();
+            // A ready frame makes discarding the error fail immediately rather
+            // than letting a regression spend three minutes in the watchdog.
+            shared
+                .tx_ring
+                .push(encoded_message(MessageType::Ready, &Ready::default()))
+                .unwrap();
+            shared.tx_wake.wake();
+
+            let error = relay.wait_ready().unwrap_err();
+            assert!(error.to_string().contains("guest user not found: iggy"));
+            assert!(relay.ready_frame.is_none());
+            if writable {
+                let ack = shared.rx_ring.pop().expect("guest may now exit");
+                let ack = decode_frame(&ack).unwrap();
+                assert_eq!(ack.t, MessageType::InitAck);
+                assert!(ack.payload::<InitAck>().unwrap().failure);
+                let saved = BootError::read(&log_dir).unwrap().unwrap();
+                assert_eq!(saved.message, error.to_string());
+                assert_eq!(
+                    saved.reason,
+                    Some(microsandbox_protocol::core::InitFailureReason::UserNotFound)
+                );
+            } else {
+                assert!(shared.rx_ring.pop().is_none(), "never ack an unsaved error");
+            }
+        }
     }
 
     #[tokio::test]

@@ -383,6 +383,8 @@ class SecretModifySpec(TypedDict, total=False):
     """Desired state for one secret passed to ``Sandbox.modify``.
 
     ``env``, ``value``, and ``store`` are mutually exclusive secret sources.
+    Omitted policy fields preserve existing settings. ``passthrough`` is a
+    deprecated alias for ``allow_placeholder_for``; both host lists are combined.
     """
 
     env: str
@@ -390,6 +392,11 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+    substitution: SecretSubstitution
+    violation_action: ViolationAction
+    require_tls_identity: bool
+    allow_placeholder_for: Sequence[str]
+    passthrough: Sequence[str]
 
 
 class DiskCompactionDiskResult(TypedDict):

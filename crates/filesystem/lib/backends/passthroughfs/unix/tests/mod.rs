@@ -3,6 +3,8 @@ mod test_concurrency;
 mod test_config;
 mod test_corrupt_xattr;
 mod test_create_ops;
+#[cfg(target_os = "linux")]
+mod test_dax;
 mod test_dir_ops;
 mod test_file_ops;
 mod test_flag_translation;

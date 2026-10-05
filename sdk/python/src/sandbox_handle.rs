@@ -175,8 +175,9 @@ impl PySandboxHandle {
     /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
-    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
-    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
+    /// hosts, substitution, violation action, TLS identity requirement, and
+    /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,

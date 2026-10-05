@@ -2260,7 +2260,7 @@ fn parse_violation_action(
     }
 }
 
-fn parse_violation_action_obj(
+pub(crate) fn parse_violation_action_obj(
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<microsandbox_network::secrets::config::SecretViolationAction> {
     let s = extract_str_enum(obj, "ViolationAction")?;

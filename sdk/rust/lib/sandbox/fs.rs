@@ -2190,6 +2190,7 @@ mod pause_tests {
                 kind: CoreErrorKind::InvalidSession,
                 message: "sandbox is paused; resume it before starting guest work".into(),
                 offending_type: None,
+                init_failure: None,
                 workload_failure: None,
             },
         )

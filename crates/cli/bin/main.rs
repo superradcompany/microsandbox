@@ -66,9 +66,8 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
-    /// Print the full command tree and exit.
-    #[arg(long, global = true)]
-    tree: bool,
+    #[command(flatten)]
+    tree: microsandbox_cli::tree::TreeArgs,
 
     #[command(flatten)]
     logs: LogArgs,
@@ -1016,6 +1015,48 @@ mod command_tests {
 #[cfg(test)]
 mod sandbox_command_tests {
     use super::*;
+
+    #[test]
+    fn tree_controls_are_global_and_require_tree_mode() {
+        for args in [
+            vec!["msb", "--tree", "-L", "2", "--commands", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-L2", "--commands"],
+            vec!["msb", "--tree", "--brief", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "--brief"],
+            vec!["msb", "--tree", "-C", "-b", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-CbL2"],
+            vec![
+                "msb",
+                "image",
+                "ls",
+                "--tree",
+                "--commands",
+                "--brief",
+                "-L2",
+            ],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+        for flag in [
+            "-L2",
+            "--levels=2",
+            "--commands",
+            "--brief",
+            "-C",
+            "-b",
+            "-Cb",
+        ] {
+            let error = Cli::try_parse_from(["msb", "image", "ls", flag])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            assert!(error.to_string().contains("--tree"));
+        }
+        Cli::try_parse_from(["msb", "modify", "demo", "--compact"]).unwrap();
+    }
 
     #[test]
     fn repeated_long_flags_have_consistent_short_forms() {
