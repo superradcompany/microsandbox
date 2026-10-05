@@ -183,6 +183,11 @@ async fn database_child() {
         return;
     }
 
+    assert!(
+        matches!(action.as_str(), "child-one" | "child-two"),
+        "unknown database child action: {action}"
+    );
+
     let backend = backend(path).await;
     with_backend(backend.clone() as Arc<dyn Backend>, async {
         drop(Volume::builder(&action).create().await.unwrap());
