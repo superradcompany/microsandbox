@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import pytest
 
-from microsandbox import JobError, Sandbox
+from microsandbox import JobError, Sandbox, Stdin
 
 
 @pytest.mark.skipif(
@@ -52,6 +52,26 @@ async def test_managed_job_ownership_io_and_cancellation():
             jobs.append(finite)
             assert (await finite.wait()).success
             assert b"".join(x.data for x in await finite.logs()) == b"finite bytes"
+
+            # Keyword and options-dictionary parsing must retain explicit null separately from
+            # omitted input. Otherwise the detached builder leaves cat's pipe open indefinitely.
+            for options_dict in [False, True]:
+                null = await (
+                    sandbox.exec_detached("cat", {"stdin": Stdin.null()})
+                    if options_dict
+                    else sandbox.exec_detached("cat", stdin=Stdin.null())
+                )
+                jobs.append(null)
+                assert (await null.wait()).success
+                assert (await null.inspect()).stdin_closed
+            empty = await sandbox.exec_detached("cat", stdin=b"")
+            jobs.append(empty)
+            assert (await empty.wait()).success
+            assert await empty.logs() == []
+            assert (await sandbox.exec("cat", stdin=Stdin.null())).success
+            with pytest.raises(JobError) as invalid:
+                await sandbox.exec_detached("cat", stdin=Stdin.null(), tty=True)
+            assert invalid.value.code == "invalid_options"
 
             sleepy = await sandbox.exec_detached("sleep", ["30"])
             jobs.append(sleepy)

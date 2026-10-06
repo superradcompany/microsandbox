@@ -1063,6 +1063,14 @@ char *msb_creation_progress_recv(uint64_t cancel_id,
 char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
 
 /**
+ * Return the configured shell from the bound sandbox, including connected/restored handles.
+ */
+char *msb_sandbox_shell_path(uint64_t cancel_id,
+                             Handle handle,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+/**
  * Run a cancellable managed-job operation. Cancellation never terminates a job.
  * The caller supplies borrowed request text and a writable output buffer.
  */
@@ -1071,14 +1079,6 @@ char *msb_jobs(uint64_t cancel_id,
                const char *request,
                unsigned char *buf,
                uintptr_t buf_len);
-
-/**
- * Return the configured shell from the bound sandbox, including connected/restored handles.
- */
-char *msb_sandbox_shell_path(uint64_t cancel_id,
-                             Handle handle,
-                             unsigned char *buf,
-                             uintptr_t buf_len);
 
 /**
  * Restore a detached sandbox through a dedicated C entry point.

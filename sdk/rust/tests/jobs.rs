@@ -17,6 +17,62 @@ use microsandbox::{
 
 #[tokio::test]
 #[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
+async fn managed_job_control_survives_resident_pause() -> Result<(), Box<dyn std::error::Error>> {
+    let name = std::env::var("MSB_JOB_TEST_SANDBOX")?;
+    let sandbox = Sandbox::get(&name).await?.connect().await?;
+    let job = sandbox
+        .exec_detached("cat", std::iter::empty::<String>())
+        .await?;
+    let mut waiting = Box::pin(job.wait());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err()
+    );
+    sandbox.pause().await?;
+
+    let outcome = async {
+        // A waiter already polling and a newly discovered handle must both retain the live owner.
+        assert_eq!(job.inspect().await?.state, JobState::Running);
+        let fresh = Sandbox::get(&name)
+            .await?
+            .get_job(job.id().as_ref())
+            .await?;
+        assert_eq!(fresh.inspect().await?.state, JobState::Running);
+        assert!(
+            sandbox
+                .list_jobs()
+                .await?
+                .items
+                .iter()
+                .any(|info| &info.id == job.id())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut waiting)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), fresh.wait())
+                .await
+                .is_err()
+        );
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    sandbox.resume().await?;
+    job.eof().await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await??
+            .success
+    );
+    outcome?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
 async fn managed_job_lifetime_io_and_deadlines() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::env::var("MSB_JOB_TEST_SANDBOX")?;
     let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -707,10 +763,9 @@ async fn exec_control_creation_backpressure_and_pause() -> Result<(), Box<dyn st
             loop {
                 if let Some(microsandbox::ExecEvent::Stdout(bytes)) =
                     tokio::time::timeout(Duration::from_secs(5), stream.recv()).await?
+                    && String::from_utf8_lossy(&bytes).contains("ready")
                 {
-                    if String::from_utf8_lossy(&bytes).contains("ready") {
-                        break;
-                    }
+                    break;
                 }
             }
         }

@@ -6,6 +6,7 @@ import os
 import queue
 import selectors
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -126,13 +127,29 @@ guarded = (
     run("exec", "-d", "--no-tty", sandbox, "--", "sleep", "30").stdout.decode().strip()
 )
 try:
-    for command in [
+    captures = [
         ("snap", "create", "managed-job-guard", "--sandbox", sandbox, "--full"),
         ("fork", sandbox, "--name", "managed-job-guard-child"),
-    ]:
-        refused = run(*command, check=False)
-        assert refused.returncode != 0, command
-        assert b"managed jobs are active" in refused.stderr, refused.stderr
+    ]
+    for paused in [False, True]:
+        if paused:
+            run("pause", sandbox)
+        try:
+            for command in captures:
+                refused = run(*command, check=False)
+                assert refused.returncode != 0, command
+                assert b"managed jobs are active" in refused.stderr, refused.stderr
+                assert b"wait for or terminate those jobs first" in refused.stderr, refused.stderr
+            # The refusal must preserve both the job and the source's resident pause state.
+            state = json.loads(run("inspect", sandbox, "--format", "json").stdout)["status"]
+            assert state == ("Paused" if paused else "Running"), state
+            info = json.loads(run("inspect", sandbox, "--job", guarded, "--format", "json").stdout)
+            assert info["state"] == "running", info
+            waiting = run("wait", sandbox, "--job", guarded, "--timeout", "100ms", check=False)
+            assert waiting.returncode and b"timed out" in waiting.stderr, waiting.stderr
+        finally:
+            if paused:
+                run("resume", sandbox)
     assert run("exec", "--no-stdin", sandbox, "--", "true").returncode == 0
 finally:
     run("kill", sandbox, "--job", guarded, check=False)
@@ -196,6 +213,12 @@ if os.name == "posix":
         run("kill", sandbox, "--job", terminal_job, check=False)
         run("wait", sandbox, "--job", terminal_job, check=False)
     print("CLI terminal input, Ctrl-] detach and reattach passed", flush=True)
+    subprocess.run(
+        [sys.executable, str(root / "scripts/smoke/managed-job-terminal.py")],
+        env=env,
+        check=True,
+        timeout=90,
+    )
 
 if os.environ.get("MSB_JOB_TEST_RESTART") == "1":
     completed = (

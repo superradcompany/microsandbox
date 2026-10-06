@@ -2131,7 +2131,9 @@ fn normalize_stdin(
     data: Option<Vec<u8>>,
 ) -> PyResult<(Option<String>, Option<Vec<u8>>)> {
     match mode.as_str() {
-        "null" => Ok((None, None)),
+        // Absence keeps the caller's builder default; explicit null must override a retained
+        // detached pipe, just as it overrides any other explicitly configured stdin mode.
+        "null" => Ok((Some(mode), None)),
         "pipe" => Ok((Some(mode), None)),
         "bytes" => Ok((Some(mode), Some(data.unwrap_or_default()))),
         _ => Err(PyValueError::new_err(format!(
@@ -2258,6 +2260,7 @@ fn apply_exec_options(
     }
     // Stdin mode.
     match opts.stdin_mode.as_deref() {
+        Some("null") => builder = builder.stdin_null(),
         Some("pipe") => builder = builder.stdin_pipe(),
         Some("bytes") => {
             if let Some(data) = opts.stdin_data {
@@ -2673,6 +2676,67 @@ mod tests {
     use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
 
     use super::*;
+
+    #[test]
+    fn stdin_omission_preserves_defaults_but_explicit_null_overrides_a_pipe() {
+        use microsandbox::sandbox::ExecOptionsBuilder;
+        use microsandbox::sandbox::exec::StdinMode;
+
+        for builder in [
+            ExecOptionsBuilder::default(),
+            ExecOptionsBuilder::default().stdin_pipe(),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin("null".into(), None).unwrap();
+            let options = apply_exec_options(
+                builder,
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            assert!(matches!(options.stdin, StdinMode::Null));
+        }
+        let ordinary =
+            apply_exec_options(ExecOptionsBuilder::default(), vec![], ExecOpts::default())
+                .build()
+                .unwrap();
+        assert!(matches!(ordinary.stdin, StdinMode::Null));
+        let detached = apply_exec_options(
+            ExecOptionsBuilder::default().stdin_pipe(),
+            vec![],
+            ExecOpts::default(),
+        )
+        .build()
+        .unwrap();
+        assert!(matches!(detached.stdin, StdinMode::Pipe));
+        for (mode, data) in [
+            ("pipe", None),
+            ("bytes", Some(vec![])),
+            ("bytes", Some(b"finite".to_vec())),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin(mode.into(), data.clone()).unwrap();
+            let options = apply_exec_options(
+                ExecOptionsBuilder::default(),
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            match options.stdin {
+                StdinMode::Pipe => assert_eq!(mode, "pipe"),
+                StdinMode::Bytes(bytes) => assert_eq!(Some(bytes), data),
+                StdinMode::Null => panic!("explicit pipe/bytes became null"),
+            }
+        }
+    }
 
     #[test]
     fn execution_timeouts_reject_non_finite_and_overflowing_values() {

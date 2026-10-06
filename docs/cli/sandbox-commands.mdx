@@ -893,4 +893,8 @@ Job IDs are opaque, sandbox-scoped identities independent of guest PIDs and ordi
 
 Execution `--timeout` remains enforced by the runtime after launch returns. Full snapshots and forks are rejected while managed jobs are active, because their host-side I/O ownership cannot yet be restored. Resident pause/resume remains supported. Older runtimes and unsupported backends reject job launch before dispatch; existing exec and sandbox APIs remain available.
 
+While resident-paused, job inspection and waits remain available. Waiting does not resume the sandbox; resume allows an active job to finish. Snapshot and fork refusals explain that you must wait for or terminate the active jobs first.
+
+Terminal attachment applies backpressure when its input buffer fills. After reading Ctrl-], it drains preceding input to runtime admission for at most two seconds, then detaches. If draining fails or times out, `input_not_flushed` reports that some input was not confirmed; detaching still releases the attachment and restores the terminal without closing guest stdin or terminating the job. Do not automatically resend unconfirmed input, since it may already have been accepted.
+
 Signals and runtime deadlines remain deliverable when job stdin is full. Signals can interrupt queued input; stdin bytes and EOF otherwise keep their order. Pause delays physical signal delivery until resume. `kill` acknowledges the request; `wait` confirms process exit, and `inspect` reports delivery failures. Graceful sandbox stop interrupts queued exec input while preserving filesystem ordering. A stop timeout reports failure without forcing termination.

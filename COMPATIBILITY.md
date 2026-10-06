@@ -294,6 +294,8 @@ Local execution signals can use the optional host-only `exec_control` Ready exte
 
 On Windows, console readers await in-process wake notifications instead of scheduling a blocking wait every 100 ms. The native manual-reset event remains available to synchronous consumers; cancellation drops the async wait without leaving a blocked worker. This changes no launch, console framing, agent capability, or SDK/runtime wire contract in either direction.
 
+Managed-job terminal attachment retains bounded local input and drains bytes preceding Ctrl-] to runtime admission before releasing its lease. A two-second drain limit returns the local `input_not_flushed` error on incomplete or ambiguous delivery; it does not send EOF, terminate the job, or replay unconfirmed bytes. Windows managed-job console delivery uses an opt-in bounded, cancellable queue, while existing sandbox attach and SSH retain their current event delivery. Python preserves explicit null stdin separately from omission, so detached null input closes and omitted input retains its pipe. These corrections change no public signatures, host/guest operation, capability gate, launch JSON, persisted job record, or catalog schema.
+
 Evolution rules:
 
 - Do not make semantically harmless serialization changes to identity-bearing bytes without treating them as an identity format change.

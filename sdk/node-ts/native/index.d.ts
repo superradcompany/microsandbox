@@ -237,6 +237,12 @@ export declare class HttpBuilder {
 }
 export type JsHttpBuilder = HttpBuilder
 
+/** Builds an HTTP CONNECT outbound proxy. */
+export declare class HttpConnectProxyBuilder {
+
+}
+export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
+
 /**
  * Fluent builder for an explicit rootfs image source.
  *
@@ -655,9 +661,6 @@ export declare class OutboundProxyBuilder {
   socks5(address: string): Socks5ProxyBuilder
 }
 export type JsOutboundProxyBuilder = OutboundProxyBuilder
-
-/** Builds an HTTP CONNECT outbound proxy. */
-export declare class HttpConnectProxyBuilder {}
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -1502,8 +1505,6 @@ export declare class SandboxHandle {
   getJob(id: string): Promise<Job>
   /** List bounded managed-job metadata without creating processes. */
   listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
-  /** Observe object storage through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */
@@ -1516,6 +1517,8 @@ export declare class SandboxHandle {
   get configJson(): string
   /** Return a fresh handle for the same sandbox. */
   refresh(): Promise<SandboxHandle>
+  /** Observe this sandbox's managed directory through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   /** Creation timestamp as ms since Unix epoch. */
   get createdAt(): number | null
   /** Last update timestamp as ms since Unix epoch. */
@@ -1705,8 +1708,6 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
-  /** Observe object storage through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
@@ -1759,6 +1760,8 @@ export declare class Snapshot {
   copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
   /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
+  /** Observe this artifact's storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
 }
 export type JsSnapshot = Snapshot
 
@@ -1828,7 +1831,7 @@ export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
-  /** Observe object storage through its captured backend. */
+  /** Observe this artifact's storage through its captured backend. */
   storageUsage(): Promise<StorageItemUsageJs>
   get group(): string | null
   get headUpdate(): HeadUpdate | null
@@ -2188,12 +2191,12 @@ export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /** Summary of artifacts removed by `imagePrune`. */
 export interface ImagePruneReportJs {
-  skippedInUse: number
   imageRefsRemoved: number
   manifestsRemoved: number
   layersRemoved: number
   fsmetaRemoved: number
   vmdkRemoved: number
+  skippedInUse: number
   bytesReclaimed?: number
 }
 
@@ -2326,6 +2329,26 @@ export interface LogStreamOptions {
    * new entries as they are written.
    */
   follow?: boolean
+}
+
+/** Per-file reclamation result, including ownership exclusions and errors. */
+export interface MemoryCacheEntryJs {
+  path: string
+  kind: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  state: string
+  error?: string
+}
+
+/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
+export interface MemoryCacheReportJs {
+  dryRun: boolean
+  entries: Array<MemoryCacheEntryJs>
+  filesRemoved: number
+  logicalBytesRemoved: bigint
+  physicalBytesReclaimed?: bigint
+  truncated: boolean
 }
 
 export interface NetworkPolicy {
@@ -2794,6 +2817,45 @@ export interface StdinMode {
   data?: Array<number>
 }
 
+/** Counts and observed bytes in one managed storage category. */
+export interface StorageCategoryUsageJs {
+  count?: number
+  inUse?: number
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  reclaimableLogicalBytes?: bigint
+  items: Array<StorageItemUsageJs>
+  notes: Array<string>
+}
+
+/** One object's storage usage and retention explanations. */
+export interface StorageItemUsageJs {
+  name: string
+  path: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  inUse?: boolean
+  reclaimable?: boolean
+  reasons: Array<string>
+}
+
+/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
+export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
+
+/** Observe storage in the selected local backend without removing files. */
+export declare function storageUsage(): Promise<StorageUsageJs>
+
+/** Aggregate storage usage. Unknown measurements remain nullable. */
+export interface StorageUsageJs {
+  images: StorageCategoryUsageJs
+  snapshots: StorageCategoryUsageJs
+  sandboxes: StorageCategoryUsageJs
+  volumes: StorageCategoryUsageJs
+  branchMemory: StorageCategoryUsageJs
+  snapshotMemory: StorageCategoryUsageJs
+  notes: Array<string>
+}
+
 /**
  * Result of opening a stream: the protocol correlation id (for follow-up
  * sends) and an opaque stream handle (for `streamNext` / `streamClose`).
@@ -2884,64 +2946,4 @@ export interface VolumeMount {
    * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
-}
-
-
-/** Observe storage in the selected local backend without removing files. */
-export declare function storageUsage(): Promise<StorageUsageJs>
-
-/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
-export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
-
-/** Aggregate storage usage. Unknown measurements remain nullable. */
-export interface StorageUsageJs {
-  images: StorageCategoryUsageJs
-  snapshots: StorageCategoryUsageJs
-  sandboxes: StorageCategoryUsageJs
-  volumes: StorageCategoryUsageJs
-  branchMemory: StorageCategoryUsageJs
-  snapshotMemory: StorageCategoryUsageJs
-  notes: Array<string>
-}
-
-/** Counts and observed bytes in one managed storage category. */
-export interface StorageCategoryUsageJs {
-  count?: number
-  inUse?: number
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  reclaimableLogicalBytes?: bigint
-  items: Array<StorageItemUsageJs>
-  notes: Array<string>
-}
-
-/** One object's storage usage and retention explanations. */
-export interface StorageItemUsageJs {
-  name: string
-  path: string
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  inUse?: boolean
-  reclaimable?: boolean
-  reasons: Array<string>
-}
-
-/** Per-file reclamation result, including ownership exclusions and errors. */
-export interface MemoryCacheEntryJs {
-  path: string
-  kind: string
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  state: string
-  error?: string
-}
-
-/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
-export interface MemoryCacheReportJs {
-  dryRun: boolean
-  entries: Array<MemoryCacheEntryJs>
-  filesRemoved: number
-  logicalBytesRemoved: bigint
-  physicalBytesReclaimed?: bigint
-  truncated: boolean
 }
