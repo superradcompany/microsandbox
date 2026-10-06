@@ -9,12 +9,19 @@ import type { NapiSandboxModifyOptions } from "./internal/napi.js";
 /** Policy for applying a sandbox modification. */
 export type ModificationPolicy = "no_restart" | "next_start" | "restart";
 
-/** When or whether a planned change can take effect. */
+/**
+ * When or whether a planned change can take effect.
+ *
+ * Backends may report dispositions added after this release; those arrive as
+ * their raw string, so handle unrecognized values as unknown.
+ */
 export type ModificationDisposition =
   | "live"
   | "next start"
   | "requires restart"
-  | "unsupported";
+  | "unsupported"
+  | "unconfirmed"
+  | (string & {});
 
 /** Natural config change type for human output. */
 export type ChangeKind = "added" | "updated" | "removed";

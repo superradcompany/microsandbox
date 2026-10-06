@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -268,5 +269,38 @@ func TestParseModificationPlan(t *testing.T) {
 	}
 	if len(plan.ResizeStatus) != 0 {
 		t.Fatalf("resize status = %+v", plan.ResizeStatus)
+	}
+}
+
+func TestParseModificationPlanDispositions(t *testing.T) {
+	for _, disposition := range []ModificationDisposition{
+		ModificationDispositionUnconfirmed,
+		"a future disposition",
+	} {
+		raw := fmt.Sprintf(`{
+			"sandbox": "api",
+			"status": "running",
+			"applied": true,
+			"policy": "no_restart",
+			"changes": [{
+				"kind": "secret",
+				"field": "secret",
+				"name": "API_KEY",
+				"change": "rotated",
+				"before_ref": "$API_KEY",
+				"after_ref": "$API_KEY",
+				"disposition": %q
+			}],
+			"conflicts": [],
+			"warnings": []
+		}`, disposition)
+
+		plan, err := parseModificationPlan(raw)
+		if err != nil {
+			t.Fatalf("parseModificationPlan(%q): %v", disposition, err)
+		}
+		if got := plan.Changes[0].Disposition; got != disposition {
+			t.Fatalf("disposition = %q, want %q", got, disposition)
+		}
 	}
 }

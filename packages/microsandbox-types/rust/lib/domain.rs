@@ -2799,7 +2799,10 @@ fn is_http_tchar(byte: u8) -> bool {
         )
 }
 
-fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+pub(crate) fn validate_env_var(
+    env_var: &str,
+    secret_index: usize,
+) -> Result<(), SecretConfigError> {
     if env_var.is_empty() {
         return Err(SecretConfigError::EmptyEnvVar { secret_index });
     }
@@ -2812,7 +2815,10 @@ fn validate_env_var(env_var: &str, secret_index: usize) -> Result<(), SecretConf
     Ok(())
 }
 
-fn validate_placeholder(placeholder: &str, secret_index: usize) -> Result<(), SecretConfigError> {
+pub(crate) fn validate_placeholder(
+    placeholder: &str,
+    secret_index: usize,
+) -> Result<(), SecretConfigError> {
     if placeholder.is_empty() {
         return Err(SecretConfigError::EmptyPlaceholder { secret_index });
     }

@@ -104,7 +104,7 @@ impl DiskCompactionBuilder {
         crate::LocalBackend::validate_completed_restore(&config)?;
         validate_root_selection(&config, &target)?;
         if model.status == SandboxStatus::Running {
-            return super::modify::control_disk_compact(
+            return crate::backend::local::control_disk_compact(
                 local,
                 &self.name,
                 target,

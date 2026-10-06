@@ -3,12 +3,13 @@
 use microsandbox_control_client::{GetPauseState, PauseRuntime, ResumeRuntime};
 use microsandbox_runtime::control::ControlRequest;
 
+use crate::backend::local::control_session_for_run;
 use crate::backend::sandbox::SandboxIdentity;
 use crate::backend::{Backend, LocalBackend};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxHandle, SandboxPauseState, modify};
+use super::{Sandbox, SandboxHandle, SandboxPauseState};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -190,7 +191,7 @@ async fn lifecycle(
     let _transition =
         LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
     let run = local.control_run_identity(name, expected_id).await?;
-    let session = modify::control_session_for_run(local, name, run).await?;
+    let session = control_session_for_run(local, name, run).await?;
     if matches!(request, ControlRequest::PauseWithGuestFlush { .. }) {
         // Even Auto is explicit on this new entry point; unknown runtimes must refuse.
         if !session.capabilities().guest_flush_policy {
@@ -256,6 +257,7 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
+    use crate::backend::local::control_request_for_run;
     use crate::backend::with_backend;
 
     async fn seed_run(local: &LocalBackend, name: &str) -> i32 {
@@ -556,7 +558,7 @@ mod tests {
                 0
             );
         });
-        let result = modify::control_request_for_run(
+        let result = control_request_for_run(
             &backend,
             "source",
             super::super::identity::SandboxRunIdentity {

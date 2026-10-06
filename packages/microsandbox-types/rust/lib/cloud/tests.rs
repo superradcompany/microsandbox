@@ -4,7 +4,7 @@ use super::*;
 use crate::compat;
 use crate::domain::{
     DEFAULT_SANDBOX_CPUS, DEFAULT_SANDBOX_MEMORY_MIB, HostPattern, OciRootfsSource, RootDisk,
-    RootfsSource, SecretSubstitution, SecretsConfig,
+    RootfsSource, SecretConfigError, SecretSubstitution, SecretsConfig,
 };
 use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
 
@@ -858,6 +858,10 @@ fn previous_version_cloud_secrets_translate_to_current_wire() {
                 }]
             });
             let cloud: CloudSecretsConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                cloud.entries[0].placeholder, "$KEY",
+                "a historical explicit placeholder must survive translation"
+            );
             let wire = serde_json::to_value(&cloud).unwrap();
             assert_eq!(
                 wire["entries"][0]["substitution"]["headers"],
@@ -877,6 +881,38 @@ fn previous_version_cloud_secrets_translate_to_current_wire() {
             );
         }
     }
+}
+
+#[test]
+fn current_cloud_secret_entry_requires_placeholder() {
+    let result = serde_json::from_value::<CloudSecretEntry>(serde_json::json!({
+        "env_var": "KEY",
+        "value": "synthetic"
+    }));
+
+    assert!(
+        result.is_err(),
+        "a secret without replacement bytes is invalid"
+    );
+}
+
+#[test]
+fn current_cloud_secret_entry_rejects_an_empty_placeholder_during_validation() {
+    let entry: CloudSecretEntry = serde_json::from_value(serde_json::json!({
+        "env_var": "KEY",
+        "value": "synthetic",
+        "placeholder": "",
+        "allowed_hosts": [{"type": "exact", "value": "api.example.com"}]
+    }))
+    .expect("the wire shape is complete");
+
+    let error = crate::domain::SecretEntry::from(entry)
+        .validate(0)
+        .expect_err("an empty placeholder cannot identify replacement bytes");
+    assert!(matches!(
+        error,
+        SecretConfigError::EmptyPlaceholder { secret_index: 0 }
+    ));
 }
 
 #[test]

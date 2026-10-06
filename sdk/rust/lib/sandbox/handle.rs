@@ -21,9 +21,10 @@ use crate::{
     error::Operation,
 };
 
-#[cfg(feature = "local")]
-use super::SandboxModificationBuilder;
-use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
+use super::{
+    Sandbox, SandboxConfig, SandboxId, SandboxModificationBuilder, SandboxModificationPlan,
+    SandboxStatus, SandboxStopResult,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -316,10 +317,30 @@ impl SandboxHandle {
     ///
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
-    /// handle's possibly stale snapshot.
-    #[cfg(feature = "local")]
+    /// handle's possibly stale snapshot. The builder stays bound to this
+    /// sandbox and never modifies a replacement that reused its name; the local
+    /// backend reports one as [`MicrosandboxError::SandboxReplaced`].
     pub fn modify(&self) -> SandboxModificationBuilder {
-        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone(), self.identity())
+    }
+
+    /// Keep waiting for a modification that did not settle, using the operation id from
+    /// [`ModificationIncomplete`](crate::MicrosandboxError::ModificationIncomplete).
+    /// Returns the settled plan, the operation's error, or another `ModificationIncomplete`;
+    /// backends without resumable operations, such as local, return `Unsupported`.
+    pub async fn resume_modification(
+        &self,
+        operation_id: impl Into<String>,
+    ) -> MicrosandboxResult<SandboxModificationPlan> {
+        self.backend
+            .sandboxes()
+            .resume_modification_identified(
+                self.backend.clone(),
+                &self.name,
+                self.identity(),
+                operation_id.into(),
+            )
+            .await
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.

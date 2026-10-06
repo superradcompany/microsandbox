@@ -70,6 +70,57 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
     );
 }
 
+#[test]
+fn rust_modify_surface_is_backend_neutral() {
+    use microsandbox::sandbox::SandboxHandle;
+    use microsandbox::{Sandbox, SandboxModificationBuilder};
+
+    // Coerce each receiver to a function pointer so a build that drops either
+    // method behind a backend feature fails to compile.
+    let _: fn(&Sandbox) -> SandboxModificationBuilder = Sandbox::modify;
+    let _: fn(&SandboxHandle) -> SandboxModificationBuilder = SandboxHandle::modify;
+    let _ = SandboxModificationBuilder::dry_run;
+    let _ = SandboxModificationBuilder::apply;
+    let _ = |sandbox: &Sandbox, handle: &SandboxHandle| {
+        drop(sandbox.resume_modification("operation-id"));
+        drop(handle.resume_modification(String::from("operation-id")));
+    };
+    let _: Option<microsandbox::SandboxModificationPlan> = None;
+    let _ = microsandbox::ModificationPolicy::NoRestart;
+}
+
+#[test]
+fn modification_disposition_is_non_exhaustive_downstream() {
+    use microsandbox::ModificationDisposition;
+
+    // Downstream matches need a wildcard arm; it keeps them compiling when dispositions are added.
+    fn label(disposition: &ModificationDisposition) -> &'static str {
+        match disposition {
+            ModificationDisposition::Live => "live",
+            ModificationDisposition::NextStart => "next start",
+            ModificationDisposition::RequiresRestart => "requires restart",
+            ModificationDisposition::Unsupported => "unsupported",
+            ModificationDisposition::Unconfirmed => "unconfirmed",
+            _ => "unknown",
+        }
+    }
+
+    let unconfirmed = ModificationDisposition::Unconfirmed;
+    assert_eq!(label(&unconfirmed), "unconfirmed");
+    assert_eq!(
+        serde_json::to_value(&unconfirmed).unwrap(),
+        serde_json::json!("unconfirmed")
+    );
+    assert_eq!(
+        serde_json::from_str::<ModificationDisposition>("\"unconfirmed\"").unwrap(),
+        unconfirmed
+    );
+
+    let newer = serde_json::from_str::<ModificationDisposition>("\"after migration\"").unwrap();
+    assert_eq!(label(&newer), "unknown");
+    assert_eq!(newer.as_str(), "after migration");
+}
+
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
     fs: &microsandbox::sandbox::SandboxFsOps<'_>,

@@ -2,6 +2,7 @@
 
 pub(super) mod archive;
 mod artifact;
+mod control;
 mod copy;
 mod create;
 pub(crate) mod deletion;
@@ -27,6 +28,7 @@ use crate::snapshot::{
 };
 pub(crate) use archive::materialize_archive_for_child_with_overrides as materialize_archive_for_child;
 use artifact::{Snapshot, SnapshotHandle};
+pub(crate) use control::capture_flush_policy;
 pub(crate) use create::{
     CHECKPOINT_DIRECTORY, stage_local_branch_closure, validate_checkpoint_owned_inventory,
     validate_owned_inventory,

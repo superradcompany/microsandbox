@@ -619,7 +619,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error)
@@ -675,13 +675,15 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 </Accordion>
 
-Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
+Plan or apply a configuration change. The returned plan labels each change with a [`ModificationDisposition`](#modificationdisposition): `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`; an applied plan can also report `"unconfirmed"`.
 
 `CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+
+On microsandbox cloud, an applied plan may report a change `"unconfirmed"`: saved but not confirmed on the running sandbox; it takes effect by the next start at the latest. If the change does not settle within the wait budget, `Modify` returns a `*ModificationIncompleteError` (kind `ErrModificationIncomplete`) with `OperationID`, `Budget`, and `Committed` (`nil` when unknown); the change may still commit. Pass `OperationID` to [`ResumeModification()`](#sb-resumemodification) to keep waiting.
 
 <p className="msb-label">Parameters</p>
 
@@ -698,6 +700,49 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">*SandboxModificationPlan</a></div>
     <div className="msb-param-desc">The modification plan, applied unless <code>DryRun</code> is set.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ResumeModification()</span>
+
+```go
+func (s *Sandbox) ResumeModification(ctx context.Context, operationID string) (*SandboxModificationPlan, error)
+```
+
+<Accordion title="Example">
+
+```go
+plan, err := sb.Modify(ctx, m.ModifyOptions{
+    Secrets: map[string]m.SecretModifySpec{"API_KEY": {Value: token}},
+})
+var incomplete *m.ModificationIncompleteError
+if errors.As(err, &incomplete) {
+    plan, err = sb.ResumeModification(ctx, incomplete.OperationID)
+}
+if err != nil {
+    return err
+}
+```
+
+</Accordion>
+
+Keep waiting for a modification that returned `*ModificationIncompleteError`. The operation must belong to this sandbox. Each call waits up to the full wait budget again and returns the settled plan, the operation's failure, or another `*ModificationIncompleteError`. The local backend returns `ErrUnsupportedOperation`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operationID</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">The <code>OperationID</code> of <code>*ModificationIncompleteError</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">*SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The settled plan, with <code>Applied</code> set.</div>
   </div>
 </div>
 
@@ -2433,13 +2478,25 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Modify(ctx, opts)
 ```
 
-Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
+Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot. Returns `ErrSandboxReplaced` when the name now points to another sandbox
+
+<p className="msb-label">Returns</p>
+
+`(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ResumeModification()</span>
+
+```go
+ResumeModification(ctx, operationID)
+```
+
+Keep waiting for a modification that did not settle, using its `*ModificationIncompleteError` `OperationID`; see [`ResumeModification()`](#sb-resumemodification)
 
 <p className="msb-label">Returns</p>
 
@@ -2869,7 +2926,7 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Change | `string` | `"added"`, `"updated"`, or `"removed"` for config; `"added"`, `"rotated"`, `"removed"`, `"renamed"`, `"hosts updated"`, or `"placeholder updated"` for secrets |
 | Before / After | `*string` | Previous / new visible state (config entries) |
 | BeforeRef / AfterRef | `*string` | Previous / new guest-visible reference (secret entries) |
-| Disposition | `string` | `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"` |
+| Disposition | [`ModificationDisposition`](#modificationdisposition) | When or whether the change can take effect |
 | AllowHosts | `[]string` | Allowed hosts after the requested change (secret entries) |
 | Reason | `*string` | Human-readable reason for the classification, when useful |
 
@@ -2882,6 +2939,18 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Actual | `string` | Actual value observed in the guest/runtime |
 | Enforced | `string` | Host/VMM-enforced value |
 | State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
+
+### ModificationDisposition
+
+String-backed type for `PlannedChange.Disposition`. Backends may report values added after this release; they decode unchanged, so switches should include a default case.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ModificationDispositionLive` | `"live"` | Applies to the running VM now |
+| `ModificationDispositionNextStart` | `"next start"` | Applies the next time the sandbox starts |
+| `ModificationDispositionRequiresRestart` | `"requires restart"` | Requires a restart before taking effect |
+| `ModificationDispositionUnsupported` | `"unsupported"` | Cannot be changed by `Modify` |
+| `ModificationDispositionUnconfirmed` | `"unconfirmed"` | Applied plans only (microsandbox cloud): saved but not confirmed on the running sandbox; takes effect by the next start at the latest |
 
 ### SandboxPage
 

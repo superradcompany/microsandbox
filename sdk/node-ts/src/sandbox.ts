@@ -559,6 +559,16 @@ export class Sandbox implements AsyncDisposable {
     return modificationPlanFromJson(raw);
   }
 
+  /**
+   * Keep waiting for a modification that did not settle within `modify()`'s budget, using the
+   * `operationId` of `ModificationIncompleteError`. Backends without resumable operations,
+   * such as local, reject with `UnsupportedError`.
+   */
+  async resumeModification(operationId: string): Promise<SandboxModificationPlan> {
+    const raw = await withMappedErrors(() => this.inner.resumeModification(operationId));
+    return modificationPlanFromJson(raw);
+  }
+
   /** Compact sealed root and owned-data disk layers without rewriting existing snapshots. */
   async compact(opts?: DiskCompactionOptions): Promise<DiskCompactionResult> {
     const raw = await withMappedErrors(() =>

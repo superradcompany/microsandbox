@@ -4,7 +4,7 @@
 //! contract transitively references; `snapshot.ts` carries the shared snapshot
 //! descriptor schema; `cloud.ts` carries the cloud wire twins and imports its
 //! dependencies from `./domain` and `./snapshot`. Domain types the cloud never
-//! touches (the modification plan set, volume specs, the domain twins the cloud
+//! touches (the modification patch, volume specs, the domain twins the cloud
 //! replaces, …) are intentionally not generated.
 
 use ts_rs::TS;
@@ -14,17 +14,23 @@ use crate::snapshot::cloud_manifest::{
     SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
 use crate::{
-    Action, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
-    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
+    Action, ChangeKind, CloudCreateSandboxRequest, CloudCreateSandboxResponse,
+    CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
+    CloudHostPattern, CloudMessageResponse, CloudModificationOperationStatus, CloudNetworkSpec,
+    CloudPaginated, CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxComputeResources, CloudSandboxModificationApplyRequest,
+    CloudSandboxModificationOperation, CloudSandboxModificationPlanRequest, CloudSandboxResources,
+    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudSecretEntry, CloudSecretMaterial, CloudSecretModificationApply,
+    CloudSecretModificationIntent, CloudSecretSource, CloudSecretValue, CloudSecretsConfig,
     CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
     CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
-    SandboxLogLevel, SandboxPolicy, SecretSubstitution, SecurityProfile, StatVirtualization,
+    CloudVolumeMount, ConfigPlannedChange, Destination, DestinationGroup, Direction, EnvVar,
+    HandoffInit, HostPermissions, ModificationConflict, ModificationDisposition,
+    ModificationPolicy, ModificationWarning, MountOptions, NetworkPolicy, OwnedVolumeStorage,
+    PlannedChange, PortRange, Protocol, ResourceConvergenceState, ResourceKind,
+    ResourceResizeStatus, Rule, SandboxLogLevel, SandboxModificationPlan, SandboxPolicy,
+    SecretChangeKind, SecretPlannedChange, SecretSubstitution, SecurityProfile, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +61,19 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "SecretSubstitution",
     "SecurityProfile",
     "StatVirtualization",
+    "ModificationPolicy",
+    "SandboxModificationPlan",
+    "PlannedChange",
+    "ConfigPlannedChange",
+    "SecretPlannedChange",
+    "ChangeKind",
+    "SecretChangeKind",
+    "ModificationDisposition",
+    "ModificationConflict",
+    "ModificationWarning",
+    "ResourceResizeStatus",
+    "ResourceKind",
+    "ResourceConvergenceState",
 ];
 
 /// Snapshot schema type names the cloud twins may reference. Filtered into the
@@ -160,6 +179,19 @@ pub fn domain_declarations() -> Vec<String> {
         Destination::decl(&cfg),
         DestinationGroup::decl(&cfg),
         PortRange::decl(&cfg),
+        ModificationPolicy::decl(&cfg),
+        SandboxModificationPlan::decl(&cfg),
+        PlannedChange::decl(&cfg),
+        ConfigPlannedChange::decl(&cfg),
+        SecretPlannedChange::decl(&cfg),
+        ChangeKind::decl(&cfg),
+        SecretChangeKind::decl(&cfg),
+        ModificationDisposition::decl(&cfg),
+        ModificationConflict::decl(&cfg),
+        ModificationWarning::decl(&cfg),
+        ResourceResizeStatus::decl(&cfg),
+        ResourceKind::decl(&cfg),
+        ResourceConvergenceState::decl(&cfg),
     ]
 }
 
@@ -215,6 +247,14 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudSnapshotOperation::decl(&cfg),
         CloudSnapshotOperationStatus::decl(&cfg),
         CloudSnapshotKind::decl(&cfg),
+        CloudSandboxModificationPlanRequest::decl(&cfg),
+        CloudSecretModificationIntent::decl(&cfg),
+        CloudSecretMaterial::decl(&cfg),
+        CloudSandboxModificationApplyRequest::decl(&cfg),
+        CloudSecretModificationApply::decl(&cfg),
+        CloudSecretValue::decl(&cfg),
+        CloudSandboxModificationOperation::decl(&cfg),
+        CloudModificationOperationStatus::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -331,7 +371,7 @@ mod tests {
         assert!(domain.contains("export type NetworkPolicy"));
         assert!(domain.contains("export type Rule"));
         // ...but domain-only types the cloud never reaches are not generated.
-        assert!(!domain.contains("SandboxModificationPlan"));
+        assert!(!domain.contains("SandboxModificationPatch"));
         assert!(!domain.contains("export type SandboxSpec ="));
 
         let snapshot = render_snapshot();

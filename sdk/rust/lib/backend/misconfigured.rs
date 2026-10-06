@@ -510,4 +510,18 @@ mod tests {
         #[cfg(feature = "local")]
         assert!(backend.as_local().is_none());
     }
+
+    #[tokio::test]
+    async fn misconfigured_backend_keeps_default_modification_refusal() {
+        let backend: Arc<dyn Backend> = Arc::new(ConfigurationErrorBackend::new(
+            MicrosandboxError::InvalidConfig("MSB_BACKEND=cloud requires a key".into()),
+        ));
+
+        crate::test_support::assert_modification_unsupported(
+            backend.sandboxes(),
+            backend.clone(),
+            crate::backend::SandboxIdentity::Cloud("sandbox-id".into()),
+        )
+        .await;
+    }
 }

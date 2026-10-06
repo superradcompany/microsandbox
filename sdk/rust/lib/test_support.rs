@@ -62,3 +62,88 @@ pub(crate) fn local_backend_builder(
         .managed_config_path(home.join("managed.json"))
         .home(home)
 }
+
+/// Seed a running row whose live run is owned by this test process.
+#[cfg(feature = "local")]
+pub(crate) async fn seed_control_run(local: &crate::LocalBackend, name: &str) {
+    seed_control_run_with_status(local, name, crate::sandbox::SandboxStatus::Running).await;
+}
+
+/// Seed a row in `status` whose live run is owned by this test process.
+#[cfg(feature = "local")]
+pub(crate) async fn seed_control_run_with_status(
+    local: &crate::LocalBackend,
+    name: &str,
+    status: crate::sandbox::SandboxStatus,
+) {
+    use crate::db::entity::{run, sandbox};
+    use sea_orm::{EntityTrait, Set};
+
+    let db = local.db().await.unwrap();
+    let sandbox_id = sandbox::Entity::insert(sandbox::ActiveModel {
+        name: Set(name.into()),
+        config: Set("{}".into()),
+        status: Set(status),
+        ephemeral: Set(false),
+        ..Default::default()
+    })
+    .exec(db.write())
+    .await
+    .unwrap()
+    .last_insert_id;
+    run::Entity::insert(run::ActiveModel {
+        sandbox_id: Set(sandbox_id),
+        pid: Set(Some(std::process::id() as i32)),
+        status: Set(run::RunStatus::Running),
+        ..Default::default()
+    })
+    .exec(db.write())
+    .await
+    .unwrap();
+}
+
+/// Drive plan, apply, and resume through `sandboxes` and assert each returns
+/// the typed default `SandboxModify` refusal.
+pub(crate) async fn assert_modification_unsupported(
+    sandboxes: &dyn crate::backend::SandboxBackend,
+    backend: std::sync::Arc<dyn crate::Backend>,
+    identity: crate::backend::SandboxIdentity,
+) {
+    use crate::sandbox::{ModificationPolicy, SandboxModificationPatch};
+
+    let results = [
+        sandboxes
+            .plan_modification_identified(
+                backend.clone(),
+                "modify-default",
+                identity.clone(),
+                SandboxModificationPatch::default(),
+                ModificationPolicy::NoRestart,
+            )
+            .await,
+        sandboxes
+            .apply_modification_identified(
+                backend.clone(),
+                "modify-default",
+                identity.clone(),
+                SandboxModificationPatch::default(),
+                ModificationPolicy::Restart,
+            )
+            .await,
+        sandboxes
+            .resume_modification_identified(backend, "modify-default", identity, "op-1".into())
+            .await,
+    ];
+    for result in results {
+        assert!(
+            matches!(
+                result,
+                Err(crate::MicrosandboxError::Unsupported {
+                    op: crate::Operation::SandboxModify,
+                    reason: crate::UnsupportedReason::NotAvailable(_),
+                })
+            ),
+            "expected typed modify refusal, got {result:?}"
+        );
+    }
+}

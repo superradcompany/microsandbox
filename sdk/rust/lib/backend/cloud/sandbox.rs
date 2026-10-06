@@ -16,8 +16,9 @@ use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle, SandboxListBuilder,
-    SandboxPage, SandboxStatus,
+    ModificationPolicy, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle,
+    SandboxListBuilder, SandboxModificationPatch, SandboxModificationPlan, SandboxPage,
+    SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::RegistryAuth;
@@ -306,6 +307,38 @@ impl SandboxBackend for CloudBackend {
         })
     }
 
+    fn plan_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+        patch: SandboxModificationPatch,
+        policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(self.plan_modification(identity, patch, policy))
+    }
+
+    fn apply_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+        patch: SandboxModificationPatch,
+        policy: ModificationPolicy,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(self.apply_modification(identity, patch, policy))
+    }
+
+    fn resume_modification_identified<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _name: &'a str,
+        identity: SandboxIdentity,
+        operation_id: String,
+    ) -> BoxFuture<'a, MicrosandboxResult<SandboxModificationPlan>> {
+        Box::pin(self.resume_modification(identity, operation_id))
+    }
+
     fn boot_error<'a>(
         &'a self,
         _backend: Arc<dyn Backend>,
@@ -489,7 +522,7 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
+pub(super) fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
     match identity {
         SandboxIdentity::Cloud(id) => Ok(id),
         SandboxIdentity::Local(id) => Err(MicrosandboxError::Runtime(format!(

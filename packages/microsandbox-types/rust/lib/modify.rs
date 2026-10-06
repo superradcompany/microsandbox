@@ -81,6 +81,7 @@ pub struct SandboxModificationPatch {
 /// Policy selected for applying or planning a modification.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ModificationPolicy {
     /// Apply only changes that can complete without restarting the running sandbox.
@@ -179,6 +180,7 @@ impl SecretSource {
 /// Serializable dry-run or apply plan for a sandbox modification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SandboxModificationPlan {
     /// Sandbox being modified.
     pub sandbox: String,
@@ -209,6 +211,7 @@ pub struct SandboxModificationPlan {
 /// One planned modification entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlannedChange {
     /// Ordinary config change.
@@ -221,6 +224,7 @@ pub enum PlannedChange {
 /// Planned config change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ConfigPlannedChange {
     /// Config field being changed.
     pub field: String,
@@ -247,6 +251,7 @@ pub struct ConfigPlannedChange {
 /// Planned secret change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SecretPlannedChange {
     /// Table field name. This is always `secret`.
     pub field: String,
@@ -280,6 +285,7 @@ pub struct SecretPlannedChange {
 /// Natural config change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ChangeKind {
     /// A field is being added.
@@ -295,6 +301,7 @@ pub enum ChangeKind {
 /// Natural secret change type for human output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub enum SecretChangeKind {
     /// A secret placeholder is being added.
     #[serde(rename = "added")]
@@ -322,29 +329,58 @@ pub enum SecretChangeKind {
 }
 
 /// When or whether a planned change can take effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serialized as a plain string. Dispositions from newer backends decode as
+/// [`Unknown`](Self::Unknown) and serialize back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[non_exhaustive]
 pub enum ModificationDisposition {
     /// Applies to the running VM now.
-    #[serde(rename = "live")]
+    #[cfg_attr(feature = "ts", ts(rename = "live"))]
     Live,
 
     /// Persists to desired config and applies the next time the sandbox starts.
-    #[serde(rename = "next start")]
+    #[cfg_attr(feature = "ts", ts(rename = "next start"))]
     NextStart,
 
     /// Needs a restart before it can take effect.
-    #[serde(rename = "requires restart")]
+    #[cfg_attr(feature = "ts", ts(rename = "requires restart"))]
     RequiresRestart,
 
     /// Cannot be changed by `modify`.
-    #[serde(rename = "unsupported")]
+    #[cfg_attr(feature = "ts", ts(rename = "unsupported"))]
     Unsupported,
+
+    /// Durably committed, but not confirmed on the running sandbox. Dry runs
+    /// never report it.
+    #[cfg_attr(feature = "ts", ts(rename = "unconfirmed"))]
+    Unconfirmed,
+
+    /// A disposition this release does not recognize, kept as its wire string.
+    /// Deserialization never produces it for one of the known values above.
+    #[cfg_attr(feature = "ts", ts(untagged))]
+    Unknown(#[cfg_attr(feature = "ts", ts(type = "string & {}"))] String),
+}
+
+impl ModificationDisposition {
+    /// The wire string for this disposition.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Live => "live",
+            Self::NextStart => "next start",
+            Self::RequiresRestart => "requires restart",
+            Self::Unsupported => "unsupported",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Unknown(value) => value,
+        }
+    }
 }
 
 /// Conflict that blocks applying a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ModificationConflict {
     /// Field with the conflict.
     pub field: String,
@@ -356,6 +392,7 @@ pub struct ModificationConflict {
 /// Warning emitted while planning a modification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ModificationWarning {
     /// Field associated with the warning.
     pub field: String,
@@ -367,6 +404,7 @@ pub struct ModificationWarning {
 /// Resource kind used by live resize convergence reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     /// vCPU count.
@@ -379,6 +417,7 @@ pub enum ResourceKind {
 /// Runtime convergence state for an accepted resource resize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum ResourceConvergenceState {
     /// The runtime accepted the request.
@@ -400,6 +439,7 @@ pub enum ResourceConvergenceState {
 /// Status for a live resource resize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct ResourceResizeStatus {
     /// Resource being resized.
     pub resource: ResourceKind,
@@ -421,6 +461,44 @@ pub struct ResourceResizeStatus {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Serialize for ModificationDisposition {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModificationDisposition {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "live" => Self::Live,
+            "next start" => Self::NextStart,
+            "requires restart" => Self::RequiresRestart,
+            "unsupported" => Self::Unsupported,
+            "unconfirmed" => Self::Unconfirmed,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+// An enum schema would reject dispositions added by a newer server.
+#[cfg(feature = "utoipa")]
+impl utoipa::PartialSchema for ModificationDisposition {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::ObjectBuilder::new()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some(
+                "When or whether a planned change can take effect. Known values are \
+                 `live`, `next start`, `requires restart`, `unsupported`, and \
+                 `unconfirmed`; clients must accept other values from newer servers.",
+            ))
+            .into()
+    }
+}
+
+#[cfg(feature = "utoipa")]
+impl utoipa::ToSchema for ModificationDisposition {}
+
 impl std::fmt::Debug for SecretModificationPatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretModificationPatch")
@@ -430,5 +508,97 @@ impl std::fmt::Debug for SecretModificationPatch {
             .field("placeholder", &self.placeholder)
             .field("allowed_hosts", &self.allowed_hosts)
             .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_disposition_has_a_distinct_wire_value() {
+        for (disposition, wire) in [
+            (ModificationDisposition::Live, "live"),
+            (ModificationDisposition::NextStart, "next start"),
+            (ModificationDisposition::RequiresRestart, "requires restart"),
+            (ModificationDisposition::Unsupported, "unsupported"),
+            (ModificationDisposition::Unconfirmed, "unconfirmed"),
+        ] {
+            assert_eq!(disposition.as_str(), wire);
+            assert_eq!(
+                serde_json::to_value(&disposition).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<ModificationDisposition>(serde_json::json!(wire)).unwrap(),
+                disposition
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_disposition_round_trips_its_wire_string() {
+        for wire in ["after migration", "Live", ""] {
+            let disposition =
+                serde_json::from_value::<ModificationDisposition>(serde_json::json!(wire)).unwrap();
+            assert_eq!(
+                disposition,
+                ModificationDisposition::Unknown(wire.to_string())
+            );
+            assert_eq!(disposition.as_str(), wire);
+            assert_eq!(
+                serde_json::to_value(&disposition).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+        assert!(serde_json::from_value::<ModificationDisposition>(serde_json::json!(1)).is_err());
+    }
+
+    #[test]
+    fn plan_keeps_unknown_dispositions() {
+        let plan: SandboxModificationPlan = serde_json::from_value(serde_json::json!({
+            "sandbox": "api",
+            "status": "running",
+            "applied": true,
+            "policy": "no_restart",
+            "changes": [{
+                "kind": "secret",
+                "field": "secret",
+                "name": "API_KEY",
+                "change": "rotated",
+                "before_ref": null,
+                "after_ref": null,
+                "disposition": "after migration",
+                "reason": null
+            }],
+            "conflicts": [],
+            "warnings": []
+        }))
+        .unwrap();
+        let PlannedChange::Secret(change) = &plan.changes[0] else {
+            panic!("expected a secret change: {:?}", plan.changes[0]);
+        };
+        assert_eq!(
+            change.disposition,
+            ModificationDisposition::Unknown("after migration".into())
+        );
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["changes"][0]["disposition"],
+            "after migration"
+        );
+    }
+
+    #[cfg(feature = "utoipa")]
+    #[test]
+    fn disposition_schema_accepts_any_string() {
+        use utoipa::PartialSchema;
+
+        let schema = serde_json::to_value(ModificationDisposition::schema()).unwrap();
+        assert_eq!(schema["type"], "string");
+        assert!(schema.get("enum").is_none());
     }
 }

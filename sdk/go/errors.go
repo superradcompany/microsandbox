@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -171,6 +172,9 @@ const (
 	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
 	// before the SDK's deadline and may still complete asynchronously.
 	ErrSandboxStopTimedOut
+	// ErrModificationIncomplete indicates a sandbox modification did not
+	// settle within its wait budget and may still commit.
+	ErrModificationIncomplete
 )
 
 func (k ErrorKind) String() string {
@@ -221,6 +225,8 @@ func (k ErrorKind) String() string {
 		return "SnapshotMigration"
 	case ErrSnapshotSourceRecovery:
 		return "SnapshotSourceRecovery"
+	case ErrModificationIncomplete:
+		return "ModificationIncomplete"
 	case ErrPatchFailed:
 		return "PatchFailed"
 	case ErrNetworkPolicy:
@@ -302,6 +308,23 @@ func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
 // Unwrap preserves access to the standard SDK error kind.
 func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
 
+// ModificationIncompleteError reports a modification that did not settle
+// within its wait budget and may still commit. Pass OperationID to
+// ResumeModification to keep waiting.
+// Use errors.As to obtain this type; IsKind also recognizes ErrModificationIncomplete.
+type ModificationIncompleteError struct {
+	OperationID string
+	Budget      time.Duration
+	// Committed reports whether the change was durably committed; nil when unknown.
+	Committed *bool
+	err       *Error
+}
+
+func (e *ModificationIncompleteError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *ModificationIncompleteError) Unwrap() error { return e.err }
+
 // Error implements the error interface.
 //
 // The string form deliberately omits the Kind to avoid duplicating the
@@ -362,6 +385,15 @@ func wrapFFI(err error) error {
 				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
 			}
 		}
+		if fe.Kind == ffi.KindModificationIncomplete && fe.Operation != nil {
+			o := fe.Operation
+			return &ModificationIncompleteError{
+				OperationID: o.OperationID,
+				Budget:      time.Duration(o.BudgetMs) * time.Millisecond,
+				Committed:   o.Committed,
+				err:         &Error{Kind: ErrModificationIncomplete, Message: fe.Message},
+			}
+		}
 		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -412,6 +444,8 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotMigration
 	case ffi.KindSnapshotSourceRecovery:
 		return ErrSnapshotSourceRecovery
+	case ffi.KindModificationIncomplete:
+		return ErrModificationIncomplete
 	case ffi.KindPatchFailed:
 		return ErrPatchFailed
 	case ffi.KindIO:

@@ -151,6 +151,32 @@ char *msb_sandbox_handle_modify(uint64_t cancel_id,
                                 uintptr_t buf_len);
 
 /**
+ * Plan or apply a sandbox modification by name. A sandbox whose identity is
+ * no longer `expected_id` is refused as replaced.
+ * Input: `{"patch":{...},"policy":"no_restart|next_start|restart","dry_run":bool}`
+ * Output: the serialized `SandboxModificationPlan`.
+ */
+char *msb_sandbox_handle_modify_identified(uint64_t cancel_id,
+                                           const char *name,
+                                           const char *expected_id,
+                                           const char *opts_json,
+                                           unsigned char *buf,
+                                           uintptr_t buf_len);
+
+/**
+ * Keep waiting for a modification by name that did not settle within its
+ * wait budget. A sandbox whose identity is no longer `expected_id` is refused
+ * as replaced.
+ * Output: the serialized `SandboxModificationPlan`.
+ */
+char *msb_sandbox_handle_resume_modification(uint64_t cancel_id,
+                                             const char *name,
+                                             const char *expected_id,
+                                             const char *operation_id,
+                                             unsigned char *buf,
+                                             uintptr_t buf_len);
+
+/**
  * Explicit compaction. A nonzero handle retains its backend; zero resolves the supplied name.
  */
 char *msb_sandbox_compact(uint64_t cancel_id,
@@ -297,6 +323,17 @@ char *msb_sandbox_modify(uint64_t cancel_id,
                          const char *opts_json,
                          unsigned char *buf,
                          uintptr_t buf_len);
+
+/**
+ * Keep waiting for a modification on a live sandbox handle that did not
+ * settle within its wait budget.
+ * Output: the serialized `SandboxModificationPlan`.
+ */
+char *msb_sandbox_resume_modification(uint64_t cancel_id,
+                                      Handle handle,
+                                      const char *operation_id,
+                                      unsigned char *buf,
+                                      uintptr_t buf_len);
 
 /**
  * Reports whether this handle owns the sandbox lifecycle (synchronous).

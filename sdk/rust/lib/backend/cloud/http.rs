@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use reqwest::Response;
 use reqwest::header::{ACCEPT, HeaderName, HeaderValue};
+use reqwest::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -19,10 +19,12 @@ use super::{CloudBackend, sandbox::CloudCreateBody, volume::CloudVolume};
 use crate::backend::sandbox::LogStream;
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{LogCursor, LogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
-use crate::sandbox::SandboxListBuilder;
+use crate::sandbox::{SandboxListBuilder, SandboxModificationPlan};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxResponse, CloudErrorBody, CloudMessageResponse, CloudPaginated,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationOperation,
+    CloudSandboxModificationPlanRequest,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -60,6 +62,14 @@ enum CloudSseItem {
     Ignore,
 }
 
+/// Response from `POST /v1/sandboxes/:id/modifications`.
+pub(in crate::backend) enum CloudModificationApplyResponse {
+    /// `200`: the modification settled within the request.
+    Settled(SandboxModificationPlan),
+    /// `202`: the modification continues as a pollable operation.
+    Accepted(CloudSandboxModificationOperation),
+}
+
 #[derive(Serialize)]
 struct CloudSandboxListQuery<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,7 +90,7 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 // Methods: Sandbox lifecycle
 //
-// HTTP dispatch for the SDK's sandbox lifecycle ops, hitting msb-cloud's
+// HTTP dispatch for the SDK's sandbox lifecycle and modification ops, hitting msb-cloud's
 // API-key-authenticated routes (`/v1/sandboxes/*` and `/v1/sandboxes/by-name/*`).
 //--------------------------------------------------------------------------------------------------
 
@@ -273,6 +283,79 @@ impl CloudBackend {
             .await
             .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/:id", e))?;
         decode_json(resp, "DELETE /v1/sandboxes/:id").await
+    }
+
+    /// `POST /v1/sandboxes/:id/modifications/plan`, a value-free dry run.
+    pub(in crate::backend) async fn plan_sandbox_modification(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationPlanRequest,
+    ) -> MicrosandboxResult<SandboxModificationPlan> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/modifications/plan",
+            self.url,
+            urlencoding(id)
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications/plan", e))?;
+        decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await
+    }
+
+    /// `POST /v1/sandboxes/:id/modifications`. The body is the only place a
+    /// new secret value travels.
+    pub(in crate::backend) async fn apply_sandbox_modification(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationApplyRequest,
+    ) -> MicrosandboxResult<CloudModificationApplyResponse> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/modifications",
+            self.url,
+            urlencoding(id)
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications", e))?;
+        let resp = ensure_success(resp, "POST /v1/sandboxes/:id/modifications").await?;
+        match resp.status() {
+            StatusCode::OK => decode_json(resp, "POST /v1/sandboxes/:id/modifications")
+                .await
+                .map(CloudModificationApplyResponse::Settled),
+            StatusCode::ACCEPTED => decode_json(resp, "POST /v1/sandboxes/:id/modifications")
+                .await
+                .map(CloudModificationApplyResponse::Accepted),
+            status => Err(MicrosandboxError::Custom(format!(
+                "POST /v1/sandboxes/:id/modifications: unexpected status {status}"
+            ))),
+        }
+    }
+
+    /// `GET /v1/sandboxes/:id/modifications/:operation_id`.
+    pub(in crate::backend) async fn get_sandbox_modification_operation(
+        &self,
+        sandbox_id: &str,
+        operation_id: &str,
+    ) -> MicrosandboxResult<CloudSandboxModificationOperation> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/modifications/{}",
+            self.url,
+            urlencoding(sandbox_id),
+            urlencoding(operation_id)
+        );
+        let resp =
+            self.http.get(&url).send().await.map_err(|e| {
+                cloud_io_error("GET /v1/sandboxes/:id/modifications/:operation_id", e)
+            })?;
+        decode_json(resp, "GET /v1/sandboxes/:id/modifications/:operation_id").await
     }
 
     /// Stream logs from `GET /v1/sandboxes/:id/logs`.

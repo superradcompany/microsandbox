@@ -2822,6 +2822,32 @@ secrets:
 
     #[cfg(feature = "net")]
     #[test]
+    fn a_secret_without_placeholder_materializes_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            dir.path(),
+            "base.yaml",
+            r#"
+secrets:
+  TOKEN:
+    value: { $msb_env: HOST_TOKEN }
+    allow: [a.example]
+"#,
+        );
+        let resolved =
+            resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, path))
+                .unwrap();
+        let mut spec = microsandbox_types::SandboxSpec::default();
+        resolved.config_patch.apply_to(&mut spec);
+
+        assert_eq!(
+            spec.network.secrets.unwrap().secrets[0].placeholder,
+            "$MSB_TOKEN"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn action_only_secret_patch_keeps_existing_entries() {
         let patch = materialize_network_patch(
             None,

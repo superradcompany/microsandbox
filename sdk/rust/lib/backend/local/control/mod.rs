@@ -10,6 +10,7 @@ mod lifecycle_tests;
 mod owner;
 mod persistence;
 mod registry;
+pub(super) mod request;
 mod session;
 #[cfg(test)]
 mod tests;

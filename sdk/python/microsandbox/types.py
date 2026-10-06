@@ -113,10 +113,26 @@ class SecretChangeKind(StrEnum):
 
 
 class ModificationDisposition(StrEnum):
+    """The point at which a planned change takes effect, if any.
+
+    Backends may report dispositions added after this release. Those convert to
+    a pseudo-member that keeps the raw value; treat unrecognized members as unknown.
+    """
+
     LIVE = "live"
     NEXT_START = "next start"
     REQUIRES_RESTART = "requires restart"
     UNSUPPORTED = "unsupported"
+    UNCONFIRMED = "unconfirmed"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ModificationDisposition | None:
+        if not isinstance(value, str):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value.upper().replace(" ", "_")
+        member._value_ = value
+        return cls._value2member_map_.setdefault(value, member)
 
 
 class ResourceKind(StrEnum):

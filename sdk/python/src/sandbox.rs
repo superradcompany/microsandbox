@@ -945,6 +945,22 @@ impl PySandbox {
         })
     }
 
+    /// Keep waiting for a modification that did not settle within `modify()`'s budget,
+    /// using the `operation_id` of `ModificationIncompleteError`. Backends without
+    /// resumable operations, such as local, raise `UnsupportedError`.
+    fn resume_modification<'py>(
+        &self,
+        py: Python<'py>,
+        operation_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let plan = sandbox.resume_modification(operation_id).await;
+            modification_result_to_py(plan)
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Logs
     //----------------------------------------------------------------------------------------------
@@ -1670,9 +1686,15 @@ pub(crate) async fn run_modify(
         builder.dry_run().await
     } else {
         builder.apply().await
-    }
-    .map_err(to_py_err)?;
-    let value = serde_json::to_value(&plan)
+    };
+    modification_result_to_py(plan)
+}
+
+/// Convert a modification outcome into a Python plan dict or typed exception.
+pub(crate) fn modification_result_to_py(
+    plan: microsandbox::MicrosandboxResult<microsandbox::sandbox::SandboxModificationPlan>,
+) -> PyResult<PyObject> {
+    let value = serde_json::to_value(plan.map_err(to_py_err)?)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Python::with_gil(|py| modification_plan_to_py(py, value))
 }

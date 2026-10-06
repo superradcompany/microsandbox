@@ -430,7 +430,7 @@ pub fn format_disposition(disposition: &str) -> String {
         "requires restart" => format!("{}", style("requires restart").yellow().bold()),
         "next start" => format!("{}", style("next start").dim()),
         "unsupported" => format!("{}", style("unsupported").red().bold()),
-        other => other.to_lowercase(),
+        other => other.to_string(),
     }
 }
 

@@ -87,7 +87,7 @@ fn assert_safe_output(output: &Output, json: bool, applied: bool) {
     } else if applied {
         let combined = format!("{stdout}\n{stderr}");
         assert!(combined.contains("Modified"));
-        assert!(combined.contains(SANDBOX));
+        assert!(combined.contains(&format!("{SANDBOX} (next start)")));
     } else {
         assert!(stdout.contains(&format!("$MSB_{SECRET_ENV}")));
         assert!(stdout.contains("rotated"));

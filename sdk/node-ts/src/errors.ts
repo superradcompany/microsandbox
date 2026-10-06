@@ -20,6 +20,7 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "stopTimeout"
+  | "modificationIncomplete"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -172,6 +173,31 @@ export class ExecTimeoutError extends MicrosandboxError {
 export class StopTimeoutError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("stopTimeout", message, options);
+  }
+}
+
+/** State of a sandbox modification that did not settle in time. */
+export interface ModificationIncompleteDetails {
+  readonly operationId: string;
+  readonly budgetMs: number;
+  /** `true` if the change was durably committed; `null` when unknown. */
+  readonly committed: boolean | null;
+}
+
+/**
+ * A sandbox modification did not settle within its wait budget and may still
+ * commit. Pass `operationId` to `resumeModification()` to keep waiting.
+ */
+export class ModificationIncompleteError extends MicrosandboxError {
+  readonly operationId: string;
+  readonly budgetMs: number;
+  readonly committed: boolean | null;
+
+  constructor(message: string, details: ModificationIncompleteDetails, options?: ErrorOptions) {
+    super("modificationIncomplete", message, options);
+    this.operationId = details.operationId;
+    this.budgetMs = details.budgetMs;
+    this.committed = details.committed;
   }
 }
 

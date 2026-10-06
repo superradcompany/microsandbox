@@ -83,6 +83,28 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             };
         }
 
+        if let ModificationIncomplete {
+            operation_id,
+            budget,
+            committed,
+        } = &err
+        {
+            // Keep the operation id structured so callers can resume without parsing the message.
+            let instance = (|| -> PyResult<Bound<'_, PyAny>> {
+                let details = pyo3::types::PyDict::new(py);
+                details.set_item("operation_id", operation_id)?;
+                details.set_item("budget", budget.as_secs_f64())?;
+                details.set_item("committed", *committed)?;
+                errors_mod
+                    .getattr("ModificationIncompleteError")?
+                    .call((err.to_string(),), Some(&details))
+            })();
+            return match instance {
+                Ok(instance) => PyErr::from_value(instance),
+                Err(_) => pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
+            };
+        }
+
         // Preserve the SDK's established Python exception mapping for missing
         // snapshot references across backends.
         if matches!(err, SnapshotNotFound(_)) {

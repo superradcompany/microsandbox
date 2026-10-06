@@ -25,7 +25,6 @@ mod handle;
 pub(crate) mod identity;
 pub mod init;
 pub(crate) mod metrics;
-#[cfg(feature = "local")]
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
@@ -120,12 +119,6 @@ pub(crate) use builder::{
     apply_checkpoint_restore_constraints, apply_snapshot_guest_clock, apply_snapshot_root_layout,
 };
 #[cfg(feature = "local")]
-pub(crate) use modify::control_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::control_disk_checkpoint_create;
-#[cfg(feature = "local")]
-pub(crate) use modify::restore_requested_resources;
-#[cfg(feature = "local")]
 pub(crate) use patch::{apply_patches, build_flat_tree, build_upper_tree};
 #[cfg(all(feature = "local", windows))]
 pub(crate) use reap::reap_leaked_runtime_process;
@@ -204,7 +197,6 @@ mod restore_warnings;
 mod stop;
 #[cfg(feature = "local")]
 pub(crate) use external_mounts::resolve_external_mounts;
-#[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
@@ -685,9 +677,30 @@ impl Sandbox {
     /// The returned builder owns the canonical SDK patch and dry-run
     /// classification logic. It does not apply changes until later modify
     /// phases wire the same plan model into persistence and runtime control.
-    #[cfg(feature = "local")]
+    /// The builder stays bound to this sandbox and never modifies a replacement
+    /// that reused its name; the local backend reports one as
+    /// [`MicrosandboxError::SandboxReplaced`](crate::MicrosandboxError::SandboxReplaced).
     pub fn modify(&self) -> SandboxModificationBuilder {
-        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+        SandboxModificationBuilder::new(self.backend.clone(), self.name.clone(), self.identity())
+    }
+
+    /// Keep waiting for a modification that did not settle, using the operation id from
+    /// [`ModificationIncomplete`](crate::MicrosandboxError::ModificationIncomplete).
+    /// Returns the settled plan, the operation's error, or another `ModificationIncomplete`;
+    /// backends without resumable operations, such as local, return `Unsupported`.
+    pub async fn resume_modification(
+        &self,
+        operation_id: impl Into<String>,
+    ) -> MicrosandboxResult<SandboxModificationPlan> {
+        self.backend
+            .sandboxes()
+            .resume_modification_identified(
+                self.backend.clone(),
+                &self.name,
+                self.identity(),
+                operation_id.into(),
+            )
+            .await
     }
 
     /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.

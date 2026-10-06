@@ -44,6 +44,9 @@ pub struct CloudSecretEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<CloudSecretSource>,
     /// Placeholder the sandbox sees instead of the real value.
+    ///
+    /// Required on the wire; SDK builders may fill in a default. Validation
+    /// rejects empty, oversized, NUL-containing, or line-breaking values.
     pub placeholder: String,
     /// Hosts allowed to receive this secret.
     #[serde(default)]

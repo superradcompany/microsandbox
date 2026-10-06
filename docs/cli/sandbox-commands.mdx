@@ -496,11 +496,13 @@ msb touch --label app=engine
 
 ## msb modify
 
-<Tooltip tip="Not yet available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, msb modify only supports changing the value of an existing secret with --secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 `msb mod` is a shorter alias for `msb modify`.
 
 Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
+
+On microsandbox cloud, only `--secret NAME@HOSTS` is accepted and it changes only the value; repeat the secret's current hosts and options.
 
 ```bash
 msb modify api -c 4                         # Live when 4 <= max_cpus
@@ -514,6 +516,8 @@ Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, an
 Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. They default to the initial CPU and memory allocation; increasing the ceilings requires a restart.
 
 Resize can take time. The output and JSON `resize_status` report `applied`, `converging`, `guest-refused`, or `failed`. With `guest-refused`, the host still enforces the new limit.
+
+After an apply, `(next start)` marks a sandbox whose changes were saved for the next start, and a warning lists any change that was saved but not confirmed on the running sandbox (`unconfirmed` in JSON).
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 

@@ -69,3 +69,12 @@ def test_sandbox_modify_stub_signature() -> None:
         assert all(default is not None for default in method.args.kw_defaults)
         assert isinstance(method.returns, ast.Name)
         assert method.returns.id == "SandboxModificationPlan"
+
+
+def test_resume_modification_stub_signature() -> None:
+    tree = _stub_tree()
+    for class_name in ("Sandbox", "SandboxHandle"):
+        method = _class_method(tree, class_name, "resume_modification")
+        assert [arg.arg for arg in method.args.args] == ["self", "operation_id"]
+        assert isinstance(method.returns, ast.Name)
+        assert method.returns.id == "SandboxModificationPlan"

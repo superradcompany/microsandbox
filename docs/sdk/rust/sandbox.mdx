@@ -625,7 +625,7 @@ Explicitly refresh the running sandbox's idle timer. This sends `core.touch`; us
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn modify(&self) -> SandboxModificationBuilder
@@ -648,7 +648,7 @@ for r in &plan.resize_status {
 
 </Accordion>
 
-Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
+Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`; an applied plan can also report `unconfirmed`. Apply is all-or-nothing.
 
 CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
@@ -662,6 +662,48 @@ See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for all setters 
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationbuilder">SandboxModificationBuilder</a></div>
     <div className="msb-param-desc">Fluent builder; terminate with <code>dry_run()</code> or <code>apply()</code>.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resume_modification()</span>
+
+```rust
+async fn resume_modification(
+    &self,
+    operation_id: impl Into<String>,
+) -> MicrosandboxResult<SandboxModificationPlan>
+```
+
+<Accordion title="Example">
+
+```rust
+let plan = match sb.modify().secret(|s| s.env("API_KEY").value(token)).apply().await {
+    Err(MicrosandboxError::ModificationIncomplete { operation_id, .. }) => {
+        sb.resume_modification(operation_id).await?
+    }
+    result => result?,
+};
+```
+
+</Accordion>
+
+Keep waiting for a modification whose [`apply()`](#modification-apply) returned `MicrosandboxError::ModificationIncomplete`. The operation must belong to this sandbox. Each call waits up to the full wait budget again and returns the settled plan, the operation's failure, or another `ModificationIncomplete`. The local backend returns `MicrosandboxError::Unsupported`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operation_id</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">The <code>operation_id</code> carried by <code>ModificationIncomplete</code>.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxmodificationplan">SandboxModificationPlan</a></div>
+    <div className="msb-param-desc">The settled plan, with <code>applied: true</code>.</div>
   </div>
 </div>
 
@@ -2046,6 +2088,8 @@ Apply the changes. Live changes are made to the running sandbox first, and the n
 
 A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
 
+On microsandbox cloud, an applied plan may report a change `Unconfirmed`: saved but not confirmed on the running sandbox; it takes effect by the next start at the latest. If the change does not settle within the wait budget, `apply()` returns `MicrosandboxError::ModificationIncomplete { operation_id, budget, committed }`; the change may still commit, and `committed` is `None` when unknown. Pass `operation_id` to [`resume_modification()`](#sb-resume_modification) to keep waiting.
+
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
@@ -2567,7 +2611,7 @@ Point-in-time resource metrics
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify only supports changing the value of an existing secret."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 modify()
@@ -2578,6 +2622,21 @@ Start planning a configuration change (works without starting; changes on a stop
 <p className="msb-label">Returns</p>
 
 [`SandboxModificationBuilder`](#sandboxmodificationbuilder)
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">resume_modification()</span>
+
+```rust
+async fn resume_modification(
+    &self,
+    operation_id: impl Into<String>,
+) -> MicrosandboxResult<SandboxModificationPlan>
+```
+
+Keep waiting for a modification that did not settle, using its `ModificationIncomplete` operation ID; see [`sb.resume_modification()`](#sb-resume_modification)
+
+<p className="msb-label">Returns</p>
+
+[`SandboxModificationPlan`](#sandboxmodificationplan)
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
 
@@ -3140,7 +3199,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 
 <p className="msb-backref">Used by <a href="#configplannedchange">ConfigPlannedChange.disposition</a> · <a href="#secretplannedchange">SecretPlannedChange.disposition</a></p>
 
-When or whether a planned change can take effect. Serializes as the quoted strings below.
+When or whether a planned change can take effect. Serializes as the quoted strings below; `as_str()` returns the same string. The enum is `#[non_exhaustive]`: backends may report dispositions added later, so matches need a wildcard arm.
 
 | Value | Description |
 |-------|-------------|
@@ -3148,6 +3207,8 @@ When or whether a planned change can take effect. Serializes as the quoted strin
 | `NextStart` (`"next start"`) | Persists to the desired config and applies the next time the sandbox starts |
 | `RequiresRestart` (`"requires restart"`) | Needs a restart before it can take effect; `apply()` refuses it unless the [`restart()`](#modification-restart) policy is selected |
 | `Unsupported` (`"unsupported"`) | Cannot be changed by `modify` |
+| `Unconfirmed` (`"unconfirmed"`) | Applied plans only (microsandbox cloud): saved but not confirmed on the running sandbox; takes effect by the next start at the latest |
+| `Unknown(String)` | A disposition added by a newer backend, kept as its raw string and serialized back unchanged |
 
 ### ResourceResizeStatus
 

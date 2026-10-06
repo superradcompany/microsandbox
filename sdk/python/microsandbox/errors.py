@@ -160,6 +160,29 @@ class SnapshotMigrationError(MicrosandboxError):
     code = "snapshot-migration"
 
 
+class ModificationIncompleteError(MicrosandboxError, TimeoutError):
+    """A sandbox modification did not settle within its wait budget and may still commit.
+
+    Pass ``operation_id`` to ``resume_modification()`` to keep waiting. ``budget``
+    is in seconds; ``committed`` is ``None`` when unknown.
+    """
+
+    code = "modification-incomplete"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        budget: float,
+        committed: bool | None,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.budget = budget
+        self.committed = committed
+
+
 @dataclass(frozen=True)
 class PublishedSnapshotArtifact:
     """A completed snapshot retained after source recovery failed."""

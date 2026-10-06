@@ -170,6 +170,23 @@ pub enum MicrosandboxError {
         timeout: std::time::Duration,
     },
 
+    /// A sandbox modification did not settle within its wait budget.
+    ///
+    /// The operation may still commit; pass `operation_id` to
+    /// `resume_modification` to keep waiting.
+    #[error(
+        "sandbox modification operation {operation_id:?} did not finish within {budget:?}; {}",
+        modification_commit_state(*.committed)
+    )]
+    ModificationIncomplete {
+        /// Server-assigned id of the modification operation.
+        operation_id: String,
+        /// Wait budget that elapsed.
+        budget: std::time::Duration,
+        /// The server's durable-commit state, when known.
+        committed: Option<bool>,
+    },
+
     /// The sandbox process exited before the agent relay became
     /// available. Carries the sandbox name and the structured
     /// `boot-error.json` record so the CLI can render a useful inline
@@ -662,6 +679,18 @@ impl MicrosandboxError {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+fn modification_commit_state(committed: Option<bool>) -> &'static str {
+    match committed {
+        Some(true) => "the change is durably committed and may still be converging",
+        Some(false) => "the change was not yet committed and may still commit",
+        None => "whether the change committed is unknown",
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
@@ -793,6 +822,28 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Sandbox::create is not supported by this backend: the ca_certs option is not accepted here"
+        );
+    }
+
+    #[test]
+    fn modification_incomplete_reports_the_operation_and_commit_state() {
+        let error = |committed| MicrosandboxError::ModificationIncomplete {
+            operation_id: "op-1".into(),
+            budget: std::time::Duration::from_secs(30),
+            committed,
+        };
+
+        assert_eq!(
+            error(Some(true)).to_string(),
+            "sandbox modification operation \"op-1\" did not finish within 30s; the change is durably committed and may still be converging"
+        );
+        assert_eq!(
+            error(Some(false)).to_string(),
+            "sandbox modification operation \"op-1\" did not finish within 30s; the change was not yet committed and may still commit"
+        );
+        assert_eq!(
+            error(None).to_string(),
+            "sandbox modification operation \"op-1\" did not finish within 30s; whether the change committed is unknown"
         );
     }
 
