@@ -177,6 +177,25 @@ impl LaunchContract {
 
     /// Encode a launch for the selected executable without discarding unsupported intent.
     pub(crate) fn encode(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
+        // Check capabilities before the machine fast path so the gate is applied
+        // uniformly. `header_fields` is true only for the current build, which is
+        // the only contract that can carry the field; every historical contract
+        // drops it and would substitute in every header.
+        #[cfg(feature = "net")]
+        if !self.header_fields()
+            && launch.network.as_ref().is_some_and(|network| {
+                network
+                    .config()
+                    .secrets
+                    .secrets
+                    .iter()
+                    .any(|secret| !secret.substitution.header_fields.is_empty())
+            })
+        {
+            // Historical contracts drop the nested allowlist and would substitute
+            // in every header, silently losing the requested confidentiality scope.
+            return unsupported("per-header secret substitution scope");
+        }
         #[cfg(feature = "net")]
         if let Some(network) = &launch.network {
             self.validate_network(network.config(), launch.deployment_profile)?;
@@ -337,6 +356,18 @@ impl LaunchContract {
         Ok(())
     }
 
+    /// Whether this launch contract supports per-header secret substitution
+    /// scopes (`SecretSubstitution.header_fields`).
+    ///
+    /// The allowlist was added to the machine-protocol launch input, and only
+    /// the exact current build selects that protocol: `from_version` rejects
+    /// every other runtime (including 0.7.0/0.7.1) before encoding, so no
+    /// released 0.7.x contract reaches here without support. If a future
+    /// compatibility range ever admits an older machine-protocol runtime, this
+    /// capability must key off the runtime version instead of `machine`.
+    pub fn header_fields(self) -> bool {
+        self.machine
+    }
     fn from_version(version: &Version) -> MicrosandboxResult<Self> {
         if version.major == 0 && version.minor == 6 && version.patch <= 18 && version.pre.is_empty()
         {
@@ -456,6 +487,14 @@ impl LaunchContract {
         }
         self.encode(&launch)?;
         Ok(())
+    }
+}
+
+impl LaunchContract {
+    /// Runtimes from v0.6.7 refuse a bind root that goes through a symlink unless
+    /// the mount sets `follow_root_symlinks`; earlier ones always follow it.
+    pub(crate) fn refuses_symlinked_bind_roots(&self) -> bool {
+        self.machine || self.patch >= 7
     }
 }
 
@@ -756,6 +795,16 @@ fn upgrade_required(feature: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinked_bind_roots_are_only_refused_from_the_enforcing_runtime() {
+        let contract = |patch, machine| LaunchContract { patch, machine };
+        assert!(!contract(0, false).refuses_symlinked_bind_roots());
+        assert!(!contract(6, false).refuses_symlinked_bind_roots());
+        assert!(contract(7, false).refuses_symlinked_bind_roots());
+        assert!(contract(18, false).refuses_symlinked_bind_roots());
+        assert!(contract(0, true).refuses_symlinked_bind_roots());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1482,6 +1531,72 @@ mod encoding {
                     assert!(network.get("tcp_accept_queue_size").is_none());
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn header_fields_require_current_launch_contract() {
+        let network: microsandbox_network::ResolvedNetworkConfig = serde_json::from_value(json!({
+            "config": {
+                "secrets": {
+                    "secrets": [{
+                        "env_var": "TOKEN",
+                        "value": "secret",
+                        "placeholder": "$KEY",
+                        "allowed_hosts": [{"exact": "api.example.com"}],
+                        "substitution": {"headers": true, "header_fields": ["authorization"]},
+                    }],
+                },
+            },
+            "outbound_proxy": null,
+        }))
+        .unwrap();
+        let launch = LaunchConfig {
+            network: Some(network),
+            ..Default::default()
+        };
+
+        // The current contract carries the allowlist as-is.
+        assert!(
+            LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .header_fields()
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+        }
+        .encode(&launch)
+        .unwrap();
+        assert_eq!(
+            current["network"]["config"]["secrets"]["secrets"][0]["substitution"]["header_fields"],
+            json!(["authorization"])
+        );
+
+        // Historical runtimes lack the nested allowlist and would fall back to
+        // substituting in every header; refuse instead of broadening the scope.
+        for patch in 0..=18 {
+            assert!(
+                !LaunchContract {
+                    patch,
+                    machine: false,
+                }
+                .header_fields()
+            );
+            let err = LaunchContract {
+                patch,
+                machine: false,
+            }
+            .encode(&launch)
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("per-header secret substitution scope"),
+                "{err}"
+            );
         }
     }
 

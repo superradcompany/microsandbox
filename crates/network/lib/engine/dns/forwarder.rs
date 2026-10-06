@@ -380,8 +380,13 @@ impl DnsForwarder {
         // to one of them.
         if let Some(family) = family_for_query_type(query_type) {
             if let Some((addrs, ttl)) = extract_addrs_and_ttl(&response_msg, family, &domain) {
-                self.shared
-                    .cache_resolved_hostname(&domain, family, addrs, ttl);
+                if !self
+                    .shared
+                    .cache_resolved_hostname(&domain, family, addrs, ttl)
+                {
+                    tracing::debug!(domain = %domain, "DNS binding capacity exceeded");
+                    return build_status_response(&query_msg, ResponseCode::ServFail);
+                }
             } else {
                 self.shared.clear_resolved_hostname(&domain, family);
             }
@@ -1227,6 +1232,216 @@ mod tests {
             resolve_via_gateway(&forwarder).await,
             Some(Ipv4Addr::new(203, 0, 113, 5))
         );
+    }
+
+    #[tokio::test]
+    async fn rotating_dns_replies_retain_addresses_for_the_shortest_relevant_ttl() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream = socket.local_addr().unwrap();
+        let first = [
+            Ipv4Addr::new(93, 184, 216, 1),
+            Ipv4Addr::new(93, 184, 216, 2),
+        ];
+        let second = [
+            Ipv4Addr::new(93, 184, 216, 3),
+            Ipv4Addr::new(93, 184, 216, 4),
+        ];
+        let server = tokio::spawn(async move {
+            let mut buf = [0; 4096];
+            // The first answer is limited by its CNAME TTL; the second by
+            // its shortest address TTL. Longer-lived records share that limit.
+            for (addresses, alias_ttl, address_ttls) in
+                [(first, 2, [30, 40]), (second, 30, [4, 40])]
+            {
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let query = Message::from_bytes(&buf[..len]).unwrap();
+                let mut response = make_response(&query);
+                let canonical = Name::from_ascii("cdn.example.net.").unwrap();
+                response.add_answer(Record::from_rdata(
+                    query.queries[0].name().clone(),
+                    alias_ttl,
+                    RData::CNAME(CNAME(canonical.clone())),
+                ));
+                for (address, ttl) in addresses.into_iter().zip(address_ttls) {
+                    response.add_answer(Record::from_rdata(
+                        canonical.clone(),
+                        ttl,
+                        RData::A(A::from(address)),
+                    ));
+                }
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        let forwarder = forwarder_over(&[upstream]).await;
+        for expected in [first[0], second[0]] {
+            assert_eq!(resolve_via_gateway(&forwarder).await, Some(expected));
+        }
+        server.await.unwrap();
+
+        let matches = |addr: Ipv4Addr| {
+            forwarder
+                .shared
+                .any_resolved_hostname(addr.into(), |host| host == "example.com")
+        };
+        for address in first.into_iter().chain(second) {
+            assert!(matches(address), "both DNS answers must remain usable");
+        }
+
+        // SharedState uses the real monotonic clock. Poll observable expiry;
+        // the timeout is only a hang watchdog, not proof of expiration.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while first.into_iter().any(&matches) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("CNAME TTL must expire both first-answer addresses");
+        // Do not require the later answer to still be live here: a delayed
+        // test task may resume after both deadlines. Independent per-binding
+        // expiry is covered with explicit timestamps in TtlReverseIndex tests.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while second.into_iter().any(&matches) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shortest address TTL must expire both second-answer addresses");
+    }
+
+    #[tokio::test]
+    async fn full_hostname_cache_rejects_dns_answers_without_losing_live_bindings() {
+        use crate::netstack::shared::{MAX_BINDINGS_PER_HOSTNAME, MAX_RESOLVED_HOSTNAME_BINDINGS};
+
+        for hostname_full in [true, false] {
+            let answer = Ipv4Addr::new(93, 184, 216, 34);
+            let (upstream, hits) = responding_udp(answer).await;
+            let forwarder = forwarder_over(&[upstream]).await;
+            let old: IpAddr = "93.184.216.35".parse().unwrap();
+            assert!(forwarder.shared.cache_resolved_hostname(
+                "example.com",
+                ResolvedHostnameFamily::Ipv4,
+                [old],
+                Duration::from_secs(60),
+            ));
+            let freed_domain = if hostname_full {
+                // Mixed case and a trailing dot must share the same quota, and
+                // AAAA bindings must count against the next A answer's allowance.
+                assert!(
+                    forwarder.shared.cache_resolved_hostname(
+                        "EXAMPLE.COM.",
+                        ResolvedHostnameFamily::Ipv6,
+                        (1..MAX_BINDINGS_PER_HOSTNAME)
+                            .map(|n| IpAddr::V6(std::net::Ipv6Addr::from(n as u128))),
+                        Duration::from_secs(60),
+                    )
+                );
+                "example.com"
+            } else {
+                // Spread bindings across hostnames to hit the sandbox limit
+                // without overflowing any individual hostname quota.
+                let mut remaining = MAX_RESOLVED_HOSTNAME_BINDINGS - 1;
+                let mut n = 0;
+                while remaining > 0 {
+                    let count = remaining.min(MAX_BINDINGS_PER_HOSTNAME);
+                    assert!(forwarder.shared.cache_resolved_hostname(
+                        &format!("fill-{n}.example"),
+                        ResolvedHostnameFamily::Ipv6,
+                        (1..=count).map(|ip| IpAddr::V6(std::net::Ipv6Addr::from(ip as u128))),
+                        Duration::from_secs(60),
+                    ));
+                    remaining -= count;
+                    n += 1;
+                }
+                "fill-0.example"
+            };
+            assert!(
+                forwarder.shared.cache_resolved_hostname(
+                    "example.com",
+                    ResolvedHostnameFamily::Ipv4,
+                    [old, old],
+                    Duration::from_secs(120),
+                ),
+                "duplicates and refreshes must fit at either limit"
+            );
+            let query = make_query("example.com.", RecordType::A);
+            let raw = query.to_bytes().unwrap();
+            let bytes = forwarder
+                .forward(
+                    &raw,
+                    Some("10.0.0.1".parse().unwrap()),
+                    Transport::Udp,
+                    None,
+                )
+                .await
+                .expect("capacity failure response");
+            let response = Message::from_bytes(&bytes).unwrap();
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "upstream supplied an answer"
+            );
+            assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+            assert_eq!(response.metadata.id, query.metadata.id);
+            assert!(response.answers.is_empty());
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(old, |h| h == "example.com")
+            );
+            assert!(
+                !forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |_| true)
+            );
+
+            // A full hostname quota must not block another hostname. A full
+            // sandbox still rejects new bindings, regardless of hostname.
+            let unrelated_query = make_query("unrelated.example.", RecordType::A)
+                .to_bytes()
+                .unwrap();
+            let unrelated_bytes = forwarder
+                .forward(
+                    &unrelated_query,
+                    Some("10.0.0.1".parse().unwrap()),
+                    Transport::Udp,
+                    None,
+                )
+                .await
+                .unwrap();
+            let unrelated = Message::from_bytes(&unrelated_bytes).unwrap();
+            assert_eq!(
+                unrelated.metadata.response_code,
+                if hostname_full {
+                    ResponseCode::NoError
+                } else {
+                    ResponseCode::ServFail
+                }
+            );
+            assert_eq!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |h| h == "unrelated.example"),
+                hostname_full
+            );
+
+            forwarder
+                .shared
+                .clear_resolved_hostname(freed_domain, ResolvedHostnameFamily::Ipv6);
+            assert_eq!(resolve_via_gateway(&forwarder).await, Some(answer));
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(old, |h| h == "example.com")
+            );
+            assert!(
+                forwarder
+                    .shared
+                    .any_resolved_hostname(answer.into(), |h| h == "example.com")
+            );
+        }
     }
 
     /// When every upstream is unusable the guest still gets a definite

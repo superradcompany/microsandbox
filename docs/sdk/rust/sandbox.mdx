@@ -652,6 +652,8 @@ Plan or apply a configuration change. Set what to change (CPUs, memory, env vars
 
 CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart. Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
 
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `.restart()` to apply now, or `.next_start()` to save for the next start. Omitted options keep their current settings.
+
 See [`SandboxModificationBuilder`](#sandboxmodificationbuilder) for all setters and [`msb modify`](/cli/sandbox-commands#msb-modify) for the CLI.
 
 <p className="msb-label">Returns</p>

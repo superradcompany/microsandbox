@@ -37,8 +37,10 @@
 
 mod creation_progress;
 mod jobs;
+mod exec_adapter;
 mod restore;
 mod setup;
+mod storage;
 mod volume_fs;
 
 use std::{
@@ -1026,6 +1028,8 @@ struct SecretOpts {
 struct SecretSubstitutionOpts {
     headers: Option<bool>,
     #[serde(default)]
+    header_fields: Vec<String>,
+    #[serde(default)]
     query: bool,
     #[serde(default)]
     body: bool,
@@ -1929,6 +1933,12 @@ fn apply_secret(
         if let Some(req) = require_tls {
             sb = sb.require_tls_identity(req);
         }
+        if !s.substitution.header_fields.is_empty() {
+            sb = sb.substitute_in_header_fields(s.substitution.header_fields.clone());
+        }
+        // Apply the explicit enabled/disabled switch after the header list:
+        // `substitute_in_header_fields` enables header substitution, so a
+        // caller that sets `headers=false` must win regardless of ordering.
         if let Some(headers) = s.substitution.headers {
             sb = sb.substitute_in_headers(headers);
         }
@@ -4751,15 +4761,7 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                 .await
                 .map_err(FfiError::from)?;
 
-            let stdout = output.stdout().unwrap_or_default();
-            let stderr = output.stderr().unwrap_or_default();
-            let exit_code = output.status().code;
-            Ok(serde_json::json!({
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -4804,12 +4806,7 @@ pub unsafe extern "C" fn msb_sandbox_exec_default(
                 .await
                 .map_err(FfiError::from)?;
 
-            Ok(serde_json::json!({
-                "stdout": output.stdout().unwrap_or_default(),
-                "stderr": output.stderr().unwrap_or_default(),
-                "exit_code": output.status().code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -6332,6 +6329,7 @@ pub unsafe extern "C" fn msb_image_prune(
                 "layers_removed": report.layers_removed,
                 "fsmeta_removed": report.fsmeta_removed,
                 "vmdk_removed": report.vmdk_removed,
+                "skipped_in_use": report.skipped_in_use,
                 "bytes_reclaimed": report.bytes_reclaimed,
             })
             .to_string())
@@ -7802,6 +7800,34 @@ mod tests {
         };
         let config = builder.build().await.unwrap();
         assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
+    }
+
+    #[tokio::test]
+    async fn explicit_header_disable_wins_over_header_fields() {
+        // `substitute_in_header_fields` enables header substitution, so the
+        // adapter must apply the explicit `headers` switch last. Otherwise a
+        // caller that sets `headers=false` would silently re-enable it.
+        let secret: super::SecretOpts = serde_json::from_value(serde_json::json!({
+            "env_var": "TOKEN",
+            "value": "synthetic",
+            "allow": ["example.com"],
+            "substitution": {"headers": false, "header_fields": ["authorization"], "query": true},
+        }))
+        .unwrap();
+        let builder = microsandbox::Sandbox::builder("secret-headers").image("alpine");
+        let Ok(builder) = super::apply_secret(builder, &secret) else {
+            panic!("apply_secret rejected valid options");
+        };
+        // The explicit disable must win, so the now-inert allowlist is rejected
+        // by validation. If the adapter re-enabled header substitution by
+        // applying the list last, the config would build successfully instead.
+        let error = builder.build().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("header field substitutions require header substitution"),
+            "{error}"
+        );
     }
 
     use super::*;

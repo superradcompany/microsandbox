@@ -17,6 +17,7 @@ pub fn to_previous_version(raw: &str) -> Result<Option<String>, &'static str> {
     else {
         return Ok(None);
     };
+    crate::compat::secrets::reject_scoped_header_fields(policy)?;
     let mut fields = policy.as_object().ok_or("invalid secrets object")?.clone();
     // Recognize both persisted spellings without changing the source record.
     types_compat::v0_5_0::local::secrets::to_current(&mut fields)?;

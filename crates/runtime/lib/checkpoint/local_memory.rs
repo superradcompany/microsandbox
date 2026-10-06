@@ -46,6 +46,8 @@ pub struct LocalMemoryReservation {
     _backend: File,
     #[cfg(target_os = "linux")]
     _ram: Option<File>,
+    // Fields drop in declaration order: eviction must run after reservation ownership ends.
+    _reclaim: ReclaimLocalMemory,
 }
 
 /// Independent ownership of local RAM and, when applicable, its cross-process accounting lease.
@@ -54,6 +56,15 @@ pub struct LocalMemoryPin {
     pub(crate) memory: LocalMemory,
     pub(crate) _file: File,
     _lease: Option<File>,
+    // Never explicitly unlock `_file`: the VMM may own a duplicate of that open description.
+    // Closing this handle first leaves those duplicates pinned while reclamation rechecks them.
+    _reclaim: ReclaimLocalMemory,
+}
+
+/// Best-effort named-backing cleanup after the preceding ownership fields have closed.
+#[derive(Debug)]
+struct ReclaimLocalMemory {
+    path: Option<PathBuf>,
 }
 
 #[cfg(feature = "runner")]
@@ -101,6 +112,9 @@ impl LocalMemory {
             _backend: file,
             #[cfg(target_os = "linux")]
             _ram: super::local_memory_budget::handoff(root, id, cache.page_size).ok(),
+            _reclaim: ReclaimLocalMemory {
+                path: Some(path.with_extension("ram")),
+            },
         })
     }
 
@@ -111,13 +125,7 @@ impl LocalMemory {
             // The next allocation reclaims the tiny unlocked accounting record.
             return Ok(false);
         }
-        let handoff = microsandbox_utils::process_lock::open_lock_file(
-            &self.path.with_extension("handoff-lock"),
-        )?;
-        if !microsandbox_utils::process_lock::try_lock_exclusive(&handoff)? {
-            return Ok(false);
-        }
-        super::memory_cache::evict_unpinned(&self.path)
+        evict_local_memory(&self.path)
     }
 
     /// Acquire independent backing ownership before launching or mapping a child.
@@ -173,6 +181,7 @@ impl LocalMemory {
                     memory: self.clone(),
                     _file: file,
                     _lease: Some(pin),
+                    _reclaim: ReclaimLocalMemory { path: None },
                 });
             }
             #[cfg(not(target_os = "linux"))]
@@ -187,6 +196,9 @@ impl LocalMemory {
             memory: self.clone(),
             _file: self.pin()?,
             _lease: None,
+            _reclaim: ReclaimLocalMemory {
+                path: Some(self.path.clone()),
+            },
         })
     }
 }
@@ -546,6 +558,7 @@ impl LocalMemoryCapture {
                 },
                 _file: file,
                 _lease: Some(pin),
+                _reclaim: ReclaimLocalMemory { path: None },
             });
         }
         #[cfg(unix)]
@@ -571,10 +584,14 @@ impl LocalMemoryCapture {
         let file = open_pinned(&self.staging.path().join("memory"), self.length)?
             .ok_or_else(|| io::Error::other("capture staging disappeared"))?;
         std::fs::hard_link(self.staging.path().join("memory"), &memory.path)?;
+        let reclaim = ReclaimLocalMemory {
+            path: Some(memory.path.clone()),
+        };
         Ok(LocalMemoryPin {
             memory,
             _file: file,
             _lease: None,
+            _reclaim: reclaim,
         })
     }
 }
@@ -582,6 +599,18 @@ impl LocalMemoryCapture {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Drop for ReclaimLocalMemory {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path
+            && let Err(error) = evict_local_memory(path)
+        {
+            // Reclamation must never turn successful capture/stop into a lifecycle failure.
+            // A later bounded sweep retries leftovers, including abrupt process exits.
+            tracing::debug!(%error, path = %path.display(), "deferred local memory cleanup");
+        }
+    }
+}
 
 #[cfg(feature = "runner")]
 impl MemoryCaptureSink for LocalMemoryCapture {
@@ -609,6 +638,26 @@ impl MemoryCaptureSink for LocalMemoryCapture {
         }
         Ok(())
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Recheck pending handoff ownership before the shared backing-file eviction checks.
+pub(super) fn evict_local_memory(path: &Path) -> io::Result<bool> {
+    // Direct captures can have ownership handles without an SDK handoff reservation.
+    // Read-only scans never create missing lock files; this explicit owner may do so.
+    drop(microsandbox_utils::process_lock::open_lock_file(
+        &path.with_extension("handoff-lock"),
+    )?);
+    super::cache_storage::reclaim_branch_file(
+        path,
+        true,
+        std::time::Duration::ZERO,
+        std::time::SystemTime::now(),
+    )
+    .map(|entry| entry.state == super::MemoryCacheState::Removed)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -718,6 +767,101 @@ mod tests {
         drop(child);
         assert!(memory.evict().unwrap());
         assert!(memory.pin().is_err());
+    }
+
+    #[test]
+    fn last_independent_owner_reclaims_backing_but_keeps_the_stable_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = MemoryCache::open(dir.path()).unwrap().page_size;
+        let mut capture = LocalMemoryCapture::new(dir.path(), "owners", None).unwrap();
+        capture.write_zero(range(0, page)).unwrap();
+        let source = capture.finish(1, 1).unwrap();
+        let memory = source.memory().clone();
+        let child = memory.pin_backing(None).unwrap();
+
+        drop(source);
+        assert!(memory.path.exists(), "the child still owns this generation");
+        drop(child);
+        assert!(!memory.path.exists());
+        assert!(memory.path.with_extension("handoff-lock").exists());
+    }
+
+    #[test]
+    fn pin_release_does_not_unlock_a_descriptor_retained_by_the_vm() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = MemoryCache::open(dir.path()).unwrap().page_size;
+        let mut capture = LocalMemoryCapture::new(dir.path(), "mapped", None).unwrap();
+        capture.write_zero(range(0, page)).unwrap();
+        let source = capture.finish(1, 1).unwrap();
+        let memory = source.memory().clone();
+        let mapping_owner = source.file().try_clone().unwrap();
+
+        drop(source);
+        assert!(memory.path.exists());
+        assert!(!memory.evict().unwrap());
+        drop(mapping_owner);
+        // Raw File owners retain the established public contract; the next sweep handles exit.
+        assert!(memory.evict().unwrap());
+    }
+
+    #[test]
+    fn cancelled_handoff_reclaims_after_both_source_and_reservation_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = MemoryCache::open(dir.path()).unwrap().page_size;
+        let reservation = LocalMemory::reserve(dir.path(), "cancelled").unwrap();
+        let mut capture = LocalMemoryCapture::new(dir.path(), "cancelled", None).unwrap();
+        capture.write_zero(range(0, page)).unwrap();
+        let source = capture.finish(1, 1).unwrap();
+        let memory = source.memory().clone();
+
+        drop(source);
+        assert!(
+            memory.path.exists(),
+            "the unreceived handoff remains reserved"
+        );
+        drop(reservation);
+        assert!(!memory.path.exists());
+        assert!(memory.path.with_extension("handoff-lock").exists());
+    }
+
+    #[test]
+    fn cancelled_disk_capture_keeps_its_published_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = MemoryCache::open(dir.path()).unwrap().page_size;
+        let reservation = LocalMemory::reserve(dir.path(), "still-capturing").unwrap();
+        let mut capture = LocalMemoryCapture::new(dir.path(), "still-capturing", None).unwrap();
+        drop(reservation);
+        capture
+            .write_bytes(range(0, page), &vec![9; page as usize])
+            .unwrap();
+        let source = capture.finish(1, 1).unwrap();
+        let memory = source.memory().clone();
+        assert!(!memory.evict().unwrap());
+        assert_eq!(std::fs::read(&memory.path).unwrap(), vec![9; page as usize]);
+        drop(source);
+        assert!(!memory.path.exists());
+    }
+
+    #[test]
+    fn releasing_replaced_baseline_preserves_the_next_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = MemoryCache::open(dir.path()).unwrap().page_size;
+        let mut full = LocalMemoryCapture::new(dir.path(), "old-baseline", None).unwrap();
+        full.write_bytes(range(0, page), &vec![7; page as usize])
+            .unwrap();
+        let baseline = full.finish(1, 1).unwrap();
+        let old = baseline.memory().path.clone();
+        let mut delta =
+            LocalMemoryCapture::new(dir.path(), "next-baseline", Some(&baseline)).unwrap();
+        delta.write_zero(range(0, page)).unwrap();
+        let next = delta.finish(2, 1).unwrap();
+
+        drop(baseline);
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read(&next.memory().path).unwrap(),
+            vec![0; page as usize]
+        );
     }
 
     #[test]

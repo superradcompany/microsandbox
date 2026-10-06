@@ -133,7 +133,11 @@ fn format_snapshot(
         name = s.name,
         id = s.sandbox_id,
         cpu = f64::from(m.cpu_percent) / 100.0,
-        mem = format_bytes(m.memory_bytes),
+        mem = if m.memory_bytes_reported {
+            format_bytes(m.memory_bytes)
+        } else {
+            "N/A".to_string()
+        },
         mem_lim = format_bytes(m.memory_limit_bytes),
         dr = format_bytes(m.disk_read_bytes),
         dw = format_bytes(m.disk_write_bytes),
@@ -177,6 +181,7 @@ mod tests {
                 cpu_percent: 12.5,
                 vcpu_time_ns: 1,
                 memory_bytes: 14 * 1024 * 1024,
+                memory_bytes_reported: true,
                 memory_available_bytes: Some(13 * 1024 * 1024),
                 memory_host_resident_bytes: Some(12 * 1024 * 1024),
                 memory_limit_bytes: 512 * 1024 * 1024,
@@ -208,12 +213,18 @@ mod tests {
 
     #[tokio::test]
     async fn writes_one_line_per_snapshot() {
+        let mut missing = snapshot("devenv", 38);
+        missing.metrics.memory_bytes = 0;
+        missing.metrics.memory_bytes_reported = false;
+        let mut zero = snapshot("idle", 39);
+        zero.metrics.memory_bytes = 0;
+
         let sink = CapturedSink::default();
         let exporter = StdoutExporter::with_writer(sink.clone());
         let batch = Arc::new(MetricsExportBatch {
             collections: vec![MetricsCollection {
                 collected_at: chrono::Utc.with_ymd_and_hms(2026, 5, 30, 1, 2, 3).unwrap(),
-                sandboxes: vec![snapshot("devbox", 33), snapshot("devenv", 38)],
+                sandboxes: vec![snapshot("devbox", 33), missing, zero],
                 labels: std::collections::HashMap::new(),
             }],
             dropped_collection_count: 0,
@@ -223,12 +234,14 @@ mod tests {
         let buf = sink.0.lock().unwrap().clone();
         let out = String::from_utf8(buf).expect("utf8");
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2, "two snapshots → two lines, got: {out}");
+        assert_eq!(lines.len(), 3, "three snapshots → three lines, got: {out}");
         assert!(lines[0].contains("sandbox=devbox"));
         assert!(lines[0].contains("id=33"));
         assert!(lines[0].contains("cpu=0.125000"));
         assert!(lines[0].contains("mem=14.0 MiB / 512.0 MiB"));
         assert!(lines[1].contains("sandbox=devenv"));
+        assert!(lines[1].contains("mem=N/A / 512.0 MiB"));
+        assert!(lines[2].contains("mem=0 B / 512.0 MiB"));
     }
 
     #[tokio::test]

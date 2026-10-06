@@ -647,7 +647,9 @@ Plan or apply a configuration change. The returned plan uses [`ModificationDispo
 
 `cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
+Secrets are keyed by name. Each `SecretModifySpec` can set one source (`env`, `value`, or `store`) and optional settings listed below. Omitted fields stay unchanged. Plans never include secret values. Use `secrets_rm` to remove secrets.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy=ModificationPolicy.RESTART` to apply now, or `policy=ModificationPolicy.NEXT_START` to save for the next start. Omitted options keep their current settings.
 
 The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed dictionary:
 
@@ -1844,8 +1846,8 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
 | replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | - | Maximum sandbox lifetime in seconds |
-| idle_timeout | `float` | - | Idle timeout in seconds |
+| max_duration | `float` | - | Maximum sandbox lifetime in seconds; finite and non-negative, rounded up to whole seconds |
+| idle_timeout | `float` | - | Idle timeout in seconds; finite and non-negative, rounded up to whole seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
 | labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
@@ -2020,7 +2022,7 @@ Controls how sandbox modifications that cannot apply live are handled.
 
 <p className="msb-backref">Used by <a href="#sb-modify">modify(secrets=...)</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the supplied policy or placeholder fields.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -2029,6 +2031,11 @@ Desired state for one secret. `env`, `value`, and `store` are mutually exclusive
 | `store` | `str` | Reserved for a host-side secret store reference; currently unsupported |
 | `placeholder` | `str` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
 | `allowed_hosts` | `list[str]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+| `substitution` | [`SecretSubstitution`](/sdk/python/secrets#secretsubstitution) | Desired substitution locations. Omission preserves the existing policy; new secrets default to headers only |
+| `violation_action` | [`ViolationAction`](/sdk/python/secrets#violationaction) | Per-secret blocking action. Omission preserves the existing override |
+| `require_tls_identity` | `bool` | Whether substitution requires verified TLS identity. Omission preserves the existing setting; new secrets default to `True`. Explicit `False` disables this requirement |
+| `allow_placeholder_for` | `Sequence[str]` | Hosts permitted to receive unchanged placeholders. A nonempty sequence replaces existing passthrough hosts; an empty sequence leaves them unchanged |
+| `passthrough` | `Sequence[str]` | Deprecated alias for `allow_placeholder_for`. Nonempty values emit `DeprecationWarning`; when both keys are supplied, their sequences are combined |
 
 ### SandboxModificationPlan
 

@@ -78,6 +78,17 @@ pub(crate) fn init_entry(entry_timeout: Duration, attr_timeout: Duration) -> Ent
 ///
 /// This file is stored in `PassthroughFs` and used by `read_init` via `write_from`.
 pub(crate) fn create_init_file() -> io::Result<File> {
+    create_init_file_with(agentd_bytes())
+}
+
+/// Create an empty init file for mounts that do not inject the init binary
+/// (`inject_init = false`). Nothing reads it, so it does not require the Agentd
+/// payload to be available.
+pub(crate) fn create_empty_init_file() -> io::Result<File> {
+    create_init_file_with(&[])
+}
+
+fn create_init_file_with(data: &[u8]) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::FromRawFd;
@@ -87,16 +98,18 @@ pub(crate) fn create_init_file() -> io::Result<File> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let data = agentd_bytes();
-        let written = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
-        if written < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(err);
-        }
-        if (written as usize) != data.len() {
-            unsafe { libc::close(fd) };
-            return Err(super::platform::eio());
+        if !data.is_empty() {
+            let written =
+                unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+            if written < 0 {
+                let err = io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(err);
+            }
+            if (written as usize) != data.len() {
+                unsafe { libc::close(fd) };
+                return Err(super::platform::eio());
+            }
         }
         Ok(unsafe { File::from_raw_fd(fd) })
     }
@@ -105,7 +118,7 @@ pub(crate) fn create_init_file() -> io::Result<File> {
     {
         use std::io::Write;
         let mut file = tempfile::tempfile()?;
-        file.write_all(agentd_bytes())?;
+        file.write_all(data)?;
         Ok(file)
     }
 }

@@ -78,6 +78,7 @@ pub fn to_previous_version(raw: &str, version: &Version) -> Result<Option<String
     match (version.major, version.minor, version.patch) {
         (0, 6, patch) => to_v0_6(raw, patch),
         (0, 7, 0..=2) => compat::v0_7_0::secrets::to_previous_version(raw),
+        (0, 7, 3..=6) => compat::v0_7_3::secrets::to_previous_version(raw),
         _ => Ok(None),
     }
 }
@@ -87,7 +88,7 @@ pub fn to_previous_version(raw: &str, version: &Version) -> Result<Option<String
 pub fn requires_downgrade(version: &Version) -> bool {
     matches!(
         (version.major, version.minor, version.patch),
-        (0, 6, _) | (0, 7, 0..=2)
+        (0, 6, _) | (0, 7, 0..=6)
     )
 }
 
@@ -189,15 +190,85 @@ mod tests {
     }
 
     #[test]
+    fn header_field_scope_is_rejected_for_targets_that_cannot_preserve_it() {
+        let targets = (0..=18)
+            .map(|patch| Version::new(0, 6, patch))
+            .chain((0..=6).map(|patch| Version::new(0, 7, patch)));
+        let mut failures = Vec::new();
+
+        for target in targets {
+            for entries_key in ["secrets", "entries"] {
+                for scopes_key in ["substitution", "injection"] {
+                    for headers in [None, Some(true), Some(false)] {
+                        for fields in [
+                            None,
+                            Some(serde_json::json!([])),
+                            Some(serde_json::json!(["authorization", "x-api-key"])),
+                        ] {
+                            let mut scopes = if scopes_key == "injection" {
+                                serde_json::json!({"basic_auth": false, "query_params": true, "body": false})
+                            } else {
+                                serde_json::json!({"query": true, "body": false})
+                            };
+                            if let Some(headers) = headers {
+                                scopes["headers"] = headers.into();
+                            }
+                            if let Some(fields) = &fields {
+                                scopes["header_fields"] = fields.clone();
+                            }
+
+                            let raw = serde_json::json!({"network":{"secrets":{entries_key:[{
+                                "env_var":"TOKEN", "value":"synthetic", "placeholder":"$TOKEN",
+                                "allowed_hosts":[{"exact":"allowed.example"}], scopes_key: scopes
+                            }]}}})
+                            .to_string();
+
+                            let restricted = headers != Some(false)
+                                && fields
+                                    .as_ref()
+                                    .is_some_and(|fields| !fields.as_array().unwrap().is_empty());
+
+                            let result = to_previous_version(&raw, &target);
+                            let case = format!(
+                                "{target} {entries_key}/{scopes_key} headers={headers:?} fields={fields:?}"
+                            );
+
+                            if restricted {
+                                match result {
+                                    Err(error) => {
+                                        assert!(error.contains("header-field"), "{case}: {error}");
+                                        assert!(!error.contains("synthetic"), "{case}: {error}");
+                                    }
+                                    Ok(_) => {
+                                        failures.push(format!("{case}: unsafe downgrade accepted"))
+                                    }
+                                }
+                            } else if let Err(error) = result {
+                                failures.push(format!("{case}: safe downgrade rejected: {error}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
     fn downgrade_target_gates_include_released_v0_7_only() {
-        for version in ["0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2"] {
+        for version in [
+            "0.6.0", "0.6.18", "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+        ] {
             assert!(requires_downgrade(&Version::parse(version).unwrap()));
         }
-        for version in ["0.7.0", "0.7.1", "0.7.2"] {
+        for version in [
+            "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+        ] {
             assert!(!requires_rewrite(&Version::parse(version).unwrap()));
         }
         assert!(requires_rewrite(&Version::parse("0.6.18").unwrap()));
-        for version in ["0.5.0", "0.7.3", "0.8.0", "1.6.0"] {
+        for version in ["0.5.0", "0.7.7", "0.8.0", "1.6.0"] {
             assert!(!requires_downgrade(&Version::parse(version).unwrap()));
         }
     }
@@ -239,27 +310,40 @@ mod tests {
 
     #[test]
     fn released_v0_7_checks_global_defaults_without_mutating_supported_configs() {
-        for patch in 0..=2 {
+        for patch in 0..=6 {
             let target = Version::new(0, 7, patch);
             let raw = current();
             assert!(to_previous_version(&raw, &target).unwrap().is_none());
             for hosts in [serde_json::json!([]), serde_json::json!(["any"])] {
                 let mut value: Value = serde_json::from_str(&raw).unwrap();
                 value["network"]["secrets"]["passthrough_hosts"] = hosts;
-                let error = to_previous_version(&value.to_string(), &target).unwrap_err();
-                assert!(error.contains("cannot preserve global secret passthrough defaults"));
-                assert!(!error.contains("synthetic"));
+
+                let result = to_previous_version(&value.to_string(), &target);
+                if patch <= 2 {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("cannot preserve global secret passthrough defaults"));
+                    assert!(!error.contains("synthetic"));
+                } else {
+                    assert!(result.unwrap().is_none());
+                }
             }
             let previous = include_str!(
                 "../../../../sdk/rust/lib/db/fixtures/config-0.6.18-global-passthrough-with-entries.json"
             );
-            assert!(to_previous_version(previous, &target).is_err());
+            if patch <= 2 {
+                assert!(to_previous_version(previous, &target).is_err());
+            } else {
+                assert!(to_previous_version(previous, &target).unwrap().is_none());
+            }
         }
     }
 
     #[test]
     fn conversion_preserves_unrelated_fields_and_explicit_scopes() {
-        let raw = current();
+        let mut input: Value = serde_json::from_str(&current()).unwrap();
+        input["network"]["secrets"]["secrets"][0]["substitution"]["header_fields"] =
+            serde_json::json!([]);
+        let raw = input.to_string();
         let encoded = to_previous_version(&raw, &Version::new(0, 6, 18))
             .unwrap()
             .unwrap();
@@ -274,6 +358,15 @@ mod tests {
             to_previous_version(&encoded, &Version::new(0, 6, 18))
                 .unwrap()
                 .is_none()
+        );
+
+        // Normalizing a known empty list must not discard unknown policy fields.
+        input["network"]["secrets"]["secrets"][0]["substitution"]["future_scope"] =
+            serde_json::json!([]);
+        assert!(
+            to_previous_version(&input.to_string(), &Version::new(0, 6, 18))
+                .unwrap_err()
+                .contains("unsupported by the downgrade codec")
         );
     }
 
@@ -314,9 +407,12 @@ mod tests {
                     .contains("cannot preserve")
             );
         }
-        let version = Version::new(0, 7, 3);
-        assert!(!requires_downgrade(&version));
-        assert!(to_previous_version(raw, &version).unwrap().is_none());
+        for patch in 3..=6 {
+            let version = Version::new(0, 7, patch);
+            assert!(requires_downgrade(&version));
+            assert!(!requires_rewrite(&version));
+            assert!(to_previous_version(raw, &version).unwrap().is_none());
+        }
         assert!(to_previous_version(raw, &Version::parse("0.6.18-preview").unwrap()).is_err());
     }
 }

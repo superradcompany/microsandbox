@@ -94,6 +94,7 @@ pub(super) async fn load(
                 .is_none_or(|inventory| sources.require(inventory).is_ok())
         })
     };
+    let mut dependency_leases = Vec::new();
     let external = if has_dependencies && !complete(&sources) {
         for directory in &existing {
             if complete(&sources) {
@@ -103,8 +104,11 @@ pub(super) async fn load(
             // available elsewhere. A missing required identity is still reported below, and any
             // chosen payload is verified after copying into this operation's owned staging.
             let inspected = async {
+                let lease = super::super::lease::reader_async(directory.clone()).await?;
                 let manifest = read_manifest(directory).await?;
-                sources.add(&manifest, directory, None).await
+                sources.add(&manifest, directory, None).await?;
+                dependency_leases.push(lease);
+                Ok::<_, MicrosandboxError>(())
             }
             .await;
             if let Err(error) = inspected {
@@ -207,17 +211,20 @@ pub(super) async fn load(
     let publication = tempfile::Builder::new()
         .prefix(".msb-snapshot-batch-")
         .tempdir_in(&snapshots_dir)?;
+    let mut image_operations = Vec::new();
     for ((item, snapshots), candidate) in staged.iter().zip(&imported).zip(&candidates) {
         let head = snapshots
             .iter()
             .find(|snapshot| snapshot.id() == candidate)
             .expect("validated archive head");
-        Box::pin(install_staged_cache(
-            item.cache.path(),
-            &cache_dir,
-            head.manifest(),
-        ))
-        .await?;
+        image_operations.push(
+            Box::pin(install_staged_cache(
+                item.cache.path(),
+                &cache_dir,
+                head.manifest(),
+            ))
+            .await?,
+        );
     }
     // Resolve all cross-archive reads before moving any source directory. Same-ID/same-descriptor
     // duplicates were independently validated above and are published only once.
@@ -230,14 +237,47 @@ pub(super) async fn load(
         }
     }
     let group_dir = super::super::group::ensure(&snapshots_dir, opts.group.as_deref()).await?;
-    let update = super::super::group::publish_batch(
-        &group_dir,
-        publication.path(),
-        &aliases,
-        &candidates,
-        opts.set_head,
-    )
-    .await?;
+    let mut publication_leases = Vec::new();
+    for id in identities.keys() {
+        publication_leases.push(
+            microsandbox_image::storage_lease::StorageLease::shared_async(
+                group_dir.join(id.as_str()),
+            )
+            .await?,
+        );
+    }
+    let db = local.db().await?.write().clone();
+    let destination = group_dir.clone();
+    let publish_candidates = candidates.clone();
+    let set_head = opts.set_head;
+    let update = tokio::spawn(async move {
+        // Cancellation must not drop staging, image pins, or namespace pins while the
+        // blocking group publisher is still moving members into their final names.
+        let _protection = (image_operations, publication_leases);
+        for snapshot in imported.iter().flatten() {
+            let path = destination.join(snapshot.id().as_str());
+            super::super::publication::prepare(&db, &path, snapshot.digest(), snapshot.manifest())
+                .await?;
+        }
+        let update = super::super::group::publish_batch(
+            &destination,
+            publication.path(),
+            &aliases,
+            &publish_candidates,
+            set_head,
+        )
+        .await?;
+        for snapshot in imported.iter().flatten() {
+            let path = destination.join(snapshot.id().as_str());
+            super::super::publication::complete(&db, &path, snapshot.digest(), snapshot.manifest())
+                .await?;
+        }
+        Ok::<_, MicrosandboxError>(update)
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("snapshot import publication: {error}"))
+    })??;
     let group = group_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -248,7 +288,6 @@ pub(super) async fn load(
         let snapshot = store::open_snapshot(local, path.to_string_lossy().as_ref()).await?;
         handles.push(handle(&snapshot, group, update.clone())?);
     }
-    let _ = store::reindex_dir(local, &group_dir).await;
     tracing::info!(
         target: "microsandbox_checkpoint_timing",
         operation = "snapshot_load_batch",

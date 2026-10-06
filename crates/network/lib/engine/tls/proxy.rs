@@ -730,8 +730,17 @@ async fn flush_to_guest(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio_rustls::TlsAcceptor;
+
     use super::*;
+    use crate::secrets::config::{HostPattern, SecretEntry, SecretSubstitution};
     use crate::secrets::{config::SecretsConfig, handle::SecretsHandle};
+    use microsandbox_types::TlsConfig;
 
     async fn tls_denial_response(chunks: &[&[u8]], close_input: bool, enabled: bool) -> Vec<u8> {
         let state = TlsState::new(
@@ -869,5 +878,211 @@ mod tests {
                 .await
                 .is_empty()
         );
+    }
+
+    async fn accept_with_deadline(listener: TcpListener) -> io::Result<TcpStream> {
+        tokio::time::timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "fixture accept timed out"))?
+            .map(|(stream, _)| stream)
+    }
+
+    fn test_tls_state(secrets: SecretsConfig) -> Arc<TlsState> {
+        Arc::new(
+            TlsState::new(
+                TlsConfig {
+                    verify_upstream: false,
+                    ..Default::default()
+                },
+                SecretsHandle::new(secrets),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn host_bound_secret_config() -> SecretsConfig {
+        SecretsConfig {
+            secrets: vec![SecretEntry {
+                env_var: "API_KEY".into(),
+                value: zeroize::Zeroizing::new("real-secret-value".into()),
+                source: None,
+                placeholder: "$MSB_KEY".into(),
+                allowed_hosts: vec![HostPattern::Exact("example.com".into())],
+                substitution: SecretSubstitution {
+                    headers: true,
+                    query: false,
+                    body: false,
+                },
+                passthrough_hosts: Vec::new(),
+                violation_action: None,
+                require_tls_identity: true,
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn guest_client(tls_state: &TlsState) -> rustls::ClientConnection {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(tls_state.intercept_ca.cert_der.clone()).unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        rustls::ClientConnection::new(
+            Arc::new(config),
+            ServerName::try_from("example.com".to_owned()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn upstream_server_config() -> Arc<rustls::ServerConfig> {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let params = rcgen::CertificateParams::new(vec!["example.com".to_owned()]).unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let chain = vec![CertificateDer::from(cert.der().to_vec())];
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+        Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, key)
+                .unwrap(),
+        )
+    }
+
+    async fn send_client_tls_output(
+        client: &mut rustls::ClientConnection,
+        to_relay: &mpsc::Sender<Bytes>,
+    ) {
+        while client.wants_write() {
+            let mut encrypted = Vec::new();
+            client.write_tls(&mut encrypted).unwrap();
+            to_relay.send(Bytes::from(encrypted)).await.unwrap();
+        }
+    }
+
+    async fn complete_relay_handshake(
+        client: &mut rustls::ClientConnection,
+        to_relay: &mpsc::Sender<Bytes>,
+        from_relay: &mut mpsc::Receiver<Bytes>,
+    ) {
+        for _ in 0..8 {
+            if !client.is_handshaking() {
+                return;
+            }
+            let encrypted =
+                tokio::time::timeout(std::time::Duration::from_secs(1), from_relay.recv())
+                    .await
+                    .expect("guest handshake record timed out")
+                    .expect("relay closed during guest handshake");
+            let mut input = encrypted.as_ref();
+            client.read_tls(&mut input).unwrap();
+            client.process_new_packets().unwrap();
+            send_client_tls_output(client, to_relay).await;
+        }
+        assert!(
+            !client.is_handshaking(),
+            "guest TLS handshake did not finish"
+        );
+    }
+
+    async fn spawn_upstream_request_sink() -> (
+        SocketAddr,
+        oneshot::Receiver<Vec<u8>>,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let stream = accept_with_deadline(listener).await?;
+            let mut stream = TlsAcceptor::from(upstream_server_config())
+                .accept(stream)
+                .await?;
+            let mut buf = [0; RELAY_BUF_SIZE];
+            let request = match stream.read(&mut buf).await {
+                Ok(read) => buf[..read].to_vec(),
+                // Fail-closed relay outcomes drop the upstream connection without
+                // reading queued-but-unsent bytes (e.g. TLS 1.3 session tickets the
+                // server sends unsolicited right after the handshake). Depending on
+                // scheduling, the kernel may report that abrupt drop as a reset
+                // rather than a clean EOF; both mean "no request bytes arrived".
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            };
+            let _ = request_tx.send(request);
+            match stream.shutdown().await {
+                Ok(()) => Ok(()),
+                // Fail-closed relay outcomes may drop the upstream socket before
+                // the fixture can send its TLS close notification.
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                Err(error) => Err(error),
+            }
+        });
+        (address, request_rx, server)
+    }
+
+    #[tokio::test]
+    async fn intercept_relay_rejects_a_truncated_h2_header_block_without_forwarding() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // A non-empty secret makes the relay install the HTTP/2 secret handler;
+        // a truncated HPACK representation must then fail the connection closed
+        // instead of reaching httlib-hpack's out-of-bounds indexing.
+        let tls_state = test_tls_state(host_bound_secret_config());
+        let (upstream, upstream_request, server) = spawn_upstream_request_sink().await;
+        let guest_destination: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        let (from_tx, from_rx) = mpsc::channel(4);
+        let (to_tx, mut to_rx) = mpsc::channel(4);
+        let mut client = guest_client(&tls_state);
+        send_client_tls_output(&mut client, &from_tx).await;
+        let relay = tokio::spawn(intercept_relay(
+            guest_destination,
+            UpstreamTcpTarget::direct(upstream),
+            "example.com",
+            true,
+            Vec::new(),
+            from_rx,
+            to_tx,
+            Arc::new(SharedState::new(4)),
+            tls_state,
+            Arc::new(ProxyConnectState::new()),
+            None,
+            None,
+        ));
+
+        complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+        // h2 preface + empty SETTINGS + HEADERS(stream 1, END_HEADERS|END_STREAM)
+        // whose entire header block is the truncated representation `ff`.
+        let mut payload = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0, 0, 0, 0x04, 0x00, 0, 0, 0, 0]);
+        payload.extend_from_slice(&[0, 0, 1, 0x01, 0x05, 0, 0, 0, 1, 0xff]);
+        client.writer().write_all(&payload).unwrap();
+        send_client_tls_output(&mut client, &from_tx).await;
+
+        // The relay must fail closed on the malformed block...
+        let result = tokio::time::timeout(Duration::from_secs(5), relay)
+            .await
+            .expect("relay did not close after a truncated header block")
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "relay must close on a truncated header block"
+        );
+        drop(from_tx);
+        // ...and the rejected flight must not reach the upstream at all.
+        let received = tokio::time::timeout(Duration::from_secs(1), upstream_request)
+            .await
+            .expect("upstream sink did not finish")
+            .expect("upstream sink task failed");
+        assert!(
+            received.is_empty(),
+            "a rejected header flight must forward nothing upstream, got {received:02x?}"
+        );
+        server.await.unwrap().unwrap();
     }
 }

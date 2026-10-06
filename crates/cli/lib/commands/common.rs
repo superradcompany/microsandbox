@@ -660,6 +660,8 @@ pub(crate) struct ParsedSecret {
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) passthrough_hosts: Vec<String>,
     pub(crate) substitute_headers: bool,
+    /// When non-empty, restrict header substitution to these field names.
+    pub(crate) substitute_header_fields: Vec<String>,
     pub(crate) substitute_query: bool,
     pub(crate) substitute_body: bool,
 }
@@ -2545,6 +2547,23 @@ fn apply_network_opts(
                 extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
                 extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
                 existing.substitute_headers &= parsed.substitute_headers;
+                if existing.substitute_headers {
+                    match intersect_header_fields(
+                        &existing.substitute_header_fields,
+                        &parsed.substitute_header_fields,
+                    ) {
+                        Some(merged) => existing.substitute_header_fields = merged,
+                        None => {
+                            // The scopes share no field: the empty allowlist is
+                            // equivalent to disabling header substitution and
+                            // must not fall back to substituting in every header.
+                            existing.substitute_headers = false;
+                            existing.substitute_header_fields.clear();
+                        }
+                    }
+                } else {
+                    existing.substitute_header_fields.clear();
+                }
                 existing.substitute_query |= parsed.substitute_query;
                 existing.substitute_body |= parsed.substitute_body;
             }
@@ -2557,9 +2576,13 @@ fn apply_network_opts(
             var: env_var.clone(),
         };
         builder = builder.secret(|mut s| {
+            s = s.env(&env_var).source(source);
+            // `substitute_in_header_fields` enables header substitution, so the
+            // explicit enabled/disabled switch must be applied after it.
+            if !secret.substitute_header_fields.is_empty() {
+                s = s.substitute_in_header_fields(secret.substitute_header_fields.clone());
+            }
             s = s
-                .env(&env_var)
-                .source(source)
                 .substitute_in_headers(secret.substitute_headers)
                 .substitute_in_query(secret.substitute_query)
                 .substitute_in_body(secret.substitute_body);
@@ -2955,15 +2978,85 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
         allowed_hosts,
         passthrough_hosts: Vec::new(),
         substitute_headers: true,
+        substitute_header_fields: Vec::new(),
         substitute_query: false,
         substitute_body: false,
     };
     if let Some(options) = options {
+        // `no-headers` and `headers=` express opposite header scopes and must
+        // not be combined into an ambiguous or silently widened secret.
+        let mut header_scope_selected = false;
+        let mut headers_disabled = false;
         for option in split_secret_options(options)? {
             match option.as_str() {
-                "no-headers" => parsed.substitute_headers = false,
+                "no-headers" => {
+                    if header_scope_selected {
+                        anyhow::bail!(
+                            "secret cannot combine `no-headers` with a `headers=` scope; specify only one header scope"
+                        );
+                    }
+                    headers_disabled = true;
+                    parsed.substitute_headers = false;
+                }
                 "query" => parsed.substitute_query = true,
                 "body" => parsed.substitute_body = true,
+                value if value.starts_with("headers=") => {
+                    if headers_disabled {
+                        anyhow::bail!(
+                            "secret cannot combine `headers=` with `no-headers`; specify only one header scope"
+                        );
+                    }
+                    if header_scope_selected {
+                        anyhow::bail!("secret `headers=` scope may be specified only once");
+                    }
+                    let raw = value.trim_start_matches("headers=");
+                    let fields = raw
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(raw);
+                    let mut parsed_fields: Vec<String> = Vec::new();
+                    let mut all_headers = false;
+                    for field in fields
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|field| !field.is_empty())
+                    {
+                        if field == "*" {
+                            // `headers=*` restores the default of all headers.
+                            all_headers = true;
+                            continue;
+                        }
+                        if !parsed_fields
+                            .iter()
+                            .any(|existing| existing.eq_ignore_ascii_case(field))
+                        {
+                            parsed_fields.push(field.to_string());
+                        }
+                    }
+                    // `*` means every header. Mixing it with concrete field names
+                    // is ambiguous and must not silently widen the scope to every
+                    // header (which would re-enable reflected-header secret
+                    // disclosure).
+                    if all_headers && !parsed_fields.is_empty() {
+                        anyhow::bail!(
+                            "secret header scope cannot combine `*` (all headers) with specific field names; use `headers=*` for all headers or list only the fields to substitute"
+                        );
+                    }
+                    // An empty or effectively-empty list (`headers=`, `headers=[]`,
+                    // `headers=[,,]`) must not silently select the broadest scope.
+                    if !all_headers && parsed_fields.is_empty() {
+                        anyhow::bail!(
+                            "secret header scope requires at least one field name; use `headers=*` for all headers"
+                        );
+                    }
+                    parsed.substitute_headers = true;
+                    parsed.substitute_header_fields = if all_headers {
+                        Vec::new()
+                    } else {
+                        parsed_fields
+                    };
+                    header_scope_selected = true;
+                }
                 value if value.starts_with("passthrough=") => {
                     let hosts = value.trim_start_matches("passthrough=");
                     let hosts = hosts
@@ -2982,7 +3075,7 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                     extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
                 }
                 other => anyhow::bail!(
-                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                    "invalid secret option: {other} (expected: no-headers, headers=[FIELD,...], query, body, passthrough=HOST, or passthrough=[HOST,...])"
                 ),
             }
         }
@@ -3018,6 +3111,28 @@ fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("secret options must not be empty");
     }
     Ok(result)
+}
+
+/// Intersect two header-field allowlists, where an empty list means "all".
+///
+/// An empty list on either side means every header, so the intersection is the
+/// other list. When both sides name fields but share none, the intersection is
+/// the empty set, which this encoding cannot represent (an empty list means
+/// "all"); `None` is returned so the caller can disable header substitution,
+/// the equivalent of allowing no field, instead of widening to every header.
+pub(crate) fn intersect_header_fields(left: &[String], right: &[String]) -> Option<Vec<String>> {
+    if left.is_empty() {
+        return Some(right.to_vec());
+    }
+    if right.is_empty() {
+        return Some(left.to_vec());
+    }
+    let intersection: Vec<String> = left
+        .iter()
+        .filter(|field| right.iter().any(|other| other.eq_ignore_ascii_case(field)))
+        .cloned()
+        .collect();
+    (!intersection.is_empty()).then_some(intersection)
 }
 
 fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
@@ -3664,6 +3779,104 @@ mod tests {
     }
 
     #[test]
+    fn parse_secret_supports_header_field_allowlist() {
+        let secret = parse_secret(
+            "API_KEY:headers=[authorization,x-api-key]@api.example.com",
+            "create",
+        )
+        .unwrap();
+        assert!(secret.substitute_headers);
+        assert_eq!(
+            secret.substitute_header_fields,
+            vec!["authorization", "x-api-key"]
+        );
+
+        // A single field does not require brackets.
+        let single =
+            parse_secret("API_KEY:headers=authorization@api.example.com", "create").unwrap();
+        assert_eq!(single.substitute_header_fields, vec!["authorization"]);
+
+        // `*` restores the default of every header.
+        let all = parse_secret("API_KEY:headers=*@api.example.com", "create").unwrap();
+        assert!(all.substitute_header_fields.is_empty());
+
+        // Mixing the wildcard with concrete field names must not silently widen
+        // the scope to every header.
+        for spec in [
+            "API_KEY:headers=[authorization,*]@api.example.com",
+            "API_KEY:headers=[*,authorization]@api.example.com",
+            "API_KEY:headers=[authorization,*,x-api-key]@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("cannot combine"), "{spec}: {err}");
+        }
+
+        // Outside brackets the `*` is a separate option and is rejected too.
+        assert!(parse_secret("API_KEY:headers=authorization,*@api.example.com", "create").is_err());
+        // An empty or effectively empty list must not silently allow every header.
+        for spec in [
+            "API_KEY:headers=@api.example.com",
+            "API_KEY:headers=[]@api.example.com",
+            "API_KEY:headers=[,,]@api.example.com",
+            "API_KEY:headers=[ , ]@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("at least one field name"), "{spec}: {err}");
+        }
+
+        // `no-headers` and a `headers=` scope are opposite intents and must
+        // not be combined, regardless of order.
+        for spec in [
+            "API_KEY:headers=authorization,no-headers,query@api.example.com",
+            "API_KEY:no-headers,headers=authorization,query@api.example.com",
+            "API_KEY:headers=*,no-headers,query@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("header scope"), "{spec}: {err}");
+        }
+        // The same scope may not be repeated within one declaration.
+        let err = parse_secret(
+            "API_KEY:headers=authorization,headers=x-api-key@api.example.com",
+            "create",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only once"), "{err}");
+    }
+
+    #[test]
+    fn intersect_header_fields_maps_disjoint_scopes_to_no_substitution() {
+        // An empty list means "all", so a disjoint intersection must not be
+        // returned as an empty list: `None` tells the caller to disable header
+        // substitution rather than silently re-enable every header.
+        assert_eq!(
+            intersect_header_fields(&["authorization".to_string()], &["x-api-key".to_string()]),
+            None
+        );
+
+        // Overlapping scopes intersect case-insensitively.
+        assert_eq!(
+            intersect_header_fields(
+                &["Authorization".to_string(), "x-extra".to_string()],
+                &["authorization".to_string(), "x-api-key".to_string()],
+            ),
+            Some(vec!["Authorization".to_string()])
+        );
+
+        // An empty side means every header and yields the other scope.
+        assert_eq!(
+            intersect_header_fields(&[], &["authorization".to_string()]),
+            Some(vec!["authorization".to_string()])
+        );
+        assert_eq!(
+            intersect_header_fields(&["authorization".to_string()], &[]),
+            Some(vec!["authorization".to_string()])
+        );
+        // Both empty means every header.
+        assert_eq!(intersect_header_fields(&[], &[]), Some(Vec::new()));
+    }
+
+    #[test]
     fn parse_secret_rejects_inline_value_syntax() {
         for command in ["create", "modify"] {
             let err = parse_secret("API_KEY=literal@api.example.com", command)
@@ -3724,6 +3937,38 @@ mod tests {
                 HostPattern::Any,
             ]
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn apply_sandbox_opts_disjoint_header_scopes_disable_header_substitution() {
+        // Repeating `--secret` for the same variable intersects the header
+        // scopes. Disjoint scopes allow no field, which must disable header
+        // substitution rather than fall back to substituting in every header.
+        let opts = SandboxOpts {
+            secret: vec![
+                "API_KEY:headers=authorization,query@api.example.com".into(),
+                "API_KEY:headers=x-api-key@api.example.com".into(),
+            ],
+            ..Default::default()
+        };
+
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let secrets = config
+            .spec
+            .network
+            .secrets
+            .expect("network secrets")
+            .secrets;
+
+        assert_eq!(secrets.len(), 1);
+        assert!(!secrets[0].substitution.headers);
+        assert!(secrets[0].substitution.header_fields.is_empty());
+        assert!(secrets[0].substitution.query);
     }
 
     #[cfg(feature = "net")]

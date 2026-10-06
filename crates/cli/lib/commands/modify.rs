@@ -276,6 +276,23 @@ fn apply_secret_args(
                     }
                 }
                 existing.substitute_headers &= parsed.substitute_headers;
+                if existing.substitute_headers {
+                    match common::intersect_header_fields(
+                        &existing.substitute_header_fields,
+                        &parsed.substitute_header_fields,
+                    ) {
+                        Some(merged) => existing.substitute_header_fields = merged,
+                        None => {
+                            // The scopes share no field: the empty allowlist is
+                            // equivalent to disabling header substitution and
+                            // must not fall back to substituting in every header.
+                            existing.substitute_headers = false;
+                            existing.substitute_header_fields.clear();
+                        }
+                    }
+                } else {
+                    existing.substitute_header_fields.clear();
+                }
                 existing.substitute_query |= parsed.substitute_query;
                 existing.substitute_body |= parsed.substitute_body;
             }
@@ -290,6 +307,11 @@ fn apply_secret_args(
                 .source(SecretSource::Env { var: name.clone() })
                 .substitution(microsandbox_types::SecretSubstitution {
                     headers: spec.substitute_headers,
+                    header_fields: if spec.substitute_headers {
+                        spec.substitute_header_fields.clone()
+                    } else {
+                        Vec::new()
+                    },
                     query: spec.substitute_query,
                     body: spec.substitute_body,
                 });
@@ -353,20 +375,17 @@ fn print_human_plan(plan: &SandboxModificationPlan) {
 
     table.print();
     for warning in &plan.warnings {
-        eprintln!("{}", style(warning_line(warning)).dim());
+        ui::warn(&warning_line(warning));
     }
     if include_effect {
-        eprintln!("{}", style("   dry run · nothing applied").dim());
+        ui::notice("Dry run", "nothing applied");
     } else {
-        eprintln!(
-            "{}",
-            style("   dry run · applies on next start · nothing applied").dim()
-        );
+        ui::notice("Dry run", "applies on next start · nothing applied");
     }
 }
 
 fn warning_line(warning: &ModificationWarning) -> String {
-    format!("   ! {}: {}", warning.field, warning.message)
+    format!("{}: {}", warning.field, warning.message)
 }
 
 fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<ApplyBlocker> {
@@ -950,7 +969,7 @@ mod tests {
 
         assert_eq!(
             warning_line(&warning),
-            "   ! env: applies to future execs only; running processes keep their current environment"
+            "env: applies to future execs only; running processes keep their current environment"
         );
     }
 }

@@ -1,5 +1,7 @@
 //! Inode, handle, and lookup helpers for the Windows passthrough backend.
 
+use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
 use super::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -65,12 +67,9 @@ impl InodeData {
 }
 
 impl PassthroughFs {
-    pub(super) fn owned_identity(&self, path: &Path) -> io::Result<Option<(u32, u64)>> {
-        if self.cfg.owned_checkpoint.is_none() {
-            return Ok(None);
-        }
+    pub(super) fn path_identity(&self, path: &Path) -> io::Result<Option<(u32, u64)>> {
         let file = StdOpenOptions::new()
-            .read(true)
+            .access_mode(FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
             .map_err(host_error)?;
@@ -157,7 +156,7 @@ impl PassthroughFs {
         let data = Arc::new(InodeData {
             inode: ROOT_INODE,
             path: RwLock::new(self.root.clone()),
-            identity: self.owned_identity(&self.root)?,
+            identity: self.path_identity(&self.root)?,
             virtual_meta: RwLock::new(VirtualMetadata::default()),
             retained: Mutex::new(None),
             retained_stat: Mutex::new(None),
@@ -188,7 +187,7 @@ impl PassthroughFs {
     }
 
     pub(super) fn intern_path(&self, path: PathBuf) -> io::Result<Arc<InodeData>> {
-        let identity = self.owned_identity(&path)?;
+        let identity = self.path_identity(&path)?;
         let mut inodes = self.inodes.write().unwrap();
         if let Some(data) = inodes.by_path.get(&path) {
             return Ok(data.clone());

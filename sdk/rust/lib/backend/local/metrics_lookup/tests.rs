@@ -63,6 +63,7 @@ fn write(
             memory_bytes: Some(memory),
             memory_available_bytes: None,
             memory_host_resident_bytes: None,
+            memory_limit_bytes: None,
             disk_read_bytes: 0,
             disk_write_bytes: 0,
             net_rx_bytes: 0,

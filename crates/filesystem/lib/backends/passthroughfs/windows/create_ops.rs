@@ -27,7 +27,13 @@ impl PassthroughFs {
         self.quota_ensure_baseline();
 
         let options = open_options_from_flags(flags, true)?;
-        let file = options.open(&path).map_err(host_error)?;
+        let file = if flags & LINUX_O_TRUNC as u32 != 0 && self.safe_metadata(&path).is_ok() {
+            let data = self.intern_path(path.clone())?;
+            self.resize_inode(data.inode, || options.open(&path).map_err(host_error))?
+        } else {
+            options.open(&path).map_err(host_error)?
+        };
+
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
         let metadata = self.safe_metadata(&path)?;
         let data = self.intern_path(path.clone())?;

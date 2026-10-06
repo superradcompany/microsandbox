@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// The directory holds the canonical descriptor and complete local payload closure.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub(super) lease: Option<microsandbox_image::storage_lease::StorageLease>,
     pub(super) path: PathBuf,
     pub(super) digest: String,
     pub(super) manifest: Manifest,
@@ -141,6 +142,7 @@ impl Snapshot {
         labels: BTreeMap<String, String>,
     ) -> Self {
         Self {
+            lease: None,
             path,
             digest,
             manifest,

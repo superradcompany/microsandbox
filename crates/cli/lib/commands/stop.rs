@@ -65,6 +65,9 @@ pub async fn run(args: StopArgs) -> anyhow::Result<()> {
         }
     }
 
+    // `process::exit` on a partial failure bypasses the binary's finalizer.
+    // Cleanup remains outside each sandbox's graceful-stop timeout.
+    super::finish_stopped_memory_cleanup().await;
     if failed {
         std::process::exit(1);
     }

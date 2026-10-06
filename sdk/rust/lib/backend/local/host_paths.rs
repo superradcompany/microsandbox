@@ -54,6 +54,77 @@ pub(crate) fn resolve_host_paths(config: &mut SandboxConfig) -> MicrosandboxResu
     })
 }
 
+/// Report a symlinked bind mount root now instead of when the sandbox boots.
+///
+/// The runtime opens a bind mount root without following symlinks in any
+/// component, including the last, unless `follow_root_symlinks` is set. Mirror
+/// that check so creation fails with an actionable error before the sandbox is
+/// persisted. Call it after missing-resource admission: only roots that exist
+/// and resolve to a directory are checked, so a vanished mount that a relaxed
+/// restore marks unavailable is never rejected here. Missing paths, dangling
+/// links and files (canonicalized by `SingleFileFs`) are left to the runtime,
+/// which enforces the policy itself; this only explains it. A restored mount whose
+/// captured transport is a file, or whose backing is optional under a relaxed
+/// restore, is skipped for the same reason: the runtime tolerates or reclassifies it.
+#[cfg(unix)]
+pub(crate) fn check_bind_roots_do_not_follow_symlinks(
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    for mount in &config.spec.mounts {
+        let VolumeMount::Bind {
+            host,
+            guest,
+            follow_root_symlinks: false,
+            ..
+        } = mount
+        else {
+            continue;
+        };
+        if let Some(restore) = &config.checkpoint_restore
+            && restore.external_mounts.iter().any(|binding| {
+                binding.mount.guest_path == *guest
+                    && (binding.filename.is_some()
+                        || (restore.external_mount_policy
+                            == microsandbox_types::ExternalMountRestorePolicy::Relaxed
+                            && !binding.require_backing))
+            })
+        {
+            continue;
+        }
+        if !std::fs::metadata(host).is_ok_and(|metadata| metadata.is_dir()) {
+            continue;
+        }
+        let mut current = PathBuf::new();
+        for component in host.components() {
+            current.push(component);
+            if !std::fs::symlink_metadata(&current)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                continue;
+            }
+            let reached = if current == *host {
+                "is a symlink".to_string()
+            } else {
+                format!("goes through symlink {}", current.display())
+            };
+            let resolved = std::fs::canonicalize(host)?;
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "bind mount host path {} {reached}; use the resolved path {} or add follow-root-symlinks",
+                host.display(),
+                resolved.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn check_bind_roots_do_not_follow_symlinks(
+    _config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    Ok(())
+}
+
 /// Capture explicit builder inputs without turning omitted settings into overrides.
 /// The temporary value only feeds the common path visitor; copy back path-bearing
 /// fields that were present, retaining sparse layer and managed-policy semantics.

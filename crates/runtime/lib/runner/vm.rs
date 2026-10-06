@@ -721,6 +721,8 @@ fn run(
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    relay = relay.with_boot_error_log_dir(config.log_dir.clone());
+
     let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
         Ok(disk_paths) => disk_paths,
         Err(error) => {
@@ -1271,6 +1273,7 @@ fn run(
     let relay_exit_handle = exit_handle.clone();
     let relay_exit_reason = Arc::clone(&exit_reason);
     let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
+    let metrics_vm_control = vm.control_handle();
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
@@ -1334,6 +1337,7 @@ fn run(
                         interval_ms,
                         max_cpus: metrics_max_cpus,
                         krun_metrics: krun_metrics_handle,
+                        vm_control: metrics_vm_control,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
                     }));
@@ -1866,6 +1870,7 @@ fn build_vm(
         })
         .transpose()?;
     let mut bootstrap = vm.bootstrap.clone();
+    bootstrap.init_failure_ack = true;
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));

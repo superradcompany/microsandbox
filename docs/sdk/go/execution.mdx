@@ -77,7 +77,7 @@ fmt.Print(out.Stdout())
 
 </Accordion>
 
-Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the command exits. A convenience wrapper over [`Exec`](#sb-exec) for shell one-liners.
+Run `<configured-shell> -c command` in the sandbox and collect its output. The shell comes from `WithShell` and defaults to `/bin/sh`. When loading an older native SDK library without configured-shell support, these methods return an unsupported-operation error with upgrade guidance. Blocks until the command exits. A convenience wrapper over [`Exec`](#sb-exec) for shell one-liners.
 
 <p className="msb-label">Parameters</p>
 
@@ -88,7 +88,7 @@ Run `/bin/sh -c command` in the sandbox and collect its output. Blocks until the
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>command</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Shell command line passed to <code>/bin/sh -c</code>.</div>
+    <div className="msb-param-desc">Shell command line passed to the configured shell with <code>-c</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#execoption">...ExecOption</a></div>
@@ -188,7 +188,7 @@ for {
 
 </Accordion>
 
-Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`ExecStream`](#sb-execstream). Nonblocking: the handle returns immediately and the stream starts in the background.
+Run `<configured-shell> -c command` with streaming output. The shell comes from `WithShell` and defaults to `/bin/sh`. When loading an older native SDK library without configured-shell support, these methods return an unsupported-operation error with upgrade guidance. A convenience wrapper over [`ExecStream`](#sb-execstream). Nonblocking: the handle returns immediately and the stream starts in the background.
 
 <p className="msb-label">Parameters</p>
 
@@ -199,7 +199,7 @@ Run `/bin/sh -c command` with streaming output. A convenience wrapper over [`Exe
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>command</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Shell command line passed to <code>/bin/sh -c</code>.</div>
+    <div className="msb-param-desc">Shell command line passed to the configured shell with <code>-c</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>opts</code><a className="msb-type" href="#execoption">...ExecOption</a></div>
@@ -485,6 +485,8 @@ defer h.Close()
 Release the Rust-side exec handle. Does not kill the running process; call [`Signal`](#h-signal) or [`Kill`](#h-kill) first if you need to terminate it. Safe to call after `ExecEventDone` has been received.
 
 ## ExecOutput
+
+Collected `Exec` and `ExecDefault` output preserves arbitrary bytes, including invalid UTF-8 and NUL bytes. Use `StdoutBytes()` and `StderrBytes()` for binary data. The native response retains its legacy text fields and adds a base64 field only for a stream containing invalid UTF-8, so ordinary text keeps its existing response size and older readers remain compatible. With an older native library, the SDK falls back to the text fields; recovering invalid UTF-8 requires the updated native library. Collected responses must fit the 1 MiB FFI buffer after JSON and any base64 encoding; use streaming execution and consume events incrementally for larger output.
 
 <p className="msb-backref">Returned by <a href="#sb-exec">sb.Exec()</a> · <a href="#sb-shell">sb.Shell()</a> · <a href="#h-collect">h.Collect()</a></p>
 

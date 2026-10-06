@@ -241,7 +241,10 @@ mod tests {
             }
             let config = SandboxBuilder::new(name)
                 .image(rootfs.clone())
-                .volume("/bind", |mount| mount.bind(rootfs))
+                .volume("/bind", |mount| {
+                    // Bind roots refuse symlinks, and /tmp is one on macOS.
+                    mount.bind(rootfs.canonicalize().unwrap())
+                })
                 .volume("/shared", |mount| mount.named("shared"))
                 .volume("/owned", |mount| mount.owned())
                 .build()

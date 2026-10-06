@@ -460,6 +460,7 @@ enum SecretValueInput {
 #[serde(default, deny_unknown_fields)]
 struct SecretSubstitutionInput {
     headers: Option<bool>,
+    header_fields: Option<Vec<String>>,
     query: Option<bool>,
     body: Option<bool>,
 }
@@ -1811,6 +1812,7 @@ fn materialize_secrets(
         let substitution = input.substitution.clone().unwrap_or_default();
         let substitution = SecretSubstitution {
             headers: substitution.headers.unwrap_or(true),
+            header_fields: substitution.header_fields.clone().unwrap_or_default(),
             query: substitution.query.unwrap_or(false),
             body: substitution.body.unwrap_or(false),
         };

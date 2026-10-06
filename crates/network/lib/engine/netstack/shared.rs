@@ -28,6 +28,12 @@ use crate::engine::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
 /// Default frame queue capacity. Matches libkrun's virtio queue size.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 
+/// Maximum live hostname/address bindings retained by one sandbox.
+pub(crate) const MAX_RESOLVED_HOSTNAME_BINDINGS: usize = 16_384;
+
+/// Maximum live bindings for one normalized hostname, across both families.
+pub(crate) const MAX_BINDINGS_PER_HOSTNAME: usize = 1_024;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -200,20 +206,50 @@ impl SharedState {
         }
     }
 
-    /// Replace the resolved addresses for a hostname within the given address family.
+    /// Record resolved addresses for a hostname within the given address family.
+    ///
+    /// Addresses from earlier answers stay bound until the TTL of the answer
+    /// that returned them expires.
+    /// Resolvers that rotate their answers hand concurrent lookups of one name
+    /// different addresses, and a connection dialed on any of them must still
+    /// match the name's domain rules.
+    ///
+    /// Returns `false` if the complete answer would exceed either the hostname
+    /// or sandbox binding limit; existing bindings are preserved on rejection.
     pub fn cache_resolved_hostname(
         &self,
         domain: &str,
         family: ResolvedHostnameFamily,
         addrs: impl IntoIterator<Item = IpAddr>,
         ttl: Duration,
-    ) {
+    ) -> bool {
         let hostname = normalize_hostname(domain);
         let key = ResolvedHostnameKey { hostname, family };
         let addrs = addrs.into_iter().map(normalize_ip_addr);
-        self.resolved_hostnames
-            .write()
-            .insert(key, addrs, ttl, Instant::now());
+
+        let now = Instant::now();
+        let mut index = self.resolved_hostnames.write();
+        index.evict_expired(now);
+
+        let bindings_for = |family| {
+            index.member_count(&ResolvedHostnameKey {
+                hostname: key.hostname.clone(),
+                family,
+            })
+        };
+
+        let ipv4_bindings = bindings_for(ResolvedHostnameFamily::Ipv4);
+        let ipv6_bindings = bindings_for(ResolvedHostnameFamily::Ipv6);
+        let hostname_bindings = ipv4_bindings + ipv6_bindings;
+
+        let total_bindings = index.binding_count();
+        let hostname_slots = MAX_BINDINGS_PER_HOSTNAME.saturating_sub(hostname_bindings);
+        let sandbox_slots = MAX_RESOLVED_HOSTNAME_BINDINGS.saturating_sub(total_bindings);
+        let available_slots = hostname_slots.min(sandbox_slots);
+
+        // try_extend takes a total capacity; only new bindings consume slots.
+        let capacity = total_bindings + available_slots;
+        index.try_extend(key, addrs, ttl, now, capacity)
     }
 
     /// Clear the resolved addresses for a hostname within the given address family.
@@ -370,6 +406,34 @@ mod tests {
         assert!(state.any_resolved_hostname(v4, |h| h == "example.com"));
         assert!(state.any_resolved_hostname(v6, |h| h == "example.com"));
         assert!(!state.any_resolved_hostname(v4, |h| h == "other.example"));
+    }
+
+    #[test]
+    fn resolved_hostnames_keep_earlier_answers() {
+        let state = SharedState::new(4);
+        let first: IpAddr = "142.250.0.1".parse().unwrap();
+        let second: IpAddr = "142.250.0.2".parse().unwrap();
+
+        // Rotating answers must remain usable even beyond the old 64-address
+        // limit, as long as their TTLs have not expired.
+        for n in 1..=65 {
+            let addr = IpAddr::V4(Ipv4Addr::new(142, 250, 0, n));
+            state.cache_resolved_hostname(
+                "fonts.example",
+                ResolvedHostnameFamily::Ipv4,
+                [addr],
+                Duration::from_secs(30),
+            );
+        }
+
+        for n in 1..=65 {
+            let addr = IpAddr::V4(Ipv4Addr::new(142, 250, 0, n));
+            assert!(state.any_resolved_hostname(addr, |h| h == "fonts.example"));
+        }
+
+        state.clear_resolved_hostname("fonts.example", ResolvedHostnameFamily::Ipv4);
+        assert!(!state.any_resolved_hostname(first, |h| h == "fonts.example"));
+        assert!(!state.any_resolved_hostname(second, |h| h == "fonts.example"));
     }
 
     #[test]
