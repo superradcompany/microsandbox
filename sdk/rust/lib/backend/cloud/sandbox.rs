@@ -562,6 +562,15 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.runtime.hostname.is_some() {
         return Err(unsupported("hostname"));
     }
+    // The cloud wire has no clock policy field; refuse `off` rather than drop it.
+    if config
+        .spec
+        .runtime
+        .guest_clock
+        .is_some_and(|policy| !policy.is_sync())
+    {
+        return Err(unsupported("guest_clock"));
+    }
 
     // The shared default is harmless because Cloud owns metrics collection.
     // Any caller override would otherwise be mistaken for an honored guest
@@ -1472,13 +1481,16 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 11] = [
+        let cases: [(&str, ConfigMutation); 12] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("guest_clock", |config| {
+                config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)
             }),
             ("metrics_sample_interval", |config| {
                 config.spec.runtime.metrics_sample_interval_ms = Some(2500)

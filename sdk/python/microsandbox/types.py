@@ -383,6 +383,8 @@ class SecretModifySpec(TypedDict, total=False):
     """Desired state for one secret passed to ``Sandbox.modify``.
 
     ``env``, ``value``, and ``store`` are mutually exclusive secret sources.
+    Omitted policy fields preserve existing settings. ``passthrough`` is a
+    deprecated alias for ``allow_placeholder_for``; both host lists are combined.
     """
 
     env: str
@@ -390,6 +392,11 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+    substitution: SecretSubstitution
+    violation_action: ViolationAction
+    require_tls_identity: bool
+    allow_placeholder_for: Sequence[str]
+    passthrough: Sequence[str]
 
 
 class DiskCompactionDiskResult(TypedDict):
@@ -1610,7 +1617,7 @@ class SecretSource:
 class OutboundProxy:
     """Proxy used for outbound sandbox connections."""
 
-    protocol: Literal["socks4", "socks5"]
+    protocol: Literal["http_connect", "socks4", "socks5"]
     address: str
     user_id: str | None = None
     username: str | None = None
@@ -1623,6 +1630,11 @@ class OutboundProxy:
             raise ValueError("credentials are only supported for SOCKS5 proxies")
         if (self.username is None) != (self.password is None):
             raise ValueError("SOCKS5 username and password must be provided together")
+
+    @classmethod
+    def http_connect(cls, address: str) -> OutboundProxy:
+        """Create an HTTP CONNECT outbound proxy."""
+        return cls(protocol="http_connect", address=address)
 
     @classmethod
     def socks4(cls, address: str, *, user_id: str | None = None) -> OutboundProxy:

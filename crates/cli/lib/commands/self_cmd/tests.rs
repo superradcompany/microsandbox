@@ -277,6 +277,9 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
 
+    // With no clock policies to preserve, rollback removes the catalog compatibility marker.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
     // Empty catalogs have no secret policies requiring downgrade conversion.
     rollback_schema(db.inner(), 1).await.unwrap();
 

@@ -3,14 +3,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 #[cfg(feature = "net")]
 use microsandbox::OutboundProxy;
 use microsandbox::VolumeKind;
 use microsandbox::backend::{Backend, LocalBackend};
 use microsandbox::sandbox::{
-    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, MountBuilder, Patch,
-    RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, GuestClockPolicy, MountBuilder,
+    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
@@ -146,6 +147,11 @@ pub struct SandboxOpts {
     /// Guest transparent huge-page policy selected at boot.
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
+
+    /// Guest wall-clock policy: `sync` (default) keeps the guest clock in step with the
+    /// host; `off` leaves it alone after boot, including across full snapshot restores.
+    #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
+    pub guest_clock: Option<GuestClockPolicy>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
@@ -552,9 +558,9 @@ pub struct SandboxOpts {
     pub trust_host_cas: bool,
 
     /// Dial all outbound sandbox connections through this proxy.
-    /// Supports the socks4:// and socks5:// protocols.
+    /// Supports http://, socks4://, and socks5:// protocols.
     #[cfg(feature = "net")]
-    #[arg(long, value_name = "socks[4|5]://IP:PORT")]
+    #[arg(long, value_name = "http://IP:PORT|socks[4|5]://IP:PORT")]
     pub proxy: Option<String>,
 
     /// Optional user ID for a SOCKS4 proxy.
@@ -729,6 +735,22 @@ impl SandboxOpts {
         };
 
         match raw.parse::<OutboundProxy>()? {
+            OutboundProxy::HttpConnect { address } => {
+                if self.socks4_user_id.is_some()
+                    || self.socks5_username.is_some()
+                    || self.socks5_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "SOCKS authentication flags cannot be used with an http:// proxy"
+                    );
+                }
+
+                Ok(Some(
+                    OutboundProxyBuilder::new()
+                        .http_connect(address.to_string())
+                        .build()?,
+                ))
+            }
             OutboundProxy::Socks4 { address, .. } => {
                 if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
                     anyhow::bail!(
@@ -1035,6 +1057,7 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
+            || self.guest_clock.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
             || !self.mount_file.is_empty()
@@ -1317,6 +1340,9 @@ fn apply_sandbox_opts_inner(
             .map_err(anyhow::Error::msg)?;
         builder = builder.thp(policy);
     }
+    if let Some(policy) = opts.guest_clock {
+        builder = builder.guest_clock(policy);
+    }
     if let Some(ref workdir) = opts.workdir {
         builder = builder.workdir(workdir);
     }
@@ -1473,6 +1499,11 @@ fn apply_sandbox_opts_inner(
     }
 
     Ok(builder)
+}
+
+/// Parse the clock policy at the CLI boundary while retaining possible values in help.
+pub(crate) fn guest_clock_parser() -> impl TypedValueParser<Value = GuestClockPolicy> {
+    PossibleValuesParser::new(["sync", "off"]).try_map(|value| value.parse::<GuestClockPolicy>())
 }
 
 /// Parse `HOST_PATH:PORT[/stream|/dgram]` without treating colons in the
@@ -3938,6 +3969,42 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn apply_sandbox_opts_sets_guest_clock_policy() {
+        for (args, expected) in [
+            (vec!["create"], None),
+            (
+                vec!["create", "--guest-clock", "sync"],
+                Some(GuestClockPolicy::Sync),
+            ),
+            (
+                vec!["create", "--guest-clock", "off"],
+                Some(GuestClockPolicy::Off),
+            ),
+        ] {
+            let matches = SandboxOpts::augment_args(Command::new("create"))
+                .try_get_matches_from(args)
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            if expected.is_some() {
+                assert!(opts.has_creation_flags());
+            }
+
+            let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(config.spec.runtime.guest_clock, expected);
+        }
+
+        assert!(
+            SandboxOpts::augment_args(Command::new("create"))
+                .try_get_matches_from(["create", "--guest-clock", "host"])
+                .is_err()
+        );
     }
 
     #[tokio::test]

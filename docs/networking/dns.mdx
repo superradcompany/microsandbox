@@ -177,6 +177,10 @@ Domain blocking and rebinding protection apply only to DNS traffic that microsan
 
 microsandbox records the IP addresses returned for each domain. A domain rule matches a later connection only when that sandbox resolved the domain to that IP.
 
+microsandbox uses the lowest TTL across the relevant addresses and alias chain in each DNS answer, with a one-second minimum, for all addresses in that answer. For example, addresses with TTLs of 30 and 120 seconds both get a 30-second lifetime. Later answers retain earlier addresses until they expire and extend only the addresses they contain, so rotating CDN answers do not invalidate connections using an earlier answer.
+
+Each sandbox retains up to 16,384 hostname/address bindings in total, with at most 1,024 per hostname shared across IPv4 and IPv6. An address shared by two domains counts twice. If a DNS answer would exceed either limit, microsandbox returns `SERVFAIL` without adding any of that answer's addresses or removing existing bindings. Answers containing only existing bindings can still refresh them; expired bindings free space for new answers.
+
 An application that connects directly to a hard-coded IP does not match a domain rule. Use an IP or CIDR rule for that traffic.
 
 ## Reference

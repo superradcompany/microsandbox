@@ -97,6 +97,10 @@ export interface SecretEntry {
 /** Proxy used for outbound sandbox connections. */
 export type OutboundProxy =
   | {
+      readonly protocol: "http_connect";
+      readonly address: string;
+    }
+  | {
       readonly protocol: "socks4";
       readonly address: string;
       readonly userId?: string;

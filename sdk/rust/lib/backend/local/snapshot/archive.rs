@@ -31,6 +31,7 @@ use microsandbox_image::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, MAX_JSON_SAFE_INTEGER, SnapshotState, UpperIntegrity,
 };
 use microsandbox_runtime::launch::RootfsUpperLayerConfig;
+use microsandbox_types::snapshot::GUEST_CLOCK_EXTENSION;
 use microsandbox_utils::extent::{self, ExtentMap};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -193,6 +194,7 @@ struct CheckpointArchiveMember {
 
 /// Child construction state streamed from one archive without installing a snapshot artifact.
 pub(crate) struct ArchiveChildMaterialization {
+    pub(crate) cache_operation: microsandbox_image::GlobalCache,
     pub(crate) manifest: microsandbox_image::snapshot::Manifest,
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
@@ -268,11 +270,26 @@ pub(super) async fn save_snapshot(
     out: &Path,
     opts: SaveOpts,
 ) -> MicrosandboxResult<()> {
+    save_snapshot_expected(local, name_or_path, out, opts, None).await
+}
+
+pub(crate) async fn save_snapshot_expected(
+    local: &LocalBackend,
+    name_or_path: &str,
+    out: &Path,
+    opts: SaveOpts,
+    expected: Option<&str>,
+) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     let resolve_started = Instant::now();
     // Collect the artifact dirs we need to ship: the head snapshot
     // and (optionally) all ancestors via their stable snapshot IDs.
-    let head = store::open_snapshot(local, name_or_path).await?;
+    let head = store::open_snapshot_leased(local, name_or_path).await?;
+    if expected.is_some_and(|expected| expected != head.digest()) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot handle refers to a replaced artifact".into(),
+        ));
+    }
     let dependencies = delta::selection(local, &head, &opts).await?;
     let mut parents: Vec<Snapshot> = Vec::new();
 
@@ -287,7 +304,7 @@ pub(super) async fn save_snapshot(
             }
             let parent_path = resolve_parent_artifact(local, &current, parent_id.as_str()).await?;
             let parent =
-                store::open_snapshot(local, parent_path.to_string_lossy().as_ref()).await?;
+                store::open_snapshot_leased(local, parent_path.to_string_lossy().as_ref()).await?;
             if parent.id() != &parent_id {
                 return Err(MicrosandboxError::SnapshotIntegrity(format!(
                     "snapshot parent path contains {}, expected {parent_id}",
@@ -305,13 +322,16 @@ pub(super) async fn save_snapshot(
 
     // Optional image cache bundling.
     let mut cache_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut admitted_metadata = None;
+    let cache_operation = microsandbox_image::GlobalCache::new_async(&local.cache_dir())
+        .await?
+        .operation();
     if opts.with_image {
-        let cache_dir = local.cache_dir();
         let img_digest_str = head.manifest().image.manifest_digest.clone();
         let img_digest: microsandbox_image::Digest = img_digest_str
             .parse()
             .map_err(|e| MicrosandboxError::Custom(format!("invalid image digest: {e}")))?;
-        let cache = microsandbox_image::GlobalCache::new_async(&cache_dir).await?;
+        let cache = cache_operation.clone();
 
         let image_ref: microsandbox_image::Reference =
             head.manifest().image.reference.parse().map_err(|e| {
@@ -326,6 +346,9 @@ pub(super) async fn save_snapshot(
                     head.manifest().image.reference
                 ))
             })?;
+        cache
+            .lease_paths_async(cache.metadata_paths(&metadata)?)
+            .await?;
         if metadata.manifest_digest != img_digest_str {
             return Err(MicrosandboxError::Custom(format!(
                 "cached image metadata digest mismatch: snapshot={}, cache={}",
@@ -333,7 +356,14 @@ pub(super) async fn save_snapshot(
             )));
         }
 
-        let metadata_path = cache.image_metadata_path(&image_ref);
+        // The tag can change after admission. Bundle the metadata we actually validated,
+        // not a later reopen of that mutable pathname alongside the old generation's layers.
+        let staging = tempfile::tempdir_in(cache.tmp_dir())?;
+        let metadata_path = staging
+            .path()
+            .join(cache.image_metadata_path(&image_ref).file_name().unwrap());
+        std::fs::write(&metadata_path, serde_json::to_vec(&metadata)?)?;
+        admitted_metadata = Some(staging);
         push_required_cache_file(&mut cache_files, &metadata_path, "manifests")?;
 
         // Flat snapshots already own a complete root disk. Their offline dependency is
@@ -360,6 +390,7 @@ pub(super) async fn save_snapshot(
             }
         }
     }
+    let _admitted_metadata = admitted_metadata;
     let resolve_us = resolve_started.elapsed().as_micros();
 
     // Write the archive.
@@ -812,7 +843,7 @@ where
         },
         entries,
         extensions: BTreeMap::new(),
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(manifest)?,
     };
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
@@ -933,7 +964,7 @@ where
         },
         entries,
         extensions: BTreeMap::new(),
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(manifest)?,
     };
     let inventory_bytes = serde_json::to_vec(&inventory).map_err(|error| {
         MicrosandboxError::Custom(format!("serialize archive inventory: {error}"))
@@ -1114,13 +1145,20 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             MicrosandboxError::SnapshotIntegrity(format!("invalid legacy archive closure: {error}"))
         })?;
         tokio::fs::rename(head.layer_path(layer), child_stage.join(DEFAULT_UPPER_FILE)).await?;
-        install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+        let cache_operation =
+            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
         for directory in unpacked.manifest_dirs {
             if directory.exists() {
                 tokio::fs::remove_dir_all(directory).await?;
             }
         }
+        #[cfg(windows)]
+        {
+            drop(imported);
+            remove_private_stage_leases(child_stage).await?;
+        }
         return Ok(ArchiveChildMaterialization {
+            cache_operation,
             manifest,
             checkpoint_restore: None,
             upper_layers: Vec::new(),
@@ -1148,6 +1186,16 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             "archive head descriptor identity mismatch".into(),
         ));
     }
+    let unsupported = manifest.unsupported_requires();
+    if !unsupported.is_empty() {
+        return Err(MicrosandboxError::unsupported(
+            Operation::SnapshotOps,
+            UnsupportedReason::NotAvailable(format!(
+                "snapshot requires unsupported runtime capabilities: {}",
+                unsupported.join(", ")
+            )),
+        ));
+    }
     boot_overrides.validate_scope(
         manifest.scope,
         if disk_only {
@@ -1172,14 +1220,18 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 choices,
             )
             .await?;
-            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+            let cache_operation =
+                install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
             for member in &inventory.members {
                 let member_dir = child_stage.join(&member.snapshot_id);
                 if member_dir.exists() {
                     tokio::fs::remove_dir_all(member_dir).await?;
                 }
             }
+            #[cfg(windows)]
+            remove_private_stage_leases(child_stage).await?;
             return Ok(ArchiveChildMaterialization {
+                cache_operation,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
@@ -1197,14 +1249,18 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             choices,
         )
         .await?;
-        install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+        let cache_operation =
+            install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
         for member in &inventory.members {
             let member_dir = child_stage.join(&member.snapshot_id);
             if member_dir.exists() {
                 tokio::fs::remove_dir_all(member_dir).await?;
             }
         }
+        #[cfg(windows)]
+        remove_private_stage_leases(child_stage).await?;
         return Ok(ArchiveChildMaterialization {
+            cache_operation,
             manifest,
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
@@ -1262,14 +1318,17 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         tokio::fs::remove_dir_all(&archive_layers).await?;
     }
 
-    install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
+    let cache_operation = install_staged_cache(cache_stage.path(), &cache_dir, &manifest).await?;
     for member in &inventory.members {
         let member_dir = child_stage.join(&member.snapshot_id);
         if member_dir.exists() {
             tokio::fs::remove_dir_all(member_dir).await?;
         }
     }
+    #[cfg(windows)]
+    remove_private_stage_leases(child_stage).await?;
     Ok(ArchiveChildMaterialization {
+        cache_operation,
         manifest,
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
@@ -1280,6 +1339,26 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+async fn remove_private_stage_leases(child_stage: &Path) -> MicrosandboxResult<()> {
+    let path = child_stage.join(".msb-leases");
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            // This unique archive stage has no external readers. Its transient locks must
+            // not become permanent files when the stage becomes a sandbox directory.
+            tokio::fs::remove_dir_all(path).await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "private archive lease path is not a directory".into(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
 
 async fn write_archive_entries<W>(
     builder: &mut Builder<W>,
@@ -1467,7 +1546,14 @@ async fn normalize_imported_descriptor(snapshot: &Snapshot) -> MicrosandboxResul
         }
     }
     tokio::fs::write(&path, canonical).await?;
-    tokio::fs::File::open(path).await?.sync_all().await?;
+    // Windows requires write access for FlushFileBuffers after normalization.
+    tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .await?
+        .sync_all()
+        .await?;
     Ok(())
 }
 
@@ -1645,8 +1731,24 @@ async fn build_archive_inventory(
         },
         entries,
         extensions,
-        requires: vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into()],
+        requires: archive_requires(head.manifest())?,
     })
+}
+
+/// Released SDKs restore archives without checking descriptor `requires`, but they
+/// refuse unknown archive requirements, so a non-default clock is lifted to both.
+fn archive_requires(
+    head: &microsandbox_image::snapshot::Manifest,
+) -> MicrosandboxResult<Vec<String>> {
+    let mut requires = Vec::with_capacity(2);
+    let guest_clock = head
+        .guest_clock()
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if !guest_clock.is_sync() {
+        requires.push(GUEST_CLOCK_EXTENSION.into());
+    }
+    requires.push(ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.into());
+    Ok(requires)
 }
 
 fn collect_checkpoint_archive_members(
@@ -2953,7 +3055,9 @@ async fn validate_archive_inventory(
     }
     if inventory.requires.windows(2).any(|pair| pair[0] >= pair[1])
         || inventory.requires.iter().any(|requirement| {
-            requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM && requirement != delta::REQUIREMENT
+            requirement != ARCHIVE_MEMBER_TRANSPORT_ALGORITHM
+                && requirement != delta::REQUIREMENT
+                && requirement != GUEST_CLOCK_EXTENSION
         })
     {
         return Err(MicrosandboxError::unsupported(
@@ -3667,7 +3771,7 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        snapshots.push(store::open_snapshot(local, dir.to_string_lossy().as_ref()).await?);
+        snapshots.push(store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?);
     }
 
     if snapshots.is_empty() {
@@ -3712,9 +3816,12 @@ async fn install_staged_cache(
     cache_stage: &Path,
     cache_dir: &Path,
     manifest: &microsandbox_image::snapshot::Manifest,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<microsandbox_image::GlobalCache> {
+    let cache = microsandbox_image::GlobalCache::new_async(cache_dir)
+        .await?
+        .operation();
     if !contains_files(cache_stage)? {
-        return Ok(());
+        return Ok(cache);
     }
 
     let image_ref: microsandbox_image::Reference =
@@ -3726,7 +3833,6 @@ async fn install_staged_cache(
             MicrosandboxError::Custom(format!("invalid snapshot image digest: {e}"))
         })?;
     let staged_cache = microsandbox_image::GlobalCache::new_async(cache_stage).await?;
-    let _real_cache = microsandbox_image::GlobalCache::new_async(cache_dir).await?;
     let metadata = staged_cache
         .read_image_metadata_async(&image_ref)
         .await?
@@ -3737,8 +3843,11 @@ async fn install_staged_cache(
             ))
         })?;
     validate_cached_metadata(manifest, &metadata)?;
+    let mut leased_paths = cache.metadata_paths(&metadata)?;
+    leased_paths.push(cache.image_metadata_path(&image_ref));
+    cache.lease_paths_async(leased_paths).await?;
 
-    let expected_files = expected_cache_files(
+    let mut expected_files = expected_cache_files(
         &staged_cache,
         &image_ref,
         &metadata,
@@ -3746,15 +3855,35 @@ async fn install_staged_cache(
         manifest.root_disk.clone(),
     )?;
     ensure_only_expected_cache_files(cache_stage, &expected_files)?;
+    // The staged VMDK lists the exporter's extent paths; it is rewritten below for this cache.
+    let rewrite_vmdk = expected_files.remove(&staged_cache.vmdk_path(&pinned_digest));
     ensure_cache_targets_compatible(&expected_files, cache_stage, cache_dir).await?;
 
     let metadata_path = staged_cache.image_metadata_path(&image_ref);
     for source in expected_files.iter().filter(|path| **path != metadata_path) {
         install_cache_file(source, cache_stage, cache_dir).await?;
     }
-    install_cache_file(&metadata_path, cache_stage, cache_dir).await?;
+    if rewrite_vmdk {
+        let diff_ids = metadata
+            .layers
+            .iter()
+            .map(|layer| layer.diff_id.parse())
+            .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
+            .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
+        // Keep the imported cache paths pinned while the blocking rewrite completes.
+        let rewrite_cache = cache.clone();
+        tokio::task::spawn_blocking(move || rewrite_cache.rewrite_vmdk(&pinned_digest, &diff_ids))
+            .await
+            .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
+    }
+    // The archive may describe an image already installed under this reference. Publish under
+    // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
+    let archived_metadata = tokio::fs::read(&metadata_path).await?;
+    cache
+        .install_image_metadata_if_compatible_async(&image_ref, archived_metadata)
+        .await?;
 
-    Ok(())
+    Ok(cache)
 }
 
 fn validate_cached_metadata(
@@ -3966,12 +4095,41 @@ async fn ensure_cache_target_compatible(source: &Path, target: &Path) -> Microsa
     if metadata.len() != tokio::fs::metadata(source).await?.len()
         || file_sha256(target).await? != file_sha256(source).await?
     {
+        // Image metadata JSON embeds a parsed image config whose labels come from a `HashMap`, so
+        // two processes serialize identical metadata with different key order. Accept a JSON
+        // target that parses to the same value as the archive copy.
+        if target.extension().is_some_and(|ext| ext == "json")
+            && json_files_equivalent(source, target).await
+        {
+            return Ok(());
+        }
         return Err(MicrosandboxError::Custom(format!(
             "cache target already exists with different content: {}",
             target.display()
         )));
     }
     Ok(())
+}
+
+/// Whether both files parse as JSON documents with equal values, ignoring object key order.
+async fn json_files_equivalent(source: &Path, target: &Path) -> bool {
+    let (Ok(source), Ok(target)) = (tokio::fs::read(source).await, tokio::fs::read(target).await)
+    else {
+        return false;
+    };
+    // `Value` keeps only the last of duplicate keys, which the typed cache reader rejects.
+    if microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&source).is_err()
+        || microsandbox_image::snapshot::manifest::reject_duplicate_json_keys(&target).is_err()
+    {
+        return false;
+    }
+    match (
+        serde_json::from_slice::<serde_json::Value>(&source),
+        serde_json::from_slice::<serde_json::Value>(&target),
+    ) {
+        (Ok(source), Ok(target)) => source == target,
+        _ => false,
+    }
 }
 
 async fn file_sha256(path: &Path) -> MicrosandboxResult<[u8; 32]> {
@@ -4008,6 +4166,9 @@ fn collect_files_inner(path: &Path, files: &mut Vec<PathBuf>) -> MicrosandboxRes
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
+        if file_type.is_dir() && entry.file_name() == ".msb-leases" {
+            continue;
+        }
         if file_type.is_dir() {
             collect_files_inner(&entry.path(), files)?;
         } else if file_type.is_file() {
@@ -4158,6 +4319,74 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn import_requires_durable_ownership_and_recovers_failed_completion() {
+        use sea_orm::{ConnectionTrait, EntityTrait};
+        let root = tempfile::tempdir().unwrap();
+        let source = crate::test_support::local_backend_builder(root.path().join("source"))
+            .build()
+            .await
+            .unwrap();
+        let data = grouped_archive_manifest(991, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &data);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &source,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        for block_prepare in [true, false] {
+            let destination = crate::test_support::local_backend_builder(
+                root.path().join(format!("destination-{block_prepare}")),
+            )
+            .build()
+            .await
+            .unwrap();
+            let db = destination.db().await.unwrap();
+            let condition = if block_prepare {
+                "1"
+            } else {
+                "NEW.availability = 'ready'"
+            };
+            db.write().execute_unprepared(&format!("CREATE TRIGGER fail_publication BEFORE INSERT ON snapshot_index WHEN {condition} BEGIN SELECT RAISE(FAIL, 'injected catalog failure'); END")).await.unwrap();
+            let error = load_snapshot(&destination, &archive, None)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("injected catalog failure"),
+                "{error}"
+            );
+            let rows = crate::db::entity::snapshot::Entity::find()
+                .all(db.read())
+                .await
+                .unwrap();
+            if block_prepare {
+                assert!(rows.is_empty());
+            } else {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].availability, "publishing");
+                assert!(
+                    Path::new(&rows[0].artifact_path)
+                        .join(DESCRIPTOR_FILENAME)
+                        .exists()
+                );
+            }
+            db.write()
+                .execute_unprepared("DROP TRIGGER fail_publication")
+                .await
+                .unwrap();
+            let repaired = store::list_indexed(&destination).await.unwrap();
+            assert_eq!(repaired.len(), usize::from(!block_prepare));
+            if let Some(snapshot) = repaired.first() {
+                assert_eq!(snapshot.availability, "ready");
+            }
+        }
+    }
 
     #[tokio::test]
     async fn extraction_never_overwrites_an_existing_file() {
@@ -4408,6 +4637,92 @@ mod tests {
         assert!(loaded.group().is_some());
     }
 
+    #[tokio::test]
+    async fn cache_target_accepts_json_with_reordered_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(
+            &source,
+            r#"{"config":{"labels":{"a":"1","b":"2","c":"3"}},"layers":[]}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &target,
+            r#"{"layers":[],"config":{"labels":{"c":"3","a":"1","b":"2"}}}"#,
+        )
+        .await
+        .unwrap();
+
+        ensure_cache_target_compatible(&source, &target)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_json_with_duplicate_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(&source, r#"{"manifest_digest":"expected"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &target,
+            r#"{"manifest_digest":"wrong","manifest_digest":"expected"}"#,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            ensure_cache_target_compatible(&source, &target)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_json_with_different_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let target = directory.path().join("target.json");
+        tokio::fs::write(&source, r#"{"labels":{"a":"1","b":"2"}}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&target, r#"{"labels":{"b":"2","a":"changed"}}"#)
+            .await
+            .unwrap();
+
+        let error = ensure_cache_target_compatible(&source, &target)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cache target already exists with different content")
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_target_rejects_non_json_with_different_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.erofs");
+        let target = directory.path().join("target.erofs");
+        tokio::fs::write(&source, br#"{"a":1,"b":2}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(&target, br#"{"b":2,"a":1}"#)
+            .await
+            .unwrap();
+
+        assert!(
+            ensure_cache_target_compatible(&source, &target)
+                .await
+                .is_err()
+        );
+    }
+
     #[test]
     fn digest_hex_rejects_uppercase_identity() {
         let uppercase = format!("sha256:{}", "A".repeat(64));
@@ -4522,7 +4837,7 @@ mod tests {
         .unwrap();
         let loaded = load_snapshot(&destination, &archive, None).await.unwrap();
         assert_eq!(
-            store::open_snapshot(&destination, loaded.path().to_str().unwrap())
+            store::open_snapshot_leased(&destination, loaded.path().to_str().unwrap())
                 .await
                 .unwrap()
                 .manifest()
@@ -4592,31 +4907,21 @@ mod tests {
         assert!(!temp_out.exists());
     }
 
-    #[tokio::test]
-    async fn direct_archive_capture_and_child_restore_do_not_install_snapshot_artifacts() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        let source = directory.path().join("upper.ext4");
-        let child_stage = directory.path().join("child");
-        let mut payload = b"direct archive payload".to_vec();
-        payload.resize(4096, 0);
-        std::fs::write(&source, &payload).unwrap();
-
-        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+    fn direct_disk_manifest(snapshot_id: &SnapshotId, size: u64) -> Manifest {
         let layer_id = DiskLayerId::new("layer_00000000000000000000000000000001").unwrap();
-        let manifest = Manifest {
+        Manifest {
             schema: SCHEMA.into(),
             snapshot_id: snapshot_id.clone(),
             scope: SnapshotScope::Disk,
             state: SnapshotState::File(FileSnapshotState {
                 disk_format: SnapshotFormat::Raw,
                 filesystem: "ext4".into(),
-                virtual_size: payload.len() as u64,
+                virtual_size: size,
                 head: layer_id.clone(),
                 layers: vec![DiskLayer {
                     layer_id,
                     format: SnapshotFormat::Raw,
-                    virtual_size: payload.len() as u64,
+                    virtual_size: size,
                     backing: None,
                     payload: LayerPayload {
                         file_kind: LayerFileKind::Regular,
@@ -4639,7 +4944,21 @@ mod tests {
             parent: None,
             extensions: BTreeMap::new(),
             requires: Vec::new(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_archive_capture_and_child_restore_do_not_install_snapshot_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let source = directory.path().join("upper.ext4");
+        let child_stage = directory.path().join("child");
+        let mut payload = b"direct archive payload".to_vec();
+        payload.resize(4096, 0);
+        std::fs::write(&source, &payload).unwrap();
+
+        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+        let manifest = direct_disk_manifest(&snapshot_id, payload.len() as u64);
         let local = crate::test_support::local_backend_builder(&home)
             .build()
             .await
@@ -4679,9 +4998,80 @@ mod tests {
                     payload
                 );
                 assert!(!child_stage.join(snapshot_id.as_str()).exists());
+                #[cfg(windows)]
+                assert!(!child_stage.join(".msb-leases").exists());
                 assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn direct_archive_lifts_guest_clock_and_refuses_unknown_descriptor_requirements() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("upper.ext4");
+        std::fs::write(&source, vec![0; 4096]).unwrap();
+        let snapshot_id = SnapshotId::new("snap_00000000000000000000000000000001").unwrap();
+        let local = crate::test_support::local_backend_builder(directory.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let save_and_restore = |manifest: Manifest, name: &'static str| {
+            let archive = directory.path().join(format!("{name}.msb"));
+            let child_stage = directory.path().join(name);
+            let source = source.clone();
+            let local = &local;
+            async move {
+                save_direct_file_snapshot(
+                    &manifest,
+                    &BTreeMap::new(),
+                    "test-snapshot",
+                    std::slice::from_ref(&source),
+                    None,
+                    &archive,
+                    false,
+                    false,
+                )
+                .await
+                .unwrap();
+                materialize_archive_for_child(local, &archive, &child_stage, false).await
+            }
+        };
+
+        let mut off = direct_disk_manifest(&snapshot_id, 4096);
+        off.set_guest_clock(microsandbox_types::GuestClockPolicy::Off)
+            .unwrap();
+        // Released readers accept only these archive requirements; anything else must refuse.
+        let released = [ARCHIVE_MEMBER_TRANSPORT_ALGORITHM, delta::REQUIREMENT];
+        let requires = archive_requires(&off).unwrap();
+        assert!(requires.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            requires
+                .iter()
+                .any(|value| !released.contains(&value.as_str()))
+        );
+        assert_eq!(
+            archive_requires(&direct_disk_manifest(&snapshot_id, 4096)).unwrap(),
+            vec![ARCHIVE_MEMBER_TRANSPORT_ALGORITHM.to_string()]
+        );
+        let restored = save_and_restore(off, "off").await.unwrap();
+        assert_eq!(
+            restored.manifest.guest_clock().unwrap(),
+            microsandbox_types::GuestClockPolicy::Off
+        );
+
+        let mut future = direct_disk_manifest(&snapshot_id, 4096);
+        future.extensions.insert(
+            "microsandbox.future-extension".into(),
+            serde_json::json!({}),
+        );
+        future.requires.push("microsandbox.future-extension".into());
+        let Err(error) = save_and_restore(future, "future").await else {
+            panic!("an unknown descriptor requirement must refuse the restore");
+        };
+        assert!(
+            error.to_string().contains("microsandbox.future-extension"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

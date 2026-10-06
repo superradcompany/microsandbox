@@ -1036,6 +1036,7 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `max_connections()` | Concurrent TCP limit; zero means unlimited. |
 | `disable_network()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
+| `guest_clock()` | Override the snapshot's clock setting with `Sync` or `Off`. Supports full restores. |
 | `max_duration(), idle_timeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
 | `volume()` | Map host volumes or select captured private volumes. |
 | `port(), port_bind(), port_udp(), port_udp_bind()` | Bind destination TCP or UDP ports. |

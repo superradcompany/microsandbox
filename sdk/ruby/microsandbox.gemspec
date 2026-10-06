@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
   spec.description = "Magnus-based Ruby bindings for the microsandbox Rust SDK."
   spec.homepage = "https://github.com/superradcompany/microsandbox"
   spec.license = "Apache-2.0"
-  spec.required_ruby_version = ">= 3.1"
+  spec.required_ruby_version = ">= 3.3"
   spec.metadata = {
     "source_code_uri" => "#{spec.homepage}/tree/main/sdk/ruby",
     "bug_tracker_uri" => "#{spec.homepage}/issues",

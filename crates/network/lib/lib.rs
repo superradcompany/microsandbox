@@ -43,9 +43,9 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 #[doc(hidden)]
 pub use config::ResolvedNetworkConfig;
 pub use proxy::{
-    OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
-    OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder, Socks5Credentials,
-    Socks5ProxyBuilder,
+    HttpConnectProxyBuilder, OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder,
+    OutboundProxyConfig, OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder,
+    Socks5Credentials, Socks5ProxyBuilder,
 };
 
 pub use config::builder;

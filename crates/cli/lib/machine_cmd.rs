@@ -317,6 +317,7 @@ pub fn run(args: MachineArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
         memory_mib: args.memory_mib,

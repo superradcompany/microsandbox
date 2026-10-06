@@ -121,10 +121,14 @@ impl JsSandboxBuilder {
         &mut self,
         env: &Env,
         size_mib_or_configure: Either<
-            u32,
+            f64,
             Function<ClassInstance<JsRootDiskBuilder>, ClassInstance<JsRootDiskBuilder>>,
         >,
     ) -> Result<&Self> {
+        let size_mib_or_configure = match size_mib_or_configure {
+            Either::A(size) => Either::A(crate::numeric::uint32(size, "sizeMib")?),
+            Either::B(configure) => Either::B(configure),
+        };
         let prev = self.take_inner();
         match size_mib_or_configure {
             Either::A(size_mib) => {
@@ -142,7 +146,8 @@ impl JsSandboxBuilder {
 
     /// Number of virtual CPUs.
     #[napi]
-    pub fn cpus(&mut self, count: u32) -> Result<&Self> {
+    pub fn cpus(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::uint32(count, "count")?;
         let n =
             u8::try_from(count).map_err(|_| napi::Error::from_reason("cpus out of u8 range"))?;
         let prev = self.take_inner();
@@ -152,7 +157,8 @@ impl JsSandboxBuilder {
 
     /// Boot-time maximum possible virtual CPUs.
     #[napi(js_name = "maxCpus")]
-    pub fn max_cpus(&mut self, count: u32) -> Result<&Self> {
+    pub fn max_cpus(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::uint32(count, "count")?;
         let n =
             u8::try_from(count).map_err(|_| napi::Error::from_reason("maxCpus out of u8 range"))?;
         let prev = self.take_inner();
@@ -181,18 +187,20 @@ impl JsSandboxBuilder {
 
     /// Guest memory in MiB.
     #[napi]
-    pub fn memory(&mut self, mib: u32) -> &Self {
+    pub fn memory(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
         let prev = self.take_inner();
         self.inner = Some(prev.memory(Mebibytes::from(mib)));
-        self
+        Ok(self)
     }
 
     /// Boot-time maximum hotpluggable guest memory in MiB.
     #[napi(js_name = "maxMemory")]
-    pub fn max_memory(&mut self, mib: u32) -> &Self {
+    pub fn max_memory(&mut self, mib: f64) -> Result<&Self> {
+        let mib = crate::numeric::uint32(mib, "mib")?;
         let prev = self.take_inner();
         self.inner = Some(prev.max_memory(Mebibytes::from(mib)));
-        self
+        Ok(self)
     }
 
     /// Guest transparent huge-page policy selected at boot.
@@ -263,10 +271,11 @@ impl JsSandboxBuilder {
 
     /// Override the metrics sampling interval in milliseconds; pass `0` to disable.
     #[napi(js_name = "metricsSampleIntervalMs")]
-    pub fn metrics_sample_interval_ms(&mut self, ms: u32) -> &Self {
+    pub fn metrics_sample_interval_ms(&mut self, ms: f64) -> Result<&Self> {
+        let ms = crate::numeric::safe_integer(ms, "ms")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.metrics_sample_interval(Duration::from_millis(u64::from(ms))));
-        self
+        self.inner = Some(prev.metrics_sample_interval(Duration::from_millis(ms)));
+        Ok(self)
     }
 
     /// Force-disable metrics sampling regardless of `metricsSampleIntervalMs`.
@@ -368,11 +377,11 @@ impl JsSandboxBuilder {
     /// The default timeout used by `replace` is 10_000 ms. An expired
     /// timeout force-kills the prior sandbox; `create()` still proceeds.
     #[napi]
-    pub fn replace_with_timeout(&mut self, timeout_ms: u32) -> &Self {
+    pub fn replace_with_timeout(&mut self, timeout_ms: f64) -> Result<&Self> {
+        let timeout_ms = crate::numeric::safe_integer(timeout_ms, "timeout_ms")?;
         let prev = self.take_inner();
-        self.inner =
-            Some(prev.replace_with_timeout(std::time::Duration::from_millis(timeout_ms.into())));
-        self
+        self.inner = Some(prev.replace_with_timeout(std::time::Duration::from_millis(timeout_ms)));
+        Ok(self)
     }
 
     /// Override the image entrypoint.
@@ -493,21 +502,36 @@ impl JsSandboxBuilder {
         env: &Env,
         configure: Function<ClassInstance<JsNetworkBuilder>, ClassInstance<JsNetworkBuilder>>,
     ) -> Result<&Self> {
-        let initial = JsNetworkBuilder::new().into_instance(env)?;
-        let mut returned = configure.call(initial)?;
-        let net_builder = returned.take_inner_builder()?;
         let prev = self.take_inner();
-        let mut next = prev.network(|_default| net_builder);
+        let mut callback_error = None;
+        let mut next = prev.network(|current| {
+            // Seed the callback with the accumulated configuration, and retain it
+            // if JavaScript throws so a failed callback cannot discard restrictions.
+            let result = (|| {
+                let initial = JsNetworkBuilder::from_inner(current.clone()).into_instance(env)?;
+                configure.call(initial)?.take_inner_builder()
+            })();
+            match result {
+                Ok(updated) => updated,
+                Err(error) => {
+                    callback_error = Some(error);
+                    current
+                }
+            }
+        });
         if let Some(proxy) = self.outbound_proxy.clone() {
             next = next.proxy(|_| proxy);
         }
         self.inner = Some(next);
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
         Ok(self)
     }
 
     /// Configure the single proxy used for outbound sandbox connections.
     #[napi(
-        ts_args_type = "configure: (arg: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder"
+        ts_args_type = "configure: (arg: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder"
     )]
     pub fn proxy(
         &mut self,
@@ -527,7 +551,9 @@ impl JsSandboxBuilder {
 
     /// Publish a TCP port from host -> guest.
     #[napi]
-    pub fn port(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -539,7 +565,9 @@ impl JsSandboxBuilder {
 
     /// Publish a TCP port from host -> guest on a specific host bind address.
     #[napi(js_name = "portBind")]
-    pub fn port_bind(&mut self, bind: String, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_bind(&mut self, bind: String, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -552,7 +580,9 @@ impl JsSandboxBuilder {
 
     /// Publish a UDP port from host -> guest.
     #[napi(js_name = "portUdp")]
-    pub fn port_udp(&mut self, host_port: u32, guest_port: u32) -> Result<&Self> {
+    pub fn port_udp(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
         let g = u16::try_from(guest_port)
@@ -567,9 +597,11 @@ impl JsSandboxBuilder {
     pub fn port_udp_bind(
         &mut self,
         bind: String,
-        host_port: u32,
-        guest_port: u32,
+        host_port: f64,
+        guest_port: f64,
     ) -> Result<&Self> {
+        let host_port = crate::numeric::uint32(host_port, "host_port")?;
+        let guest_port = crate::numeric::uint32(guest_port, "guest_port")?;
         let bind = parse_bind_addr(&bind)?;
         let h = u16::try_from(host_port)
             .map_err(|_| napi::Error::from_reason("host port out of range"))?;
@@ -582,18 +614,20 @@ impl JsSandboxBuilder {
 
     /// Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port.
     #[napi]
-    pub fn vsock(&mut self, host_path: String, port: u32) -> &Self {
+    pub fn vsock(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner();
         self.inner = Some(prev.vsock(host_path, port));
-        self
+        Ok(self)
     }
 
     /// Expose a host Unix datagram socket on a guest-to-host vsock port.
     #[napi(js_name = "vsockDgram")]
-    pub fn vsock_dgram(&mut self, host_path: String, port: u32) -> &Self {
+    pub fn vsock_dgram(&mut self, host_path: String, port: f64) -> Result<&Self> {
+        let port = crate::numeric::uint32(port, "port")?;
         let prev = self.take_inner();
         self.inner = Some(prev.vsock_dgram(host_path, port));
-        self
+        Ok(self)
     }
 
     /// Add a secret via a callback.
@@ -654,19 +688,22 @@ impl JsSandboxBuilder {
 
     /// Set a hard rlimit (soft = hard).
     #[napi]
-    pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
+    pub fn rlimit(&mut self, resource: String, limit: f64) -> Result<&Self> {
+        let limit = crate::numeric::safe_integer(limit, "limit")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit(res, limit as u64));
+        self.inner = Some(prev.rlimit(res, limit));
         Ok(self)
     }
 
     /// Set a separate soft and hard rlimit.
     #[napi(js_name = "rlimitRange")]
-    pub fn rlimit_range(&mut self, resource: String, soft: u32, hard: u32) -> Result<&Self> {
+    pub fn rlimit_range(&mut self, resource: String, soft: f64, hard: f64) -> Result<&Self> {
+        let soft = crate::numeric::safe_integer(soft, "soft")?;
+        let hard = crate::numeric::safe_integer(hard, "hard")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit_range(res, soft as u64, hard as u64));
+        self.inner = Some(prev.rlimit_range(res, soft, hard));
         Ok(self)
     }
 
@@ -688,18 +725,20 @@ impl JsSandboxBuilder {
 
     /// Auto-stop after `secs` seconds.
     #[napi(js_name = "maxDuration")]
-    pub fn max_duration(&mut self, secs: u32) -> &Self {
+    pub fn max_duration(&mut self, secs: f64) -> Result<&Self> {
+        let secs = crate::numeric::safe_integer(secs, "secs")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.max_duration(secs as u64));
-        self
+        self.inner = Some(prev.max_duration(secs));
+        Ok(self)
     }
 
     /// Auto-stop after `secs` seconds of inactivity.
     #[napi(js_name = "idleTimeout")]
-    pub fn idle_timeout(&mut self, secs: u32) -> &Self {
+    pub fn idle_timeout(&mut self, secs: f64) -> Result<&Self> {
+        let secs = crate::numeric::safe_integer(secs, "secs")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.idle_timeout(secs as u64));
-        self
+        self.inner = Some(prev.idle_timeout(secs));
+        Ok(self)
     }
 
     /// Configure a volume mount via a callback. The callback receives a

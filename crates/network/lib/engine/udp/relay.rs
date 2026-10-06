@@ -406,6 +406,14 @@ impl UdpRelay {
                     );
                     None
                 }
+                ResolvedOutboundProxy::HttpConnect { .. } => {
+                    tracing::debug!(
+                        guest_src = %guest_src,
+                        guest_dst = %guest_dst,
+                        "UDP relay dropped datagram because HTTP CONNECT has no UDP transport",
+                    );
+                    None
+                }
             },
         }
     }

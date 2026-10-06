@@ -16,7 +16,7 @@ use microsandbox_protocol::bootstrap::GuestBootstrap;
 use microsandbox_types::{CpuPlacement, PlacementProfile, VsockRouteSpec};
 use serde::{Deserialize, Serialize};
 
-use microsandbox_types::TransparentHugePagePolicy;
+use microsandbox_types::{GuestClockPolicy, TransparentHugePagePolicy};
 
 #[cfg(feature = "net")]
 use microsandbox_network::ResolvedNetworkConfig;
@@ -67,6 +67,15 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub http_deny_message: bool,
+
+    /// HTTP CONNECT outbound proxies are supported. Older runtimes omit this capability.
+    #[serde(default)]
+    pub http_connect_proxy: bool,
+
+    /// The launch field `guest_clock` is honored by the runtime.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub guest_clock: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.
@@ -151,6 +160,11 @@ pub struct LaunchConfig {
     /// Guest transparent huge-page policy selected at boot.
     #[serde(default)]
     pub thp: TransparentHugePagePolicy,
+
+    /// Host control over the guest wall clock. Omitted when it is the default host sync, so
+    /// runtimes that predate the field keep accepting ordinary launches.
+    #[serde(default, skip_serializing_if = "GuestClockPolicy::is_sync")]
+    pub guest_clock: GuestClockPolicy,
 
     /// Backend-resolved protected cache for explicit memory captures and restores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -595,6 +609,29 @@ mod tests {
         without_files.as_object_mut().unwrap().remove("file_mounts");
         let decoded: LaunchConfig = serde_json::from_value(without_files).unwrap();
         assert!(decoded.file_mounts.is_empty());
+    }
+
+    #[test]
+    fn guest_clock_is_omitted_by_default_and_survives_the_handoff() {
+        // Default launches stay byte-compatible with runtimes that predate the field.
+        let default = serde_json::to_value(LaunchConfig::default()).unwrap();
+        assert!(default.get("guest_clock").is_none());
+        assert_eq!(decode(default).unwrap().guest_clock, GuestClockPolicy::Sync);
+
+        let mut off = restore_request();
+        off["guest_clock"] = "off".into();
+        assert_eq!(
+            decode(off.clone()).unwrap().guest_clock,
+            GuestClockPolicy::Off
+        );
+        let config = LaunchConfig {
+            guest_clock: GuestClockPolicy::Off,
+            ..Default::default()
+        };
+        assert_eq!(serde_json::to_value(config).unwrap()["guest_clock"], "off");
+
+        off["guest_clock"] = "host".into();
+        assert!(decode(off).is_err());
     }
 
     #[cfg(feature = "net")]

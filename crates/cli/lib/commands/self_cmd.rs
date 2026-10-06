@@ -556,9 +556,7 @@ fn diagnose_host() -> microsandbox::setup::Diagnosis {
     diagnosis
 }
 
-/// Render the checks as a flat log: all `info <label>: <value>` facts first,
-/// then the `✓`/`✗ <label> <detail>` rows — matching the CLI's convention of
-/// leading with `info` metadata before the result rows.
+/// Render informational facts first, followed by results, using shared CLI styling.
 fn render_diagnosis(diagnosis: &microsandbox::setup::Diagnosis) {
     use microsandbox::setup::CheckState;
 
@@ -585,22 +583,14 @@ fn info_fact_rank(label: &str) -> u8 {
     }
 }
 
-/// Render one check. Pass/fail use the `✓`/`✗ <label> <detail>` completion
-/// format; informational facts render as an `info <label>: <value>` line.
+/// Render check results and facts with the shared action and diagnostic helpers.
 fn render_check(check: &microsandbox::setup::Check) {
     use microsandbox::setup::CheckState;
     match check.state {
         CheckState::Pass => ui::success(&check.label, &check.value),
         CheckState::Fail => ui::failure(&check.label, &check.value),
-        CheckState::Warn => {
-            eprintln!(
-                "   {} {:<12} {}",
-                style("!").yellow(),
-                check.label,
-                check.value
-            );
-        }
-        CheckState::Info => info(&format!("{}: {}", check.label, check.value)),
+        CheckState::Warn => ui::warn(&format!("{}: {}", check.label, check.value)),
+        CheckState::Info => ui::notice(&check.label, &check.value),
     }
 }
 
@@ -3431,11 +3421,11 @@ fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn info(msg: &str) {
-    eprintln!("{} {msg}", style("info").cyan().bold());
+    ui::notice("", msg);
 }
 
 fn done(msg: &str) {
-    eprintln!("{} {msg}", style("done").green().bold());
+    ui::success(msg, "");
 }
 
 /// Remove a single uninstall category from the base directory.
@@ -3508,7 +3498,7 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     for rc in [".profile", ".bash_profile", ".bashrc", ".zshrc"] {
         let path = home.join(rc);
         if path.exists() && remove_marker_block(&path)? {
-            ui::success("Cleaned legacy shell config", &format!("~/{rc}"));
+            ui::success("Cleaned", &format!("legacy shell config ~/{rc}"));
         }
     }
 
@@ -3516,8 +3506,8 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     if fish_conf.exists() {
         fs::remove_file(&fish_conf)?;
         ui::success(
-            "Removed legacy shell config",
-            "~/.config/fish/conf.d/microsandbox.fish",
+            "Removed",
+            "legacy shell config ~/.config/fish/conf.d/microsandbox.fish",
         );
     }
 

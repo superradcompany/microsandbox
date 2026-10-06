@@ -27,8 +27,8 @@ pub struct JsStdinMode {
 #[napi(object, js_name = "Rlimit")]
 pub struct JsRlimit {
     pub resource: String,
-    pub soft: u32,
-    pub hard: u32,
+    pub soft: f64,
+    pub hard: f64,
 }
 
 /// Built exec options produced by `ExecOptionsBuilder.build()`.
@@ -39,7 +39,7 @@ pub struct JsExecOptions {
     pub cwd: Option<String>,
     pub user: Option<String>,
     pub env: HashMap<String, String>,
-    pub timeout_ms: Option<u32>,
+    pub timeout_ms: Option<f64>,
     // Keep public names stable when napi-rs renders these renamed nested objects.
     #[napi(ts_type = "StdinMode")]
     pub stdin: JsStdinMode,
@@ -56,7 +56,7 @@ pub struct JsExecOptionsBuilder {
     cwd: Option<String>,
     user: Option<String>,
     env: Vec<(String, String)>,
-    timeout_ms: Option<u32>,
+    timeout_ms: Option<f64>,
     stdin: JsStdinMode,
     tty: bool,
     rlimits: Vec<JsRlimit>,
@@ -144,11 +144,12 @@ impl JsExecOptionsBuilder {
 
     /// Kill the process if it hasn't exited within `ms` milliseconds.
     #[napi]
-    pub fn timeout(&mut self, ms: u32) -> &Self {
+    pub fn timeout(&mut self, ms: f64) -> Result<&Self> {
+        let ms = crate::numeric::safe_integer(ms, "ms")?;
         let prev = self.take_inner();
-        self.inner = Some(prev.timeout(Duration::from_millis(ms as u64)));
-        self.timeout_ms = Some(ms);
-        self
+        self.inner = Some(prev.timeout(Duration::from_millis(ms)));
+        self.timeout_ms = Some(ms as f64);
+        Ok(self)
     }
 
     #[napi(js_name = "stdinNull")]
@@ -194,27 +195,30 @@ impl JsExecOptionsBuilder {
     }
 
     #[napi]
-    pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
+    pub fn rlimit(&mut self, resource: String, limit: f64) -> Result<&Self> {
+        let limit = crate::numeric::safe_integer(limit, "limit")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit(res, limit as u64));
+        self.inner = Some(prev.rlimit(res, limit));
         self.rlimits.push(JsRlimit {
             resource,
-            soft: limit,
-            hard: limit,
+            soft: limit as f64,
+            hard: limit as f64,
         });
         Ok(self)
     }
 
     #[napi(js_name = "rlimitRange")]
-    pub fn rlimit_range(&mut self, resource: String, soft: u32, hard: u32) -> Result<&Self> {
+    pub fn rlimit_range(&mut self, resource: String, soft: f64, hard: f64) -> Result<&Self> {
+        let soft = crate::numeric::safe_integer(soft, "soft")?;
+        let hard = crate::numeric::safe_integer(hard, "hard")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit_range(res, soft as u64, hard as u64));
+        self.inner = Some(prev.rlimit_range(res, soft, hard));
         self.rlimits.push(JsRlimit {
             resource,
-            soft,
-            hard,
+            soft: soft as f64,
+            hard: hard as f64,
         });
         Ok(self)
     }

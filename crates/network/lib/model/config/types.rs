@@ -128,7 +128,7 @@ pub struct NetworkConfig {
     /// Proxy that all outbound sandbox connections are dialed through.
     ///
     /// Applies to TLS-intercepted and bypassed/plain TCP traffic. SOCKS5 also
-    /// relays non-DNS UDP; SOCKS4 blocks it because that protocol has no UDP command.
+    /// relays non-DNS UDP; SOCKS4 and HTTP CONNECT block it.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
 }

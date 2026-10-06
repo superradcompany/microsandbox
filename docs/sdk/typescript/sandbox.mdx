@@ -1483,7 +1483,7 @@ Configure DNS, TLS, policy, and secrets. See [Networking](/sdk/typescript/networ
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">proxy()</span>
 
 ```typescript
-proxy(configure: (proxy: OutboundProxyBuilder) => Socks4ProxyBuilder | Socks5ProxyBuilder): this
+proxy(configure: (proxy: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
 ```
 
 Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/typescript/proxies) for the protocol builders and examples.

@@ -284,6 +284,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Host control over the guest wall clock during boot, restore, and resume.
+    pub guest_clock: microsandbox_types::GuestClockPolicy,
+
     /// Protected memory cache resolved by the sandbox's owning local backend.
     pub memory_cache_dir: Option<PathBuf>,
 
@@ -526,6 +529,7 @@ impl std::fmt::Debug for VmConfig {
         debug
             .field("libkrunfw_path", &self.libkrunfw_path)
             .field("thp", &self.thp)
+            .field("guest_clock", &self.guest_clock)
             .field("vcpus", &self.vcpus)
             .field("memory_mib", &self.memory_mib)
             .field("max_cpus", &self.max_cpus)
@@ -717,6 +721,8 @@ fn run(
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
 
+    relay = relay.with_boot_error_log_dir(config.log_dir.clone());
+
     let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
         Ok(disk_paths) => disk_paths,
         Err(error) => {
@@ -792,6 +798,8 @@ fn run(
             crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
         return Err(error.into());
     }
+
+    relay = relay.with_guest_clock(config.vm.guest_clock);
 
     // Attach the exec.log writer so the ring reader can capture the
     // primary session's stdout/stderr. Failure to open the file is
@@ -1265,6 +1273,7 @@ fn run(
     let relay_exit_handle = exit_handle.clone();
     let relay_exit_reason = Arc::clone(&exit_reason);
     let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
+    let metrics_vm_control = vm.control_handle();
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
@@ -1328,6 +1337,7 @@ fn run(
                         interval_ms,
                         max_cpus: metrics_max_cpus,
                         krun_metrics: krun_metrics_handle,
+                        vm_control: metrics_vm_control,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
                     }));
@@ -1860,6 +1870,7 @@ fn build_vm(
         })
         .transpose()?;
     let mut bootstrap = vm.bootstrap.clone();
+    bootstrap.init_failure_ack = true;
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));

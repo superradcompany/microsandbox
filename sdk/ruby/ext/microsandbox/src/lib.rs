@@ -613,6 +613,9 @@ fn apply_secret_options(
 
 #[derive(Clone)]
 enum RubyOutboundProxyConfig {
+    HttpConnect {
+        address: String,
+    },
     Socks4 {
         address: String,
         user_id: Option<String>,
@@ -625,6 +628,9 @@ enum RubyOutboundProxyConfig {
 
 fn apply_outbound_proxy(builder: SandboxBuilder, proxy: &RubyOutboundProxy) -> SandboxBuilder {
     match proxy.inner.borrow().clone() {
+        RubyOutboundProxyConfig::HttpConnect { address } => {
+            builder.proxy(|proxy| proxy.http_connect(address))
+        }
         RubyOutboundProxyConfig::Socks4 {
             address,
             user_id: Some(user_id),
@@ -2070,6 +2076,12 @@ fn outbound_proxy_socks4(address: String) -> RubyOutboundProxy {
     }
 }
 
+fn outbound_proxy_http_connect(address: String) -> RubyOutboundProxy {
+    RubyOutboundProxy {
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::HttpConnect { address }),
+    }
+}
+
 fn outbound_proxy_socks5(address: String) -> RubyOutboundProxy {
     RubyOutboundProxy {
         inner: std::cell::RefCell::new(RubyOutboundProxyConfig::Socks5 {
@@ -2105,6 +2117,10 @@ impl RubyOutboundProxy {
                 ruby,
                 "user_id is only supported for SOCKS4 proxies",
             )),
+            RubyOutboundProxyConfig::HttpConnect { .. } => Err(argument_error(
+                ruby,
+                "user_id is only supported for SOCKS4 proxies",
+            )),
         }
     }
 
@@ -2116,6 +2132,10 @@ impl RubyOutboundProxy {
     ) -> Result<(), Error> {
         match &mut *this.inner.borrow_mut() {
             RubyOutboundProxyConfig::Socks4 { .. } => Err(argument_error(
+                ruby,
+                "credentials are only supported for SOCKS5 proxies",
+            )),
+            RubyOutboundProxyConfig::HttpConnect { .. } => Err(argument_error(
                 ruby,
                 "credentials are only supported for SOCKS5 proxies",
             )),
@@ -2640,6 +2660,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     secret_source.define_singleton_method("env", function!(secret_source_env, 1))?;
 
     let outbound_proxy = module.define_class("OutboundProxy", ruby.class_object())?;
+    outbound_proxy
+        .define_singleton_method("http_connect", function!(outbound_proxy_http_connect, 1))?;
     outbound_proxy.define_singleton_method("socks4", function!(outbound_proxy_socks4, 1))?;
     outbound_proxy.define_singleton_method("socks5", function!(outbound_proxy_socks5, 1))?;
     outbound_proxy.define_method("user_id!", method!(RubyOutboundProxy::user_id, 1))?;

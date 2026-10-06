@@ -2,12 +2,14 @@
 
 use clap::Args;
 use microsandbox::sandbox::{
-    ForkBuilder, ForkManyBuilder, RestoreBuilder, Sandbox, SecurityProfile,
+    ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
 };
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
-use super::common::{display_restore_warnings, parse_restore_volume, parse_vsock_route};
+use super::common::{
+    display_restore_warnings, guest_clock_parser, parse_restore_volume, parse_vsock_route,
+};
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -88,6 +90,9 @@ pub struct RestoreControlArgs {
     /// Guest security profile for disk boot; rejected for full execution restore.
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+    /// Guest wall-clock policy (`sync` or `off`); defaults to the policy recorded in the snapshot.
+    #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
+    pub guest_clock: Option<GuestClockPolicy>,
     /// Maximum lifetime of the destination sandbox (e.g. 30s, 5m, 1h).
     #[arg(long, value_name = "DURATION")]
     pub max_duration: Option<String>,
@@ -141,6 +146,9 @@ impl RestoreControlArgs {
                 other => anyhow::bail!("invalid security profile {other:?}"),
             };
             builder = builder.security(profile);
+        }
+        if let Some(policy) = self.guest_clock {
+            builder = builder.guest_clock(policy);
         }
         if let Some(duration) = &self.max_duration {
             builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
@@ -342,6 +350,8 @@ mod tests {
             "2G",
             "--security",
             "restricted",
+            "--guest-clock",
+            "off",
             "--max-duration",
             "10m",
             "--idle-timeout",
@@ -351,6 +361,7 @@ mod tests {
         assert_eq!(cli.args.controls.cpus, Some(2));
         assert_eq!(cli.args.controls.memory.as_deref(), Some("2G"));
         assert_eq!(cli.args.controls.security.as_deref(), Some("restricted"));
+        assert_eq!(cli.args.controls.guest_clock, Some(GuestClockPolicy::Off));
         assert!(
             cli.args
                 .controls
@@ -366,6 +377,18 @@ mod tests {
 
     #[test]
     fn invalid_destination_controls_fail_before_source_resolution() {
+        assert!(
+            TestCli::try_parse_from([
+                "restore",
+                "source-not-opened",
+                "--name",
+                "worker",
+                "--guest-clock",
+                "host",
+            ])
+            .is_err()
+        );
+
         for controls in [
             RestoreControlArgs {
                 memory: Some("not-a-size".into()),

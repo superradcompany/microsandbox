@@ -403,7 +403,7 @@ async fn drive_stream(
                 // Match buffered collect(): an early guest stdin close is not
                 // an error on the captured path. Keep streaming diagnostics.
                 if stream_output {
-                    eprintln!("msb: warning: failed to forward stdin to guest: {err:?}");
+                    ui::warn(&format!("failed to forward stdin to guest: {err:?}"));
                 }
             }
             // Explicit (not `_`) so a new ExecEvent variant fails to compile here.

@@ -36,6 +36,14 @@ pub enum AgentdError {
     #[error("exec session error: {0}")]
     ExecSession(String),
 
+    /// The configured guest user name could not be resolved.
+    #[error("exec session error: guest user not found: {0}")]
+    UserNotFound(String),
+
+    /// The configured guest group name could not be resolved.
+    #[error("exec session error: guest group not found: {0}")]
+    GroupNotFound(String),
+
     /// A spawn-time exec failure with classified payload, ready to
     /// be shipped to the host as `ExecFailed`. Distinct from
     /// `ExecSession` (which is a free-form internal error) — this

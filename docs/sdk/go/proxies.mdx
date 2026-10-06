@@ -1,10 +1,12 @@
 ---
 title: Proxies
 "og:title": Go SDK Proxies reference
-description: Route outbound sandbox connections through a SOCKS4 or SOCKS5 proxy with the Go SDK.
+description: Route outbound sandbox connections through an HTTP CONNECT, SOCKS4, or SOCKS5 proxy with the Go SDK.
 ---
 
-Set the proxy with [`WithProxy`](#m-withproxy). SOCKS4 and SOCKS5 are mutually exclusive. See [Outbound proxies](/networking/outbound-proxy) for setup examples.
+Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`WithProxy`](#m-withproxy). Proxy protocols are mutually exclusive.
+
+See [Proxies](/networking/outbound-proxy) for routing behavior, security considerations, and limits.
 
 <Note>Outbound proxies are local-only. Cloud sandbox creation rejects this setting.</Note>
 
@@ -43,6 +45,14 @@ func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy
 ```
 
 Construct a SOCKS4 proxy at `IP:port` for [`WithProxy`](#m-withproxy). Pass `SOCKS4ProxyOptions{UserID: "sandbox"}` to include the optional SOCKS4 user ID. It must contain 1–255 bytes and no null byte; it is an identifier, not a password.
+
+### <span className="msb-recv" id="m-httpconnectproxy">m.</span><span className="msb-hn">HTTPConnectProxy()</span>
+
+```go
+func HTTPConnectProxy(address string) *OutboundProxy
+```
+
+Construct an HTTP CONNECT proxy at `IP:port` for [`WithProxy`](#m-withproxy). It supports TCP only and does not support proxy authentication.
 
 ### <span className="msb-recv" id="m-socks5proxy">m.</span><span className="msb-hn">SOCKS5Proxy()</span>
 

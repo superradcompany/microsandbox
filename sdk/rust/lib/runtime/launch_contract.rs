@@ -87,6 +87,21 @@ impl LaunchContract {
         if self.machine && network.tcp_accept_queue_size.is_some() {
             require_tcp_accept_queue_size(msb_path).await?;
         }
+
+        if self.machine
+            && matches!(
+                network.outbound_proxy,
+                Some(microsandbox_network::OutboundProxy::HttpConnect { .. })
+            )
+        {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.http_connect_proxy,
+                "HTTP CONNECT outbound proxies",
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -104,6 +119,16 @@ impl LaunchContract {
         if self.machine {
             return Ok(());
         }
+
+        if matches!(
+            network.outbound_proxy,
+            Some(microsandbox_network::OutboundProxy::HttpConnect { .. })
+        ) {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "HTTP CONNECT outbound proxies",
+            )));
+        }
+
         if network.max_udp_connections.is_some() {
             return unsupported("UDP connection limits");
         }
@@ -182,6 +207,9 @@ impl LaunchContract {
     fn to_previous_version(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
         if launch.execution != microsandbox_runtime::launch::ExecutionIntent::Boot {
             return unsupported("execution restore");
+        }
+        if !launch.guest_clock.is_sync() {
+            return unsupported("guest clock policy");
         }
         if !launch.owned_volumes.is_empty() {
             return unsupported("sandbox-owned volumes");
@@ -356,6 +384,7 @@ impl LaunchContract {
             cpu_placement: resources.cpu_placement,
             placement_profile_name: resources.placement_profile.clone(),
             thp: resources.thp,
+            guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
             vsock: config.spec.vsock.routes.clone(),
             owned_volumes: config
                 .spec
@@ -430,6 +459,14 @@ impl LaunchContract {
     }
 }
 
+impl LaunchContract {
+    /// Runtimes from v0.6.7 refuse a bind root that goes through a symlink unless
+    /// the mount sets `follow_root_symlinks`; earlier ones always follow it.
+    pub(crate) fn refuses_symlinked_bind_roots(&self) -> bool {
+        self.machine || self.patch >= 7
+    }
+}
+
 impl FileIdentity {
     fn capture(file: &File) -> std::io::Result<Self> {
         let metadata = file.metadata()?;
@@ -489,6 +526,7 @@ pub(crate) async fn validate_runtime_config(
     contract
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
+    validate_guest_clock(&runtime.msb_path, config).await?;
     Ok(())
 }
 
@@ -582,6 +620,35 @@ pub(crate) async fn validate_http_deny_response(
             crate::error::UnsupportedReason::NotAvailable(upgrade_required(
                 "network.http.deny_response",
             )),
+        ));
+    }
+    Ok(())
+}
+
+/// Probe guest clock support only when the caller turns host synchronization off.
+/// Runtimes that predate the capability would otherwise reject the launch field late.
+pub(crate) async fn validate_guest_clock(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    if config
+        .spec
+        .runtime
+        .guest_clock
+        .unwrap_or_default()
+        .is_sync()
+    {
+        return Ok(());
+    }
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| capabilities.guest_clock);
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required("runtime.guest_clock")),
         ));
     }
     Ok(())
@@ -697,6 +764,16 @@ fn upgrade_required(feature: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlinked_bind_roots_are_only_refused_from_the_enforcing_runtime() {
+        let contract = |patch, machine| LaunchContract { patch, machine };
+        assert!(!contract(0, false).refuses_symlinked_bind_roots());
+        assert!(!contract(6, false).refuses_symlinked_bind_roots());
+        assert!(contract(7, false).refuses_symlinked_bind_roots());
+        assert!(contract(18, false).refuses_symlinked_bind_roots());
+        assert!(contract(0, true).refuses_symlinked_bind_roots());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -845,6 +922,71 @@ mod tests {
 
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
+    async fn http_connect_requires_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let network: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {"protocol": "http_connect", "address": "127.0.0.1:3128"}
+        }))
+        .unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":false}'"#,
+            r#"printf '%s' '{"protocols":[1],"http_connect_proxy":true}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-http-connect", response);
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP CONNECT"), "{error}");
+            assert!(error.to_string().contains("upgrade msb"), "{error}");
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-http-connect",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &network)
+            .await
+            .unwrap();
+
+        for patch in [17, 18] {
+            let legacy = LaunchContract {
+                patch,
+                machine: false,
+            };
+            let error = legacy
+                .validate_network(&network, Default::default())
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP CONNECT"), "{error}");
+        }
+
+        for proxy in [None, Some("socks4"), Some("socks5")] {
+            let network: NetworkConfig = serde_json::from_value(json!({
+                "outbound_proxy": proxy.map(|protocol| json!({
+                    "protocol": protocol,
+                    "address": "127.0.0.1:1080"
+                }))
+            }))
+            .unwrap();
+            machine
+                .require_network_capabilities(&dir.path().join("absent-msb"), &network)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
     async fn http_deny_response_requires_an_explicit_runtime_capability() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::test_support::fixtures::decode(include_str!(
@@ -882,6 +1024,41 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
         );
         validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guest_clock_off_requires_an_explicit_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        // The default and an explicit sync must avoid probing, including on an old runtime.
+        for policy in [None, Some(microsandbox_types::GuestClockPolicy::Sync)] {
+            config.spec.runtime.guest_clock = policy;
+            validate_guest_clock(&dir.path().join("no-probe"), &config)
+                .await
+                .unwrap();
+        }
+        config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off);
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"guest_clock":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"guest_clock":"true"}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-clock", response);
+            let error = validate_guest_clock(&path, &config).await.unwrap_err();
+            assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+            assert!(error.to_string().contains("runtime.guest_clock"));
+        }
+        let path = script(
+            dir.path(),
+            "supports-clock",
+            r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
+        );
+        validate_guest_clock(&path, &config).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1660,6 +1837,36 @@ mod protocol {
             encode_bytes(&config, LEGACY)
                 .unwrap_err()
                 .contains("requires a newer runtime launch contract")
+        );
+    }
+
+    #[test]
+    fn legacy_codec_refuses_guest_clock_off() {
+        let config = LaunchConfig {
+            guest_clock: microsandbox_types::GuestClockPolicy::Off,
+            ..Default::default()
+        };
+        assert!(
+            encode_bytes(&config, LEGACY)
+                .unwrap_err()
+                .contains("requires a newer runtime launch contract")
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode_bytes(&config, current).unwrap()).unwrap()["guest_clock"],
+            "off"
+        );
+        // The default is omitted, so launches without the option stay readable by older runtimes.
+        let default = encode_bytes(&LaunchConfig::default(), current).unwrap();
+        assert!(
+            !serde_json::from_slice::<Value>(&default)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("guest_clock")
         );
     }
 

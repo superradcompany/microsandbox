@@ -34,6 +34,8 @@ const LIVE_RESIZE_UNAVAILABLE: &str =
     "live CPU and memory resize are not available in this runtime yet";
 const LIVE_SECRET_RECONFIGURE_UNAVAILABLE: &str =
     "live secret reconfiguration is not available in this runtime yet";
+const SECRET_POLICY_REQUIRES_RESTART: &str =
+    "secret policy changes require restart; use restart or next_start";
 const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
     "affects future execs only after restart; live exec-default updates are not available yet";
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
@@ -94,6 +96,10 @@ struct DesiredResources {
 struct ExistingSecret {
     placeholder: String,
     allowed_hosts: Vec<String>,
+    substitution: SecretSubstitution,
+    passthrough_hosts: Vec<String>,
+    violation_action: Option<SecretViolationAction>,
+    require_tls_identity: bool,
 }
 
 /// Live-control operations the running sandbox process actually serves,
@@ -289,6 +295,9 @@ impl SandboxModificationBuilder {
     /// `tls` change and, like every other restart-backed change, needs
     /// `restart` or `next_start` on a running sandbox. Existing secrets that
     /// opt out of TLS identity continue to support live plain-HTTP updates.
+    /// Changes to an existing secret's substitution, violation action, TLS
+    /// identity requirement, or placeholder passthrough hosts require restart
+    /// or next-start policy, even when combined with otherwise live edits.
     pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
         let handle = self
             .backend
@@ -598,6 +607,7 @@ fn build_plan(
     push_secret_changes(
         status,
         config,
+        active,
         live.secrets,
         &patch,
         policy,
@@ -790,7 +800,10 @@ pub(crate) async fn restore_requested_resources(
     let resources = &config.spec.resources;
     let session =
         if resources.max_cpus > resources.cpus || resources.max_memory_mib > resources.memory_mib {
-            local.control_session(&config.spec.name).await?
+            // The restored sandbox is still `Starting` here: readiness is published after this.
+            local
+                .control_session_while_starting(&config.spec.name)
+                .await?
         } else {
             None
         };
@@ -1913,9 +1926,11 @@ fn root_disk_size_state(config: &SandboxConfig) -> Option<RootDiskSizeState> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_secret_changes(
     status: SandboxStatus,
     config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
     live_secret_reconfigure_supported: bool,
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
@@ -1924,34 +1939,61 @@ fn push_secret_changes(
 ) {
     for spec in &patch.secrets {
         let existing = existing_secret(config, &spec.name);
+        let policy_changed = secret_policy_changes(spec, existing.as_ref())
+            || (running_status(status)
+                && active.is_some_and(|active| {
+                    secret_policy_changes(spec, existing_secret(active, &spec.name).as_ref())
+                }));
         let Some(change) = infer_secret_change(spec, existing.as_ref()) else {
-            // The spec already matches the current config: declarative no-op.
+            if policy_changed {
+                // Use the existing generic config-change contract: older SDKs
+                // need no new SecretChangeKind variant to decode this plan.
+                changes.push(spec_change(
+                    &format!("secret.{}.policy", spec.name),
+                    ChangeKind::Updated,
+                    None,
+                    None,
+                    status,
+                    policy,
+                    SECRET_POLICY_REQUIRES_RESTART,
+                ));
+            }
             continue;
         };
         let placeholder_changed = secret_placeholder_changes(spec, existing.as_ref());
-        let disposition = secret_disposition(
-            status,
-            policy,
-            change,
-            placeholder_changed,
-            live_secret_reconfigure_supported,
-        );
-        let reason = secret_reason(
-            status,
-            policy,
-            change,
-            placeholder_changed,
-            live_secret_reconfigure_supported,
-        );
+        let disposition = if policy_changed {
+            spec_disposition(status, policy)
+        } else {
+            secret_disposition(
+                status,
+                policy,
+                change,
+                placeholder_changed,
+                live_secret_reconfigure_supported,
+            )
+        };
+        let reason = if policy_changed {
+            spec_reason(status, policy, SECRET_POLICY_REQUIRES_RESTART)
+        } else {
+            secret_reason(
+                status,
+                policy,
+                change,
+                placeholder_changed,
+                live_secret_reconfigure_supported,
+            )
+        };
 
-        push_live_secret_warning(
-            status,
-            change,
-            placeholder_changed,
-            disposition,
-            live_secret_reconfigure_supported,
-            warnings,
-        );
+        if !policy_changed {
+            push_live_secret_warning(
+                status,
+                change,
+                placeholder_changed,
+                disposition,
+                live_secret_reconfigure_supported,
+                warnings,
+            );
+        }
 
         changes.push(PlannedChange::Secret(SecretPlannedChange {
             field: SECRET_FIELD.to_string(),
@@ -2079,6 +2121,30 @@ fn secret_placeholder_changes(
         (Some(_), None) => true,
         (None, _) => false,
     }
+}
+
+/// Compare only supplied policy fields; omitted options and empty host lists
+/// leave an existing policy unchanged, matching persistence semantics.
+fn secret_policy_changes(
+    spec: &SecretModificationPatch,
+    existing: Option<&ExistingSecret>,
+) -> bool {
+    let Some(existing) = existing else {
+        return false;
+    };
+    spec.substitution.as_ref().is_some_and(|substitution| {
+        substitution.headers != existing.substitution.headers
+            || substitution.query != existing.substitution.query
+            || substitution.body != existing.substitution.body
+    }) || (!spec.passthrough_hosts.is_empty()
+        && spec.passthrough_hosts != existing.passthrough_hosts)
+        || spec
+            .violation_action
+            .as_ref()
+            .is_some_and(|action| Some(action) != existing.violation_action.as_ref())
+        || spec
+            .require_tls_identity
+            .is_some_and(|required| required != existing.require_tls_identity)
 }
 
 /// Warn when a live-capable secret change falls back to restart-required
@@ -2607,6 +2673,14 @@ fn existing_secret_from_network_config(
         .find(|secret| secret.env_var == name)
         .map(|secret| ExistingSecret {
             placeholder: secret.placeholder,
+            substitution: secret.substitution,
+            passthrough_hosts: secret
+                .passthrough_hosts
+                .into_iter()
+                .map(format_host_pattern)
+                .collect(),
+            violation_action: secret.violation_action,
+            require_tls_identity: secret.require_tls_identity,
             allowed_hosts: secret
                 .allowed_hosts
                 .into_iter()
@@ -2823,6 +2897,69 @@ mod tests {
             assert_eq!(config.spec.resources.cpus, cpus);
             assert_eq!(config.spec.resources.memory_mib, 256);
         }
+    }
+
+    /// A checkpoint restore reads the restored CPU target before the creator publishes the
+    /// sandbox as `Running`; ordinary control sessions still refuse a sandbox that is `Starting`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_cpu_target_is_read_while_the_sandbox_is_still_starting() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        seed_control_run_with_status(&local, "api", SandboxStatus::Starting).await;
+        let agent =
+            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let path = microsandbox_runtime::control::control_socket_path_for(&agent);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        // An ordinary session does not own a sandbox that has not been published yet.
+        assert!(matches!(
+            local.control_session("api").await,
+            Err(crate::MicrosandboxError::ControlClient(error))
+                if matches!(&*error, microsandbox_control_client::ControlClientError::RuntimeChanged)
+        ));
+        let server = tokio::spawn(async move {
+            for (op, reply) in [
+                (
+                    "capabilities",
+                    "{\"ok\":true,\"capabilities\":{\"cpu_resize\":true,\"memory_resize\":true,\"secrets_update\":false}}",
+                ),
+                (
+                    "cpu_state",
+                    "{\"ok\":true,\"cpu\":{\"possible\":4,\"requested_online\":2,\"actual_online\":2,\"enforced\":2}}",
+                ),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+                    op
+                );
+                stream
+                    .get_mut()
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut config = config(1, 256);
+        config.spec.resources.max_cpus = 4;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            restore_requested_resources(&local, &mut config),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.spec.resources.cpus, 2);
+        server.await.unwrap();
     }
 
     #[cfg(unix)]
@@ -3213,13 +3350,17 @@ mod tests {
     }
 
     async fn seed_control_run(local: &LocalBackend, name: &str) {
+        seed_control_run_with_status(local, name, SandboxStatus::Running).await;
+    }
+
+    async fn seed_control_run_with_status(local: &LocalBackend, name: &str, status: SandboxStatus) {
         use crate::db::entity::{run, sandbox};
 
         let db = local.db().await.unwrap();
         let sandbox_id = sandbox::Entity::insert(sandbox::ActiveModel {
             name: Set(name.into()),
             config: Set("{}".into()),
-            status: Set(SandboxStatus::Running),
+            status: Set(status),
             ephemeral: Set(false),
             ..Default::default()
         })
@@ -4502,6 +4643,289 @@ mod tests {
         SandboxModificationPatch {
             secrets: specs,
             ..SandboxModificationPatch::default()
+        }
+    }
+
+    #[cfg(feature = "net")]
+    fn secret_policy_specs() -> Vec<SecretModificationPatch> {
+        vec![
+            SecretModificationPatch {
+                substitution: Some(SecretSubstitution {
+                    headers: false,
+                    query: true,
+                    body: true,
+                }),
+                ..bare_spec("API_KEY", &[])
+            },
+            SecretModificationPatch {
+                violation_action: Some(SecretViolationAction::BlockAndTerminate),
+                ..bare_spec("API_KEY", &[])
+            },
+            SecretModificationPatch {
+                require_tls_identity: Some(false),
+                ..bare_spec("API_KEY", &[])
+            },
+            SecretModificationPatch {
+                passthrough_hosts: vec!["logs.example.com".into()],
+                ..bare_spec("API_KEY", &[])
+            },
+        ]
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn secret_policy_edits_are_planned_and_never_sent_live() {
+        let config = config_with_secret("API_KEY", SECRET_SENTINEL);
+        for spec in secret_policy_specs() {
+            for (status, policy, expected, apply_allowed) in [
+                (
+                    SandboxStatus::Running,
+                    ModificationPolicy::NoRestart,
+                    ModificationDisposition::RequiresRestart,
+                    false,
+                ),
+                (
+                    SandboxStatus::Running,
+                    ModificationPolicy::Restart,
+                    ModificationDisposition::RequiresRestart,
+                    true,
+                ),
+                (
+                    SandboxStatus::Running,
+                    ModificationPolicy::NextStart,
+                    ModificationDisposition::NextStart,
+                    true,
+                ),
+                (
+                    SandboxStatus::Stopped,
+                    ModificationPolicy::NoRestart,
+                    ModificationDisposition::NextStart,
+                    true,
+                ),
+                (
+                    SandboxStatus::Stopped,
+                    ModificationPolicy::Restart,
+                    ModificationDisposition::NextStart,
+                    true,
+                ),
+                (
+                    SandboxStatus::Stopped,
+                    ModificationPolicy::NextStart,
+                    ModificationDisposition::NextStart,
+                    true,
+                ),
+                (
+                    SandboxStatus::Paused,
+                    ModificationPolicy::NoRestart,
+                    ModificationDisposition::Unsupported,
+                    false,
+                ),
+                (
+                    SandboxStatus::Paused,
+                    ModificationPolicy::Restart,
+                    ModificationDisposition::Unsupported,
+                    false,
+                ),
+                (
+                    SandboxStatus::Paused,
+                    ModificationPolicy::NextStart,
+                    ModificationDisposition::NextStart,
+                    true,
+                ),
+            ] {
+                for supported in [false, true] {
+                    for combined_change in 0..3 {
+                        let mut spec = spec.clone();
+                        match combined_change {
+                            1 => spec.allowed_hosts = vec!["other.example.com".into()],
+                            2 => spec.value = SECRET_SENTINEL.to_string().into(),
+                            _ => {}
+                        }
+                        let patch = patch_with_specs(vec![spec]);
+                        let plan = build_plan(
+                            "api".into(),
+                            status,
+                            &config,
+                            Some(&config),
+                            LiveControl {
+                                secrets: supported,
+                                ..Default::default()
+                            },
+                            patch.clone(),
+                            policy,
+                        );
+                        assert_eq!(plan.changes.len(), 1);
+                        match &plan.changes[0] {
+                            PlannedChange::Config(change) => {
+                                assert_eq!(change.field, "secret.API_KEY.policy");
+                                assert_eq!(change.change, ChangeKind::Updated);
+                                assert_eq!(change.disposition, expected);
+                            }
+                            PlannedChange::Secret(change) => {
+                                assert_ne!(combined_change, 0);
+                                assert_eq!(change.disposition, expected);
+                            }
+                        }
+                        assert!(live_secret_updates(&plan, &patch).unwrap().is_empty());
+                        assert_eq!(validate_apply_supported(&plan).is_ok(), apply_allowed,);
+                        assert_eq!(
+                            plan_requires_restart(&plan),
+                            expected == ModificationDisposition::RequiresRestart
+                        );
+                        assert!(
+                            !serde_json::to_string(&plan)
+                                .unwrap()
+                                .contains(SECRET_SENTINEL)
+                        );
+                        assert!(plan.warnings.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn secret_policy_comparison_preserves_noops_and_checks_active_rules() {
+        let original = config_with_secret("API_KEY", SECRET_SENTINEL);
+        for spec in secret_policy_specs() {
+            let patch = patch_with_specs(vec![spec]);
+            let mut desired = original.clone();
+            apply_secret_patch_to_config(&mut desired, &patch).unwrap();
+            let plan = build_plan(
+                "api".into(),
+                SandboxStatus::Running,
+                &desired,
+                Some(&desired),
+                LiveControl {
+                    secrets: true,
+                    ..Default::default()
+                },
+                patch.clone(),
+                ModificationPolicy::NoRestart,
+            );
+            assert!(
+                plan.changes.is_empty(),
+                "identical explicit policies are no-ops"
+            );
+
+            let pending = build_plan(
+                "api".into(),
+                SandboxStatus::Running,
+                &desired,
+                Some(&original),
+                LiveControl {
+                    secrets: true,
+                    ..Default::default()
+                },
+                patch.clone(),
+                ModificationPolicy::NoRestart,
+            );
+            assert!(plan_requires_restart(&pending));
+            assert!(validate_apply_supported(&pending).is_err());
+            assert!(live_secret_updates(&pending, &patch).unwrap().is_empty());
+
+            let omitted = patch_with_specs(vec![bare_spec("API_KEY", &[])]);
+            let unchanged = build_plan(
+                "api".into(),
+                SandboxStatus::Running,
+                &desired,
+                Some(&desired),
+                LiveControl {
+                    secrets: true,
+                    ..Default::default()
+                },
+                omitted,
+                ModificationPolicy::NoRestart,
+            );
+            assert!(
+                unchanged.changes.is_empty(),
+                "omitted fields preserve existing policies"
+            );
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn applying_stopped_secret_policy_edits_persists_each_option() {
+        let temp = tempdir().unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(
+            LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        for (index, spec) in secret_policy_specs().into_iter().enumerate() {
+            let mut current = config_with_secret("API_KEY", SECRET_SENTINEL);
+            current.spec.name = format!("policy-{index}");
+            let model = sandbox_entity::ActiveModel {
+                name: Set(current.spec.name.clone()),
+                config: Set(serde_json::to_string(&current).unwrap()),
+                active_config: Set(None),
+                status: Set(SandboxStatus::Stopped),
+                ephemeral: Set(false),
+                ..Default::default()
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+            let patch = patch_with_specs(vec![spec]);
+            let plan = SandboxModificationBuilder::new(backend.clone(), &current.spec.name)
+                .with_patch(patch.clone())
+                .apply()
+                .await
+                .unwrap();
+            assert!(plan.applied);
+            assert_eq!(plan.changes.len(), 1);
+            let row = sandbox_entity::Entity::find_by_id(model.id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(row.active_config.is_none());
+            let saved: SandboxConfig = serde_json::from_str(&row.config).unwrap();
+            let network = saved.local_network_config().unwrap();
+            let entry = &network.secrets.secrets[0];
+            match index {
+                0 => {
+                    assert!(!entry.substitution.headers);
+                    assert!(entry.substitution.query);
+                    assert!(entry.substitution.body);
+                }
+                1 => assert_eq!(
+                    entry.violation_action,
+                    Some(SecretViolationAction::BlockAndTerminate)
+                ),
+                2 => assert!(!entry.require_tls_identity),
+                3 => assert_eq!(
+                    entry
+                        .passthrough_hosts
+                        .iter()
+                        .cloned()
+                        .map(format_host_pattern)
+                        .collect::<Vec<_>>(),
+                    vec!["logs.example.com"]
+                ),
+                _ => unreachable!(),
+            }
+            assert!(!secret_policy_changes(
+                &patch.secrets[0],
+                existing_secret(&saved, "API_KEY").as_ref()
+            ));
+            assert_eq!(
+                &*saved.local_network_config().unwrap().secrets.secrets[0].value,
+                SECRET_SENTINEL
+            );
+            let repeat = SandboxModificationBuilder::new(backend.clone(), &current.spec.name)
+                .with_patch(patch)
+                .apply()
+                .await
+                .unwrap();
+            assert!(repeat.changes.is_empty());
         }
     }
 

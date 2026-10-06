@@ -191,6 +191,13 @@ impl RestoreBuilder {
         self
     }
 
+    /// Select how the host manages the restored guest's wall clock, including full restore.
+    /// Without this call the restore keeps the policy recorded in the snapshot.
+    pub fn guest_clock(mut self, policy: super::GuestClockPolicy) -> Self {
+        self.inner = self.inner.guest_clock(policy);
+        self
+    }
+
     /// Set host runtime logging for the restored sandbox.
     pub fn log_level(mut self, level: crate::LogLevel) -> Self {
         self.inner = self.inner.log_level(level);

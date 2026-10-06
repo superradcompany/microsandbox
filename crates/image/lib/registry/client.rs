@@ -21,8 +21,8 @@ use tokio::{
 
 use crate::{
     cache::{
-        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache,
-        lock::{flock_unlock, lock_exclusive, open_lock_file},
+        self, CachedImageMetadata, CachedLayerMetadata, GlobalCache, VmdkWriteMode,
+        lock::{lock_exclusive, open_lock_file},
     },
     config::ImageConfig,
     digest::Digest,
@@ -88,7 +88,7 @@ struct MaterializeLayersRequest<'a> {
     force: bool,
     materialization: RootfsMaterialization,
     progress: Option<PullProgressSender>,
-    staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
+    staged_layers: Option<Arc<crate::archive::StagedLayerGuard>>,
 }
 
 /// Per-layer pipeline success: EROFS image written, data-stripped tree + data map retained.
@@ -155,6 +155,20 @@ impl Registry {
     ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
         Ok(resolve_cached_pull_result(cache, reference, options)?
             .map(|cached| (cached.result, cached.metadata)))
+    }
+
+    /// Resolve a cached image without blocking the async executor on a deletion lease.
+    pub async fn pull_cached_async(
+        cache: &GlobalCache,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+    ) -> ImageResult<Option<(PullResult, CachedImageMetadata)>> {
+        let cache = cache.clone();
+        let reference = reference.clone();
+        let options = options.clone();
+        tokio::task::spawn_blocking(move || Self::pull_cached(&cache, &reference, &options))
+            .await
+            .map_err(|error| ImageError::Io(io::Error::other(error)))?
     }
 
     /// Resolve a pull from any complete cached image metadata matching a manifest digest.
@@ -290,6 +304,12 @@ impl Registry {
         let manifest_digest = manifest_digest.clone();
         let layer_diff_ids = layer_diff_ids.to_vec();
         tokio::task::spawn_blocking(move || {
+            let _leases = cache.lease_paths(
+                layer_diff_ids
+                    .iter()
+                    .map(|id| cache.layer_erofs_path(id))
+                    .collect(),
+            )?;
             crate::flat::materialize_flat_rootfs(
                 &cache,
                 &manifest_digest,
@@ -307,7 +327,7 @@ impl Registry {
         reference: &oci_client::Reference,
         metadata: &CachedImageMetadata,
         force: bool,
-        staged_layers: Arc<HashMap<String, PathBuf>>,
+        staged_layers: Arc<crate::archive::StagedLayerGuard>,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
         self.materialize_cached_layers_inner(
@@ -325,7 +345,7 @@ impl Registry {
         reference: &oci_client::Reference,
         metadata: &CachedImageMetadata,
         force: bool,
-        staged_layers: Option<Arc<HashMap<String, PathBuf>>>,
+        staged_layers: Option<Arc<crate::archive::StagedLayerGuard>>,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
         let manifest_digest: Digest = metadata.manifest_digest.parse()?;
@@ -421,11 +441,9 @@ impl Registry {
         let auth = self.auth.clone();
         let platform = self.platform.clone();
 
-        let layers_dir = self.cache.layers_dir().to_path_buf();
-        let cache_parent = layers_dir.parent().unwrap_or(&layers_dir).to_path_buf();
+        let cache = self.cache.clone();
 
         tokio::spawn(async move {
-            let cache = GlobalCache::new_async(&cache_parent).await?;
             let registry = Self {
                 client,
                 auth,
@@ -445,6 +463,25 @@ impl Registry {
         options: &PullOptions,
         progress: Option<PullProgressSender>,
     ) -> ImageResult<PullResult> {
+        let scoped = Self {
+            client: self.client.clone(),
+            auth: self.auth.clone(),
+            platform: self.platform.clone(),
+            cache: self.cache.operation_or_new(),
+        };
+        scoped.pull_scoped_inner(reference, options, progress).await
+    }
+
+    async fn pull_scoped_inner(
+        &self,
+        reference: &oci_client::Reference,
+        options: &PullOptions,
+        progress: Option<PullProgressSender>,
+    ) -> ImageResult<PullResult> {
+        let _reference_lease = self
+            .cache
+            .lease_paths_async(vec![self.cache.image_metadata_path(reference)])
+            .await?;
         let pull_started_at = Instant::now();
         let ref_str: Arc<str> = reference.to_string().into();
         let oci_ref = reference;
@@ -458,9 +495,7 @@ impl Registry {
         .map_err(|e| ImageError::Io(io::Error::other(e)))??;
         // Lock files are intentionally never deleted — stable inodes prevent
         // TOCTOU races where two processes flock different inodes at the same path.
-        let _image_lock_guard = scopeguard::guard(image_lock_file, |file| {
-            let _ = flock_unlock(&file);
-        });
+        let _image_lock_guard = image_lock_file;
 
         // Step 1: Early cache check using persisted image metadata.
         if let Some(cached) =
@@ -839,6 +874,17 @@ impl Registry {
             })
             .collect::<ImageResult<Vec<_>>>()?;
 
+        let mut protected = vec![
+            self.cache.fsmeta_erofs_path(manifest_digest),
+            self.cache.vmdk_path(manifest_digest),
+        ];
+        protected.extend(
+            validated_diff_ids
+                .iter()
+                .map(|id| self.cache.layer_erofs_path(id)),
+        );
+        let _leases = self.cache.lease_paths_async(protected).await?;
+
         // Phase-level idempotency is target-aware. Per-layer EROFS images are
         // the common verified input for both output representations.
         //
@@ -900,8 +946,12 @@ impl Registry {
                 let lock_path = self.cache.layer_erofs_lock_path(&diff_id_digest);
                 let tmp_dir = self.cache.tmp_dir().to_path_buf();
                 let semaphore = Arc::clone(&semaphore);
-
+                // Detached layer tasks retain their admitted files even if pull is cancelled.
+                let leases = _leases.clone();
+                let staging = staged_layers.clone();
                 tokio::spawn(async move {
+                    let _leases = leases;
+                    let _staging = staging;
                     let _permit =
                         semaphore
                             .acquire_owned()
@@ -935,6 +985,14 @@ impl Registry {
                         });
                     }
 
+                    if staged_tar_path.is_none() && _staging.is_some() {
+                        return Err(LayerPipelineFailure {
+                            error: ImageError::ManifestParse(format!(
+                                "archive has no staged layer {}",
+                                diff_id
+                            )),
+                        });
+                    }
                     if staged_tar_path.is_none()
                         && let Err(error) = layer
                             .download(&client, &oci_ref, size, force, progress.as_ref(), i)
@@ -955,9 +1013,7 @@ impl Registry {
                         error: ImageError::Io(io::Error::other(e)),
                     })?
                     .map_err(|e| LayerPipelineFailure { error: e })?;
-                    let _lock_guard = scopeguard::guard(lock_file, |file| {
-                        let _ = flock_unlock(&file);
-                    });
+                    let materializer_guard = lock_file;
 
                     // Re-check after lock — another process may have materialized it.
                     if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
@@ -1060,7 +1116,9 @@ impl Registry {
                     let erofs_final = erofs_path.clone();
                     let diff_id_for_join = diff_id.clone();
                     let write_started_at = Instant::now();
+                    let worker_leases = _leases.clone();
                     let (data_map, mut tree) = tokio::task::spawn_blocking(move || {
+                        let _protection = (materializer_guard, worker_leases);
                         let data_map = erofs::write_erofs(&tree, &temp_path)?;
                         std::fs::rename(&temp_path, &erofs_final).map_err(erofs::ErofsError::Io)?;
                         Ok::<(erofs::ErofsDataMap, FileTree), erofs::ErofsError>((data_map, tree))
@@ -1146,9 +1204,7 @@ impl Registry {
         })
         .await
         .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        let _fsmeta_lock_guard = scopeguard::guard(fsmeta_lock_file, |file| {
-            let _ = flock_unlock(&file);
-        });
+        let materializer_guard = Arc::new(fsmeta_lock_file);
 
         // Re-check after lock acquisition.
         if cache::is_valid_erofs_artifact_async(&fsmeta_path).await
@@ -1165,7 +1221,9 @@ impl Registry {
         let cache = self.cache.clone();
         let diff_ids = diff_ids.to_vec();
         let manifest_digest_for_inputs = manifest_digest.to_string();
+        let input_guard = materializer_guard.clone();
         let (layer_trees, layer_data_maps) = tokio::task::spawn_blocking(move || {
+            let _guard = input_guard;
             collect_layered_inputs_from_erofs(
                 &cache,
                 &diff_ids,
@@ -1197,7 +1255,10 @@ impl Registry {
             .collect();
 
         let stitch_progress = progress.clone();
+        let worker_cache = self.cache.clone();
         tokio::task::spawn_blocking(move || {
+            // Both the materializer mutex and the operation pins must outlive cancellation.
+            let _protection = (materializer_guard, worker_cache);
             std::fs::create_dir_all(&work_dir).map_err(|e| ImageError::Cache {
                 path: work_dir.clone(),
                 source: e,
@@ -1269,81 +1330,23 @@ impl Registry {
         validated_diff_ids: &[Digest],
         progress: Option<&PullProgressSender>,
     ) -> ImageResult<()> {
-        let fsmeta_path = self.cache.fsmeta_erofs_path(manifest_digest);
-        let vmdk_path = self.cache.vmdk_path(manifest_digest);
+        let cache = self.cache.clone();
+        let manifest_digest = manifest_digest.clone();
+        let diff_ids = validated_diff_ids.to_vec();
+        let progress = progress.cloned();
 
-        let fsmeta_lock_path = self.cache.fsmeta_erofs_lock_path(manifest_digest);
-        let fsmeta_lock_file = open_lock_file(&fsmeta_lock_path)?;
-        let fsmeta_lock_file = tokio::task::spawn_blocking(move || {
-            lock_exclusive(&fsmeta_lock_file)?;
-            Ok::<_, ImageError>(fsmeta_lock_file)
-        })
-        .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        let _fsmeta_lock_guard = scopeguard::guard(fsmeta_lock_file, |file| {
-            let _ = flock_unlock(&file);
-        });
-
-        // Re-check under lock: a concurrent pull may have regenerated VMDK,
-        // or the fsmeta may have been evicted while we waited.
-        if path_exists_async(&vmdk_path).await {
-            return Ok(());
-        }
-        if !cache::is_valid_erofs_artifact_async(&fsmeta_path).await {
-            return Err(ImageError::Materialize {
-                digest: manifest_digest.to_string(),
-                message: "fsmeta vanished while waiting for VMDK regen lock".into(),
-                source: None,
-            });
-        }
-
-        let layer_erofs_paths: Vec<std::path::PathBuf> = validated_diff_ids
-            .iter()
-            .map(|d| self.cache.layer_erofs_path(d))
-            .collect();
-        let work_dir = self.cache.work_dir(manifest_digest);
-        let manifest_digest_str = manifest_digest.to_string();
-
-        let stitch_progress = progress.cloned();
+        // The worker owns the cache operation pins and the materializer lock, even if
+        // the awaiting pull is cancelled while the descriptor is being repaired.
         tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&work_dir).map_err(|e| ImageError::Cache {
-                path: work_dir.clone(),
-                source: e,
-            })?;
-            let _work_guard = scopeguard::guard((), |_| {
-                let _ = std::fs::remove_dir_all(&work_dir);
-            });
-
-            if let Some(ref p) = stitch_progress {
-                p.send(PullProgress::StitchWritingVmdk);
-            }
-            let temp_vmdk = work_dir.join("rootfs.vmdk");
-            let mut extents: Vec<&std::path::Path> = vec![&fsmeta_path];
-            extents.extend(layer_erofs_paths.iter().map(|p| p.as_path()));
-
-            crate::stitch::write_vmdk_descriptor(&temp_vmdk, &extents).map_err(|e| {
-                ImageError::Materialize {
-                    digest: manifest_digest_str.clone(),
-                    message: format!("VMDK write failed: {e}"),
-                    source: None,
-                }
-            })?;
-
-            std::fs::rename(&temp_vmdk, &vmdk_path).map_err(|e| ImageError::Cache {
-                path: vmdk_path.clone(),
-                source: e,
-            })?;
-
-            Ok::<(), ImageError>(())
+            cache.write_vmdk(
+                &manifest_digest,
+                &diff_ids,
+                VmdkWriteMode::KeepExisting,
+                progress.as_ref(),
+            )
         })
         .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-
-        if let Some(p) = progress {
-            p.send(PullProgress::StitchComplete);
-        }
-
-        Ok(())
+        .map_err(|e| ImageError::Io(io::Error::other(e)))?
     }
 
     // NOTE: materialize_flat_image was removed — replaced by fsmeta + VMDK generation
@@ -1641,6 +1644,11 @@ fn resolve_cached_pull_result_for_platform(
         return Ok(None);
     };
 
+    let _leases = match cache.metadata_paths(&metadata) {
+        Ok(paths) => cache.lease_paths(paths)?,
+        Err(_) => return Ok(None),
+    };
+
     // Check that all per-layer EROFS images exist.
     let cached_diff_ids = match metadata
         .layers
@@ -1752,17 +1760,12 @@ async fn resolve_cached_pull_result_by_manifest_digest_async(
             continue;
         }
 
-        let data = match tokio::fs::read_to_string(&path).await {
-            Ok(data) => data,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(ImageError::Cache { path, source: e }),
-        };
-        let Some(metadata) = cache::parse_cached_image_metadata(&path, &data)? else {
+        let Some(metadata) = cache
+            .read_image_metadata_matching_async(path, expected.clone())
+            .await?
+        else {
             continue;
         };
-        if metadata.manifest_digest != expected {
-            continue;
-        }
 
         if let Some(cached) = resolve_snapshot_metadata(cache, metadata, metadata_only).await? {
             return Ok(Some(cached));
@@ -1797,6 +1800,10 @@ async fn resolve_cached_metadata_pull_result_async(
     materialization: RootfsMaterialization,
     platform: &Platform,
 ) -> ImageResult<Option<CachedPullInfo>> {
+    let _leases = match cache.metadata_paths(&metadata) {
+        Ok(paths) => cache.lease_paths_async(paths).await?,
+        Err(_) => return Ok(None),
+    };
     let cached_diff_ids = match metadata
         .layers
         .iter()
@@ -2209,7 +2216,12 @@ mod tests {
         let reference: oci_client::Reference = "docker.io/library/redis:latest".parse().unwrap();
         let mut metadata = write_cached_image_fixture(&cache, &reference, &[true]);
         metadata.layers[0].diff_id = "not-a-digest".into();
-        cache.write_image_metadata(&reference, &metadata).unwrap();
+        // Corrupt the on-disk fixture directly; validated publication rejects this metadata.
+        std::fs::write(
+            cache.image_metadata_path(&reference),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
 
         let cached = resolve_cached_pull_result(
             &cache,
@@ -2263,7 +2275,12 @@ mod tests {
         let reference: oci_client::Reference = "docker.io/library/httpd:latest".parse().unwrap();
         let mut metadata = write_cached_image_fixture(&cache, &reference, &[true]);
         metadata.layers[0].diff_id = "not-a-digest".into();
-        cache.write_image_metadata(&reference, &metadata).unwrap();
+        // Corrupt the on-disk fixture directly; validated publication rejects this metadata.
+        std::fs::write(
+            cache.image_metadata_path(&reference),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
 
         let registry = super::Registry::new(Platform::default(), cache).unwrap();
         let result = registry

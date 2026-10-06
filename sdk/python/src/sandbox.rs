@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    extract_str_enum, is_exact_sdk_type, restore_builder_from_args, sandbox_builder_from_args,
-    str_enum_member,
+    extract_str_enum, is_exact_sdk_type, parse_violation_action_obj, restore_builder_from_args,
+    sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -878,8 +878,9 @@ impl PySandbox {
     /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
-    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
-    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
+    /// hosts, substitution, violation action, TLS identity requirement, and
+    /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -977,7 +978,10 @@ impl PySandbox {
     #[pyo3(signature = (interval = 1.0))]
     fn metrics_stream<'py>(&self, py: Python<'py>, interval: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let interval_dur = std::time::Duration::from_secs_f64(interval);
+        let interval_dur = optional_duration(Some(interval))?.unwrap();
+        if interval_dur.is_zero() {
+            return Err(PyValueError::new_err("metrics interval must be positive"));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let stream = sandbox.metrics_stream(interval_dur);
@@ -1482,6 +1486,11 @@ pub(crate) fn build_secret_patches(
         let mut store = None;
         let mut placeholder = None;
         let mut allowed_hosts = Vec::new();
+        let mut substitution = None;
+        let mut violation_action = None;
+        let mut require_tls_identity = None;
+        let mut allow_placeholder_for = Vec::new();
+        let mut passthrough = Vec::new();
         for (key, obj) in spec {
             let obj = obj.bind(py);
             match key.as_str() {
@@ -1496,10 +1505,65 @@ pub(crate) fn build_secret_patches(
                         ))
                     })?
                 }
+                "substitution" => {
+                    if !is_exact_sdk_type(obj, "SecretSubstitution")? {
+                        return Err(PyTypeError::new_err(format!(
+                            "secret {name:?}: \"substitution\" must be SecretSubstitution"
+                        )));
+                    }
+                    substitution =
+                        Some(microsandbox_network::secrets::config::SecretSubstitution {
+                            headers: extract_secret_bool(
+                                &name,
+                                "substitution.headers",
+                                &obj.getattr("headers")?,
+                            )?,
+                            query: extract_secret_bool(
+                                &name,
+                                "substitution.query",
+                                &obj.getattr("query")?,
+                            )?,
+                            body: extract_secret_bool(
+                                &name,
+                                "substitution.body",
+                                &obj.getattr("body")?,
+                            )?,
+                        });
+                }
+                "violation_action" => violation_action = Some(parse_violation_action_obj(obj)?),
+                "require_tls_identity" => {
+                    require_tls_identity = Some(extract_secret_bool(&name, &key, obj)?);
+                }
+                "allow_placeholder_for" | "passthrough" => {
+                    let hosts: Vec<String> = obj.extract().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "secret {name:?}: {key:?} must be a sequence of strings"
+                        ))
+                    })?;
+                    if key == "passthrough" {
+                        if !hosts.is_empty() {
+                            let kwargs = PyDict::new(py);
+                            kwargs.set_item("stacklevel", 2)?;
+                            py.import("warnings")?.call_method(
+                                "warn",
+                                (
+                                    "passthrough is deprecated; use allow_placeholder_for instead",
+                                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                                ),
+                                Some(&kwargs),
+                            )?;
+                        }
+                        passthrough = hosts;
+                    } else {
+                        allow_placeholder_for = hosts;
+                    }
+                }
                 other => {
                     return Err(PyValueError::new_err(format!(
                         "secret {name:?}: unknown key {other:?}; expected \"env\", \"value\", \
-                         \"store\", \"placeholder\", or \"allowed_hosts\""
+                         \"store\", \"placeholder\", \"allowed_hosts\", \"substitution\", \
+                         \"violation_action\", \"require_tls_identity\", \
+                         \"allow_placeholder_for\", or \"passthrough\""
                     )));
                 }
             }
@@ -1513,13 +1577,17 @@ pub(crate) fn build_secret_patches(
             (_, Some(reference)) => Some(SecretSource::Store { reference }),
             _ => None,
         };
+        allow_placeholder_for.extend(passthrough);
         patches.push(SecretModificationPatch {
             name,
             source,
             value: value.unwrap_or_default().into(),
             placeholder,
             allowed_hosts,
-            ..SecretModificationPatch::default()
+            substitution,
+            violation_action,
+            require_tls_identity,
+            passthrough_hosts: allow_placeholder_for,
         });
     }
     Ok(patches)
@@ -1550,6 +1618,15 @@ pub(crate) fn validate_secret_source_exclusivity(
 fn extract_secret_str(name: &str, key: &str, obj: &Bound<'_, PyAny>) -> PyResult<String> {
     obj.extract()
         .map_err(|_| PyValueError::new_err(format!("secret {name:?}: {key:?} must be a string")))
+}
+
+fn extract_secret_bool(name: &str, key: &str, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "secret {name:?}: {key:?} must be a bool"
+        )));
+    }
+    obj.extract()
 }
 
 /// Parse the `policy=` kwarg into the core modification policy.
@@ -2056,10 +2133,7 @@ fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
 }
 
 fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
-    if timeout_secs.is_some_and(|timeout| timeout < 0.0) {
-        return Err(PyValueError::new_err("timeout must be non-negative"));
-    }
-    Ok(())
+    optional_duration(timeout_secs).map(|_| ())
 }
 
 fn required_from_dict<'py, T: FromPyObject<'py>>(
@@ -2524,6 +2598,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execution_timeouts_reject_non_finite_and_overflowing_values() {
+        pyo3::prepare_freethreaded_python();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
+            assert!(validate_timeout(Some(value)).is_err());
+        }
+        assert!(validate_timeout(Some(0.5)).is_ok());
+        assert!(validate_timeout(Some(0.0)).is_ok());
+    }
+
+    #[test]
     fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {
         assert_eq!(optional_duration(None).unwrap(), None);
         assert_eq!(
@@ -2613,6 +2697,169 @@ mod tests {
         let patch = secret_patch("STRIPE_KEY", None, "sk_test_123");
         let debug = format!("{patch:?}");
         assert!(!debug.contains("sk_test_123"), "debug output leaks value");
+    }
+
+    #[test]
+    fn python_secret_modify_options_reach_rust_patch() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            // Load the public Python types without requiring a built extension or VM.
+            let modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let previous_package = modules.get_item("microsandbox").ok();
+            let previous_types = modules.get_item("microsandbox.types").ok();
+            let package = PyModule::new(py, "microsandbox").unwrap();
+            modules.set_item("microsandbox", &package).unwrap();
+            let types = PyModule::from_code(
+                py,
+                &std::ffi::CString::new(include_str!("../microsandbox/types.py")).unwrap(),
+                pyo3::ffi::c_str!("microsandbox/types.py"),
+                pyo3::ffi::c_str!("microsandbox.types"),
+            )
+            .unwrap();
+            package.setattr("types", &types).unwrap();
+            let parse = |expression: &str| {
+                let expression = std::ffi::CString::new(expression).unwrap();
+                let spec = py.eval(&expression, Some(&types.dict()), None).unwrap();
+                let secrets = PyDict::new(py);
+                secrets.set_item("KEY", spec).unwrap();
+                build_secret_patches(py, Some(secrets.extract().unwrap()))
+            };
+
+            let patches = parse(
+                "dict(value='private-material', allowed_hosts=['api.example.com'], \
+                 substitution=SecretSubstitution(headers=False, query=True, body=True), \
+                 violation_action=ViolationAction.BLOCK_AND_TERMINATE, \
+                 require_tls_identity=False, allow_placeholder_for=('logs.example.com',))",
+            )
+            .unwrap();
+            let patch = &patches[0];
+            let substitution = patch.substitution.as_ref().unwrap();
+            assert!(!substitution.headers);
+            assert!(substitution.query);
+            assert!(substitution.body);
+            let wire = serde_json::to_value(patch).unwrap();
+            assert_eq!(wire["require_tls_identity"], false);
+            assert_eq!(wire["violation_action"], "block-and-terminate");
+            assert_eq!(wire["passthrough_hosts"][0], "logs.example.com");
+            assert_eq!(wire["allowed_hosts"][0], "api.example.com");
+            assert!(!format!("{patch:?}").contains("private-material"));
+
+            for action in ["BLOCK", "BLOCK_AND_LOG", "BLOCK_AND_TERMINATE"] {
+                let patches =
+                    parse(&format!("dict(violation_action=ViolationAction.{action})")).unwrap();
+                assert!(patches[0].violation_action.is_some());
+            }
+            for required in ["True", "False"] {
+                let patches = parse(&format!("dict(require_tls_identity={required})")).unwrap();
+                assert_eq!(patches[0].require_tls_identity, Some(required == "True"));
+            }
+            let patches = parse("dict(substitution=SecretSubstitution())").unwrap();
+            let substitution = patches[0].substitution.as_ref().unwrap();
+            assert!(substitution.headers);
+            assert!(!substitution.query);
+            assert!(!substitution.body);
+
+            for expression in ["{}", "dict(value='private-material')"] {
+                let patches = parse(expression).unwrap();
+                let patch = &patches[0];
+                assert!(patch.substitution.is_none());
+                assert!(patch.violation_action.is_none());
+                assert!(patch.require_tls_identity.is_none());
+                assert!(patch.passthrough_hosts.is_empty());
+                let wire = serde_json::to_value(patch).unwrap();
+                for key in [
+                    "substitution",
+                    "violation_action",
+                    "require_tls_identity",
+                    "passthrough_hosts",
+                ] {
+                    assert!(wire.get(key).is_none());
+                }
+            }
+
+            let warnings = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let context = warnings
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let recorded = context.call_method0("__enter__").unwrap();
+            warnings.call_method1("simplefilter", ("always",)).unwrap();
+            for expression in [
+                "dict(passthrough=['legacy.example'])",
+                "dict(allow_placeholder_for=['new.example'], passthrough=['legacy.example'])",
+            ] {
+                let patches = parse(expression).unwrap();
+                assert_eq!(
+                    patches[0].passthrough_hosts.last().unwrap(),
+                    "legacy.example"
+                );
+                if expression.contains("allow_placeholder_for") {
+                    assert_eq!(patches[0].passthrough_hosts[0], "new.example");
+                }
+            }
+            assert_eq!(recorded.len().unwrap(), 2);
+            let warning = recorded.get_item(0).unwrap();
+            assert!(
+                warning
+                    .getattr("category")
+                    .unwrap()
+                    .is(&py.get_type::<pyo3::exceptions::PyDeprecationWarning>())
+            );
+            assert!(
+                warning
+                    .getattr("message")
+                    .unwrap()
+                    .str()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("allow_placeholder_for")
+            );
+            assert!(
+                parse("dict(passthrough=[])").unwrap()[0]
+                    .passthrough_hosts
+                    .is_empty()
+            );
+            assert_eq!(recorded.len().unwrap(), 2);
+            context
+                .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                .unwrap();
+
+            for expression in [
+                "dict(substitution={})",
+                "dict(substitution=None)",
+                "dict(substitution=SecretSubstitution(headers='private-material'))",
+                "dict(substitution=SecretSubstitution(query=1))",
+                "dict(substitution=SecretSubstitution(body=None))",
+                "dict(require_tls_identity=1)",
+                "dict(require_tls_identity='private-material')",
+                "dict(require_tls_identity=None)",
+                "dict(violation_action='private-material')",
+                "dict(violation_action=None)",
+                "dict(allow_placeholder_for='private-material')",
+                "dict(allow_placeholder_for=[1])",
+                "dict(passthrough=[None])",
+                "dict(unknown='private-material')",
+                "dict(env='HOST_KEY', value='private-material')",
+            ] {
+                let error = match parse(expression) {
+                    Ok(_) => panic!("malformed spec accepted: {expression}"),
+                    Err(error) => error,
+                };
+                assert!(!error.to_string().contains("private-material"));
+            }
+            for (name, previous) in [
+                ("microsandbox", previous_package),
+                ("microsandbox.types", previous_types),
+            ] {
+                if let Some(previous) = previous {
+                    modules.set_item(name, previous).unwrap();
+                } else {
+                    modules.del_item(name).unwrap();
+                }
+            }
+        });
     }
 
     #[test]

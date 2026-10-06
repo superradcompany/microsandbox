@@ -20,7 +20,9 @@ fn main() {
     // Re-run only when the FFI source changes.
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/creation_progress.rs");
+    println!("cargo:rerun-if-changed=src/exec_adapter.rs");
     println!("cargo:rerun-if-changed=src/restore.rs");
     println!("cargo:rerun-if-changed=src/setup.rs");
+    println!("cargo:rerun-if-changed=src/storage.rs");
     println!("cargo:rerun-if-changed=src/volume_fs.rs");
 }

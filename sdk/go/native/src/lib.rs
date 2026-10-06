@@ -36,8 +36,10 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod creation_progress;
+mod exec_adapter;
 mod restore;
 mod setup;
+mod storage;
 mod volume_fs;
 
 use std::{
@@ -2560,6 +2562,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                     )));
                 }
                 builder = match proxy.protocol.as_str() {
+                    "http_connect" => builder.proxy(move |p| p.http_connect(proxy.address)),
                     "socks4" => builder.proxy(move |p| {
                         let proxy_builder = p.socks4(proxy.address);
                         match proxy.user_id {
@@ -4749,15 +4752,7 @@ pub unsafe extern "C" fn msb_sandbox_exec(
                 .await
                 .map_err(FfiError::from)?;
 
-            let stdout = output.stdout().unwrap_or_default();
-            let stderr = output.stderr().unwrap_or_default();
-            let exit_code = output.status().code;
-            Ok(serde_json::json!({
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": exit_code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -4802,12 +4797,7 @@ pub unsafe extern "C" fn msb_sandbox_exec_default(
                 .await
                 .map_err(FfiError::from)?;
 
-            Ok(serde_json::json!({
-                "stdout": output.stdout().unwrap_or_default(),
-                "stderr": output.stderr().unwrap_or_default(),
-                "exit_code": output.status().code,
-            })
-            .to_string())
+            Ok(exec_adapter::collected_output_json(&output))
         }))
     })
 }
@@ -6330,6 +6320,7 @@ pub unsafe extern "C" fn msb_image_prune(
                 "layers_removed": report.layers_removed,
                 "fsmeta_removed": report.fsmeta_removed,
                 "vmdk_removed": report.vmdk_removed,
+                "skipped_in_use": report.skipped_in_use,
                 "bytes_reclaimed": report.bytes_reclaimed,
             })
             .to_string())

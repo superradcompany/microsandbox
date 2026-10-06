@@ -1086,7 +1086,7 @@ type RegistryAuth struct {
 // ---------------------------------------------------------------------------
 
 // OutboundProxy configures the single proxy used for outbound connections.
-// Construct one with a protocol-specific function such as SOCKS5Proxy.
+// Construct one with a protocol-specific function such as HTTPConnectProxy.
 type OutboundProxy struct {
 	protocol       string
 	address        string
@@ -1125,6 +1125,12 @@ func SOCKS4Proxy(address string, options ...SOCKS4ProxyOptions) *OutboundProxy {
 // SOCKS5Proxy configures a SOCKS5 outbound proxy at address.
 func SOCKS5Proxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "socks5", address: address}
+}
+
+// HTTPConnectProxy configures an HTTP proxy that opens outbound TCP tunnels
+// with CONNECT at address.
+func HTTPConnectProxy(address string) *OutboundProxy {
+	return &OutboundProxy{protocol: "http_connect", address: address}
 }
 
 // Credentials returns a copy configured with SOCKS5 username authentication

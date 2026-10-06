@@ -38,7 +38,8 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 #[cfg(test)]
 use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
-    CoreError, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw, WorkloadThawed,
+    CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw,
+    WorkloadThawed,
 };
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
@@ -67,8 +68,9 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
+use crate::boot_error::BootError;
 use crate::checkpoint::RestoredAgentState;
-use crate::clock::spawn_clock_sync_task;
+use crate::clock::{RestoreActivationMode, spawn_clock_sync_task};
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
 use crate::{RuntimeError, RuntimeResult};
@@ -471,9 +473,13 @@ pub struct AgentRelay {
     /// Cached `core.ready` frame bytes (length-prefixed wire format).
     ready_frame: Option<Vec<u8>>,
     kernel_clock_synchronized: bool,
+    /// Host control over the guest wall clock.
+    guest_clock: microsandbox_types::GuestClockPolicy,
     /// Optional `exec.log` writer. When set, the ring reader task
     /// captures the primary session's stdout/stderr to JSON Lines.
     log_writer: Option<Arc<LogWriter>>,
+    /// Destination for startup diagnostics, saved before allowing guest exit.
+    boot_error_log_dir: Option<PathBuf>,
     /// Shared user-volume bind identity map to install before `core.ready`.
     #[cfg(unix)]
     bind_identity_map: Option<BindIdentityMapHandle>,
@@ -1135,7 +1141,9 @@ impl AgentRelay {
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             kernel_clock_synchronized: false,
+            guest_clock: Default::default(),
             log_writer: None,
+            boot_error_log_dir: None,
             #[cfg(unix)]
             bind_identity_map: None,
             #[cfg(unix)]
@@ -1164,7 +1172,9 @@ impl AgentRelay {
             endpoint: agent_sock_path.to_path_buf(),
             ready_frame: None,
             kernel_clock_synchronized: false,
+            guest_clock: Default::default(),
             log_writer: None,
+            boot_error_log_dir: None,
             #[cfg(unix)]
             bind_identity_map: None,
             #[cfg(unix)]
@@ -1185,6 +1195,12 @@ impl AgentRelay {
         Ok(())
     }
 
+    /// Select how the relay manages the guest wall clock.
+    pub fn with_guest_clock(mut self, policy: microsandbox_types::GuestClockPolicy) -> Self {
+        self.guest_clock = policy;
+        self
+    }
+
     /// Attach a log writer for `exec.log` capture.
     ///
     /// Must be called before [`run()`](Self::run). When attached, the
@@ -1197,6 +1213,12 @@ impl AgentRelay {
     /// guest has actually finished booting.
     pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
         self.log_writer = Some(writer);
+        self
+    }
+
+    /// Preserve fatal guest startup diagnostics before acknowledging them.
+    pub(crate) fn with_boot_error_log_dir(mut self, log_dir: PathBuf) -> Self {
+        self.boot_error_log_dir = Some(log_dir);
         self
     }
 
@@ -1251,8 +1273,8 @@ impl AgentRelay {
         Ok(())
     }
 
-    fn send_init_ack(&self) -> RuntimeResult<()> {
-        let msg = Message::with_payload(MessageType::InitAck, 0, &InitAck {})
+    fn send_init_ack(&self, failure: bool) -> RuntimeResult<()> {
+        let msg = Message::with_payload(MessageType::InitAck, 0, &InitAck { failure })
             .map_err(|e| RuntimeError::Custom(format!("encode init ack: {e}")))?;
         let mut frame = Vec::new();
         codec::encode_to_buf(&msg, &mut frame)
@@ -1368,8 +1390,35 @@ impl AgentRelay {
                     {
                         init_resolved = true;
                     }
-                    self.send_init_ack()?;
+                    self.send_init_ack(false)?;
                     continue;
+                }
+
+                if msg.t == MessageType::CoreError && msg.id == 0 && msg.flags == FLAG_TERMINAL {
+                    let error: CoreError = msg
+                        .payload()
+                        .map_err(|e| RuntimeError::Custom(format!("decode startup error: {e}")))?;
+                    if error.kind == CoreErrorKind::InitializationFailed {
+                        let error = RuntimeError::GuestInitialization {
+                            message: error.message,
+                            reason: error.init_failure,
+                        };
+                        if let Some(log_dir) = &self.boot_error_log_dir {
+                            // The SDK may observe process exit immediately after the ack.
+                            // Publish the cause first, while the guest is still alive.
+                            match BootError::from_runtime_error(&error).write_atomic(log_dir) {
+                                Ok(()) => {
+                                    if let Err(ack_error) = self.send_init_ack(true) {
+                                        tracing::warn!(%ack_error, "failed to acknowledge guest startup error");
+                                    }
+                                }
+                                Err(write_error) => tracing::error!(
+                                    %write_error, "failed to save guest startup diagnostic"
+                                ),
+                            }
+                        }
+                        return Err(error);
+                    }
                 }
 
                 tracing::debug!(
@@ -1520,10 +1569,16 @@ impl AgentRelay {
         )?;
         let prepared_persist_us = prepared_persist_started.elapsed().as_micros();
         let generation_install_started = Instant::now();
-        let request = vm
-            .install_vm_generation_and_clock(generation_bytes.into())
+        // With the guest clock off, publish only the new identity so the restored guest
+        // continues from its captured wall clock instead of stepping to host time.
+        let activation = RestoreActivationMode::for_policy(self.guest_clock);
+        let request = activation
+            .install(vm, generation_bytes.into())
             .ok_or_else(|| {
-                RuntimeError::Custom("restored kernel lacks identity-and-clock activation; recreate this development full snapshot with the updated kernel or use disk-only restore".into())
+                RuntimeError::Custom(format!(
+                    "restored kernel lacks {}; recreate this development full snapshot with the updated kernel or use disk-only restore",
+                    activation.description(),
+                ))
             })?;
         let generation_install_us = generation_install_started.elapsed().as_micros();
         let resume_started = Instant::now();
@@ -1536,7 +1591,10 @@ impl AgentRelay {
         match vm.wait_vm_generation_processed(request, RESTORE_ACTIVATION_TIMEOUT) {
             Some(msb_krun::VmGenerationWaitOutcome::Processed) => {}
             Some(msb_krun::VmGenerationWaitOutcome::Failed) => {
-                return Err(RuntimeError::Custom("restored kernel rejected identity-and-clock activation; workloads remain frozen".into()));
+                return Err(RuntimeError::Custom(format!(
+                    "restored kernel rejected {}; workloads remain frozen",
+                    activation.description(),
+                )));
             }
             Some(msb_krun::VmGenerationWaitOutcome::Superseded) => {
                 return Err(RuntimeError::Custom(
@@ -1555,7 +1613,7 @@ impl AgentRelay {
             }
         }
         let generation_ack_us = generation_ack_started.elapsed().as_micros();
-        self.kernel_clock_synchronized = true;
+        self.kernel_clock_synchronized = activation == RestoreActivationMode::IdentityAndClock;
 
         let ready_started = Instant::now();
         self.install_restored_ready(restored)?;
@@ -1798,8 +1856,11 @@ impl AgentRelay {
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
         let mut ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
-        let clock_sync_handle =
-            spawn_clock_sync_task(agent_tx.clone(), self.kernel_clock_synchronized);
+        let clock_sync_handle = spawn_clock_sync_task(
+            agent_tx.clone(),
+            self.guest_clock,
+            self.kernel_clock_synchronized,
+        );
         let bulk_write_budget = self
             .dual_port_active
             .then(|| Arc::new(Semaphore::new(BULK_WRITE_BYTE_CAPACITY)));
@@ -2128,7 +2189,9 @@ impl AgentRelay {
         }
 
         // Abort background tasks.
-        clock_sync_handle.abort();
+        if let Some(handle) = clock_sync_handle {
+            handle.abort();
+        }
         ring_writer_handle.abort();
         if let Some(handle) = bulk_writer_handle {
             handle.abort();
@@ -3872,17 +3935,9 @@ async fn combined_ring_reader_task(
         }
         #[cfg(windows)]
         {
-            let shared_for_wait = Arc::clone(&shared);
-            let woke = tokio::task::spawn_blocking(move || {
-                shared_for_wait
-                    .tx_wake
-                    .wait_timeout(std::time::Duration::from_millis(100))
-            })
-            .await
-            .unwrap_or(false);
-            if !woke {
-                continue;
-            }
+            // Every producer signals the same wake primitive. Await its stored
+            // permit directly so idle readers and cancelled tasks need no worker.
+            shared.tx_wake.notified().await;
         }
 
         shared.tx_wake.drain();
@@ -3968,17 +4023,9 @@ async fn lane_reader_task(
         }
         #[cfg(windows)]
         {
-            let shared_for_wait = Arc::clone(&shared);
-            let woke = tokio::task::spawn_blocking(move || {
-                shared_for_wait
-                    .tx_wake
-                    .wait_timeout(std::time::Duration::from_millis(100))
-            })
-            .await
-            .unwrap_or(false);
-            if !woke {
-                continue;
-            }
+            // Every producer signals the same wake primitive. Await its stored
+            // permit directly so idle readers and cancelled tasks need no worker.
+            shared.tx_wake.notified().await;
         }
 
         shared.tx_wake.drain();
@@ -4443,6 +4490,7 @@ async fn client_reader_task(
                 kind: microsandbox_protocol::core::CoreErrorKind::InvalidSession,
                 message: "sandbox is paused; resume it before starting guest work".into(),
                 offending_type: None,
+                init_failure: None,
                 workload_failure: None,
             };
             let Ok(mut response) = Message::with_payload(MessageType::CoreError, frame.id, &error)
@@ -6696,6 +6744,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_ready_preserves_guest_failure_before_acknowledging_exit() {
+        for writable in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let log_dir = dir.path().join("logs");
+            if !writable {
+                std::fs::write(&log_dir, "not a directory").unwrap();
+            }
+            let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
+            let sock_path = test_agent_endpoint("startup-failure");
+            let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+                .await
+                .unwrap()
+                .with_boot_error_log_dir(log_dir.clone());
+            shared
+                .tx_ring
+                .push(encoded_message(
+                    MessageType::CoreError,
+                    &CoreError {
+                        kind: CoreErrorKind::InitializationFailed,
+                        message: "init failed: exec session error: guest user not found: iggy"
+                            .into(),
+                        offending_type: None,
+                        init_failure: Some(
+                            microsandbox_protocol::core::InitFailureReason::UserNotFound,
+                        ),
+                        workload_failure: None,
+                    },
+                ))
+                .unwrap();
+            // A ready frame makes discarding the error fail immediately rather
+            // than letting a regression spend three minutes in the watchdog.
+            shared
+                .tx_ring
+                .push(encoded_message(MessageType::Ready, &Ready::default()))
+                .unwrap();
+            shared.tx_wake.wake();
+
+            let error = relay.wait_ready().unwrap_err();
+            assert!(error.to_string().contains("guest user not found: iggy"));
+            assert!(relay.ready_frame.is_none());
+            if writable {
+                let ack = shared.rx_ring.pop().expect("guest may now exit");
+                let ack = decode_frame(&ack).unwrap();
+                assert_eq!(ack.t, MessageType::InitAck);
+                assert!(ack.payload::<InitAck>().unwrap().failure);
+                let saved = BootError::read(&log_dir).unwrap().unwrap();
+                assert_eq!(saved.message, error.to_string());
+                assert_eq!(
+                    saved.reason,
+                    Some(microsandbox_protocol::core::InitFailureReason::UserNotFound)
+                );
+            } else {
+                assert!(shared.rx_ring.pop().is_none(), "never ack an unsaved error");
+            }
+        }
+    }
+
+    #[tokio::test]
     #[cfg(unix)]
     async fn wait_ready_rejects_ready_before_init_when_maps_are_pending() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
@@ -7496,6 +7602,42 @@ mod tests {
         ));
         assert!(next_control_write(&mut pending, control).unwrap().is_none());
         assert_eq!(pending.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_is_not_spawned_when_guest_clock_is_off() {
+        let (tx, mut rx) = ControlWriter::new();
+        assert!(
+            spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Off, false).is_none()
+        );
+        // The only writer was dropped without sending, so the guest never receives a clock frame.
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_sends_initial_sync_after_cold_boot() {
+        let (tx, mut rx) = ControlWriter::new();
+        let handle = spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Sync, false)
+            .expect("sync policy spawns the clock task");
+        let write = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("initial clock sync is sent without waiting for the interval")
+            .expect("clock frame");
+        assert_eq!(decode_frame(&write.data).unwrap().t, MessageType::ClockSync);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn clock_sync_task_skips_initial_sync_after_kernel_restore_sync() {
+        let (tx, mut rx) = ControlWriter::new();
+        let handle = spawn_clock_sync_task(tx, microsandbox_types::GuestClockPolicy::Sync, true)
+            .expect("sync policy spawns the clock task");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .is_err()
+        );
+        handle.abort();
     }
 
     #[tokio::test]

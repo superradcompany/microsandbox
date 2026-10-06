@@ -28,3 +28,7 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"
+
+[dev-dependencies]
+# Rust test executables have no Node host to provide the N-API symbols.
+napi = { version = "3", default-features = false, features = ["dyn-symbols"] }

@@ -8,6 +8,8 @@ icon: "chart-line"
 
 Query resource usage for a running sandbox: CPU, memory, and more. Get a single point-in-time snapshot, or open a streaming subscription that delivers updates at a fixed interval.
 
+While a sandbox is paused, the runtime skips host page-residency scans and reports `memory_host_resident_bytes` as unavailable (`null`, `None`, or `nil`, depending on the SDK). Host residency can change even when guest execution is stopped, so the runtime does not reuse the previous value. Other metrics continue to be sampled; residency sampling returns on the next sample after resume.
+
 OCI sandboxes also expose optional upper filesystem fields for capacity dashboards. Guest-visible `upper_used_bytes` and `upper_free_bytes` are available when the protected bundled-kernel reporter is fresh. Host-observed `upper_host_allocated_bytes` is available when microsandbox can inspect the writable upper image from the host. SDKs surface those as nullable fields (`Option`, `null`, `None`, or `nil`) because custom kernels and non-OCI roots may not provide them.
 
 <Note>

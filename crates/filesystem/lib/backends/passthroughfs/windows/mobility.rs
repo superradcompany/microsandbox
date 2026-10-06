@@ -37,6 +37,8 @@ mod owned;
 
 const KIND: &[u8; 8] = b"MSBPTWIN";
 const EXTERNAL_KIND: &[u8; 8] = b"MSBPTWX1";
+const ALIASED_KIND: &[u8; 8] = b"MSBPTWA2";
+const ALIASED_EXTERNAL_KIND: &[u8; 8] = b"MSBPTWX2";
 const MAX_PATH_DEPTH: usize = 256;
 const MAX_COMPONENT_UNITS: usize = 255;
 
@@ -59,6 +61,26 @@ struct ExternalState {
     state: PassthroughState,
     identities: BTreeMap<u64, ObjectIdentity>,
     invalid_inodes: BTreeSet<u64>,
+}
+
+// Keep the original payload types intact so existing snapshots remain readable,
+// including owned snapshots, whose format already records aliases.
+#[derive(Deserialize, Serialize)]
+struct AliasedState {
+    state: PassthroughState,
+    aliases: Vec<AliasState>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AliasedExternalState {
+    external: ExternalState,
+    aliases: Vec<AliasState>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AliasState {
+    inode: u64,
+    components: Vec<Vec<u16>>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Eq)]
@@ -216,7 +238,13 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
     }
     let state = capture_linked(fs, &BTreeSet::new())?;
     if fs.cfg.external_checkpoint.is_none() {
-        return mobility::encode(KIND, &state);
+        return mobility::encode(
+            ALIASED_KIND,
+            &AliasedState {
+                state,
+                aliases: capture_aliases(fs)?,
+            },
+        );
     }
     if fs
         .invalid_inodes
@@ -253,11 +281,14 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         })
         .collect::<io::Result<BTreeMap<_, _>>>()?;
     mobility::encode(
-        EXTERNAL_KIND,
-        &ExternalState {
-            state,
-            identities,
-            invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
+        ALIASED_EXTERNAL_KIND,
+        &AliasedExternalState {
+            external: ExternalState {
+                state,
+                identities,
+                invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
+            },
+            aliases: capture_aliases(fs)?,
         },
     )
 }
@@ -267,8 +298,9 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         return owned::prepare(fs, bytes);
     }
     if let Some(options) = &fs.cfg.external_checkpoint {
-        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        let (mut external, aliases) = decode_external(bytes)?;
         validate_external_shape(&external)?;
+        validate_aliases(&external.state, &aliases)?;
         validate_quota(fs, &external.state)?;
         validate_shape(
             &external.state,
@@ -311,6 +343,24 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
                 invalid_paths.push(saved.components.clone());
             }
         }
+        // Every cached name must still identify the same destination object.
+        // On remap, compare aliases with the observed destination identity rather
+        // than the original volume/file ID. A copied pair is not a hardlink pair.
+        for alias in &aliases {
+            if invalid.contains(&alias.inode) {
+                continue;
+            }
+            let path = path_from_components(fs, &alias.components)?;
+            let valid = fs.safe_metadata(&path).is_ok()
+                && fs.path_identity(&path).ok().flatten()
+                    == observed.get(&alias.inode).map(|id| (id.volume, id.file_id));
+            if !valid {
+                if !options.relaxed {
+                    return Err(invalid_state("external alias is missing or replaced"));
+                }
+                invalid.insert(alias.inode);
+            }
+        }
         external
             .state
             .inodes
@@ -324,12 +374,16 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
             .dirs
             .retain(|saved| !invalid.contains(&saved.inode));
         let mut prepared = rebuild(fs, external.state, Some(&observed))?;
+        restore_aliases(fs, &mut prepared, &aliases, &invalid)?;
         prepared.invalid_inodes = invalid;
         return Ok(prepared);
     }
-    let state: PassthroughState = mobility::decode(KIND, bytes)?;
+    let (state, aliases) = decode_linked(bytes)?;
     validate_semantics(fs, &state)?;
-    rebuild(fs, state, None)
+    validate_aliases(&state, &aliases)?;
+    let mut prepared = rebuild(fs, state, None)?;
+    restore_aliases(fs, &mut prepared, &aliases, &BTreeSet::new())?;
+    Ok(prepared)
 }
 
 pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
@@ -352,8 +406,9 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
 
 /// Validate a missing export's payload without opening any host paths.
 pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
-    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    let (external, aliases) = decode_external(bytes)?;
     validate_external_shape(&external)?;
+    validate_aliases(&external.state, &aliases)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)
 }
 
@@ -365,8 +420,9 @@ pub(super) fn prepare_single_file_state(
     Vec<u8>,
     crate::backends::passthroughfs::ExternalSingleFileIndex,
 )> {
-    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    let (mut external, mut aliases) = decode_external(bytes)?;
     validate_external_shape(&external)?;
+    validate_aliases(&external.state, &aliases)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)?;
     let source = source
         .to_str()
@@ -404,6 +460,17 @@ pub(super) fn prepare_single_file_state(
         }
         inode.components = vec![destination.clone()];
     }
+    for alias in &mut aliases {
+        if alias.inode == super::ROOT_INODE {
+            continue;
+        }
+        if alias.components != [source.clone()] {
+            return Err(invalid_state(
+                "single-file state references a sibling alias",
+            ));
+        }
+        alias.components = vec![destination.clone()];
+    }
     let index = crate::backends::passthroughfs::ExternalSingleFileIndex {
         inodes: external
             .state
@@ -419,12 +486,132 @@ pub(super) fn prepare_single_file_state(
             .collect(),
         invalid_inodes: external.invalid_inodes.clone(),
     };
-    Ok((mobility::encode(EXTERNAL_KIND, &external)?, index))
+    Ok((
+        mobility::encode(
+            ALIASED_EXTERNAL_KIND,
+            &AliasedExternalState { external, aliases },
+        )?,
+        index,
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
 // Functions: Validation and reconstruction
 //--------------------------------------------------------------------------------------------------
+
+fn canonical_aliases(state: &PassthroughState) -> Vec<AliasState> {
+    state
+        .inodes
+        .iter()
+        .map(|inode| AliasState {
+            inode: inode.inode,
+            components: inode.components.clone(),
+        })
+        .collect()
+}
+
+fn decode_linked(bytes: &[u8]) -> io::Result<(PassthroughState, Vec<AliasState>)> {
+    if bytes.starts_with(ALIASED_KIND) {
+        let saved: AliasedState = mobility::decode(ALIASED_KIND, bytes)?;
+        Ok((saved.state, saved.aliases))
+    } else {
+        let state: PassthroughState = mobility::decode(KIND, bytes)?;
+        let aliases = canonical_aliases(&state);
+        Ok((state, aliases))
+    }
+}
+
+fn decode_external(bytes: &[u8]) -> io::Result<(ExternalState, Vec<AliasState>)> {
+    if bytes.starts_with(ALIASED_EXTERNAL_KIND) {
+        let saved: AliasedExternalState = mobility::decode(ALIASED_EXTERNAL_KIND, bytes)?;
+        Ok((saved.external, saved.aliases))
+    } else {
+        let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        let aliases = canonical_aliases(&external.state);
+        Ok((external, aliases))
+    }
+}
+
+fn capture_aliases(fs: &PassthroughFs) -> io::Result<Vec<AliasState>> {
+    fs.inodes
+        .read()
+        .unwrap()
+        .by_path
+        .iter()
+        .map(|(path, data)| {
+            let relative = path
+                .strip_prefix(&fs.root)
+                .map_err(|_| invalid_state("tracked alias escaped passthrough root"))?;
+            let components = relative
+                .components()
+                .map(|component| match component {
+                    Component::Normal(name) => Ok(name.encode_wide().collect()),
+                    _ => Err(invalid_state("invalid tracked alias path")),
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            Ok(AliasState {
+                inode: data.inode,
+                components,
+            })
+        })
+        .collect()
+}
+
+fn validate_aliases(state: &PassthroughState, aliases: &[AliasState]) -> io::Result<()> {
+    let ids = state
+        .inodes
+        .iter()
+        .map(|inode| inode.inode)
+        .collect::<BTreeSet<_>>();
+    let mut paths = BTreeMap::new();
+    for alias in aliases {
+        validate_components(&alias.components)?;
+        if !ids.contains(&alias.inode)
+            || (alias.components.is_empty() != (alias.inode == super::ROOT_INODE))
+            || paths.insert(&alias.components, alias.inode).is_some()
+        {
+            return Err(invalid_state("invalid or duplicate passthrough alias"));
+        }
+    }
+    for inode in &state.inodes {
+        if paths.get(&inode.components) != Some(&inode.inode) {
+            return Err(invalid_state("canonical inode path is absent from aliases"));
+        }
+    }
+    Ok(())
+}
+
+fn restore_aliases(
+    fs: &PassthroughFs,
+    prepared: &mut PreparedState,
+    aliases: &[AliasState],
+    invalid: &BTreeSet<u64>,
+) -> io::Result<()> {
+    for alias in aliases {
+        if invalid.contains(&alias.inode) {
+            continue;
+        }
+        let path = path_from_components(fs, &alias.components)?;
+        let data = prepared.inodes.by_inode[&alias.inode].clone();
+        if let Err(error) = fs.safe_metadata(&path) {
+            // Linked snapshots follow the live host namespace. An extra name
+            // may disappear while the canonical path still reaches the file.
+            // External checkpoints retain their strict/relaxed validation above.
+            if fs.cfg.external_checkpoint.is_none()
+                && path != data.path()
+                && error.raw_os_error() == Some(super::LINUX_ENOENT)
+            {
+                continue;
+            }
+            return Err(error);
+        }
+        if fs.path_identity(&path)? != data.identity {
+            return Err(invalid_state("alias no longer names its captured inode"));
+        }
+        prepared.inodes.by_path.insert(path, data);
+    }
+    Ok(())
+}
 
 fn validate_external_shape(external: &ExternalState) -> io::Result<()> {
     if external.identities.len() != external.state.inodes.len()
@@ -688,7 +875,7 @@ fn rebuild(
         let data = Arc::new(InodeData {
             inode: saved.inode,
             path: RwLock::new(path.clone()),
-            identity: fs.owned_identity(&path)?,
+            identity: fs.path_identity(&path)?,
             virtual_meta: RwLock::new(VirtualMetadata {
                 uid: saved.uid,
                 gid: saved.gid,
@@ -699,12 +886,19 @@ fn rebuild(
             retained_stat: Mutex::new(None),
             lookups: std::sync::atomic::AtomicU64::new(0),
         });
-        if let Some(identity) = data.identity
-            && inodes.by_identity.insert(identity, data.clone()).is_some()
-        {
-            return Err(invalid_state(
-                "owned aliases have conflicting logical inode ids",
-            ));
+        if let Some(identity) = data.identity {
+            // Older external snapshots assigned separate inode IDs to hardlinks.
+            // Preserve those saved IDs for existing guest references, while new
+            // lookups use a single identity. Owned snapshots already require this.
+            if inodes.by_identity.contains_key(&identity) && fs.cfg.owned_checkpoint.is_some() {
+                return Err(invalid_state(
+                    "owned aliases have conflicting logical inode ids",
+                ));
+            }
+            inodes
+                .by_identity
+                .entry(identity)
+                .or_insert_with(|| data.clone());
         }
         inodes.by_inode.insert(saved.inode, Arc::clone(&data));
         inodes.by_path.insert(path.clone(), data);
@@ -810,4 +1004,188 @@ fn path_from_components(fs: &PassthroughFs, components: &[Vec<u16>]) -> io::Resu
 
 fn invalid_state(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use msb_krun::backends::fs::{Context, DynFileSystem, FsOptions};
+
+    use super::*;
+    use crate::{PassthroughConfig, StatVirtualization};
+
+    fn backend(path: &std::path::Path, external: bool, relaxed: bool) -> PassthroughFs {
+        let mut cfg = PassthroughConfig::new(path.to_path_buf());
+        cfg.inject_init = false;
+        cfg.stat_virtualization = StatVirtualization::Off;
+        if external {
+            cfg.external_checkpoint =
+                Some(crate::backends::passthroughfs::ExternalCheckpointOptions {
+                    relaxed,
+                    ..Default::default()
+                });
+        }
+        let fs = PassthroughFs::new(cfg).unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+        fs
+    }
+
+    fn context() -> Context {
+        Context {
+            uid: 0,
+            gid: 0,
+            pid: 0,
+        }
+    }
+
+    #[test]
+    fn restored_hardlink_keeps_cached_inode_after_canonical_name_is_removed() {
+        for external in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("first"), b"contents").unwrap();
+            std::fs::hard_link(temp.path().join("first"), temp.path().join("alias")).unwrap();
+            let source = backend(temp.path(), external, false);
+            let first = source.lookup(context(), 1, c"first").unwrap();
+            let alias = source.lookup(context(), 1, c"alias").unwrap();
+            assert_eq!(first.inode, alias.inode);
+            let bytes = capture(&source).unwrap();
+            let destination = backend(temp.path(), external, false);
+            restore(&destination, &bytes).unwrap();
+            // No lookup after restore: the guest already has both cached names.
+            destination.unlink(context(), 1, c"first").unwrap();
+            let stat = destination.getattr(context(), alias.inode, None).unwrap().0;
+            assert_eq!(stat.st_size, 8);
+            assert_eq!(stat.st_nlink, 1);
+            assert_eq!(
+                std::fs::read(temp.path().join("alias")).unwrap(),
+                b"contents"
+            );
+        }
+    }
+
+    #[test]
+    fn linked_restore_tolerates_only_missing_noncanonical_hardlinks() {
+        for (removed, replace, succeeds) in [
+            ("alias", false, true),
+            ("alias", true, false),
+            ("first", false, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("first"), b"contents").unwrap();
+            std::fs::hard_link(temp.path().join("first"), temp.path().join("alias")).unwrap();
+            let source = backend(temp.path(), false, false);
+            let first = source.lookup(context(), 1, c"first").unwrap();
+            source.lookup(context(), 1, c"alias").unwrap();
+            let bytes = capture(&source).unwrap();
+            std::fs::remove_file(temp.path().join(removed)).unwrap();
+            if replace {
+                std::fs::write(temp.path().join(removed), b"replacement").unwrap();
+            }
+
+            let destination = backend(temp.path(), false, false);
+            let result = restore(&destination, &bytes);
+            if !succeeds {
+                assert!(
+                    result.is_err(),
+                    "restore accepted {removed}, replace={replace}"
+                );
+                continue;
+            }
+            result.expect("a missing extra hardlink must not block linked restore");
+            let stat = destination.getattr(context(), first.inode, None).unwrap().0;
+            assert_eq!((stat.st_size, stat.st_nlink), (8, 1));
+            assert!(destination.lookup(context(), 1, c"alias").is_err());
+            destination.unlink(context(), 1, c"first").unwrap();
+            assert!(destination.getattr(context(), first.inode, None).is_err());
+        }
+    }
+
+    #[test]
+    fn external_alias_replacement_is_rejected_or_invalidates_the_whole_inode() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("first"), b"contents").unwrap();
+        std::fs::hard_link(temp.path().join("first"), temp.path().join("alias")).unwrap();
+        let source = backend(temp.path(), true, false);
+        let first = source.lookup(context(), 1, c"first").unwrap();
+        source.lookup(context(), 1, c"alias").unwrap();
+        let bytes = capture(&source).unwrap();
+        std::fs::remove_file(temp.path().join("alias")).unwrap();
+        std::fs::write(temp.path().join("alias"), b"contents").unwrap();
+        let strict = backend(temp.path(), true, false);
+        assert!(restore(&strict, &bytes).is_err());
+        let relaxed = backend(temp.path(), true, true);
+        restore(&relaxed, &bytes).unwrap();
+        assert!(relaxed.getattr(context(), first.inode, None).is_err());
+        assert_ne!(
+            relaxed.lookup(context(), 1, c"alias").unwrap().inode,
+            first.inode
+        );
+    }
+
+    #[test]
+    fn legacy_snapshots_preserve_separate_cached_hardlink_ids() {
+        for external in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("first"), b"contents").unwrap();
+            std::fs::hard_link(temp.path().join("first"), temp.path().join("alias")).unwrap();
+            let source = backend(temp.path(), external, false);
+            let first = source.lookup(context(), 1, c"first").unwrap();
+            let mut state = capture_linked(&source, &BTreeSet::new()).unwrap();
+            // The old writer assigned each hardlink a distinct guest inode ID.
+            let alias_id = state.next_inode;
+            state.next_inode += 1;
+            state.inodes.push(InodeState {
+                inode: alias_id,
+                components: vec!["alias".encode_utf16().collect()],
+                uid: 0,
+                gid: 0,
+                mode: None,
+                rdev: 0,
+            });
+            let bytes = if external {
+                let identities = state
+                    .inodes
+                    .iter()
+                    .map(|saved| (saved.inode, object_identity(&source, saved).unwrap()))
+                    .collect();
+                mobility::encode(
+                    EXTERNAL_KIND,
+                    &ExternalState {
+                        state,
+                        identities,
+                        invalid_inodes: BTreeSet::new(),
+                    },
+                )
+                .unwrap()
+            } else {
+                mobility::encode(KIND, &state).unwrap()
+            };
+            let destination = backend(temp.path(), external, false);
+            restore(&destination, &bytes).unwrap();
+            assert_eq!(
+                destination
+                    .getattr(context(), first.inode, None)
+                    .unwrap()
+                    .0
+                    .st_size,
+                8
+            );
+            assert_eq!(
+                destination
+                    .getattr(context(), alias_id, None)
+                    .unwrap()
+                    .0
+                    .st_size,
+                8
+            );
+            destination.unlink(context(), 1, c"alias").unwrap();
+            let new_alias = destination
+                .link(context(), first.inode, 1, c"new-alias")
+                .unwrap();
+            assert_eq!(new_alias.inode, first.inode);
+        }
+    }
 }

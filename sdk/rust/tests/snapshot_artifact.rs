@@ -2465,6 +2465,210 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
 }
 
 #[tokio::test]
+async fn load_accepts_cached_image_metadata_with_reordered_labels() {
+    let tmp = TempDir::new().unwrap();
+    let export_home = tmp.path().join("export-home");
+    let export_backend = isolated_backend(&export_home).await;
+    let export_cache = microsandbox_image::GlobalCache::new(&export_home.join("cache")).unwrap();
+    let seeded = seed_image_cache(&export_cache).await;
+
+    // Rewrite the cached metadata with labels, the way the cache writes it. Labels come from
+    // a `HashMap`, so their serialized order differs between processes.
+    let export_path = export_cache.image_metadata_path(&seeded.image_ref);
+    let mut metadata: microsandbox_image::CachedImageMetadata =
+        serde_json::from_slice(&std::fs::read(&export_path).unwrap()).unwrap();
+    let labels: Vec<(String, String)> = (0..8)
+        .map(|i| (format!("label.{i}"), format!("value-{i}")))
+        .collect();
+    metadata.config.labels = labels.iter().cloned().collect();
+    export_cache
+        .write_image_metadata_async(&seeded.image_ref, &metadata)
+        .await
+        .unwrap();
+    let exported_bytes = std::fs::read(&export_path).unwrap();
+
+    let (dir, _) = make_artifact_with_image(
+        tmp.path(),
+        "src-reordered-labels",
+        b"upper",
+        seeded.image_ref.to_string(),
+        seeded.manifest_digest.clone(),
+    );
+    let archive = tmp.path().join("reordered-labels.tar");
+    microsandbox::with_backend(
+        export_backend,
+        Box::pin(async {
+            save_snapshot(
+                dir.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts {
+                    with_image: true,
+                    plain_tar: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }),
+    )
+    .await;
+
+    // Destination metadata: identical values, but the labels object lists its keys in an order
+    // that differs from the archive copy.
+    let labels_json = |entries: &[(String, String)]| {
+        let body: Vec<String> = entries
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}:{}",
+                    serde_json::to_string(k).unwrap(),
+                    serde_json::to_string(v).unwrap()
+                )
+            })
+            .collect();
+        format!("\"labels\":{{{}}}", body.join(","))
+    };
+    let text = String::from_utf8(exported_bytes.clone()).unwrap();
+    let start = text.find("\"labels\":{").unwrap();
+    let end = start + text[start..].find('}').unwrap() + 1;
+    let mut reordered = None;
+    for candidate in [labels.clone(), labels.iter().rev().cloned().collect()] {
+        let rewritten = format!(
+            "{}{}{}",
+            &text[..start],
+            labels_json(&candidate),
+            &text[end..]
+        );
+        if rewritten.as_bytes() != exported_bytes.as_slice() {
+            reordered = Some(rewritten);
+            break;
+        }
+    }
+    let reordered = reordered.expect("a differently ordered labels object exists");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reordered).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&exported_bytes).unwrap()
+    );
+
+    let import_home = tmp.path().join("import-home");
+    let import_backend = isolated_backend(&import_home).await;
+    let import_cache = microsandbox_image::GlobalCache::new(&import_home.join("cache")).unwrap();
+    let import_metadata = import_cache.image_metadata_path(&seeded.image_ref);
+    std::fs::write(&import_metadata, reordered.as_bytes()).unwrap();
+    let dest = tmp.path().join("reordered-labels-dest");
+
+    let handle = microsandbox::with_backend(
+        import_backend.clone(),
+        Box::pin(async { Snapshot::load(&archive, Some(&dest)).await.unwrap() }),
+    )
+    .await;
+    assert_eq!(Snapshot::list_dir(&dest).await.unwrap().len(), 1);
+    assert!(handle.path().unwrap().is_dir());
+    assert_eq!(
+        std::fs::read(&import_metadata).unwrap(),
+        reordered.as_bytes(),
+        "import replaced the existing metadata"
+    );
+
+    // A genuinely different metadata value still conflicts.
+    metadata.manifest_digest = "sha256:different".into();
+    std::fs::write(&import_metadata, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    let dest = tmp.path().join("reordered-labels-conflict-dest");
+    microsandbox::with_backend(
+        import_backend,
+        Box::pin(async {
+            let err = Snapshot::load(&archive, Some(&dest))
+                .await
+                .expect_err("expected differing metadata to conflict");
+            assert!(
+                err.to_string()
+                    .contains("cache target already exists with different content"),
+                "unexpected error: {err}"
+            );
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn load_rebuilds_image_vmdk_for_destination_cache() {
+    let tmp = TempDir::new().unwrap();
+    let export_home = tmp.path().join("export-home");
+    let export_backend = isolated_backend(&export_home).await;
+    let export_cache = microsandbox_image::GlobalCache::new(&export_home.join("cache")).unwrap();
+    let seeded = seed_image_cache(&export_cache).await;
+    let (dir, _) = make_artifact_with_image(
+        tmp.path(),
+        "src-vmdk-rebuild",
+        b"upper",
+        seeded.image_ref.to_string(),
+        seeded.manifest_digest.clone(),
+    );
+    let archive = tmp.path().join("vmdk-rebuild.tar");
+
+    microsandbox::with_backend(
+        export_backend,
+        Box::pin(async {
+            save_snapshot(
+                dir.to_string_lossy().as_ref(),
+                &archive,
+                microsandbox::snapshot::SaveOpts {
+                    with_image: true,
+                    plain_tar: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }),
+    )
+    .await;
+
+    let import_home = tmp.path().join("import-home");
+    let import_backend = isolated_backend(&import_home).await;
+    let import_cache = microsandbox_image::GlobalCache::new(&import_home.join("cache")).unwrap();
+    let dest = tmp.path().join("vmdk-rebuild-dest");
+    microsandbox::with_backend(
+        import_backend.clone(),
+        Box::pin(async {
+            Snapshot::load(&archive, Some(&dest)).await.unwrap();
+        }),
+    )
+    .await;
+
+    let vmdk = import_cache.vmdk_path(&seeded.image_digest);
+    assert_vmdk_references_cache(&import_cache, &seeded);
+
+    // A descriptor left by an earlier import, pointing elsewhere, is replaced too.
+    std::fs::write(&vmdk, "RW 8 FLAT \"/elsewhere/fsmeta.erofs\" 0\n").unwrap();
+    let dest = tmp.path().join("vmdk-rebuild-dest-stale");
+    microsandbox::with_backend(
+        import_backend,
+        Box::pin(async {
+            Snapshot::load(&archive, Some(&dest)).await.unwrap();
+        }),
+    )
+    .await;
+    assert_vmdk_references_cache(&import_cache, &seeded);
+}
+
+fn assert_vmdk_references_cache(
+    cache: &microsandbox_image::GlobalCache,
+    seeded: &SeededImageCache,
+) {
+    let descriptor = std::fs::read_to_string(cache.vmdk_path(&seeded.image_digest)).unwrap();
+    for extent in [
+        cache.fsmeta_erofs_path(&seeded.image_digest),
+        cache.layer_erofs_path(&seeded.diff_id),
+    ] {
+        assert!(
+            descriptor.contains(&*std::fs::canonicalize(extent).unwrap().to_string_lossy()),
+            "imported VMDK does not reference the destination cache: {descriptor}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn manifest_digest_is_stable_across_processes() {
     // Canonicalization is stable for one immutable descriptor. Independent
     // captures intentionally receive different opaque snapshot IDs.

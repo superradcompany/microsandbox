@@ -16,6 +16,8 @@ use tokio::net::TcpStream;
 use tokio_socks::tcp::Socks4Stream;
 use zeroize::Zeroizing;
 
+#[cfg(feature = "engine")]
+use super::http_connect::HttpConnectProtocol;
 use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyProtocol, ResolvedOutboundProxy,
@@ -97,6 +99,14 @@ impl ResolvedOutboundProxy {
 
         configured.validate()?;
         match configured {
+            OutboundProxy::HttpConnect { address } => {
+                if resolved.is_some() {
+                    return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
+                        reason: "launch credentials require a configured SOCKS5 proxy",
+                    });
+                }
+                Ok(Some(Self::HttpConnect { address: *address }))
+            }
             OutboundProxy::Socks4 { address, user_id } => {
                 if resolved.is_some() {
                     return Err(OutboundProxyBuildError::InvalidSocks5Credentials {
@@ -146,6 +156,9 @@ impl ResolvedOutboundProxy {
     #[cfg(feature = "engine")]
     pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
         match self {
+            Self::HttpConnect { address } => {
+                HttpConnectProtocol::connect(*address, destination).await
+            }
             Self::Socks4 { address, user_id } => match user_id {
                 Some(user_id) => {
                     Socks4Stream::connect_with_userid(*address, destination, user_id).await
@@ -208,6 +221,7 @@ impl ResolvedOutboundProxy {
 impl OutboundProxy {
     fn validate(&self) -> Result<(), OutboundProxyBuildError> {
         match self {
+            Self::HttpConnect { .. } => Ok(()),
             Self::Socks4 { user_id, .. } => Self::validate_socks4_user_id(user_id.as_deref()),
             Self::Socks5 { credentials, .. } => credentials
                 .as_ref()
@@ -390,6 +404,11 @@ impl OutboundProxyBuilder {
     /// Creates a protocol selector.
     pub fn new() -> Self {
         Self
+    }
+
+    /// Starts building an HTTP CONNECT outbound proxy.
+    pub fn http_connect(self, address: impl Into<String>) -> super::HttpConnectProxyBuilder {
+        super::HttpConnectProxyBuilder::new(address)
     }
 
     /// Starts building a SOCKS4 outbound proxy.
@@ -967,9 +986,17 @@ mod tests {
 
     #[test]
     fn uri_parses_and_formats_for_cli() {
+        let http: OutboundProxy = "http://127.0.0.1:1080".parse().unwrap();
         let socks4: OutboundProxy = "socks4://127.0.0.1:1080".parse().unwrap();
         let socks5: OutboundProxy = "socks5://127.0.0.1:1080".parse().unwrap();
 
+        assert_eq!(
+            http,
+            OutboundProxy::HttpConnect {
+                address: "127.0.0.1:1080".parse().unwrap(),
+            }
+        );
+        assert_eq!(http.to_string(), "http://127.0.0.1:1080");
         assert_eq!(
             socks4,
             OutboundProxy::Socks4 {
@@ -992,7 +1019,7 @@ mod tests {
     fn uri_rejects_unsupported_forms() {
         for raw in [
             "127.0.0.1:1080",
-            "http://127.0.0.1:1080",
+            "ftp://127.0.0.1:1080",
             "socks4://user@127.0.0.1:1080",
             "socks5://user@127.0.0.1:1080",
             "socks5://127.0.0.1:1080/path",

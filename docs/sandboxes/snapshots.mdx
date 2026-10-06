@@ -183,6 +183,8 @@ Local snapshots use `group:member` selectors, such as `baseline:ready`. For clou
 
 Capture a running workload to resume its processes and memory later. A running source briefly pauses during capture, then resumes; an already-paused source stays paused.
 
+On Windows, full snapshots now preserve all tracked hardlink names for bind mounts. Runtimes that support this format can still restore the previous Windows filesystem format. Older runtimes cannot restore snapshots written with the new bind-mount format; use the updated runtime when restoring them. This does not change disk-only snapshot compatibility.
+
 <Steps>
 <Step title="Capture">
 
@@ -403,6 +405,51 @@ msb snap restore worker:snap --name rebooted --disk-only
 </CodeGroup>
 
 Snapshots with a tmpfs root cannot be restored disk-only.
+
+### Keep the guest clock
+
+By default (`sync`), the sandbox's date and time follow the host. The host updates the clock at boot, about once a minute, and when a full snapshot restores or a paused sandbox resumes.
+
+With `off`, the host stops updating the clock after boot. Full restores continue from the snapshot's saved time. The clock keeps running, making this useful for tests that need a repeatable starting time.
+
+<CodeGroup>
+```rust Rust
+use microsandbox::sandbox::GuestClockPolicy;
+
+let source = Sandbox::builder("worker")
+    .image("alpine")
+    .guest_clock(GuestClockPolicy::Off)
+    .create()
+    .await?;
+```
+
+```bash CLI
+msb create alpine --name worker --guest-clock off
+```
+</CodeGroup>
+
+Full snapshots save this setting. Restores inherit it unless you choose `sync` to use host time or `off` to continue from the saved time:
+
+<CodeGroup>
+```rust Rust
+let child = Sandbox::restore("worker:snap")
+    .name("child")
+    .guest_clock(GuestClockPolicy::Sync)
+    .restore()
+    .await?;
+```
+
+```bash CLI
+msb snap restore worker:snap --name child --guest-clock sync
+```
+</CodeGroup>
+
+- **Scope:** `off` prevents host clock updates. Programs inside the sandbox with permission to set the time can still change it.
+- **Drift:** With `off`, the guest clock is not corrected after the host sleeps or its clock changes.
+- **Monotonic clock:** Continues from the snapshot in both modes.
+- **Forks:** Forks inherit this setting.
+- **Compatibility:** Older runtimes reject `off`. Older SDKs and CLIs reject full snapshots saved with `off`, including exported archives. Cloud also rejects `off`.
+- **Downgrades:** Older SDKs and CLIs require a database downgrade to reopen this installation. Downgrading is blocked while any sandbox's saved or active settings use `off`.
 
 <a id="guest-filesystem-flush"></a>
 

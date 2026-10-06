@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
 use microsandbox::{Snapshot, SnapshotReference};
+use microsandbox_utils::format::format_bytes;
 
 use crate::{
     commands::restore::{self, RestoreArgs},
@@ -449,7 +450,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         let name = format_member_selector(s.group(), s.name(), s.id());
         let size = s
             .size_bytes()
-            .map(format_size)
+            .map(format_bytes)
             .unwrap_or_else(|| "-".to_string());
         let created = ui::format_datetime(&s.created_at().and_utc());
         let digest = short_digest(s.digest());
@@ -494,7 +495,7 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
             ui::detail_kv("State", "file");
             ui::detail_kv("Format", format_str(state.disk_format));
             ui::detail_kv("Filesystem", &state.filesystem);
-            ui::detail_kv("Virtual Size", &format_size(state.virtual_size));
+            ui::detail_kv("Virtual Size", &format_bytes(state.virtual_size));
             ui::detail_kv("Layers", &state.layers.len().to_string());
             let integrity = state
                 .layers
@@ -533,6 +534,13 @@ async fn inspect(args: SnapshotInspectArgs) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(", ");
         ui::detail_kv("Labels", &labels);
+    }
+    match snap.storage_usage().await {
+        Ok(usage) => super::storage::display_item(&usage),
+        Err(error) => {
+            ui::detail_header("Storage");
+            ui::detail_kv_indent("Unavailable", &error.to_string());
+        }
     }
     Ok(())
 }
@@ -699,21 +707,6 @@ fn format_root_disk(root_disk: &microsandbox::SnapshotRootDisk) -> &'static str 
 
 fn format_reference(reference: &SnapshotReference) -> String {
     reference.value().to_string()
-}
-
-fn format_size(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KiB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 fn short_digest(d: &str) -> String {

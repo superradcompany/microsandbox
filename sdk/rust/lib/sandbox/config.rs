@@ -138,6 +138,10 @@ pub(crate) struct RestoreOverrideIntent {
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 pub struct SandboxConfig {
+    /// Protect the installed source while a local restore builder materializes child-owned files.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_lease: Option<microsandbox_image::storage_lease::StorageLease>,
     /// Operation-local observer; never persisted or retained as a stream owner.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -1114,6 +1118,8 @@ impl Default for SandboxConfig {
             registry_auth: None,
             #[cfg(feature = "local")]
             creation_progress: None,
+            #[cfg(feature = "local")]
+            snapshot_lease: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -1946,6 +1952,7 @@ mod tests {
                 log_level: Some(SandboxLogLevel::Trace),
                 metrics_sample_interval_ms: Some(750),
                 disable_metrics_sample: true,
+                guest_clock: Some(microsandbox_types::GuestClockPolicy::Off),
             },
             env: vec![EnvVar::new("A", "B")],
             labels: [("team".to_string(), "infra".to_string())]
@@ -1995,6 +2002,10 @@ mod tests {
         assert_eq!(config.spec.runtime.cmd, Some(vec!["worker.py".to_string()]));
         assert_eq!(config.spec.runtime.hostname.as_deref(), Some("worker"));
         assert_eq!(config.spec.runtime.user.as_deref(), Some("appuser"));
+        assert_eq!(
+            config.spec.runtime.guest_clock,
+            Some(microsandbox_types::GuestClockPolicy::Off)
+        );
         assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
         assert_eq!(config.spec.lifecycle.max_duration_secs, Some(3600));
         assert_eq!(config.spec.lifecycle.idle_timeout_secs, Some(120));

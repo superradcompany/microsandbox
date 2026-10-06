@@ -38,6 +38,7 @@ net = ["dep:microsandbox-network", "msb_krun?/net"]
 
 [dependencies]
 base64.workspace = true
+cap-primitives.workspace = true
 ciborium-ll.workspace = true
 bytes = { workspace = true, optional = true }
 chrono.workspace = true

@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use microsandbox_types::{
-    DiskImageFormat, HostPermissions, InterceptCaConfig, OciRootfsSource, OwnedVolumeStorage,
-    Patch, RootDisk, RootfsSource, ScopedUpstreamCaCert, StatVirtualization, TlsConfig,
-    VolumeMount,
+    DiskImageFormat, ExternalMountRestorePolicy, HostPermissions, InterceptCaConfig,
+    OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk, RootfsSource, ScopedUpstreamCaCert,
+    StatVirtualization, TlsConfig, VolumeMount,
 };
 
 use crate::SandboxConfig;
@@ -534,4 +534,153 @@ fn capturing_sparse_builder_paths_does_not_fill_other_layer_fields() {
         unreachable!()
     };
     assert_eq!(guest, expected);
+}
+
+#[cfg(unix)]
+fn bind_config(host: PathBuf, follow: bool) -> SandboxConfig {
+    let mut mount = bind(host, "/data");
+    if let VolumeMount::Bind {
+        follow_root_symlinks,
+        ..
+    } = &mut mount
+    {
+        *follow_root_symlinks = follow;
+    }
+    let mut config = SandboxConfig::default();
+    config.spec.mounts = vec![mount];
+    config
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_mount_through_symlink_fails_early_unless_it_opts_out() {
+    // The runtime refuses symlinks in a bind mount root unless the mount opts out,
+    // so creation must report that instead of persisting a sandbox that cannot boot.
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let check = |host: PathBuf, follow: bool| {
+        super::check_bind_roots_do_not_follow_symlinks(&bind_config(host, follow))
+    };
+
+    // The final component and an ancestor are both refused, naming the symlink
+    // and the way out.
+    let message = check(link.clone(), false).unwrap_err().to_string();
+    assert!(message.contains("is a symlink"), "{message}");
+    std::fs::create_dir(real.join("child")).unwrap();
+    let message = check(link.join("child"), false).unwrap_err().to_string();
+    assert!(message.contains("goes through symlink"), "{message}");
+    for message in [check(link.clone(), false).unwrap_err().to_string(), message] {
+        assert!(message.contains(&link.display().to_string()), "{message}");
+        assert!(message.contains(&real.display().to_string()), "{message}");
+        assert!(message.contains("follow-root-symlinks"), "{message}");
+    }
+    // Opting out, or naming the resolved path, is accepted.
+    check(link, true).unwrap();
+    check(real, false).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bind_root_check_only_applies_to_existing_directories() {
+    // A restore marks a vanished mount unavailable instead of failing, so the check
+    // must not reject paths that no longer exist (or never were directories).
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let file = real.join("input.txt");
+    std::fs::write(&file, "x").unwrap();
+    let file_link = base.join("file-link.txt");
+    std::os::unix::fs::symlink(&file, &file_link).unwrap();
+    let dangling = base.join("dangling");
+    std::os::unix::fs::symlink(base.join("gone"), &dangling).unwrap();
+    let check = |host: PathBuf| {
+        super::check_bind_roots_do_not_follow_symlinks(&bind_config(host, false)).unwrap()
+    };
+
+    // A file reached through a symlinked ancestor, before and after it disappears
+    // (the `/tmp/input.txt` case on macOS).
+    check(link.join("input.txt"));
+    std::fs::remove_file(&file).unwrap();
+    check(link.join("input.txt"));
+    // A missing directory under a symlinked ancestor.
+    check(link.join("gone"));
+    check(base.join("missing").join("child"));
+    // A dangling link root, and a symlinked file.
+    check(dangling);
+    std::fs::write(&file, "x").unwrap();
+    check(file_link);
+}
+
+#[cfg(unix)]
+#[test]
+fn host_path_resolution_accepts_a_vanished_file_under_a_symlinked_ancestor() {
+    // Resolution runs before missing-resource admission on restore. It must leave a
+    // vanished `/tmp/input.txt`-style mount for `--allow-missing-resources` to mark
+    // unavailable rather than rejecting its symlinked ancestor.
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut config = bind_config(link.join("input.txt"), false);
+    resolve_host_paths(&mut config).unwrap();
+    std::fs::write(real.join("input.txt"), "x").unwrap();
+    resolve_host_paths(&mut config).unwrap();
+    // A directory with the same name is still reported once admission has kept it.
+    let mut dir = bind_config(link.join("dir"), false);
+    std::fs::create_dir(real.join("dir")).unwrap();
+    resolve_host_paths(&mut dir).unwrap();
+    assert!(super::check_bind_roots_do_not_follow_symlinks(&dir).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn restored_bind_check_retains_captured_transport_and_optional_backing() {
+    use microsandbox_runtime::launch::{CheckpointRestoreConfig, ExternalMountRestoreBinding};
+
+    // The runtime keeps a captured file transport, and tolerates an optional backing
+    // under a relaxed restore, so the check must not refuse these first.
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let real = base.join("real");
+    let link = base.join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let check = |filename: Option<&str>, policy, require_backing| {
+        let mut config = bind_config(link.clone(), false);
+        config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            external_mount_policy: policy,
+            external_mounts: vec![ExternalMountRestoreBinding {
+                require_backing,
+                device_id: "virtio_fs2".into(),
+                mount: microsandbox_protocol::bootstrap::BootstrapDirMount {
+                    tag: "tag".into(),
+                    guest_path: "/data".into(),
+                    flags: Default::default(),
+                },
+                filename: filename.map(Into::into),
+                remapped: false,
+                unavailable: false,
+            }],
+            ..Default::default()
+        });
+        super::check_bind_roots_do_not_follow_symlinks(&config)
+    };
+    let (strict, relaxed) = (
+        ExternalMountRestorePolicy::Strict,
+        ExternalMountRestorePolicy::Relaxed,
+    );
+
+    check(Some("input.txt"), strict, true).unwrap();
+    check(None, relaxed, false).unwrap();
+    check(None, relaxed, true).unwrap_err();
+    check(None, strict, false).unwrap_err();
 }

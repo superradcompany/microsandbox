@@ -1,3 +1,4 @@
+import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
 import {
@@ -35,6 +36,7 @@ import {
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { Snapshot } from "./snapshot.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 
 export interface SandboxStopResult {
   readonly name: string;
@@ -82,6 +84,11 @@ export class SandboxHandle {
   async refresh(): Promise<SandboxHandle> {
     const raw = await withMappedErrors(() => this.inner.refresh());
     return new SandboxHandle(raw);
+  }
+
+  /** Observe the managed sandbox directory using this handle's captured backend. */
+  async storageUsage(): Promise<StorageItemUsage> {
+    return storageUsageFromHandle(this.inner, "SandboxHandle.storageUsage()");
   }
 
   /** Get point-in-time metrics. */
@@ -344,18 +351,4 @@ function sandboxStopResultFromNapi(result: {
     observedAt: new Date(result.observedAt),
     source: result.source ?? null,
   };
-}
-
-function remapKeysToCamel(v: any): any {
-  if (Array.isArray(v)) return v.map(remapKeysToCamel);
-  if (v && typeof v === "object" && v.constructor === Object) {
-    const out: any = {};
-    for (const [k, val] of Object.entries(v)) out[snakeToCamel(k)] = remapKeysToCamel(val);
-    return out;
-  }
-  return v;
-}
-
-function snakeToCamel(s: string): string {
-  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 }

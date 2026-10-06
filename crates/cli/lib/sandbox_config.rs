@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use microsandbox::SandboxConfigPatch;
 use microsandbox::sandbox::{
-    DiskImageFormat, EnvVar, HandoffInit, HostPermissions, MountBuilder, Patch, PullPolicy, Rlimit,
-    RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
+    DiskImageFormat, EnvVar, GuestClockPolicy, HandoffInit, HostPermissions, MountBuilder, Patch,
+    PullPolicy, Rlimit, RlimitResource, SandboxBuilder, SandboxPolicyPatch, SandboxResourcesPatch,
     SandboxRuntimeOptionsPatch, SandboxSpecPatch, SecurityProfile, StatVirtualization, VolumeMount,
 };
 #[cfg(feature = "net")]
@@ -111,6 +111,7 @@ struct SandboxConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -150,6 +151,7 @@ struct RuntimeConfigInput {
     shell: Option<String>,
     user: Option<String>,
     hostname: Option<String>,
+    guest_clock: Option<GuestClockPolicy>,
     security: Option<SecurityInput>,
     entrypoint: Option<Vec<String>>,
     cmd: Option<Vec<String>>,
@@ -703,6 +705,7 @@ pub fn resolve(sources: &SandboxConfigSources) -> anyhow::Result<ResolvedSandbox
                     shell: scoped.shell,
                     user: scoped.user,
                     hostname: scoped.hostname,
+                    guest_clock: scoped.guest_clock,
                     security: scoped.security,
                     entrypoint: scoped.entrypoint,
                     cmd: scoped.cmd,
@@ -1215,6 +1218,9 @@ fn materialize_config_patch(input: &SandboxConfigInput) -> anyhow::Result<Sandbo
     }
     if let Some(value) = &input.hostname {
         runtime = runtime.hostname(value.clone());
+    }
+    if let Some(value) = input.guest_clock {
+        runtime = runtime.guest_clock(value);
     }
     if let Some(value) = input.security {
         config_patch = config_patch.security_profile(match value {
@@ -1907,6 +1913,7 @@ workdir: "/lower"
 shell: "/bin/sh"
 user: "lower"
 hostname: "lower"
+guest_clock: sync
 security: default
 entrypoint: ["lower-entrypoint"]
 cmd: ["lower-command"]
@@ -1942,6 +1949,7 @@ workdir: "/higher"
 shell: "/bin/bash"
 user: "higher"
 hostname: "higher"
+guest_clock: "off"
 security: restricted
 entrypoint: ["higher-entrypoint"]
 cmd: ["higher-command"]
@@ -2000,6 +2008,7 @@ registry: { username: higher, password_env: PATH }
             shell,
             user,
             hostname,
+            guest_clock,
             security,
             entrypoint,
             cmd,
@@ -2034,6 +2043,7 @@ registry: { username: higher, password_env: PATH }
         assert_eq!(shell.as_deref(), Some("/bin/bash"));
         assert_eq!(user.as_deref(), Some("higher"));
         assert_eq!(hostname.as_deref(), Some("higher"));
+        assert_eq!(guest_clock, Some(GuestClockPolicy::Off));
         assert!(matches!(security, Some(SecurityInput::Restricted)));
         assert_eq!(entrypoint.as_deref().unwrap(), ["higher-entrypoint"]);
         assert_eq!(cmd.as_deref().unwrap(), ["higher-command"]);

@@ -3,6 +3,9 @@
 //! Implements the microsandbox output design system: spinners, tables,
 //! detail views, and styled messages. All ephemeral output goes to stderr;
 //! final data output goes to stdout.
+//!
+//! First-level output uses two leading spaces. Nested content uses four,
+//! aligning progress details with the text after a one-column symbol and space.
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -18,6 +21,10 @@ use microsandbox_image::PullProgress;
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
+
+// Keep current action labels and detail keys aligned, with a separate two-space gap.
+const ACTION_LABEL_WIDTH: usize = 18;
+const DETAIL_LABEL_WIDTH: usize = 20;
 
 const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠋"];
 
@@ -71,10 +78,10 @@ impl Spinner {
             pb.set_style(
                 ProgressStyle::default_spinner()
                     .tick_strings(BRAILLE_TICKS)
-                    .template(&format!("   {{spinner}} {:<12} {{msg}}", label))
+                    .template("  {spinner} {msg}")
                     .unwrap(),
             );
-            pb.set_message(target.to_string());
+            pb.set_message(action_message(label, target));
             pb.enable_steady_tick(Duration::from_millis(80));
             (Some(pb), EchoGuard::acquire())
         } else {
@@ -118,12 +125,9 @@ impl Spinner {
                 String::new()
             };
 
-            eprintln!(
-                "   {} {:<12} {}{}",
-                style("✓").green(),
+            success(
                 past_tense,
-                self.target,
-                style(duration).dim()
+                &format!("{}{}", self.target, style(duration).dim()),
             );
         }
     }
@@ -136,7 +140,7 @@ impl Spinner {
         }
 
         if !self.quiet {
-            eprintln!("   {} {:<12} {}", style("✗").red(), label, self.target);
+            failure(label, &self.target);
         }
     }
 
@@ -322,9 +326,9 @@ pub fn error(msg: &str) {
 
 /// Print an error message with context lines.
 pub fn error_context(msg: &str, context: &[&str]) {
-    eprintln!("{} {msg}", style("error:").red().bold());
+    error(msg);
     for line in context {
-        eprintln!("  {} {}", style("→").dim(), style(line).dim());
+        eprintln!("{}", context_line(line));
     }
 }
 
@@ -354,12 +358,12 @@ pub enum ErrorLine<'a> {
 /// macOS Terminal default, etc., which previously made hints
 /// look like success messages).
 pub fn error_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
-    eprintln!("{} {msg}", style("error:").red().bold());
+    error(msg);
     for line in lines {
         let text = match line {
             ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
         };
-        eprintln!("  {} {}", style("→").dim(), text);
+        eprintln!("{}", context_line(text));
     }
 }
 
@@ -373,7 +377,7 @@ pub fn warn(msg: &str) {
 /// This uses the same action-line geometry as progress and success output so
 /// diagnostics remain visually consistent without contaminating stdout.
 pub fn notice(label: &str, detail: &str) {
-    eprintln!("   {} {:<12} {}", style("•").cyan(), label, detail);
+    eprintln!("  {} {}", style("•").cyan(), action_message(label, detail));
 }
 
 /// Print a warning message with `→`-prefixed context lines.
@@ -381,28 +385,28 @@ pub fn notice(label: &str, detail: &str) {
 /// Mirrors [`error_with_lines`] but with a yellow `warn:` label. As there, the
 /// message and body text render uncolored; only the `→` bullet is dim.
 pub fn warn_with_lines(msg: &str, lines: &[ErrorLine<'_>]) {
-    eprintln!("{} {msg}", style("warn:").yellow().bold());
+    warn(msg);
     for line in lines {
         let text = match line {
             ErrorLine::Cause(t) | ErrorLine::Hint(t) => t,
         };
-        eprintln!("  {} {}", style("→").dim(), text);
+        eprintln!("{}", context_line(text));
     }
 }
 
 /// Print a one-shot success action to stderr.
 ///
 /// Follows the same format as spinner completions:
-/// `   ✓ {verb:<12} {target}`
+/// a green checkmark followed by aligned action and target columns.
 pub fn success(verb: &str, target: &str) {
-    eprintln!("   {} {:<12} {}", style("✓").green(), verb, target);
+    eprintln!("  {} {}", style("✓").green(), action_message(verb, target));
 }
 
 /// Print a one-shot failure action to stderr, mirroring [`success`].
 ///
-/// Same `   ✗ {label:<12} {detail}` shape as a spinner failure completion.
+/// Uses the same aligned action and detail columns as spinner completions.
 pub fn failure(label: &str, detail: &str) {
-    eprintln!("   {} {:<12} {}", style("✗").red(), label, detail);
+    eprintln!("  {} {}", style("✗").red(), action_message(label, detail));
 }
 
 /// Format a sandbox status with appropriate color.
@@ -438,12 +442,12 @@ pub fn detail_header(title: &str) {
 
 /// Print a top-level key-value pair in detail views.
 pub fn detail_kv(key: &str, value: &str) {
-    println!("{:<16}{value}", style(format!("{key}:")).cyan());
+    println!("{}", detail_line(key, value, false));
 }
 
 /// Print an indented key-value pair in detail views.
 pub fn detail_kv_indent(key: &str, value: &str) {
-    println!("  {:<14}{value}", style(format!("{key}:")).dim());
+    println!("{}", detail_line(key, value, true));
 }
 
 /// Parse a human-readable size string (e.g., "512M", "1G", "1.5G") into MiB.
@@ -548,6 +552,48 @@ pub fn format_rfc3339_datetime(s: &str) -> Result<String, chrono::ParseError> {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions: Rendering Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Measure terminal columns rather than bytes or ANSI escapes, and always leave a gap.
+fn padded_pair(label: &str, value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(console::measure_text_width(label)) + 2;
+    format!("{label}{:padding$}{value}", "")
+}
+
+fn action_message(label: &str, detail: &str) -> String {
+    // Whole-sentence notices need neither an empty label column nor trailing padding.
+    if label.is_empty() {
+        detail.to_string()
+    } else if detail.is_empty() {
+        label.to_string()
+    } else {
+        padded_pair(label, detail, ACTION_LABEL_WIDTH)
+    }
+}
+
+fn detail_line(key: &str, value: &str, indented: bool) -> String {
+    let label = format!("{key}:");
+    if indented {
+        // Account for the indent so nested and top-level values share a column.
+        format!(
+            "  {}",
+            padded_pair(
+                &style(label).dim().to_string(),
+                value,
+                DETAIL_LABEL_WIDTH - 2
+            )
+        )
+    } else {
+        padded_pair(&style(label).cyan().to_string(), value, DETAIL_LABEL_WIDTH)
+    }
+}
+
+fn context_line(text: &str) -> String {
+    format!("  {} {text}", style("→").dim())
+}
+
+//--------------------------------------------------------------------------------------------------
 // Types: Pull Progress Display
 //--------------------------------------------------------------------------------------------------
 
@@ -632,10 +678,10 @@ impl PullProgressDisplay {
         header.set_style(
             ProgressStyle::default_spinner()
                 .tick_strings(BRAILLE_TICKS)
-                .template("   {spinner} {msg}")
+                .template("  {spinner} {msg}")
                 .unwrap(),
         );
-        header.set_message(format!("{:<12} {}", verb, reference));
+        header.set_message(action_message(verb, reference));
         header.enable_steady_tick(Duration::from_millis(80));
 
         Self {
@@ -647,16 +693,16 @@ impl PullProgressDisplay {
             _echo_guard: if is_tty { EchoGuard::acquire() } else { None },
             download_style: ProgressStyle::default_bar()
                 .template(
-                    "     {prefix}  {bar:36.magenta/238}  {bytes}/{total_bytes}  {msg:.magenta}",
+                    "    {prefix}  {bar:36.magenta/238}  {bytes}/{total_bytes}  {msg:.magenta}",
                 )
                 .unwrap()
                 .progress_chars("━━╌"),
             materialize_style: ProgressStyle::default_bar()
-                .template("     {prefix}  {bar:36.blue/238}  {bytes}/{total_bytes}  {msg:.blue}")
+                .template("    {prefix}  {bar:36.blue/238}  {bytes}/{total_bytes}  {msg:.blue}")
                 .unwrap()
                 .progress_chars("━━╌"),
             done_style: ProgressStyle::default_bar()
-                .template("     {prefix}  {msg}")
+                .template("    {prefix}  {msg}")
                 .unwrap(),
         }
     }
@@ -680,16 +726,20 @@ impl PullProgressDisplay {
     pub fn handle_event(&mut self, event: PullProgress) {
         match event {
             PullProgress::Resolving { .. } => {
-                self.header
-                    .set_message(format!("{:<12} {}...", "Resolving", self.reference));
+                self.header.set_message(action_message(
+                    "Resolving",
+                    &format!("{}...", self.reference),
+                ));
             }
             PullProgress::Resolved { layer_count, .. } => {
-                self.header.set_message(format!(
-                    "{:<12} {} ({} layer{})",
+                self.header.set_message(action_message(
                     self.verb,
-                    self.reference,
-                    layer_count,
-                    if layer_count == 1 { "" } else { "s" }
+                    &format!(
+                        "{} ({} layer{})",
+                        self.reference,
+                        layer_count,
+                        if layer_count == 1 { "" } else { "s" }
+                    ),
                 ));
 
                 let width = layer_count.to_string().len();
@@ -766,25 +816,27 @@ impl PullProgressDisplay {
                 }
             }
             PullProgress::StitchMergingTrees { layer_count } => {
-                self.header.set_message(format!(
-                    "{:<12} {} ({} layer{})",
+                self.header.set_message(action_message(
                     "Merging",
-                    self.reference,
-                    layer_count,
-                    if layer_count == 1 { "" } else { "s" }
+                    &format!(
+                        "{} ({} layer{})",
+                        self.reference,
+                        layer_count,
+                        if layer_count == 1 { "" } else { "s" }
+                    ),
                 ));
             }
             PullProgress::StitchWritingFsmeta => {
                 self.header
-                    .set_message(format!("{:<12} {}", "Writing fsmeta", self.reference));
+                    .set_message(action_message("Writing fsmeta", &self.reference));
             }
             PullProgress::StitchWritingVmdk => {
                 self.header
-                    .set_message(format!("{:<12} {}", "Writing vmdk", self.reference));
+                    .set_message(action_message("Writing vmdk", &self.reference));
             }
             PullProgress::StitchComplete => {
                 self.header
-                    .set_message(format!("{:<12} {}", "Stitched", self.reference));
+                    .set_message(action_message("Stitched", &self.reference));
             }
             PullProgress::Complete { .. } => {}
         }
@@ -802,6 +854,80 @@ impl PullProgressDisplay {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn detail_values_align_without_touching_long_keys() {
+        for (key, indented) in [
+            ("Name", false),
+            ("Deployment Profile", false),
+            ("Checkpoint Manifest", false),
+            ("CPU Placement", true),
+        ] {
+            let line = super::detail_line(key, "VALUE", indented);
+            let plain = console::strip_ansi_codes(&line);
+            let before_value = plain.strip_suffix("VALUE").unwrap();
+            assert_eq!(console::measure_text_width(before_value), 22, "{key}");
+            assert!(before_value.ends_with("  "), "{key}");
+            assert_eq!(plain.starts_with("  "), indented);
+        }
+
+        // Unknown future labels must still have a separator, even past the usual column.
+        let line = super::detail_line("A much longer detail label", "VALUE", false);
+        assert!(console::strip_ansi_codes(&line).ends_with("label:  VALUE"));
+    }
+
+    #[test]
+    fn action_columns_use_display_width_and_handle_sentences() {
+        for label in [
+            "Pulled",
+            "Writing fsmeta",
+            "Scheduled removal",
+            "Already authorized",
+            "镜像",
+        ] {
+            let styled = console::style(label)
+                .green()
+                .force_styling(true)
+                .to_string();
+            let line = super::action_message(&styled, "TARGET");
+            let plain = console::strip_ansi_codes(&line);
+            assert_eq!(
+                console::measure_text_width(plain.strip_suffix("TARGET").unwrap()),
+                20
+            );
+        }
+        assert_eq!(super::action_message("", "Skipped."), "Skipped.");
+        assert_eq!(
+            super::action_message("Host setup is ready.", ""),
+            "Host setup is ready."
+        );
+        assert_eq!(
+            super::action_message("A much longer action label", "TARGET"),
+            "A much longer action label  TARGET"
+        );
+    }
+
+    #[test]
+    fn pull_target_stays_in_the_same_column_through_stitching() {
+        use microsandbox_image::PullProgress;
+
+        let mut display = super::PullProgressDisplay::quiet("alpine");
+        let column = display.header.message().find("alpine").unwrap();
+        for event in [
+            PullProgress::StitchMergingTrees { layer_count: 2 },
+            PullProgress::StitchWritingFsmeta,
+            PullProgress::StitchWritingVmdk,
+            PullProgress::StitchComplete,
+        ] {
+            display.handle_event(event);
+            assert_eq!(display.header.message().find("alpine"), Some(column));
+        }
+        assert_eq!(
+            super::action_message("Pulled", "alpine").find("alpine"),
+            Some(column)
+        );
+        display.finish();
+    }
+
     #[test]
     fn parse_size_bytes_accepts_raw_bytes_and_binary_suffixes() {
         assert_eq!(super::parse_size_bytes("1048576").unwrap(), 1024 * 1024);

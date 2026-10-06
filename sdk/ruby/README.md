@@ -1,6 +1,6 @@
 # Ruby SDK
 
-The microsandbox Ruby SDK provides Ruby 3.1+ bindings for creating and
+The microsandbox Ruby SDK provides Ruby 3.3+ bindings for creating and
 controlling local or cloud sandboxes.
 
 ## Installation
@@ -22,10 +22,10 @@ install without a Rust toolchain:
 
 | Gem platform        | Ruby     | Notes              |
 | ------------------- | -------- | ------------------ |
-| `x86_64-linux-gnu`  | 3.1–4.0  | glibc 2.35+        |
-| `aarch64-linux-gnu` | 3.1–4.0  | glibc 2.35+        |
-| `arm64-darwin`      | 3.1–4.0  | Apple Silicon      |
-| `x64-mingw-ucrt`    | 3.1–4.0  | RubyInstaller 3.1+ |
+| `x86_64-linux-gnu`  | 3.3–4.0  | glibc 2.35+        |
+| `aarch64-linux-gnu` | 3.3–4.0  | glibc 2.35+        |
+| `arm64-darwin`      | 3.3–4.0  | Apple Silicon      |
+| `x64-mingw-ucrt`    | 3.3–4.0  | RubyInstaller 3.3+ |
 
 The Linux gems require glibc 2.35 or newer (Ubuntu 22.04, Debian 12, and
 later). The platform name carries no glibc version, so on an older glibc host
@@ -62,11 +62,11 @@ from `sdk/ruby`:
 
 ```sh
 rake cargo:patch_workspace version_check
-rake gem:stage # Once per installed Ruby, 3.1 through 4.0
+rake gem:stage # Once each under Ruby 3.3, 3.4, and 4.0
 GEM_PLATFORM=arm64-darwin rake gem:platform
 ```
 
-`gem:platform` refuses to package unless all five ABIs are staged. Set
+`gem:platform` refuses to package unless all three ABIs are staged. Set
 `RUBY_ABIS` (for example `RUBY_ABIS=3.4`) to relax that when testing against a
 single local Ruby; CI never sets it.
 
@@ -173,6 +173,11 @@ The guest receives a placeholder for each secret. The host proxy substitutes
 the real value only for the allowed TLS hostname. Secret values persist in
 host-side sandbox configuration, so load them from a secret manager, never log
 them, and rotate them after suspected host compromise.
+
+Route outbound TCP through an HTTP CONNECT proxy with
+`proxy: Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")`. The
+microsandbox host resolves and checks each destination before opening the
+tunnel. HTTP CONNECT proxy authentication and UDP are not supported.
 
 ## Snapshots
 

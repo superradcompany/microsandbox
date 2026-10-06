@@ -406,7 +406,7 @@ Practical ways to put microsandbox to work:
 
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
 
-> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox#microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox/microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart) by U.S. GSA**: From zero to a running AI coding agent with USAi in minutes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />

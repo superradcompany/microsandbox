@@ -686,6 +686,8 @@ impl AgentClient {
     /// IDs are single-use for this connection. Exhaustion requires reconnecting for a fresh range
     /// incarnation; wrap-around could relabel late raw records as a new operation.
     async fn reserve_id(&self, tx: mpsc::Sender<InboundFrame>) -> AgentClientResult<u32> {
+        // Renamed `try_update` in Rust 1.99; keep older toolchains building.
+        #[allow(deprecated)]
         let id = self
             .next_id
             .fetch_update(

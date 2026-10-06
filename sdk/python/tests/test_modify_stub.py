@@ -49,7 +49,11 @@ def test_secret_modify_spec_keys() -> None:
                 for item in node.body
                 if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
             ]
-            assert keys == ["env", "value", "store", "placeholder", "allowed_hosts"]
+            assert keys == [
+                "env", "value", "store", "placeholder", "allowed_hosts",
+                "substitution", "violation_action", "require_tls_identity",
+                "allow_placeholder_for", "passthrough",
+            ]
             return
     raise AssertionError("SecretModifySpec missing from public types")
 
