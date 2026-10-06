@@ -640,6 +640,51 @@ fn readonly_rejects_mutation() {
 }
 
 #[test]
+fn directory_rename_preserves_cached_descendants() {
+    for external in [true, false] {
+        let temp = TempDir::new();
+        std::fs::create_dir_all(temp.path.join("directory/nested")).unwrap();
+        std::fs::write(temp.path.join("directory/nested/file"), b"child").unwrap();
+        let fs = if external {
+            external_fs_for(&temp.path, false, false)
+        } else {
+            fs_for(&temp.path)
+        };
+        let directory = fs.lookup(context(), ROOT_INODE, c"directory").unwrap();
+        let nested = fs.lookup(context(), directory.inode, c"nested").unwrap();
+        let file = fs.lookup(context(), nested.inode, c"file").unwrap();
+
+        fs.rename(context(), ROOT_INODE, c"directory", ROOT_INODE, c"moved", 0)
+            .unwrap();
+
+        let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+        assert_eq!(stat.st_size, 5);
+        let (handle, _) = fs.open(context(), file.inode, false, 0).unwrap();
+        let handle = handle.unwrap();
+        assert_eq!(owned_read(&fs, file.inode, handle), b"child");
+        fs.release(context(), file.inode, 0, handle, false, false, None)
+            .unwrap();
+        let entries = fs.dir_entries(nested.inode).unwrap();
+        assert!(entries.iter().any(|(entry, _)| entry.name == b"file"));
+        assert_eq!(
+            fs.lookup(context(), ROOT_INODE, c"moved").unwrap().inode,
+            directory.inode
+        );
+        assert_eq!(
+            fs.lookup(context(), directory.inode, c"nested")
+                .unwrap()
+                .inode,
+            nested.inode
+        );
+        assert_eq!(
+            fs.lookup(context(), nested.inode, c"file").unwrap().inode,
+            file.inode
+        );
+        expect_errno(fs.lookup(context(), ROOT_INODE, c"directory"), LINUX_ENOENT);
+    }
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();
