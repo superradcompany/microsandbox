@@ -1,7 +1,8 @@
 ---
 title: Sandbox commands
+"og:title": Microsandbox CLI sandbox commands
 sidebarTitle: "Sandbox"
-description: Create, run, and interact with sandboxes from the CLI
+description: Create, run, connect to, and remove microVM sandboxes with the microsandbox CLI.
 icon: "cube"
 ---
 
@@ -128,7 +129,7 @@ Flat roots support pre-boot patches and local snapshots. Patches change only the
 
 Ports bind to `127.0.0.1` by default. Use an explicit address to expose them beyond localhost. Windows may prompt for firewall access.
 
-Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox, so a burst larger than the queue — for example a reverse proxy opening one upstream connection per request for a page that loads many assets at once — can fail at the proxy. Set `--tcp-accept-queue-size` to change the depth for every published TCP port of the sandbox:
+Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox. A burst larger than the queue can fail at the proxy. For example, a reverse proxy may open one upstream connection per request for a page that loads many assets at once. Set `--tcp-accept-queue-size` to change the depth for every published TCP port of the sandbox:
 
 ```bash
 msb create node --name web -p 127.0.0.1:3000:3000 --tcp-accept-queue-size 4096

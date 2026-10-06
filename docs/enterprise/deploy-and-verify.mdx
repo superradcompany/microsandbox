@@ -1,0 +1,119 @@
+---
+title: Deploy and verify
+description: Pilot your configuration, distribute it to employee devices, and manage updates
+icon: "laptop"
+---
+
+Roll out the runtime packages, images, and policy you prepared on one device. Verify them in an employee session before expanding to the team.
+
+Before deployment, finish [environment preparation](/enterprise/prepare-environment) and [define and protect the policy](/enterprise/managed-configuration). The steps below distribute it, verify the result, and maintain it over time.
+
+## Choose your device manager
+
+Use your device manager to distribute the policy to a pilot group first.
+
+<AccordionGroup>
+  <Accordion title="Jamf Pro">
+    <Steps>
+      <Step title="Build a configuration package">
+        On a packaging Mac, place `managed.json` in `/Library/Application Support/microsandbox/`. Drag the folder into [Composer](https://learn.jamf.com/r/en-US/jamf-connect-documentation-current/Packaging_Files_and_Images_with_Composer) to create a package source.
+
+        Set the owner to **root**, group to **wheel**, directory permissions to `0755`, and file permissions to `0644`. Select **Build as PKG** and sign according to your organization's policy.
+      </Step>
+      <Step title="Upload the package">
+        In Jamf Pro, open **Settings > Computer management > Packages > New**. [Upload the PKG](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Uploading_a_Package_to_Jamf_Pro) and make it available on your distribution point.
+      </Step>
+      <Step title="Create a deployment policy">
+        Open **Computers > Policies > New**. In **General**, select **Recurring Check-in** and a daily execution frequency. Under **Packages**, add the PKG with the **Install** action.
+      </Step>
+      <Step title="Deploy to a pilot group">
+        In **Scope**, select your pilot computers and save the [policy](https://learn.jamf.com/r/en-US/jamf-pro-documentation-current/Deploying_a_Package_Using_a_Policy). After check-in, review its logs and [verify the effective settings](#verify-the-configuration) as an employee before expanding the scope.
+      </Step>
+    </Steps>
+  </Accordion>
+  <Accordion title="Intune macOS">
+    <Steps>
+      <Step title="Prepare the file deployment">
+        Use Intune's [macOS shell-script workflow](https://learn.microsoft.com/en-us/intune/device-management/tools/run-shell-scripts-macos). Your organization's deployment script must write the JSON to the [macOS policy path](/enterprise/managed-configuration#file-location), apply the required permissions, and safely replace an existing policy. It should succeed when the correct file is already present.
+      </Step>
+      <Step title="Add the deployment in Intune">
+        Open **Devices > By platform > macOS > Manage devices > Scripts > Add**. Give the policy a name in **Basics**, then upload your script under **Script settings**.
+      </Step>
+      <Step title="Configure execution">
+        | Setting | Value |
+        | --- | --- |
+        | Run script as signed-in user | **No**, so it runs as root |
+        | Script frequency | Daily |
+        | Max number of times to retry if script fails | Set a retry count |
+
+        The Intune management agent must be installed. Microsoft's script prerequisites require direct Internet access; proxy connections are unsupported for this delivery path.
+      </Step>
+      <Step title="Assign and verify">
+        Under **Assignments**, include a pilot device group. Select **Review + add > Add**, then review **Device status**. [Verify the effective settings](#verify-the-configuration) in an employee session before extending the assignment.
+      </Step>
+    </Steps>
+  </Accordion>
+  <Accordion title="Intune Windows">
+    <Steps>
+      <Step title="Package the policy">
+        Use your application-packaging tool to create a per-machine MSI that installs `managed.json` beneath the system ProgramData folder with the [Windows permissions](/enterprise/managed-configuration#file-protection). This is your organization's configuration package, separate from the microsandbox runtime.
+
+        Wrap the MSI as an `.intunewin` file with Microsoft's [Win32 Content Prep Tool](https://learn.microsoft.com/en-us/intune/app-management/deployment/create-win32-package).
+      </Step>
+      <Step title="Create a Win32 app">
+        Open **Apps > All Apps > Create**. Choose **Windows app (Win32)** and upload the `.intunewin` file. On **Program**, enter the MSI's silent installation and uninstallation commands, choose **System** install behavior, and set **Allow available uninstall** to **No**.
+      </Step>
+      <Step title="Configure detection">
+        In **Detection rules**, choose **Manually configure detection rules**, add an **MSI** rule, and enter your package's product code and version check. See [Intune's Win32 app guide](https://learn.microsoft.com/en-us/intune/app-management/deployment/add-win32).
+
+        MSI detection confirms package installation. It does not prove that the JSON content or permissions still match your policy.
+      </Step>
+      <Step title="Assign and verify">
+        Assign the app as **Required** to a pilot device group, then create it. Review installation status and [verify the effective settings](#verify-the-configuration) as an employee before widening the assignment.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Verify the configuration
+
+The check below uses the [sample policy](/enterprise/managed-configuration#define-managed-settings), which enforces two vCPUs and 1 GiB of memory. Adjust the expected values for your own policy.
+
+1. Sign in as an employee and open a fresh terminal. Confirm `msb context` selects a local backend.
+2. Create a sandbox with values that conflict with the sample policy:
+
+   ```bash
+   msb create alpine --name managed-check --cpus 1 --memory 512M
+   msb inspect managed-check --format json
+   ```
+
+3. Confirm `config.resources.cpus` is `2` and `config.resources.memory_mib` is `1024`. Repeat with your employees' SDKs.
+4. Remove the test sandbox with `msb rm --force managed-check`.
+
+Before expanding the pilot, check each supported OS and SDK:
+
+| Check | Pass condition |
+| --- | --- |
+| Conflicting CLI and SDK options | Managed values win |
+| [Registry and network access](/enterprise/corporate-networking#verify-private-services) | Approved requests succeed; blocked destinations fail |
+| Policy update and rollback | A new backend uses the expected policy after each change |
+| Cloud creation, if used | Supported settings apply; unsupported options report an error |
+| [Disconnected operation](/enterprise/prepare-environment#verify-without-downloads), if needed | Cached workloads run without downloads |
+
+## Apply configuration updates
+
+- **Publish:** replace the complete file atomically, preserving permissions. Update the device-manager package or action and its detection rules together.
+- **Roll back:** redeploy the previous policy through the same tool. Removing a device from a deployment's scope does not remove its file.
+
+There are no file watchers. Applying a policy update depends on what is already running:
+
+| Existing state | How to pick up the change |
+| --- | --- |
+| CLI command | Run a new command |
+| Long-running SDK application | Create a new backend, or restart the application |
+| Saved or running sandbox | Policy updates do not rewrite its configuration; create a new sandbox to verify new defaults |
+| Open SSH session | Start a new session through a new backend |
+
+Restarting a VM alone does not reload `managed.json`. Keep previous runtime binaries available until applications replace their backend handles and running VMs stop using them. Changing data paths does not migrate existing data.
+
+A missing policy file means no managed overrides; an invalid or unreadable file causes an error when loaded.

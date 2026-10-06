@@ -28,6 +28,9 @@ await sb.fs.write("/app/config.json", b'{"debug": true}')
 err := sb.FS().WriteString(ctx, "/app/config.json", `{"debug": true}`)
 ```
 
+```ruby Ruby
+sb.fs.write("/app/config.json", '{"debug": true}')
+```
 </CodeGroup>
 
 ## Read a file
@@ -49,6 +52,9 @@ content = await sb.fs.read_text("/app/config.json")
 content, err := sb.FS().ReadString(ctx, "/app/config.json")
 ```
 
+```ruby Ruby
+content = sb.fs.read("/app/config.json").force_encoding(Encoding::UTF_8)
+```
 </CodeGroup>
 
 ## List a directory
@@ -81,6 +87,11 @@ for _, entry := range entries {
 }
 ```
 
+```ruby Ruby
+sb.fs.list("/app").each do |entry|
+  puts "#{entry.fetch("path")}: #{entry.fetch("kind")}"
+end
+```
 </CodeGroup>
 
 ## Stream large files
@@ -145,6 +156,9 @@ await sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
 err := sb.FS().CopyFromHost(ctx, "./local-file.txt", "/app/remote-file.txt")
 ```
 
+```ruby Ruby
+sb.fs.copy_from_host("./local-file.txt", "/app/remote-file.txt")
+```
 </CodeGroup>
 
 <Tip>

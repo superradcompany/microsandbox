@@ -1,11 +1,12 @@
 ---
 title: Snapshot commands
+"og:title": Microsandbox CLI snapshot commands
 sidebarTitle: "Snapshots"
-description: Capture, inspect, restore, and move snapshots from the CLI
+description: Capture, inspect, restore, and transfer sandbox snapshots with the microsandbox CLI.
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports disk capture from stopped or crashed sandboxes, listing, inspection, removal, and restore. Full snapshots, groups, archives, and verification are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk capture from stopped persistent sandboxes, listing, inspection, removal, and restore. Full snapshots, groups, archives, and verification are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Manage saved snapshots with `msb snap`. See the [snapshot guide](/sandboxes/snapshots) for workflows.
 
@@ -37,7 +38,7 @@ msb snap create ready --sandbox worker
 | `-f`, `--force` | Overwrite an archive output; not allowed for installed members |
 | `-q`, `--quiet` | Suppress output |
 
-Local disk capture accepts running, paused, stopped, or crashed sources. Cloud requires a stopped or crashed source.
+Local disk capture accepts running, paused, stopped, or crashed sources. Cloud requires a stopped persistent source.
 
 <Accordion title="Examples">
 
