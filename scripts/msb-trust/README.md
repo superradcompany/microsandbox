@@ -34,5 +34,4 @@ batch runs can print one combined summary. Never install packages automatically.
 
 Rebuild and include both the source and generated script in your change. CI runs
 `sh scripts/msb-trust/build.sh --check` to reject stale output or missing required
-functions. Validate setup, repeat runs, and failures against the real application;
-the existing Java and Chrome checks are in `scripts/smoke/cli/`.
+functions. Validate setup, repeat runs, and failures against the real application.
