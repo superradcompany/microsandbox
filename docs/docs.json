@@ -249,100 +249,115 @@
         ]
       },
       {
-        "tab": "Examples",
+        "tab": "How-to guides",
         "groups": [
           {
-            "group": "Overview",
-            "icon": "flask",
+            "group": "How-to guides",
             "pages": [
-              "examples/overview"
-            ]
-          },
-          {
-            "group": "AI Agents",
-            "icon": "robot",
-            "pages": [
-              "examples/agents/claude-code",
-              "examples/agents/codex",
-              "examples/agents/opencode",
-              "examples/agents/openclaw",
-              "examples/agents/goose",
-              "examples/agents/gemini-cli",
-              "examples/agents/hermes-agent",
-              "examples/agents/pi"
-            ]
-          },
-          {
-            "group": "Dev Environments",
-            "icon": "code",
-            "pages": [
-              "examples/development/vscode",
-              "examples/development/jetbrains-acp",
-              "examples/development/code-server",
-              "examples/development/jupyterlab",
-              "examples/development/vnc-desktop"
-            ]
-          },
-          {
-            "group": "CI/CD & Jobs",
-            "icon": "code-pull-request",
-            "pages": [
-              "examples/ci-cd/github-actions-runner",
-              "examples/ci-cd/pr-checks",
-              "examples/ci-cd/compose-tests",
-              "examples/ci-cd/preview-deploys",
-              "examples/automation/dependency-audits",
-              "examples/automation/parallel-batch-jobs",
-              "examples/sandboxing/warm-workers"
-            ]
-          },
-          {
-            "group": "Browser & Web Automation",
-            "icon": "globe",
-            "pages": [
-              "examples/browser-automation/browser-use",
-              "examples/browser-automation/playwright",
-              "examples/web-automation/scrapy"
-            ]
-          },
-          {
-            "group": "File Processing",
-            "icon": "file",
-            "pages": [
-              "examples/file-processing/libreoffice-pdf",
-              "examples/file-processing/ffmpeg"
-            ]
-          },
-          {
-            "group": "Docker & System Tools",
-            "icon": "docker",
-            "pages": [
-              "examples/docker/docker-in-sandbox",
-              "examples/docker/docker",
-              "examples/docker/local-images",
-              "examples/guest/systemd-services",
-              "examples/plugins/terraform"
-            ]
-          },
-          {
-            "group": "Data & Storage",
-            "icon": "database",
-            "pages": [
-              "examples/data/juicefs-s3",
-              "examples/data/postgresql",
-              "examples/data/migration-rehearsal",
-              "examples/data/redis"
-            ]
-          },
-          {
-            "group": "Observability",
-            "icon": "chart-line",
-            "pages": [
-              "examples/metrics-backends/grafana-cloud",
-              "examples/metrics-backends/grafana-alloy",
-              "examples/metrics-backends/otel-collector",
-              "examples/metrics-backends/prometheus",
-              "examples/metrics-backends/datadog"
+              "how-to/overview",
+              {
+                "group": "Agents",
+                "expanded": false,
+                "icon": "robot",
+                "pages": [
+                  "how-to/agents/claude-code",
+                  "how-to/agents/codex",
+                  "how-to/agents/opencode",
+                  "how-to/agents/openclaw",
+                  "how-to/agents/goose",
+                  "how-to/agents/gemini-cli",
+                  "how-to/agents/hermes-agent",
+                  "how-to/agents/pi"
+                ]
+              },
+              {
+                "group": "Development",
+                "expanded": false,
+                "icon": "code",
+                "pages": [
+                  "how-to/development/vscode",
+                  "how-to/development/jetbrains-acp",
+                  "how-to/development/code-server",
+                  "how-to/development/jupyterlab",
+                  "how-to/development/vnc-desktop"
+                ]
+              },
+              {
+                "group": "Browser automation",
+                "expanded": false,
+                "icon": "globe",
+                "pages": [
+                  "how-to/browser-automation/browser-use",
+                  "how-to/browser-automation/playwright"
+                ]
+              },
+              {
+                "group": "Workloads",
+                "expanded": false,
+                "icon": "gears",
+                "pages": [
+                  "how-to/file-processing/ffmpeg",
+                  "how-to/file-processing/libreoffice-pdf",
+                  "how-to/plugins/terraform",
+                  "how-to/data/migration-rehearsal",
+                  "how-to/web-automation/scrapy",
+                  "how-to/automation/parallel-batch-jobs"
+                ]
+              },
+              {
+                "group": "Sandbox setup",
+                "expanded": false,
+                "icon": "box",
+                "pages": [
+                  "how-to/docker/docker-in-sandbox",
+                  "how-to/docker/local-images",
+                  "how-to/guest/systemd-services",
+                  "how-to/sandboxing/warm-workers"
+                ]
+              },
+              {
+                "group": "Deployment",
+                "expanded": false,
+                "icon": "server",
+                "pages": [
+                  "how-to/docker/docker",
+                  "how-to/sandboxing/kubernetes"
+                ]
+              },
+              {
+                "group": "Storage",
+                "expanded": false,
+                "icon": "database",
+                "pages": [
+                  "how-to/data/postgresql",
+                  "how-to/data/redis",
+                  "how-to/data/juicefs-s3"
+                ]
+              },
+              {
+                "group": "CI/CD",
+                "expanded": false,
+                "icon": "code-pull-request",
+                "pages": [
+                  "how-to/ci-cd/github-actions-runner",
+                  "how-to/ci-cd/pr-checks",
+                  "how-to/ci-cd/compose-tests",
+                  "how-to/ci-cd/preview-deploys",
+                  "how-to/automation/dependency-audits"
+                ]
+              },
+              {
+                "group": "Observability",
+                "expanded": false,
+                "icon": "chart-line",
+                "pages": [
+                  "how-to/metrics-backends/grafana-cloud",
+                  "how-to/metrics-backends/grafana-alloy",
+                  "how-to/metrics-backends/otel-collector",
+                  "how-to/metrics-backends/prometheus",
+                  "how-to/metrics-backends/datadog"
+                ]
+              }
             ]
           }
         ]
@@ -485,6 +500,26 @@
       "destination": "/troubleshooting/windows"
     },
     {
+      "source": "/examples/kubernetes",
+      "destination": "/how-to/sandboxing/kubernetes"
+    },
+    {
+      "source": "/examples/automation/parallel-batch-jobs",
+      "destination": "/how-to/automation/parallel-batch-jobs"
+    },
+    {
+      "source": "/examples/browser-automation/browser-use",
+      "destination": "/how-to/browser-automation/browser-use"
+    },
+    {
+      "source": "/examples/web-automation/scrapy",
+      "destination": "/how-to/web-automation/scrapy"
+    },
+    {
+      "source": "/examples/overview",
+      "destination": "/how-to/overview"
+    },
+    {
       "source": "/getting-started/backends",
       "destination": "/operations/backends"
     },
@@ -526,15 +561,11 @@
     },
     {
       "source": "/recipes",
-      "destination": "/examples/overview"
-    },
-    {
-      "source": "/recipes/:slug*",
-      "destination": "/examples/:slug*"
+      "destination": "/how-to/overview"
     },
     {
       "source": "/examples/data/juicefs-r2",
-      "destination": "/examples/data/juicefs-s3"
+      "destination": "/how-to/data/juicefs-s3"
     },
     {
       "source": "/cloud/compatibility",
@@ -543,6 +574,158 @@
     {
       "source": "/enterprise/offline-deployment",
       "destination": "/enterprise/prepare-environment#prepare-offline-devices"
+    },
+    {
+      "source": "/recipes/overview",
+      "destination": "/how-to/overview"
+    },
+    {
+      "source": "/examples/agents/claude-code",
+      "destination": "/how-to/agents/claude-code"
+    },
+    {
+      "source": "/examples/agents/codex",
+      "destination": "/how-to/agents/codex"
+    },
+    {
+      "source": "/examples/agents/opencode",
+      "destination": "/how-to/agents/opencode"
+    },
+    {
+      "source": "/examples/agents/openclaw",
+      "destination": "/how-to/agents/openclaw"
+    },
+    {
+      "source": "/examples/agents/goose",
+      "destination": "/how-to/agents/goose"
+    },
+    {
+      "source": "/examples/agents/gemini-cli",
+      "destination": "/how-to/agents/gemini-cli"
+    },
+    {
+      "source": "/examples/agents/hermes-agent",
+      "destination": "/how-to/agents/hermes-agent"
+    },
+    {
+      "source": "/examples/agents/pi",
+      "destination": "/how-to/agents/pi"
+    },
+    {
+      "source": "/examples/development/vscode",
+      "destination": "/how-to/development/vscode"
+    },
+    {
+      "source": "/examples/development/jetbrains-acp",
+      "destination": "/how-to/development/jetbrains-acp"
+    },
+    {
+      "source": "/examples/development/code-server",
+      "destination": "/how-to/development/code-server"
+    },
+    {
+      "source": "/examples/development/jupyterlab",
+      "destination": "/how-to/development/jupyterlab"
+    },
+    {
+      "source": "/examples/development/vnc-desktop",
+      "destination": "/how-to/development/vnc-desktop"
+    },
+    {
+      "source": "/examples/ci-cd/github-actions-runner",
+      "destination": "/how-to/ci-cd/github-actions-runner"
+    },
+    {
+      "source": "/examples/ci-cd/pr-checks",
+      "destination": "/how-to/ci-cd/pr-checks"
+    },
+    {
+      "source": "/examples/ci-cd/compose-tests",
+      "destination": "/how-to/ci-cd/compose-tests"
+    },
+    {
+      "source": "/examples/ci-cd/preview-deploys",
+      "destination": "/how-to/ci-cd/preview-deploys"
+    },
+    {
+      "source": "/examples/automation/dependency-audits",
+      "destination": "/how-to/automation/dependency-audits"
+    },
+    {
+      "source": "/examples/sandboxing/warm-workers",
+      "destination": "/how-to/sandboxing/warm-workers"
+    },
+    {
+      "source": "/examples/browser-automation/playwright",
+      "destination": "/how-to/browser-automation/playwright"
+    },
+    {
+      "source": "/examples/file-processing/libreoffice-pdf",
+      "destination": "/how-to/file-processing/libreoffice-pdf"
+    },
+    {
+      "source": "/examples/file-processing/ffmpeg",
+      "destination": "/how-to/file-processing/ffmpeg"
+    },
+    {
+      "source": "/examples/docker/docker-in-sandbox",
+      "destination": "/how-to/docker/docker-in-sandbox"
+    },
+    {
+      "source": "/examples/docker/docker",
+      "destination": "/how-to/docker/docker"
+    },
+    {
+      "source": "/examples/docker/local-images",
+      "destination": "/how-to/docker/local-images"
+    },
+    {
+      "source": "/examples/guest/systemd-services",
+      "destination": "/how-to/guest/systemd-services"
+    },
+    {
+      "source": "/examples/plugins/terraform",
+      "destination": "/how-to/plugins/terraform"
+    },
+    {
+      "source": "/examples/data/juicefs-s3",
+      "destination": "/how-to/data/juicefs-s3"
+    },
+    {
+      "source": "/examples/data/postgresql",
+      "destination": "/how-to/data/postgresql"
+    },
+    {
+      "source": "/examples/data/migration-rehearsal",
+      "destination": "/how-to/data/migration-rehearsal"
+    },
+    {
+      "source": "/examples/data/redis",
+      "destination": "/how-to/data/redis"
+    },
+    {
+      "source": "/examples/metrics-backends/grafana-cloud",
+      "destination": "/how-to/metrics-backends/grafana-cloud"
+    },
+    {
+      "source": "/examples/metrics-backends/grafana-alloy",
+      "destination": "/how-to/metrics-backends/grafana-alloy"
+    },
+    {
+      "source": "/examples/metrics-backends/otel-collector",
+      "destination": "/how-to/metrics-backends/otel-collector"
+    },
+    {
+      "source": "/examples/metrics-backends/prometheus",
+      "destination": "/how-to/metrics-backends/prometheus"
+    },
+    {
+      "source": "/examples/metrics-backends/datadog",
+      "destination": "/how-to/metrics-backends/datadog"
+    },
+    {
+      "source": "/recipes/:slug*",
+      "destination": "/examples/:slug*"
     }
   ],
   "integrations": {

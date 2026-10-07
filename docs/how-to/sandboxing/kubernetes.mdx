@@ -1,0 +1,265 @@
+---
+title: Run microsandbox in Kubernetes
+sidebarTitle: Kubernetes
+description: Run local microVM sandboxes with shared files inside a Kubernetes pod
+icon: "dharmachakra"
+---
+
+Run microsandbox inside your application container using the worker's KVM device. This guide creates a sandbox, shares files, runs a command, and cleans up.
+
+<Warning>
+This example uses a privileged container with broad node access. Use a dedicated test node, and run untrusted code only inside the microVM.
+</Warning>
+
+## Prerequisites
+
+- A Linux worker with usable `/dev/kvm`; virtual workers need nested virtualization.
+- A namespace that permits privileged pods and host device mounts.
+- An application image matching the worker's architecture: `amd64` or `arm64`.
+- Docker, `kubectl` access, and a registry the worker can pull from.
+- Pod egress for downloading the guest image.
+
+Check the device **on the Linux worker**:
+
+```bash
+ls -l /dev/kvm
+```
+
+The application must be able to open this device and issue KVM ioctls.
+
+<Note>
+Native macOS microsandbox uses Apple's hypervisor; Linux containers need KVM. Neither CPU emulation nor enabling Kubernetes supplies missing KVM support.
+</Note>
+
+## Build the application
+
+This sample application runs a command in a sandbox with a shared workspace.
+
+<Accordion title="Required application files">
+
+In an empty directory, save `agent.py`:
+
+```python agent.py
+import asyncio
+import os
+from pathlib import Path
+
+from microsandbox import Sandbox, Volume
+
+
+async def main():
+    workspace = Path(os.environ.get("WORKSPACE_DIR", "/workspace")).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "input.txt").write_text("hello from the pod\n")
+
+    async with await Sandbox.create(
+        "example",
+        image="python:3.12-slim",
+        cpus=1,
+        memory=512,
+        volumes={"/workspace": Volume.bind(str(workspace))},
+    ) as sandbox:
+        result = await sandbox.exec(
+            "sh", ["-c", "tr a-z A-Z < /workspace/input.txt > /workspace/output.txt"]
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr_text)
+
+    print((workspace / "output.txt").read_text(), end="")
+
+
+asyncio.run(main())
+```
+
+`Volume.bind()` reads a path inside the **application container**. Here, a Kubernetes volume is shared at `/workspace` in both the container and guest; application files need no node `hostPath`.
+
+Add `Dockerfile`:
+
+```dockerfile Dockerfile
+FROM python:3.12-slim-bookworm
+
+RUN pip install --no-cache-dir --only-binary=:all: microsandbox==0.7.6
+
+ENV PYTHONUNBUFFERED=1 \
+    MSB_HOME=/msb \
+    WORKSPACE_DIR=/workspace
+
+WORKDIR /app
+COPY agent.py .
+
+CMD ["python", "agent.py"]
+```
+
+The wheel bundles the runtime and kernel firmware. No Docker daemon is needed inside the pod.
+
+</Accordion>
+
+Replace `REGISTRY/PROJECT` here and in the manifest, then build and push:
+
+```bash
+docker buildx build --platform linux/arm64 \
+  -t REGISTRY/PROJECT/msb-agent:0.7.6 --push .
+```
+
+For x86-64 workers, use `--platform linux/amd64`. Private application images need Kubernetes `imagePullSecrets`; private guest images need separate [microsandbox registry credentials](/configuration#registries).
+
+## Run the pod
+
+Label the KVM-capable worker and create a test namespace:
+
+```bash
+kubectl label node YOUR_KVM_NODE microsandbox.dev/kvm=true
+kubectl create namespace msb-example
+```
+
+The label does not detect KVM. Your namespace must already permit this pod's security settings.
+
+Save `pod.yaml` with your image reference:
+
+```yaml pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: msb-agent
+  namespace: msb-example
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 30
+  nodeSelector:
+    kubernetes.io/os: linux
+    kubernetes.io/arch: arm64
+    microsandbox.dev/kvm: "true"
+  containers:
+    - name: agent
+      image: REGISTRY/PROJECT/msb-agent:0.7.6
+      securityContext:
+        privileged: true
+        runAsUser: 0
+      resources:
+        requests:
+          cpu: "1"
+          memory: 1Gi
+          ephemeral-storage: 2Gi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+          ephemeral-storage: 10Gi
+      volumeMounts:
+        - name: kvm
+          mountPath: /dev/kvm
+        - name: runtime
+          mountPath: /msb
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: kvm
+      hostPath:
+        path: /dev/kvm
+        type: CharDevice
+    - name: runtime
+      emptyDir: {}
+    - name: workspace
+      emptyDir: {}
+```
+
+For x86-64, change `kubernetes.io/arch` to `amd64`. `CharDevice` requires an existing KVM device. Host networking, host PID access, and container-engine sockets are unnecessary.
+
+Apply and wait for completion:
+
+```bash
+kubectl apply --dry-run=server -f pod.yaml
+kubectl apply -f pod.yaml
+kubectl -n msb-example wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/msb-agent --timeout=300s
+kubectl -n msb-example logs msb-agent
+```
+
+Allow extra time for the first guest-image download. The wait command does not exit early when a pod fails. To investigate before the timeout, press Ctrl-C and run the [troubleshooting commands](#troubleshooting); this stops waiting, not the pod.
+
+Expected output:
+
+```text
+HELLO FROM THE POD
+```
+
+The guest reads the input and writes the output. After the command finishes, the context manager kills and removes the sandbox. The application reads the shared output, then the pod reaches `Succeeded`.
+
+To rerun, delete the pod and reapply. To clean up:
+
+```bash
+kubectl delete namespace msb-example
+kubectl label node YOUR_KVM_NODE microsandbox.dev/kvm-
+```
+
+Remove the label only if you added it and no other workloads use it.
+
+## Device plugins
+
+A [device plugin](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) can expose KVM as a schedulable resource and grant device access. A `hostPath` mount alone may leave unprivileged containers blocked by runtime device rules.
+
+With a KVM plugin installed:
+
+1. Find its resource name and capacity with `kubectl describe node YOUR_KVM_NODE`.
+2. Request the resource in container limits as the plugin documents. Names such as `devices.kubevirt.io/kvm` are plugin-specific.
+3. Remove the `kvm` volume and mount; the plugin supplies the device.
+4. Remove `privileged: true` and verify sandbox boot, device permissions, and seccomp/AppArmor/SELinux compatibility. Device access alone does not prove VM startup works.
+
+Plugin privileges are separate from application privileges. One KVM allocation does not limit VM count; bound concurrency in your application.
+
+## Operational notes
+
+- **Files:** `emptyDir` survives container restarts but not pod deletion. Use a PVC for durable output and `Volume.bind(path, readonly=True)` for protected inputs.
+- **Runtime state:** keep `/msb` private to each pod. It contains the database, image cache, and sandbox files. Persisting it does not preserve running VMs.
+- **Resources:** budget for the application, all guests, and runtime overhead. This example allows 2 GiB for one 512 MiB guest. Measure concurrent workloads and disk usage; keep runtime volumes disk-backed.
+- **Networking:** both cluster egress rules and microsandbox policies apply. Guest images download through the application container.
+- **Shutdown:** the context manager kills and removes the sandbox on exit. For graceful shutdown, call `await sandbox.stop()` before leaving the context. Long-running applications need a `SIGTERM` handler that stops accepting work, finishes or cancels tasks, and awaits shutdown within the pod's grace period. Default signal handling does not unwind Python contexts. No sandbox survives pod deletion.
+
+## Troubleshooting
+
+```bash
+kubectl -n msb-example get pod msb-agent -o wide
+kubectl -n msb-example describe pod msb-agent
+kubectl -n msb-example logs msb-agent
+```
+
+<Accordion title="Check KVM access inside the pod">
+
+To run a diagnostic instead of the application, add this under the `agent`
+container in `pod.yaml`:
+
+```yaml
+command: ["msb", "doctor"]
+```
+
+Delete the existing pod, reapply the manifest, and read the diagnostic output:
+
+```bash
+kubectl -n msb-example delete pod msb-agent
+kubectl apply -f pod.yaml
+kubectl -n msb-example logs -f msb-agent --pod-running-timeout=300s
+```
+
+Check the KVM device and access results. Passing these checks does not guarantee
+microVM boot. Remove `command`, then delete and recreate the pod to run the
+application again.
+
+</Accordion>
+
+| Symptom | What to check |
+| --- | --- |
+| `Pending` | Node labels, architecture, taints, resources, and device-plugin capacity. |
+| Admission rejected | Namespace policy for privileged containers and hostPath volumes. |
+| `hostPath type check failed` | `/dev/kvm` exists as a character device on the worker. |
+| KVM missing or denied | Device access, permissions, and nested virtualization. |
+| `ImagePullBackOff` | Application image, architecture, registry access, and pull credentials. |
+| Guest image download fails | Pod DNS/egress, registry limits, certificates, and microsandbox credentials. |
+| KVM passes but boot fails | Runtime error, hypervisor/firmware compatibility, seccomp, and filesystem permissions. |
+| `OOMKilled` or eviction | Memory/storage limits and guest concurrency. |
+| Shared files missing or denied | Bind source inside the application container, PVC ownership, and read-only settings. |
+
+## Validation status
+
+Checked: ARM64/AMD64 image builds, OrbStack guest-image pulls, Kubernetes v1.34 schema, and native macOS file sharing, read-only mounts, cleanup, and concurrency.
+
+**Kubernetes microVM execution remains unverified:** the test OrbStack VM lacked `/dev/kvm`. A KVM-capable Linux worker is still needed to validate boot, admission, and device-plugin setup.
