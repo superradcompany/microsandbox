@@ -215,7 +215,7 @@ Recreate the pod, wait for completion, and read the results:
 ```bash
 kubectl -n msb-example delete pod msb-agent
 kubectl apply -f pod.yaml
-kubectl -n msb-example wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl -n msb-example wait --for=jsonpath='{.status.containerStatuses[0].state.terminated}' \
   pod/msb-agent --timeout=300s
 kubectl -n msb-example logs msb-agent
 ```
