@@ -749,6 +749,7 @@ impl JobManager {
             let _input_guard = tokio_util::task::AbortOnDropHandle::new(input_worker);
             let mut started_tx = Some(started_tx);
             let mut timeout_task = None;
+            let mut stdin_failure_recorded = false;
             while let Some(message) = output.recv().await.map_err(|e| e.to_string())? {
                 let mut captured = None;
                 match MessageType::from_wire_str(&message.t) {
@@ -801,8 +802,12 @@ impl JobManager {
                         let payload = message
                             .payload::<ExecStdinError>()
                             .map_err(|e| e.to_string())?;
-                        if payload.errno == Some(32) {
+                        if payload.errno == Some(32) && !stdin_failure_recorded {
                             // EPIPE is a permanent loss of the guest reader, not a detachable lease.
+                            // Saturated input can produce one error per queued chunk. Persist this
+                            // transition once so repeated fsyncs cannot delay the following exit;
+                            // every error still reaches the output log below.
+                            stdin_failure_recorded = true;
                             self.update(&id, |info| info.stdin_closed = true);
                         }
                         captured = Some(("stdin_error", payload.message.into_bytes()));
