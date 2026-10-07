@@ -267,8 +267,7 @@
                   "how-to/agents/goose",
                   "how-to/agents/gemini-cli",
                   "how-to/agents/hermes-agent",
-                  "how-to/agents/pi",
-                  "how-to/agents/browser-use"
+                  "how-to/agents/pi"
                 ]
               },
               {
@@ -284,11 +283,19 @@
                 ]
               },
               {
+                "group": "Browser automation",
+                "expanded": false,
+                "icon": "globe",
+                "pages": [
+                  "how-to/browser-automation/browser-use",
+                  "how-to/browser-automation/playwright"
+                ]
+              },
+              {
                 "group": "Workloads",
                 "expanded": false,
                 "icon": "gears",
                 "pages": [
-                  "how-to/browser-automation/playwright",
                   "how-to/file-processing/ffmpeg",
                   "how-to/file-processing/libreoffice-pdf",
                   "how-to/plugins/terraform",
@@ -502,7 +509,7 @@
     },
     {
       "source": "/examples/browser-automation/browser-use",
-      "destination": "/how-to/agents/browser-use"
+      "destination": "/how-to/browser-automation/browser-use"
     },
     {
       "source": "/examples/web-automation/scrapy",
