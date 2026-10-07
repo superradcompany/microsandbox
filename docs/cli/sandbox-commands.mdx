@@ -895,6 +895,8 @@ Only one attachment owns input at a time. Other clients can attach with `--read-
 
 Job IDs are opaque, sandbox-scoped identities independent of guest PIDs and ordinary exec correlation IDs. Metadata and bounded output survive CLI disconnects and remain inspectable after sandbox shutdown. A runtime restart never reruns jobs: an unconfirmed former process is reported as `lost`. Up to 32 jobs can run per sandbox, with at most 256 retained histories and two 512 KiB output segments per job. Pruned history produces an explicit cursor-gap error rather than silently pretending the missing bytes were delivered. The runtime also bounds launch deduplication history; after 65,536 admissions, restart the sandbox before admitting more jobs.
 
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.
+
 Execution `--timeout` remains enforced by the runtime after launch returns. Full snapshots and forks are rejected while managed jobs are active, because their host-side I/O ownership cannot yet be restored. Resident pause/resume remains supported. Older runtimes and unsupported backends reject job launch before dispatch; existing exec and sandbox APIs remain available.
 
 While resident-paused, job inspection and waits remain available. Waiting does not resume the sandbox; resume allows an active job to finish. Snapshot and fork refusals explain that you must wait for or terminate the active jobs first.

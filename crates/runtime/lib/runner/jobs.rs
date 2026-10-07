@@ -50,6 +50,7 @@ struct Entry {
     record: StoredJob,
     output: VecDeque<JobOutput>,
     output_bytes: usize,
+    capture_error: Option<String>,
     sequence: u64,
     input: Option<mpsc::Sender<Input>>,
     control: Option<mpsc::Sender<Control>>,
@@ -74,6 +75,37 @@ enum Control {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl Entry {
+    fn retain_output(&mut self, record: JobOutput) {
+        self.output_bytes += output_memory_bytes(&record);
+        self.output.push_back(record);
+        while self.output_bytes > OUTPUT_BYTES {
+            if let Some(pruned) = self.output.pop_front() {
+                self.output_bytes -= output_memory_bytes(&pruned);
+            }
+        }
+    }
+
+    fn preserve_capture_error(&mut self) {
+        if let Some(capture) = &self.capture_error
+            && self
+                .record
+                .info
+                .error
+                .as_ref()
+                .is_none_or(|error| !error.contains(capture))
+        {
+            self.record.info.error = Some(match self.record.info.error.take() {
+                Some(error) => format!("{capture}; {error}"),
+                None => capture.clone(),
+            });
+        }
+        if let Some(error) = &mut self.record.info.error {
+            truncate_diagnostic(error, 4096);
+        }
+    }
+}
 
 impl JobManager {
     pub(crate) fn open(
@@ -103,6 +135,7 @@ impl JobManager {
                         record,
                         output,
                         output_bytes,
+                        capture_error: None,
                         sequence,
                         input: None,
                         control: None,
@@ -560,6 +593,7 @@ impl JobManager {
                 record,
                 output: VecDeque::new(),
                 output_bytes: 0,
+                capture_error: None,
                 sequence: 0,
                 input: Some(input),
                 control: Some(control),
@@ -591,9 +625,7 @@ impl JobManager {
         if let Some(entry) = entries.get_mut(id) {
             change(&mut entry.record.info);
             // Guest diagnostics must fit durable metadata and the pre-reserved control reply.
-            if let Some(error) = &mut entry.record.info.error {
-                truncate_diagnostic(error, 4096);
-            }
+            entry.preserve_capture_error();
             if let Some(failure) = &mut entry.record.info.failure {
                 truncate_diagnostic(&mut failure.message, 4096);
                 if let Some(stage) = &mut failure.stage {
@@ -613,8 +645,23 @@ impl JobManager {
             if let Err(error) = self.store.write(&entry.record) {
                 // Keep live ownership even if a disk write fails; inspection reports the failure.
                 entry.record.info.error = Some(format!("persist job state: {error}"));
+                entry.preserve_capture_error();
             }
         }
+    }
+
+    fn stop_output_capture(&self, id: &JobId, sequence: u64, error: &std::io::Error) {
+        if let Some(entry) = self.entries.lock().unwrap().get_mut(id) {
+            let mut diagnostic = format!(
+                "job output capture stopped before sequence {sequence}: {error}; \
+                 later output is live-only and will not be retained"
+            );
+            truncate_diagnostic(&mut diagnostic, 2048);
+            entry.capture_error = Some(diagnostic);
+        }
+        // A full disk can also prevent saving metadata. Keep the cutoff in live state and
+        // retry its persistence on later lifecycle updates without interrupting the process.
+        self.update(id, |_| {});
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -630,7 +677,7 @@ impl JobManager {
         mut resizes: mpsc::Receiver<(u16, u16)>,
     ) {
         let outcome: Result<(), String> = async {
-            let mut writer = self.store.writer(&id).map_err(|e| e.to_string())?;
+            let mut writer = Some(self.store.writer(&id).map_err(|e| e.to_string())?);
             let client = AgentClient::connect(&self.agent_path)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -844,19 +891,14 @@ impl JobManager {
                             source.into(),
                             STANDARD.encode(bytes),
                         );
-                        entry.output_bytes += record.data_base64.len();
-                        entry.output.push_back(record.clone());
-                        while entry.output_bytes > OUTPUT_BYTES {
-                            if let Some(pruned) = entry.output.pop_front() {
-                                entry.output_bytes -= pruned.data_base64.len();
-                            }
-                        }
+                        entry.retain_output(record.clone());
                         drop(entries);
                         // Only the runtime actor writes output. Slow attached readers never own this path.
-                        if let Err(error) = writer.append(&record) {
-                            self.update(&id, |info| {
-                                info.error = Some(format!("capture job output: {error}"))
-                            });
+                        if let Some(active_writer) = writer.as_mut()
+                            && let Err(error) = active_writer.append(&record)
+                        {
+                            writer = None;
+                            self.stop_output_capture(&id, record.sequence, &error);
                         }
                     }
                 }
@@ -882,6 +924,12 @@ impl JobManager {
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+fn output_memory_bytes(record: &JobOutput) -> usize {
+    // Tiny writes still allocate a record and two strings. Charge those allocations too,
+    // with room for the deque's spare slots, so payload size cannot hide unbounded overhead.
+    2 * std::mem::size_of::<JobOutput>() + record.source.capacity() + record.data_base64.capacity()
 }
 
 fn truncate_diagnostic(value: &mut String, limit: usize) {
@@ -987,6 +1035,100 @@ mod tests {
             JobResponse::Error { code, .. } => code,
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn capture_cutoff_survives_metadata_failure_and_terminal_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = manager(directory.path());
+        start(&manager, 1);
+        let blocker = directory
+            .path()
+            .join("jobs-v1")
+            .join(id(1).as_str())
+            .join("info.next");
+        std::fs::create_dir(&blocker).unwrap();
+        manager.stop_output_capture(&id(1), 7, &std::io::Error::other("disk full"));
+        {
+            let mut entries = manager.entries.lock().unwrap();
+            let entry = entries.get_mut(&id(1)).unwrap();
+            let error = entry.record.info.error.as_deref().unwrap();
+            assert!(error.contains("stopped before sequence 7"));
+            assert!(error.contains("persist job state"));
+            assert!(entry.record.info.state.is_active());
+            assert!(entry.input.is_some());
+            assert!(entry.control.is_some());
+            entry.sequence = 8;
+            entry.retain_output(JobOutput::new(8, 1, "stdout".into(), "YQ==".into()));
+        }
+        let JobResponse::Output { page } = request(
+            &manager,
+            JobOperation::Read {
+                id: id(1),
+                after: 7,
+                attachment: None,
+            },
+        ) else {
+            panic!("live output must remain readable")
+        };
+        assert_eq!(page.items[0].sequence, 8);
+        std::fs::remove_dir(blocker).unwrap();
+        manager.update(&id(1), |info| {
+            info.state = JobState::Exited;
+            info.exit_code = Some(0);
+            info.error = Some("another diagnostic".into());
+        });
+        let info = manager.store.read(&id(1)).unwrap().info;
+        assert_eq!(info.exit_code, Some(0));
+        let error = info.error.unwrap();
+        assert!(error.contains("stopped before sequence 7"));
+        assert!(error.contains("another diagnostic"));
+        manager.update(&id(1), |_| {});
+        assert_eq!(
+            manager.store.read(&id(1)).unwrap().info.error.unwrap(),
+            error
+        );
+    }
+
+    #[tokio::test]
+    async fn tiny_output_keeps_memory_bounded_and_reports_pruned_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = manager(directory.path());
+        start(&manager, 1);
+        let mut entries = manager.entries.lock().unwrap();
+        let entry = entries.get_mut(&id(1)).unwrap();
+        for sequence in 1..=OUTPUT_BYTES as u64 / 4 {
+            entry.sequence = sequence;
+            entry.retain_output(JobOutput::new(
+                sequence,
+                1,
+                "stdout".into(),
+                STANDARD.encode(b"x"),
+            ));
+        }
+        assert!(entry.output_bytes <= OUTPUT_BYTES);
+        assert!(entry.output.len() < 8192);
+        assert_eq!(
+            entry.output_bytes,
+            entry.output.iter().map(output_memory_bytes).sum::<usize>()
+        );
+        let first = entry.output.front().unwrap().sequence;
+        assert!(first > 1);
+        assert_eq!(entry.output.back().unwrap().sequence, entry.sequence);
+        assert_eq!(entry.output.len() as u64, entry.sequence - first + 1);
+        drop(entries);
+        let JobResponse::Output { page } = request(
+            &manager,
+            JobOperation::Read {
+                id: id(1),
+                after: 0,
+                attachment: None,
+            },
+        ) else {
+            panic!("expected retained output page");
+        };
+        assert_eq!(page.gap_before, Some(first));
+        assert_eq!(page.items[0].sequence, first);
     }
 
     #[tokio::test]

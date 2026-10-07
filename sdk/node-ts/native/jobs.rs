@@ -14,16 +14,19 @@ use tokio::sync::{Mutex, Notify};
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Sandbox-scoped job handle; dropping it does not terminate the guest process.
 #[napi(js_name = "Job")]
 pub struct JsJob {
     pub(crate) inner: Job,
 }
 
+/// Renewable output attachment with optional exclusive stdin ownership.
 #[napi(js_name = "JobAttachment")]
 pub struct JsJobAttachment {
     inner: JobAttachment,
 }
 
+/// Cancellable iterator over retained output and optional live updates.
 #[napi(js_name = "JobLogStream")]
 pub struct JsJobLogStream {
     inner: Mutex<Option<JobLogStream>>,
@@ -37,42 +40,50 @@ pub struct JsJobLogStream {
 
 #[napi]
 impl JsJob {
+    /// Return the opaque job identity, scoped to its sandbox.
     #[napi(getter)]
     pub fn id(&self) -> String {
         self.inner.id().to_string()
     }
 
+    /// Return current lifecycle metadata as JSON, including capture or runtime errors.
     #[napi]
     pub async fn inspect(&self) -> Result<String> {
         json(self.inner.inspect().await.map_err(job_error)?)
     }
 
+    /// Wait for a terminal state and return its exit result as JSON.
     #[napi]
     pub async fn wait(&self) -> Result<String> {
         json(self.inner.wait().await.map_err(job_error)?)
     }
 
+    /// Request delivery of a signal to this job; use `wait` to confirm its exit.
     #[napi]
     pub async fn signal(&self, signal: i32) -> Result<()> {
         self.inner.signal(signal).await.map_err(job_error)
     }
 
+    /// Request SIGKILL without waiting for confirmed process termination.
     #[napi]
     pub async fn kill(&self) -> Result<()> {
         self.inner.kill().await.map_err(job_error)
     }
 
+    /// Permanently close pipe stdin after previously admitted input; PTY jobs reject EOF.
     #[napi]
     pub async fn eof(&self) -> Result<()> {
         self.inner.eof().await.map_err(job_error)
     }
 
+    /// Return retained log entries as JSON using JSON-encoded log options.
     #[napi]
     pub async fn logs(&self, options: String) -> Result<String> {
         let options: JobLogOptions = serde_json::from_str(&options).map_err(invalid)?;
         json(self.inner.logs(&options).await.map_err(job_error)?)
     }
 
+    /// Replay retained logs and optionally follow output using JSON-encoded log options.
     #[napi]
     pub async fn log_stream(&self, options: String) -> Result<JsJobLogStream> {
         let options: JobLogOptions = serde_json::from_str(&options).map_err(invalid)?;
@@ -85,6 +96,8 @@ impl JsJob {
         })
     }
 
+    /// Attach with optional recent-byte or cursor replay; the replay selectors are exclusive.
+    /// A writable attachment acquires the job's stdin lease; read-only observers do not.
     #[napi]
     pub async fn attach(
         &self,
@@ -114,6 +127,7 @@ impl JsJob {
 
 #[napi]
 impl JsJobAttachment {
+    /// Receive the next JSON-encoded event, or `None` when the attachment ends.
     #[napi]
     pub async fn recv(&self) -> Result<Option<String>> {
         self.inner
@@ -123,6 +137,7 @@ impl JsJobAttachment {
             .map(json)
             .transpose()
     }
+    /// Admit bytes to guest stdin through this attachment's writable lease.
     #[napi]
     pub async fn write_stdin(&self, data: Buffer) -> Result<()> {
         self.inner
@@ -130,10 +145,12 @@ impl JsJobAttachment {
             .await
             .map_err(job_error)
     }
+    /// Resize a PTY job's terminal through this attachment's writable lease.
     #[napi]
     pub async fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.inner.resize(rows, cols).await.map_err(job_error)
     }
+    /// Release the attachment without closing guest stdin or terminating the job.
     #[napi]
     pub async fn detach(&self) -> Result<()> {
         self.inner.detach().await.map_err(job_error)
@@ -142,6 +159,7 @@ impl JsJobAttachment {
 
 #[napi]
 impl JsJobLogStream {
+    /// Read the next JSON-encoded log entry, or `None` after completion or closure.
     #[napi]
     pub async fn next(&self) -> Result<Option<String>> {
         let notified = self.notify.notified();
@@ -160,6 +178,7 @@ impl JsJobLogStream {
             .map(json)
             .transpose()
     }
+    /// Idempotently close this iterator and wake a pending read without stopping the job.
     #[napi]
     pub async fn close(&self) {
         self.closed.store(true, Ordering::Release);

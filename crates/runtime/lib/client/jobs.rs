@@ -170,7 +170,33 @@ impl JobStore {
 
 impl JobLogWriter {
     /// Append one byte-preserving record, pruning the older segment on rollover.
+    /// Any failure permanently closes this writer, preserving a readable retained prefix.
     pub fn append(&mut self, record: &JobOutput) -> io::Result<()> {
+        self.append_with(record, |file, data| file.write_all(data))
+    }
+
+    fn append_with(
+        &mut self,
+        record: &JobOutput,
+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if self.file.is_none() {
+            return Err(invalid("job output capture has stopped"));
+        }
+        let result = self.append_inner(record, write);
+        if result.is_err() {
+            // A failed write_all may have left a partial final line. Readers already tolerate
+            // that tail, but another append would corrupt it or introduce a sequence gap.
+            self.file.take();
+        }
+        result
+    }
+
+    fn append_inner(
+        &mut self,
+        record: &JobOutput,
+        write: impl FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
         let mut data = serde_json::to_vec(record).map_err(io::Error::other)?;
         data.push(b'\n');
         if self.bytes + data.len() as u64 > JOB_LOG_SEGMENT_BYTES {
@@ -185,10 +211,12 @@ impl JobLogWriter {
             self.file = Some(private_file(&self.directory.join("output.jsonl"), false)?);
             self.bytes = 0;
         }
-        self.file
-            .as_mut()
-            .ok_or_else(|| invalid("job output writer is closed"))?
-            .write_all(&data)?;
+        write(
+            self.file
+                .as_mut()
+                .ok_or_else(|| invalid("job output writer is closed"))?,
+            &data,
+        )?;
         self.bytes += data.len() as u64;
         Ok(())
     }
@@ -235,6 +263,69 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_appends_preserve_readable_history_and_never_resume() {
+        for partial in [false, true] {
+            for rotate in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let store = JobStore::new(directory.path());
+                let id = JobId::parse(format!("job_{:032x}", 1)).unwrap();
+                private_directory(&store.root.join(id.as_str())).unwrap();
+                let mut writer = store.writer(&id).unwrap();
+                let data = if rotate {
+                    "YQ==".repeat(100 * 1024)
+                } else {
+                    "YQ==".into()
+                };
+                let first = JobOutput::new(1, 1, "stdout".into(), data.clone());
+                writer.append(&first).unwrap();
+                let second = JobOutput::new(2, 1, "stdout".into(), data);
+                let error = writer
+                    .append_with(&second, |file, bytes| {
+                        if partial {
+                            file.write_all(&bytes[..bytes.len() / 2])?;
+                        }
+                        Err(io::Error::other("injected storage failure"))
+                    })
+                    .unwrap_err();
+                assert!(error.to_string().contains("injected storage failure"));
+                // Recovery must not append to a partial JSON line or skip sequence two.
+                assert!(
+                    writer
+                        .append(&JobOutput::new(3, 1, "stderr".into(), "Yg==".into()))
+                        .is_err()
+                );
+                let records = store.output(&id).unwrap();
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].sequence, 1);
+                assert_eq!(records[0].data_base64, first.data_base64);
+                assert!(writer.file.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_failure_does_not_resume_after_path_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = JobStore::new(directory.path());
+        let id = JobId::parse(format!("job_{:032x}", 1)).unwrap();
+        let path = store.root.join(id.as_str());
+        private_directory(&path).unwrap();
+        let mut writer = store.writer(&id).unwrap();
+        let record =
+            |sequence| JobOutput::new(sequence, 1, "stdout".into(), "YQ==".repeat(100 * 1024));
+        writer.append(&record(1)).unwrap();
+        // An occupied rotation destination causes a real filesystem error on every platform.
+        let blocker = path.join("output.previous.jsonl");
+        fs::create_dir(&blocker).unwrap();
+        assert!(writer.append(&record(2)).is_err());
+        fs::remove_dir(blocker).unwrap();
+        assert!(writer.append(&record(3)).is_err());
+        let records = store.output(&id).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sequence, 1);
+    }
 
     #[test]
     fn output_rotation_is_bounded_binary_safe_and_keeps_exit_metadata() {
