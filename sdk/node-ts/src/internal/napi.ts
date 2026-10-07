@@ -223,7 +223,7 @@ export interface NapiSandboxBuilderSetters {
   user(user: string): this;
   pullPolicy(policy: string): this;
   disableNetwork(): this;
-  /** Enable TLS interception, preserving existing settings. Later network() calls replace configuration. */
+  /** Enable TLS interception, preserving existing network and TLS settings. */
   tlsIntercept(): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   network(configure: (b: any) => any): this;
