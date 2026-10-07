@@ -340,6 +340,7 @@ jobs:
 
       - name: Smoke test installed runtime discovery
         run: |
+          python3 scripts/smoke/cli/test_runtime_discovery.py
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
@@ -747,7 +748,10 @@ jobs:
       - name: Smoke test installed runtime discovery
         if: matrix.component == 'CLI'
         shell: pwsh
-        run: python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
+        run: |
+          python scripts/smoke/cli/test_runtime_discovery.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
@@ -1669,13 +1673,15 @@ jobs:
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
           # Catalog/control compatibility and binary-replacement fixtures require caller-selected
-          # historical binaries, existing VMs, and dummy secrets. Keep them out of this
-          # self-provisioning batch; the catalog fixture is provisioned separately below.
+          # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
+          # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
+          # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
+          # catalog fixture is provisioned separately below.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
 
       # This fixture needs a released runtime, not the candidate installed above.

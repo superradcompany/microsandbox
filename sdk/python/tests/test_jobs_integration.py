@@ -80,7 +80,8 @@ async def test_managed_job_ownership_io_and_cancellation():
             await asyncio.sleep(0.05)
             await stream.close()
             with pytest.raises(StopAsyncIteration):
-                await pending
+                # Closing must unblock the receive that was already pending, not just a new one.
+                await asyncio.wait_for(pending, timeout=5)
     finally:
         for attachment in attachments:
             with suppress(JobError):

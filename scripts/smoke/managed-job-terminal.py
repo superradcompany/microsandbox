@@ -74,11 +74,13 @@ def terminal(job, data, success=True):
                         try:
                             offset += os.write(master, data[offset : offset + 8192])
                         except BlockingIOError:
+                            # PTY readiness can race; retry this nonblocking write on the next tick.
                             pass
                     if ready & selectors.EVENT_READ:
                         try:
                             output.extend(os.read(master, 16384))
                         except BlockingIOError:
+                            # A readiness notification may outlive the available PTY bytes.
                             pass
                 observed, value = os.waitpid(pid, os.WNOHANG)
                 if observed:

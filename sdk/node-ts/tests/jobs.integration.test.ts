@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Sandbox, JobError, type Job, type JobAttachment } from "../src/index.js";
+import { Sandbox, JobError, type Job, type JobAttachment } from "../dist/index.js";
 
 describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("managed jobs on a disposable VM", () => {
   it("preserves ownership and binary I/O across detach, and cancels an idle log stream", async () => {

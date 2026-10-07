@@ -7,6 +7,7 @@ the command symlinks; Windows checks the copied microsandbox.exe alias.
 """
 
 import argparse
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,28 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+
+
+@contextmanager
+def runtime_install_directory():
+    temporary = tempfile.TemporaryDirectory(prefix="msb-runtime-discovery-")
+    try:
+        yield temporary.name
+    finally:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                temporary.cleanup()
+                break
+            except OSError as error:
+                # Windows can briefly retain an executable's mapping after process exit.
+                # Retry only sharing violations in our disposable directory; permissions and
+                # persistent locks must still fail the smoke rather than hiding cleanup errors.
+                if (sys.platform != "win32" or getattr(error, "winerror", None) != 32
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.1)
 
 
 def diagnose(command, home, env):
@@ -45,7 +68,7 @@ def main():
     binary = args.msb.resolve(strict=True)
     firmware = args.libkrunfw.resolve(strict=True)
 
-    with tempfile.TemporaryDirectory(prefix="msb-runtime-discovery-") as temporary:
+    with runtime_install_directory() as temporary:
         home = Path(temporary).resolve()
         install = home / ".microsandbox"
         bin_dir = install / "bin"

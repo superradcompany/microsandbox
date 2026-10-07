@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { Job, JobAttachment, JobError, JobListBuilder, jobCall, jobPageFromJson } from "../src/jobs.js";
-import type { NapiJob, NapiJobAttachment } from "../src/internal/napi.js";
+import { Job, JobAttachment, JobError, JobListBuilder, jobCall, jobPageFromJson } from "../dist/jobs.js";
+import type { NapiJob, NapiJobAttachment } from "../dist/internal/napi.js";
 
 describe("managed job boundary", () => {
   it("preserves byte output and scoped replay cursors", async () => {
