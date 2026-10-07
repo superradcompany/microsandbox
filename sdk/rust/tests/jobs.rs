@@ -681,14 +681,19 @@ async fn managed_job_z_blocked_input_signal() -> Result<(), Box<dyn std::error::
             // Resize still uses the ordinary agent path; it must not hold the signal worker hostage.
             writer.resize(40, 100).await?;
         }
-        eprintln!("stdin is backpressured; requesting kill");
+        eprintln!("stdin is backpressured (tty={tty}); requesting kill");
         tokio::time::timeout(Duration::from_secs(5), blocked.kill()).await??;
         eprintln!("kill was admitted; waiting for guest exit");
-        assert!(
-            !tokio::time::timeout(Duration::from_secs(5), blocked.wait())
-                .await??
-                .success
-        );
+        let exited = tokio::time::timeout(Duration::from_secs(5), blocked.wait()).await;
+        if exited.is_err() {
+            // Admission and delivery are distinct. Preserve the runtime's delivery
+            // diagnostic on failure without allowing inspection to hang the test.
+            eprintln!(
+                "job after kill timeout (tty={tty}): {:?}",
+                tokio::time::timeout(Duration::from_secs(2), blocked.inspect()).await
+            );
+        }
+        assert!(!exited??.success);
         writer.detach().await?;
     }
 

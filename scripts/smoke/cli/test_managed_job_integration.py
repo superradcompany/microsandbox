@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest import mock
+import unittest.mock
 
 
 SPEC = importlib.util.spec_from_file_location(
@@ -32,7 +32,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
             self.assertEqual(command[-1], f"binary(=jobs) & test(={test})")
 
     def test_candidate_artifacts_and_home_replace_ambient_settings(self):
-        with mock.patch.dict(os.environ, {
+        with unittest.mock.patch.dict(os.environ, {
             "MSB_HOME": "/caller", "MSB_BACKEND": "cloud", "MSB_JOB_TEST_RESTART": "1",
             "MSB_TEST_ISOLATE_HOME": "1", "MSB_CONFIG_PATH": "/caller/config",
             "MSB_TEST_EAGER_MODE": "error", "LD_PRELOAD": "/shim",
@@ -52,7 +52,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         suite.args = SimpleNamespace(workspace=Path("/repo"), archive=Path("/archive"),
                                      binary=Path("/msb"), image="alpine")
         suite.env = {"MSB_HOME": "/private-fixture"}
-        suite.cleanup = mock.Mock()
+        suite.cleanup = unittest.mock.Mock()
         return suite
 
     def test_failure_is_reported_but_remaining_cases_get_fresh_fixtures(self):
@@ -62,7 +62,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
             if label == HARNESS.CASES[0]:
                 raise subprocess.CalledProcessError(1, command)
 
-        suite.run = mock.Mock(side_effect=run)
+        suite.run = unittest.mock.Mock(side_effect=run)
         with self.assertRaisesRegex(RuntimeError, "managed-job fixture cases failed"):
             suite.execute()
         cases = [call for call in suite.run.call_args_list
@@ -76,7 +76,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
 
     def test_cleanup_failure_stops_provisioning(self):
         suite = self.suite()
-        suite.run = mock.Mock()
+        suite.run = unittest.mock.Mock()
         suite.cleanup.side_effect = RuntimeError("cleanup failed")
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             suite.execute()
@@ -87,11 +87,11 @@ class ManagedJobIntegrationTests(unittest.TestCase):
             suite = self.suite()
             suite.root = suite.output = Path(directory)
             suite.records = []
-            child = mock.MagicMock()
+            child = unittest.mock.MagicMock()
             child.pid = 876543
             child.wait.side_effect = [subprocess.TimeoutExpired("test", 1), 0]
-            with mock.patch.object(HARNESS.subprocess, "Popen") as popen, \
-                    mock.patch.object(HARNESS.os, "killpg") as kill:
+            with unittest.mock.patch.object(HARNESS.subprocess, "Popen") as popen, \
+                    unittest.mock.patch.object(HARNESS.os, "killpg") as kill:
                 popen.return_value.__enter__.return_value = child
                 with self.assertRaises(subprocess.TimeoutExpired):
                     suite.run("timeout", ["test"], timeout=1)
