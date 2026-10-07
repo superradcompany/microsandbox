@@ -370,6 +370,7 @@ impl SandboxConfigPatch {
             outbound_proxy,
             metrics_sample_interval_ms,
             disable_metrics_sample,
+            disable_exec_log,
             // Resolved by OciSandboxDefaultsPatch::from_managed() and SandboxConfig::apply_rootfs_defaults().
             oci: _,
         } = sandbox_defaults;
@@ -403,6 +404,9 @@ impl SandboxConfigPatch {
         }
         if let Some(disable_metrics_sample) = disable_metrics_sample {
             runtime.disable_metrics_sample_mut(*disable_metrics_sample);
+        }
+        if let Some(disable_exec_log) = disable_exec_log {
+            runtime.disable_exec_log_mut(*disable_exec_log);
         }
         if let Some(log_level) = log_level {
             runtime.set_log_level_mut(log_level.map(sandbox_log_level_from_runtime));
@@ -1952,6 +1956,7 @@ mod tests {
                 log_level: Some(SandboxLogLevel::Trace),
                 metrics_sample_interval_ms: Some(750),
                 disable_metrics_sample: true,
+                disable_exec_log: true,
                 guest_clock: Some(microsandbox_types::GuestClockPolicy::Off),
             },
             env: vec![EnvVar::new("A", "B")],
@@ -1986,6 +1991,7 @@ mod tests {
         assert_eq!(config.spec.runtime.log_level, Some(SandboxLogLevel::Trace));
         assert_eq!(config.spec.runtime.metrics_sample_interval_ms, Some(750));
         assert!(config.spec.runtime.disable_metrics_sample);
+        assert!(config.spec.runtime.disable_exec_log);
         assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/app"));
         assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(

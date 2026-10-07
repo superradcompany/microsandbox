@@ -45,6 +45,16 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
+
+    /// Whether the host relay records this session's output to the
+    /// sandbox's `exec.log`.
+    ///
+    /// Off unless the caller asks: the runtime sets it for the sandbox's
+    /// startup command, and SDK callers opt in per exec. The guest agent
+    /// never reads it; it is decided on the host, so an older agentd simply
+    /// ignores the field.
+    #[serde(default)]
+    pub capture: bool,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -288,6 +298,55 @@ mod tests {
     fn test_exec_rlimit_from_str_rejects_soft_above_hard() {
         let err = "nofile=65535:4096".parse::<ExecRlimit>().unwrap_err();
         assert_eq!(err, "soft limit cannot exceed hard limit");
+    }
+
+    fn request(capture: bool) -> super::ExecRequest {
+        super::ExecRequest {
+            cmd: "/bin/sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            env: Vec::new(),
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            capture,
+        }
+    }
+
+    /// A request from a host that predates the field carries no `capture`,
+    /// and reads as not captured.
+    #[test]
+    fn test_exec_request_without_capture_decodes_as_not_captured() {
+        let json = r#"{"cmd":"/bin/sh","args":["-c","true"]}"#;
+        let request: super::ExecRequest = serde_json::from_str(json).unwrap();
+        assert!(!request.capture);
+    }
+
+    /// An agentd that predates the field reads a new request unchanged: the
+    /// extra key is ignored, since the payload type does not deny unknown
+    /// fields.
+    #[test]
+    fn test_exec_request_with_capture_decodes_for_an_older_reader() {
+        #[derive(serde::Deserialize)]
+        struct OlderExecRequest {
+            cmd: String,
+            args: Vec<String>,
+        }
+        let bytes = serde_json::to_vec(&request(true)).unwrap();
+        let older: OlderExecRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(older.cmd, "/bin/sh");
+        assert_eq!(older.args, vec!["-c".to_string(), "true".to_string()]);
+    }
+
+    #[test]
+    fn test_exec_request_capture_roundtrips() {
+        for capture in [false, true] {
+            let bytes = serde_json::to_vec(&request(capture)).unwrap();
+            let back: super::ExecRequest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(back.capture, capture);
+        }
     }
 }
 

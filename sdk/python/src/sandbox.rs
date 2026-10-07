@@ -513,6 +513,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn exec_default<'py>(
         &self,
@@ -524,9 +525,10 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -549,6 +551,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn exec_default_stream<'py>(
         &self,
@@ -560,9 +563,10 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -587,6 +591,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn exec<'py>(
         &self,
@@ -600,9 +605,11 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let (args, opts) =
+            parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -627,6 +634,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn exec_stream<'py>(
         &self,
@@ -640,9 +648,11 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let (args, opts) =
+            parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -666,6 +676,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn shell<'py>(
         &self,
@@ -678,9 +689,10 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -704,6 +716,7 @@ impl PySandbox {
         stdin = None,
         tty = false,
         rlimits = None,
+        capture = None,
     ))]
     fn shell_stream<'py>(
         &self,
@@ -716,9 +729,10 @@ impl PySandbox {
         stdin: Option<&Bound<'py, PyAny>>,
         tty: bool,
         rlimits: Option<&Bound<'py, PyAny>>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits)?;
+        let opts = parse_shell_call(cwd, user, env, timeout, stdin, tty, rlimits, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -750,6 +764,7 @@ impl PySandbox {
         user = None,
         env = None,
         detach_keys = None,
+        capture = None,
     ))]
     fn attach_default<'py>(
         &self,
@@ -758,9 +773,10 @@ impl PySandbox {
         user: Option<String>,
         env: Option<HashMap<String, String>>,
         detach_keys: Option<String>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_attach_call(None, cwd, user, env, detach_keys)?;
+        let (args, opts) = parse_attach_call(None, cwd, user, env, detach_keys, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -784,6 +800,7 @@ impl PySandbox {
         user = None,
         env = None,
         detach_keys = None,
+        capture = None,
     ))]
     fn attach<'py>(
         &self,
@@ -794,9 +811,10 @@ impl PySandbox {
         user: Option<String>,
         env: Option<HashMap<String, String>>,
         detach_keys: Option<String>,
+        capture: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let (args, opts) = parse_attach_call(args, cwd, user, env, detach_keys)?;
+        let (args, opts) = parse_attach_call(args, cwd, user, env, detach_keys, capture)?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1857,6 +1875,10 @@ struct ExecOpts {
     stdin_mode: Option<String>,
     stdin_data: Option<Vec<u8>>,
     rlimits: Vec<(String, u64, u64)>,
+    /// Whether to record the session's output to `exec.log`. `None` keeps
+    /// the Rust SDK's default: off for an ad-hoc exec, on for the
+    /// default-workload helpers.
+    capture: Option<bool>,
 }
 
 #[derive(Default)]
@@ -1865,6 +1887,8 @@ struct AttachOpts {
     user: Option<String>,
     env: Vec<(String, String)>,
     detach_keys: Option<String>,
+    /// Same tri-state as [`ExecOpts::capture`].
+    capture: Option<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1877,6 +1901,7 @@ fn parse_exec_call(
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
+    capture: Option<bool>,
 ) -> PyResult<(Vec<String>, ExecOpts)> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
     let mut parsed_args = Vec::new();
@@ -1889,6 +1914,7 @@ fn parse_exec_call(
         stdin_mode,
         stdin_data,
         rlimits: parse_rlimits(rlimits)?,
+        capture,
     };
 
     if let Some(args_or_options) = args {
@@ -1912,7 +1938,7 @@ fn validate_exec_options_keys(dict: &Bound<'_, PyDict>) -> PyResult<()> {
         })?;
         match key.as_str() {
             "args" | "cwd" | "user" | "env" | "timeout" | "tty" | "stdin" | "stdin_data"
-            | "rlimits" => {}
+            | "rlimits" | "capture" => {}
             other => {
                 return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                     "unknown exec option: {other}",
@@ -1945,6 +1971,9 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     }
     if let Some(tty) = extract_optional_dict_value::<bool>(dict, "tty")? {
         opts.tty = tty;
+    }
+    if let Some(capture) = extract_optional_dict_value::<bool>(dict, "capture")? {
+        opts.capture = Some(capture);
     }
     if let Some(stdin) = dict.get_item("stdin")?
         && !stdin.is_none()
@@ -1985,6 +2014,7 @@ fn parse_shell_call(
     stdin: Option<&Bound<'_, PyAny>>,
     tty: bool,
     rlimits: Option<&Bound<'_, PyAny>>,
+    capture: Option<bool>,
 ) -> PyResult<ExecOpts> {
     let (stdin_mode, stdin_data) = parse_stdin(stdin)?;
     validate_timeout(timeout_secs)?;
@@ -1997,6 +2027,7 @@ fn parse_shell_call(
         stdin_mode,
         stdin_data,
         rlimits: parse_rlimits(rlimits)?,
+        capture,
     })
 }
 
@@ -2006,6 +2037,7 @@ fn parse_attach_call(
     user: Option<String>,
     env: Option<HashMap<String, String>>,
     detach_keys: Option<String>,
+    capture: Option<bool>,
 ) -> PyResult<(Vec<String>, AttachOpts)> {
     Ok((
         parse_args(args)?,
@@ -2014,6 +2046,7 @@ fn parse_attach_call(
             user,
             env: env_to_pairs(env),
             detach_keys,
+            capture,
         },
     ))
 }
@@ -2196,6 +2229,12 @@ fn apply_exec_options(
     if opts.tty {
         builder = builder.tty(true);
     }
+    // Only when the caller said so: the default-workload helpers start from a
+    // builder that already asks for capture, and an unset value must not undo
+    // that.
+    if let Some(capture) = opts.capture {
+        builder = builder.capture(capture);
+    }
     // Stdin mode.
     match opts.stdin_mode.as_deref() {
         Some("pipe") => builder = builder.stdin_pipe(),
@@ -2249,6 +2288,9 @@ fn apply_attach_options(
     }
     if let Some(keys) = opts.detach_keys {
         builder = builder.detach_keys(keys);
+    }
+    if let Some(capture) = opts.capture {
+        builder = builder.capture(capture);
     }
     builder
 }

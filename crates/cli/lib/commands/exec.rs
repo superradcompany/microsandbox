@@ -40,6 +40,13 @@ pub struct ExecArgs {
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
 
+    /// Record this command's output to the sandbox's `exec.log`, where
+    /// `msb logs` shows it. Off by default: an exec session's output — an
+    /// interactive shell's above all — is not written to the host's disk
+    /// unless asked.
+    #[arg(long)]
+    pub capture: bool,
+
     /// Leave host stdin untouched and give the command EOF (disables automatic TTY).
     #[arg(long, conflicts_with = "tty")]
     pub no_stdin: bool,
@@ -162,7 +169,7 @@ async fn run_started(
         };
 
     if args.stream || (!interactive && !stdin_is_terminal) {
-        let options = apply_common_exec_opts(
+        let mut options = apply_common_exec_opts(
             ExecOptionsBuilder::default().args(cmd_args).tty(args.tty),
             &env_pairs,
             &workdir,
@@ -170,6 +177,10 @@ async fn run_started(
             timeout,
             &rlimits,
         );
+        // Unset unless asked: an explicit `false` fails on an older runtime.
+        if args.capture {
+            options = options.capture(true);
+        }
         if args.no_stdin {
             let mut handle = sandbox
                 .exec_stream_with(cmd, |_| options.stdin_bytes(Vec::new()))
@@ -196,6 +207,10 @@ async fn run_started(
                 for &(resource, soft, hard) in &rlimits {
                     a = a.rlimit_range(resource, soft, hard);
                 }
+                // Unset unless asked: an explicit `false` fails on an older runtime.
+                if args.capture {
+                    a = a.capture(true);
+                }
                 a
             })
             .await?;
@@ -215,6 +230,9 @@ async fn run_started(
                 );
                 if args.tty {
                     e = e.tty(true);
+                }
+                if args.capture {
+                    e = e.capture(true);
                 }
                 e
             })

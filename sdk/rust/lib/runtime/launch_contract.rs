@@ -233,6 +233,10 @@ impl LaunchContract {
         if !launch.owned_volumes.is_empty() {
             return unsupported("sandbox-owned volumes");
         }
+        // Previous runtimes record every exec; dropping the request would record anyway.
+        if launch.disable_exec_log {
+            return unsupported("disabling exec.log capture");
+        }
         if self.patch < 16 && !launch.file_mounts.is_empty() {
             return unsupported("isolated file mounts");
         }
@@ -391,6 +395,9 @@ impl LaunchContract {
         )?;
         if self.machine {
             return Ok(());
+        }
+        if config.spec.runtime.disable_exec_log {
+            return unsupported("disabling exec.log capture");
         }
         let resources = &config.spec.resources;
 
@@ -558,6 +565,10 @@ pub(crate) async fn validate_runtime_config(
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
+    // A current contract may still predate the opt-out: ask here too.
+    if config.spec.runtime.disable_exec_log {
+        require_disable_exec_log(&runtime.msb_path).await?;
+    }
     Ok(())
 }
 
@@ -692,6 +703,18 @@ pub(crate) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<(
         path,
         |capabilities| capabilities.required_restore_backing,
         "relaxed external-object validation with required resource backing",
+    )
+    .await
+}
+
+/// Probe only when a sandbox disables `exec.log`. An older runtime would record
+/// anyway (v0.6.x ignores the field) or reject it as an unknown field, so ordinary
+/// launches keep the process-free path and this one names the missing feature.
+pub(crate) async fn require_disable_exec_log(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.disable_exec_log,
+        "disabling exec.log capture",
     )
     .await
 }
@@ -1090,6 +1113,32 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
         );
         validate_guest_clock(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disable_exec_log_probe_distinguishes_old_and_capable_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"required_restore_backing\":true}'",
+        );
+        let error = require_disable_exec_log(&old)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upgrade msb"));
+        assert!(error.contains("disabling exec.log capture"));
+        // Releases before v0.7.0 have no probe at all.
+        let pre_probe = script(dir.path(), "pre-probe", "exit 2");
+        assert!(require_disable_exec_log(&pre_probe).await.is_err());
+        let new = script(
+            dir.path(),
+            "new-capabilities",
+            "printf '%s' '{\"protocols\":[2,1],\"disable_exec_log\":true}'",
+        );
+        require_disable_exec_log(&new).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1918,6 +1967,39 @@ mod protocol {
                 .unwrap();
         value["checkpoint_restore"] = Value::Null;
         assert!(decode_legacy(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn exec_log_opt_out_cannot_be_silently_dropped() {
+        let config = LaunchConfig {
+            disable_exec_log: true,
+            ..Default::default()
+        };
+        assert!(
+            encode_bytes(&config, LEGACY)
+                .unwrap_err()
+                .contains("disabling exec.log capture requires a newer runtime launch contract")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_checks_refuse_an_exec_log_opt_out_on_a_previous_runtime() {
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        config.spec.runtime.disable_exec_log = true;
+        let error = LaunchContract {
+            patch: 18,
+            machine: false,
+        }
+        .validate_launch_intent(&config)
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("disabling exec.log capture"),
+            "{error}"
+        );
     }
 
     #[test]

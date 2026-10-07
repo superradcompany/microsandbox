@@ -46,6 +46,7 @@ class MicrosandboxTest < Test::Unit::TestCase
       .proxy(proxy)
       .vsock("/run/host-api.sock", 5000)
       .vsock_dgram("/run/events.sock", 5001)
+      .disable_exec_log
 
     assert_instance_of Microsandbox::SandboxBuilder, builder
   end
@@ -216,6 +217,14 @@ class MicrosandboxTest < Test::Unit::TestCase
       "the replace option is not accepted here"
     ], output.lines(chomp: true)
     assert_equal backend_kind, Microsandbox.default_backend_kind
+  end
+
+  # An unknown keyword is an ArgumentError raised before the runtime starts; an
+  # accepted one reaches sandbox creation, where the empty name fails instead.
+  def test_create_accepts_disable_exec_log_keyword
+    assert_raise(Microsandbox::Error) do
+      Microsandbox::Sandbox.create("", disable_exec_log: true)
+    end
   end
 
   def test_http_deny_message_reaches_cloud_validation

@@ -198,6 +198,8 @@ impl PreviousLaunch {
             sandbox_slot: self.sandbox_slot,
             vsock: self.vsock,
             checkpoint_restore: self.checkpoint_restore,
+            // Previous formats predate the opt-out and always recorded.
+            disable_exec_log: false,
         };
         if legacy_leases {
             let root = run_dir(&launch);
