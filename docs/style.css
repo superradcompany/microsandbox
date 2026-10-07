@@ -839,3 +839,7 @@ body:has(.msb-guides-overview) #table-of-contents-layout {
 @media (max-width: 760px) {
   .msb-guides-grid { column-count: 1; }
 }
+
+/* Show moved-command links only to readers following an old bookmark. */
+.msb-moved-command { display: none; }
+.msb-moved-command:target { display: block; margin: 1rem 0; }
