@@ -53,8 +53,8 @@ chrome_configure() {
     certificates=$(certutil -L -d "sql:$store") || fail "cannot read NSS store at $store"
 
     if existing=$(certutil -L -d "sql:$store" -n "$alias" -a 2>/dev/null); then
-        expected=$(tr -d '[:space:]' < "$CA_CERT") || fail "cannot read sandbox CA"
-        actual=$(printf '%s' "$existing" | tr -d '[:space:]') || fail "cannot read existing certificate"
+        expected=$(certificate_data < "$CA_CERT") || fail "cannot read sandbox CA"
+        actual=$(printf '%s\n' "$existing" | certificate_data) || fail "cannot read existing certificate"
         [ "$actual" = "$expected" ] || fail "alias $alias contains a different certificate in $store; review and remove that alias explicitly before retrying"
 
         trust=$(printf '%s\n' "$certificates" | awk -v name="$alias" '$1 == name { print $NF }') || fail "cannot read NSS trust flags"

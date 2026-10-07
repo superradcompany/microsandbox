@@ -35,6 +35,19 @@ require_ca() {
     [ -r "$CA_CERT" ] || fail "no readable interception CA at $CA_CERT; enable TLS interception first"
 }
 
+# Compare the first PEM certificate, ignoring surrounding comments and metadata.
+certificate_data() {
+    awk '
+        /-----BEGIN CERTIFICATE-----/ { inside = 1; next }
+        /-----END CERTIFICATE-----/ {
+            if (inside && length(data)) { print data; found = 1 }
+            exit
+        }
+        inside { gsub(/[[:space:]]/, ""); data = data $0 }
+        END { if (!found) exit 1 }
+    '
+}
+
 application_supported() (
     for candidate in $SUPPORTED_APPLICATIONS; do
         [ "$1" != "$candidate" ] || return 0

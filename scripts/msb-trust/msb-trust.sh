@@ -42,6 +42,19 @@ require_ca() {
     [ -r "$CA_CERT" ] || fail "no readable interception CA at $CA_CERT; enable TLS interception first"
 }
 
+# Compare the first PEM certificate, ignoring surrounding comments and metadata.
+certificate_data() {
+    awk '
+        /-----BEGIN CERTIFICATE-----/ { inside = 1; next }
+        /-----END CERTIFICATE-----/ {
+            if (inside && length(data)) { print data; found = 1 }
+            exit
+        }
+        inside { gsub(/[[:space:]]/, ""); data = data $0 }
+        END { if (!found) exit 1 }
+    '
+}
+
 application_supported() (
     for candidate in $SUPPORTED_APPLICATIONS; do
         [ "$1" != "$candidate" ] || return 0
@@ -291,8 +304,8 @@ chrome_configure() {
     certificates=$(certutil -L -d "sql:$store") || fail "cannot read NSS store at $store"
 
     if existing=$(certutil -L -d "sql:$store" -n "$alias" -a 2>/dev/null); then
-        expected=$(tr -d '[:space:]' < "$CA_CERT") || fail "cannot read sandbox CA"
-        actual=$(printf '%s' "$existing" | tr -d '[:space:]') || fail "cannot read existing certificate"
+        expected=$(certificate_data < "$CA_CERT") || fail "cannot read sandbox CA"
+        actual=$(printf '%s\n' "$existing" | certificate_data) || fail "cannot read existing certificate"
         [ "$actual" = "$expected" ] || fail "alias $alias contains a different certificate in $store; review and remove that alias explicitly before retrying"
 
         trust=$(printf '%s\n' "$certificates" | awk -v name="$alias" '$1 == name { print $NF }') || fail "cannot read NSS trust flags"
@@ -363,8 +376,8 @@ java_configure() {
 
     if existing=$("$keytool" -exportcert -rfc -cacerts -alias "$alias" \
         -storepass:env MSB_JAVA_STORE_PASSWORD 2>/dev/null); then
-        expected=$(tr -d '[:space:]' < "$CA_CERT") || fail "cannot read sandbox CA"
-        actual=$(printf '%s' "$existing" | tr -d '[:space:]') || fail "cannot read existing certificate"
+        expected=$(certificate_data < "$CA_CERT") || fail "cannot read sandbox CA"
+        actual=$(printf '%s\n' "$existing" | certificate_data) || fail "cannot read existing certificate"
         if [ "$actual" = "$expected" ]; then
             progress 'Java already trusts this sandbox CA'
             return

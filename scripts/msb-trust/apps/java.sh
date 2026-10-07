@@ -54,8 +54,8 @@ java_configure() {
 
     if existing=$("$keytool" -exportcert -rfc -cacerts -alias "$alias" \
         -storepass:env MSB_JAVA_STORE_PASSWORD 2>/dev/null); then
-        expected=$(tr -d '[:space:]' < "$CA_CERT") || fail "cannot read sandbox CA"
-        actual=$(printf '%s' "$existing" | tr -d '[:space:]') || fail "cannot read existing certificate"
+        expected=$(certificate_data < "$CA_CERT") || fail "cannot read sandbox CA"
+        actual=$(printf '%s\n' "$existing" | certificate_data) || fail "cannot read existing certificate"
         if [ "$actual" = "$expected" ]; then
             progress 'Java already trusts this sandbox CA'
             return
