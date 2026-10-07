@@ -98,8 +98,10 @@ impl ExecControlRegistry {
                 "unsupported exec control contract",
             );
         }
-        if !(1..=64).contains(&request.signal) {
-            return ExecControlResponse::error("invalid_signal", "signal must be between 1 and 64");
+        // Ordinary exec historically accepted zero. This preserves that input without
+        // promising a liveness query: delivery still does not acknowledge guest handling.
+        if !(0..=64).contains(&request.signal) {
+            return ExecControlResponse::error("invalid_signal", "signal must be between 0 and 64");
         }
         let owner = {
             let clients = self.clients.lock().unwrap();

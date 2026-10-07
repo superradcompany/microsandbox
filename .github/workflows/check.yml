@@ -1956,6 +1956,26 @@ jobs:
           export MSB_HOME
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
+      - name: Python managed-job and null-stdin regression
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          chmod +x build/msb build/agentd
+          python3 scripts/smoke/cli/managed-job-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --workspace "${{ github.workspace }}" \
+            --python sdk/python/.venv/bin/python --python-only \
+            --output build/python-managed-job-results
+
+      - name: Upload Python managed-job regression results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-managed-job-results
+          path: build/python-managed-job-results/
+          if-no-files-found: warn
+
       - name: Disk usage
         if: always()
         run: scripts/ci/clean-runner-disk.sh --finish

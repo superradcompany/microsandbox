@@ -743,6 +743,23 @@ async fn exec_control_creation_backpressure_and_pause() -> Result<(), Box<dyn st
     let mut early = sandbox
         .exec_stream_with("sleep", |e| e.args(["120"]).stdin_pipe())
         .await?;
+    // Zero is accepted by ordinary exec, but is not an acknowledged liveness query.
+    early.signal(0).await?;
+    for invalid in [-1, 65, i32::MAX] {
+        assert!(
+            early
+                .signal(invalid)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("invalid_signal")
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), early.wait())
+            .await
+            .is_err()
+    );
     early.kill().await?;
     assert!(
         !tokio::time::timeout(Duration::from_secs(5), early.wait())
@@ -783,6 +800,12 @@ async fn exec_control_creation_backpressure_and_pause() -> Result<(), Box<dyn st
         };
         assert!(
             tokio::time::timeout(Duration::from_secs(2), filling)
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), stream.signal(0)).await??;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stream.wait())
                 .await
                 .is_err()
         );

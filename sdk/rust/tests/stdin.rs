@@ -270,3 +270,116 @@ fn parse_wc_and_sha(stdout: &str) -> (String, String) {
         .to_string();
     (byte_count, sha)
 }
+
+/// Null and finite input must close only pipe stdin; cancelling a waiter must not close
+/// retained input or a PTY. Run in one VM so each mode exercises the same guest agent.
+#[msb_test]
+async fn stdin_null_finite_retained_and_pty_lifetimes() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let name = "stdin-mode-lifetimes";
+    let sandbox = Sandbox::builder(name)
+        .image("mirror.gcr.io/library/alpine")
+        .cpus(1)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let default = timeout(Duration::from_secs(5), sandbox.exec("cat", ["-"]))
+        .await
+        .expect("default null must reach EOF")
+        .unwrap();
+    assert!(default.status().success && default.stdout_bytes().is_empty());
+    let explicit = timeout(
+        Duration::from_secs(5),
+        sandbox.exec_with("cat", |e| e.stdin_null()),
+    )
+    .await
+    .expect("explicit null must reach EOF")
+    .unwrap();
+    assert!(explicit.status().success && explicit.stdout_bytes().is_empty());
+    for bytes in [Vec::new(), vec![0, 255, 10]] {
+        let output = timeout(
+            Duration::from_secs(5),
+            sandbox.exec_with("cat", |e| e.stdin_bytes(bytes.clone())),
+        )
+        .await
+        .expect("finite input must reach EOF")
+        .unwrap();
+        assert!(output.status().success);
+        assert_eq!(output.stdout_bytes().as_ref(), bytes);
+    }
+
+    let mut retained = sandbox
+        .exec_stream_with("cat", |e| e.stdin_pipe())
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(100), retained.wait())
+            .await
+            .is_err()
+    );
+    let input = retained.take_stdin().expect("retained pipe");
+    input.write(b"after cancelled wait\n").await.unwrap();
+    input.close().await.unwrap();
+    let output = timeout(Duration::from_secs(5), retained.collect())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.stdout_bytes().as_ref(), b"after cancelled wait\n");
+
+    let mut delayed = sandbox
+        .exec_stream_with("sh", |e| e.args(["-c", "sleep 0.3; cat"]).stdin_null())
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(20), delayed.wait())
+            .await
+            .is_err()
+    );
+    assert!(
+        timeout(Duration::from_secs(5), delayed.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success
+    );
+
+    let mut pty = sandbox
+        .exec_stream_with("sh", |e| {
+            e.args(["-c", "test -t 0 && echo ready; cat"])
+                .tty(true)
+                .stdin_null()
+        })
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = pty.recv().await.expect("PTY closed before readiness");
+            if let ExecEvent::Stdout(bytes) = event
+                && String::from_utf8_lossy(&bytes).contains("ready")
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("PTY must become ready");
+    assert!(
+        timeout(Duration::from_millis(100), pty.wait())
+            .await
+            .is_err()
+    );
+    pty.kill().await.unwrap();
+    assert!(
+        !timeout(Duration::from_secs(5), pty.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success
+    );
+    stop_and_remove(name).await;
+}

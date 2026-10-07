@@ -115,12 +115,19 @@ class Suite:
             raise RuntimeError(f"managed-job fixture cleanup failed: {errors}; remaining={remaining}")
 
     def execute(self):
-        cases = [(name, test_command(self.args.archive, self.args.workspace, name))
-                 for name in CASES]
+        cases = [] if self.args.python_only else [
+            (name, test_command(self.args.archive, self.args.workspace, name)) for name in CASES]
         # managed-jobs.py invokes the real-terminal harness as well as CLI lifecycle
         # checks. Each CLI script gets a fresh VM, just like each Rust integration test.
-        cases += [(name, [sys.executable, str(self.args.workspace / "scripts/smoke" / f"{name}.py")])
-                  for name in ("managed-jobs", "managed-jobs-lifecycle")]
+        if not self.args.python_only:
+            cases += [(name, [sys.executable, str(self.args.workspace / "scripts/smoke" / f"{name}.py")])
+                      for name in ("managed-jobs", "managed-jobs-lifecycle")]
+        if self.args.python:
+            # Run the installed candidate wheel from the private fixture cwd. Supplying the
+            # sandbox environment below makes this opt-in regression execute instead of skip.
+            cases.append(("python-managed-jobs", [str(self.args.python), "-m", "pytest",
+                          "--import-mode=importlib", "-q", str(self.args.workspace /
+                          "sdk/python/tests/test_jobs_integration.py")]))
         failures = []
         try:
             for index, (label, command) in enumerate(cases):
@@ -146,11 +153,20 @@ class Suite:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("binary", "agent", "firmware", "archive", "workspace", "output"):
+    for name in ("binary", "agent", "firmware", "workspace", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--python", type=Path)
+    parser.add_argument("--python-only", action="store_true")
     parser.add_argument("--image", default="mirror.gcr.io/library/alpine:3.20")
     args = parser.parse_args()
-    for name in ("binary", "agent", "firmware", "archive", "workspace"):
+    if args.python_only and not args.python:
+        parser.error("--python-only requires --python")
+    if not args.python_only and not args.archive:
+        parser.error("--archive is required unless --python-only is selected")
+    for name in ("binary", "agent", "firmware", "archive", "workspace", "python"):
+        if getattr(args, name) is None:
+            continue
         setattr(args, name, getattr(args, name).absolute())
         if not getattr(args, name).exists():
             parser.error(f"{name} does not exist: {getattr(args, name)}")

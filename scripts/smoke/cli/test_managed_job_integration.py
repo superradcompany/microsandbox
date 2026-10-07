@@ -50,7 +50,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
     def suite(self):
         suite = object.__new__(HARNESS.Suite)
         suite.args = SimpleNamespace(workspace=Path("/repo"), archive=Path("/archive"),
-                                     binary=Path("/msb"), image="alpine")
+                                     binary=Path("/msb"), image="alpine", python=None, python_only=False)
         suite.env = {"MSB_HOME": "/private-fixture"}
         suite.cleanup = unittest.mock.Mock()
         return suite
@@ -81,6 +81,20 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             suite.execute()
         self.assertEqual(suite.run.call_count, 2)
+
+    def test_python_regression_gets_an_explicit_disposable_sandbox(self):
+        suite = self.suite()
+        suite.args.python = Path("/venv/bin/python")
+        suite.args.python_only = True
+        suite.run = unittest.mock.Mock()
+        suite.execute()
+        create, test = suite.run.call_args_list
+        self.assertEqual(create.args[0], "python-managed-jobs-create")
+        self.assertEqual(test.args[1][0], "/venv/bin/python")
+        self.assertIn("/repo/sdk/python/tests/test_jobs_integration.py", test.args[1])
+        self.assertEqual(test.kwargs["env"]["MSB_JOB_TEST_SANDBOX"], "ci-jobs-0")
+        self.assertEqual(test.kwargs["env"]["MSB_HOME"], "/private-fixture")
+        self.assertEqual(suite.cleanup.call_count, 2)
 
     def test_timeout_reaps_runner_and_records_failure_for_ci_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

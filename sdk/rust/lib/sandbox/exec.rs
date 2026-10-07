@@ -580,12 +580,22 @@ pub(crate) mod agent {
             _ => None,
         };
 
-        if let StdinMode::Bytes(ref data) = stdin_mode {
-            let data = data.clone();
+        let finite_input = match stdin_mode {
+            // A pipe with no caller-owned writer still needs an explicit guest EOF.
+            // PTYs have no independent stdin half; retain their existing terminal semantics.
+            StdinMode::Null if !tty => Some(Vec::new()),
+            StdinMode::Bytes(data) => Some(data),
+            _ => None,
+        };
+        if let Some(data) = finite_input {
             let bridge = Arc::clone(&client);
             tokio::spawn(async move {
-                let payload = ExecStdin { data };
-                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                if !data.is_empty() {
+                    let payload = ExecStdin { data };
+                    let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                }
+                // Empty finite input and null both send exactly one ordered EOF. Keeping
+                // this producer independent also lets cancellation of wait preserve delivery.
                 let close = ExecStdin { data: Vec::new() };
                 let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
             });
