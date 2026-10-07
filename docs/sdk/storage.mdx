@@ -1,0 +1,70 @@
+---
+title: Storage
+sidebarTitle: Storage
+description: Inspect local storage usage and preview cleanup from the SDK.
+icon: "database"
+---
+
+Storage reporting and cleanup are local-only. See [storage commands](/cli/storage-commands) for what is measured and what cleanup removes.
+
+The Rust SDK uses the same accounting and reclamation implementation as the CLI:
+
+<Accordion title="Rust example">
+
+```rust
+use std::time::Duration;
+
+use microsandbox::storage::MemoryPruneOptions;
+use microsandbox::{Sandbox, Snapshot, Storage};
+
+let usage = Storage::usage().await?;
+let sandbox_storage = Sandbox::get("worker").await?.storage_usage().await?;
+let snapshot_storage = Snapshot::open("worker:ready").await?.storage_usage().await?;
+let preview = Storage::prune(&MemoryPruneOptions {
+    dry_run: true,
+    older_than: Duration::from_secs(600),
+    ..Default::default()
+}).await?;
+```
+
+</Accordion>
+
+`Storage::usage_local` and `Storage::prune_local` accept an explicit `LocalBackend`. Object methods retain the backend captured by their handles. SDK pruning is an explicit operation and has no interactive confirmation; use `dry_run` to inspect first. Per-object storage measures managed files and describes exclusions. Exact attribution of shared RAM to individual sandboxes is not currently available; aggregate memory accounting reports whether pins or handoffs retain it.
+
+Python, Node, and Go expose the same aggregate reports and ownership checks:
+
+<Accordion title="Python example">
+
+```python
+from microsandbox import Storage
+
+usage = await Storage.usage()
+preview = await Storage.prune(dry_run=True, older_than_seconds=600)
+```
+
+</Accordion>
+
+<Accordion title="TypeScript example">
+
+```typescript
+import { Storage } from "microsandbox";
+
+const usage = await Storage.usage();
+const preview = await Storage.prune({ dryRun: true, olderThanSeconds: 600 });
+```
+
+</Accordion>
+
+<Accordion title="Go example">
+
+```go
+usage, err := microsandbox.StorageUsage(ctx)
+preview, err := microsandbox.PruneStorage(ctx, microsandbox.StoragePruneOptions{
+    DryRun: true,
+    OlderThanSeconds: 600,
+})
+```
+
+</Accordion>
+
+Node reports byte fields as `bigint` to preserve the complete unsigned 64-bit range; unknown values are `null`. Python uses integers and `None`, and Go uses unsigned integers with pointers for nullable measurements. Prune reports retain per-file errors alongside any successful removals, so SDK callers should inspect the report's entries.
