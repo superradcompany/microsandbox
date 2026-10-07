@@ -739,3 +739,7 @@ span:has(> .msb-badge-cloud) {
   background: rgb(var(--background-dark));
   isolation: isolate;
 }
+
+/* Show moved-command links only to readers following an old bookmark. */
+.msb-moved-command { display: none; }
+.msb-moved-command:target { display: block; margin: 1rem 0; }

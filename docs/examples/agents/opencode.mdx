@@ -114,6 +114,52 @@ Removing the sandbox also removes its provider connections, sessions, and OpenCo
 </Step>
 </Steps>
 
+## Use OpenCode from any project
+
+To launch OpenCode from whichever project folder you are in, install a reusable host command:
+
+<CodeGroup>
+```sh macOS & Linux
+msb install --tmp --name opencode-project \
+  --cpus 2 --memory 2G \
+  --mount-dir ./:/workspace:rw --workdir /workspace \
+  --mount-named opencode-config:/root/.config/opencode \
+  --mount-named opencode-data:/root/.local/share/opencode \
+  --mount-named opencode-state:/root/.local/state/opencode \
+  node:24-bookworm-slim -- sh -lc 'apt-get update && apt-get install -y --no-install-recommends ca-certificates git && npm install -g opencode-ai@1.18.4 && exec opencode'
+```
+
+```powershell Windows
+msb install --tmp --name opencode-project `
+  --cpus 2 --memory 2G `
+  --mount-dir ./:/workspace:rw --workdir /workspace `
+  --mount-named opencode-config:/root/.config/opencode `
+  --mount-named opencode-data:/root/.local/share/opencode `
+  --mount-named opencode-state:/root/.local/state/opencode `
+  node:24-bookworm-slim -- sh -lc 'apt-get update && apt-get install -y --no-install-recommends ca-certificates git && npm install -g opencode-ai@1.18.4 && exec opencode'
+```
+</CodeGroup>
+
+Then run this from a project folder on your host:
+
+```sh
+opencode-project
+```
+
+`--tmp` creates a fresh sandbox for each session and removes it on exit. The `./` mount uses the folder you launch `opencode-project` from. Keep it relative; passing a full path during installation fixes the command to that folder.
+
+Project edits stay on your host. The named volumes keep OpenCode's configuration, provider connections, and session history across runs. Other sandbox changes are discarded, so this example installs OpenCode and its dependencies again on each launch.
+
+Without `--tmp`, an installed command reuses the same sandbox and its original workspace mount. See [`msb install`](/cli/sandbox-commands#msb-install).
+
+To remove the host command:
+
+```sh
+msb uninstall opencode-project
+```
+
+The three named volumes remain until you [remove them explicitly](/cli/volume-commands#msb-volume-rm).
+
 ## Reference
 
 - [OpenCode installation](https://opencode.ai/docs/)
