@@ -6,7 +6,7 @@ from contextlib import suppress
 
 import pytest
 
-from microsandbox import JobError, Sandbox, Stdin
+from microsandbox import ExecTimeoutError, JobError, Sandbox, Stdin
 
 
 @pytest.mark.skipif(
@@ -90,3 +90,32 @@ async def test_managed_job_ownership_io_and_cancellation():
             with suppress(JobError):
                 await job.kill()
                 await job.wait()
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("MSB_HOME") and os.environ.get("MSB_JOB_TEST_SANDBOX")),
+    reason="requires an isolated MSB_HOME and running MSB_JOB_TEST_SANDBOX",
+)
+async def test_stream_timeout_without_output_polling():
+    sandbox = await (await Sandbox.get(os.environ["MSB_JOB_TEST_SANDBOX"])).connect()
+    async with asyncio.timeout(20):
+        for tty in [False, True]:
+            handle = await sandbox.exec_stream("sleep", ["30"], timeout=0.5, tty=tty)
+            try:
+                # Cancelling a caller's wait must not remove the execution deadline.
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(handle.wait(), 0.05)
+                await asyncio.sleep(1)
+                with pytest.raises(ExecTimeoutError):
+                    await handle.collect()
+            finally:
+                with suppress(Exception):
+                    await handle.kill()
+        shell = await sandbox.shell_stream("sleep 30", timeout=0.5)
+        with pytest.raises(ExecTimeoutError):
+            await shell.wait()
+        output = await sandbox.exec_stream("echo", ["ok"], timeout=5)
+        assert (await output.collect()).stdout_text == "ok\n"
+        # Buffered exec keeps its established timeout error contract as well.
+        with pytest.raises(ExecTimeoutError):
+            await sandbox.exec("sleep", ["30"], timeout=0.5)

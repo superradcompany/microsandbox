@@ -45,4 +45,18 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
       }
     }
   }, 20_000);
+  it("enforces streaming deadlines without polling output", async () => {
+    const sb = await (await Sandbox.get(process.env.MSB_JOB_TEST_SANDBOX!)).connect();
+    for (const tty of [false, true]) {
+      const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeout(500));
+      try {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        await expect(handle.collect()).rejects.toMatchObject({ name: "ExecTimeoutError" });
+      } finally {
+        await handle.kill().catch(() => {});
+      }
+    }
+    const fast = await sb.execStreamWith("echo", b => b.args(["ok"]).timeout(5000));
+    expect((await fast.collect()).stdout()).toBe("ok\n");
+  }, 20_000);
 });

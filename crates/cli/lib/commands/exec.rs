@@ -206,7 +206,8 @@ async fn run_started(
             &env_pairs,
             &workdir,
             &args.user,
-            timeout,
+            // drive_stream owns the CLI deadline and its existing diagnostic/exit behavior.
+            None,
             &rlimits,
         );
         if args.no_stdin {
@@ -370,9 +371,8 @@ async fn forward_stdin(sink: ExecSink) -> anyhow::Result<()> {
 /// Pump events from a streaming exec session to the host's stdout/stderr until
 /// the guest exits, returning its exit code.
 ///
-/// Enforces `timeout` by killing the guest on expiry — the SDK leaves timeout
-/// enforcement to the stream driver, mirroring the buffered path's
-/// `tokio::time::timeout` + kill.
+/// Owns the CLI timeout and its diagnostic/exit behavior. The underlying SDK stream
+/// is opened without a second deadline so the two timers cannot race each other.
 async fn drive_stream(
     handle: &mut ExecHandle,
     timeout: Option<Duration>,

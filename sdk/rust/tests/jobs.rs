@@ -939,3 +939,145 @@ fn output_bytes(entries: &[microsandbox::jobs::JobLogEntry]) -> Vec<u8> {
         .flat_map(|entry| entry.data.iter().copied())
         .collect()
 }
+
+#[tokio::test]
+#[ignore = "requires a running disposable VM and MSB_JOB_TEST_SANDBOX"]
+async fn exec_stream_deadlines() -> Result<(), Box<dyn std::error::Error>> {
+    use microsandbox::{ExecEvent, MicrosandboxError};
+
+    let sandbox = Sandbox::get(&std::env::var("MSB_JOB_TEST_SANDBOX")?)
+        .await?
+        .connect()
+        .await?;
+    let duration = Duration::from_millis(500);
+    for tty in [false, true] {
+        let mut stream = sandbox
+            .exec_stream_with("sleep", |e| e.args(["120"]).tty(tty).timeout(duration))
+            .await?;
+        let pid = match stream.recv().await {
+            Some(ExecEvent::Started { pid }) => pid,
+            other => panic!("missing start: {other:?}"),
+        };
+        // No handle method is polled while the deadline expires. Prove guest death before
+        // calling wait, so a timer implemented only inside wait cannot pass this test.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(
+            !sandbox
+                .exec("kill", ["-0".to_string(), pid.to_string()])
+                .await?
+                .status()
+                .success
+        );
+        assert!(
+            matches!(stream.wait().await, Err(MicrosandboxError::ExecTimeout(d)) if d == duration)
+        );
+    }
+    let mut cancelled = sandbox
+        .exec_stream_with("sleep", |e| e.args(["120"]).timeout(duration))
+        .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), cancelled.wait())
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), cancelled.collect()).await?,
+        Err(MicrosandboxError::ExecTimeout(_))
+    ));
+
+    let mut zero = sandbox
+        .exec_stream_with("sleep", |e| e.args(["120"]).timeout(Duration::ZERO))
+        .await?;
+    assert!(
+        matches!(tokio::time::timeout(Duration::from_secs(5), zero.wait()).await?, Err(MicrosandboxError::ExecTimeout(d)) if d.is_zero())
+    );
+    let mut failed = sandbox
+        .exec_stream_with("/nonexistent-stream-timeout-command", |e| {
+            e.timeout(Duration::ZERO)
+        })
+        .await?;
+    assert!(matches!(
+        failed.wait().await,
+        Err(MicrosandboxError::ExecFailed(_))
+    ));
+    let mut fast = sandbox
+        .exec_stream_with("sh", |e| {
+            e.args(["-c", "printf out; printf err >&2; exit 7"])
+                .timeout(Duration::from_secs(10))
+        })
+        .await?;
+    let output = fast.collect().await?;
+    assert_eq!(output.status().code, 7);
+    assert_eq!(output.stdout_bytes().as_ref(), b"out");
+    assert_eq!(output.stderr_bytes().as_ref(), b"err");
+    let mut unlimited = sandbox.exec_stream("sleep", ["1"]).await?;
+    assert!(unlimited.wait().await?.success);
+
+    // A deadline must reach the same reserved control path as explicit kill, even
+    // while the guest refuses pipe or raw PTY input and the producer is blocked.
+    for tty in [false, true] {
+        let mut blocked = sandbox
+            .exec_stream_with("sh", |e| {
+                e.args([
+                    "-c",
+                    if tty {
+                        "stty raw -echo; echo ready; sleep 120"
+                    } else {
+                        "echo ready; sleep 120"
+                    },
+                ])
+                .stdin_pipe()
+                .tty(tty)
+                .timeout(Duration::from_secs(3))
+            })
+            .await?;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), blocked.recv()).await? {
+                Some(ExecEvent::Stdout(bytes))
+                    if String::from_utf8_lossy(&bytes).contains("ready") =>
+                {
+                    break;
+                }
+                Some(ExecEvent::Started { .. }) => {}
+                other => panic!("missing ready: {other:?}"),
+            }
+        }
+        let input = blocked.take_stdin().unwrap();
+        let fill = async {
+            for _ in 0..512 {
+                input.write(vec![0; 16384]).await?;
+            }
+            Ok::<_, MicrosandboxError>(())
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), fill)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(7), blocked.wait()).await?,
+            Err(MicrosandboxError::ExecTimeout(_))
+        ));
+    }
+
+    let mut paused = sandbox
+        .exec_stream_with("sleep", |e| e.args(["120"]).timeout(duration))
+        .await?;
+    assert!(matches!(
+        paused.recv().await,
+        Some(ExecEvent::Started { .. })
+    ));
+    sandbox.pause().await?;
+    // Resume before the transport's delivery-confirmation limit; a paused guest
+    // cannot acknowledge a signal or exit until the vCPUs run again.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    sandbox.resume().await?;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), paused.wait()).await?,
+        Err(MicrosandboxError::ExecTimeout(_))
+    ));
+    eprintln!(
+        "stream deadlines: idle consumer, cancelled wait, zero/start failure, output/status, pipe/PTY saturation and pause/resume passed"
+    );
+    Ok(())
+}

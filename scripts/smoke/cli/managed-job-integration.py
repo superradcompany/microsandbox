@@ -23,6 +23,7 @@ CASES = (
     "managed_job_z_blocked_input_signal",
     "managed_job_z_blocked_input_timeout",
     "exec_control_creation_backpressure_and_pause",
+    "exec_stream_deadlines",
     "managed_job_zz_saturated_shutdown",
 )
 

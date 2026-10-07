@@ -112,3 +112,35 @@ func TestManagedJobIntegration(t *testing.T) {
 		t.Fatalf("stream close: %v", err)
 	}
 }
+
+func TestExecStreamDeadlineIntegration(t *testing.T) {
+	name := os.Getenv("MSB_JOB_TEST_SANDBOX")
+	if name == "" {
+		t.Skip("requires a disposable VM and MSB_JOB_TEST_SANDBOX")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	handle, err := GetSandbox(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := handle.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sb.Close()
+	for _, tty := range []bool{false, true} {
+		stream, err := sb.ExecStream(ctx, "sleep", []string{"30"}, WithExecTimeout(time.Second), WithExecTTY(tty))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Close()
+		defer stream.Kill(context.Background())
+		// No output consumer is necessary for the native deadline to fire.
+		time.Sleep(1500 * time.Millisecond)
+		_, err = stream.Collect(ctx)
+		if !IsKind(err, ErrExecTimeout) {
+			t.Fatalf("expected exec timeout, got %v", err)
+		}
+	}
+}
