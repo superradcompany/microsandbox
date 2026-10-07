@@ -1542,6 +1542,7 @@ jobs:
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
         # The short operation deadline excludes image setup and bounded cleanup.
@@ -1676,13 +1677,32 @@ jobs:
           # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
           # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
           # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
-          # catalog fixture is provisioned separately below.
+          # catalog and managed-job fixtures are provisioned separately below.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
             -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
+
+      - name: Managed-job integration fixtures
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/smoke/cli/managed-job-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/managed-job-integration-results
+
+      - name: Upload managed-job integration results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: managed-job-integration-results
+          path: build/managed-job-integration-results/
+          if-no-files-found: warn
 
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
