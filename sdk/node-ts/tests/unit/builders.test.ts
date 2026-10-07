@@ -744,6 +744,7 @@ describe("NetworkBuilder secret passthrough", () => {
         .value("sk-abc")
         .allow("api.github.com")[method]("api.anthropic.com")
         .allowPlaceholderFor("*.anthropic.com")
+        .substituteInHeaderFields(["authorization"])
         .substituteInBody(true)
         .violationAction("block-and-log")
         .build();
@@ -753,6 +754,7 @@ describe("NetworkBuilder secret passthrough", () => {
         "api.anthropic.com",
         "*.anthropic.com",
       ]);
+      expect(secret.substitution.headerFields).toEqual(["authorization"]);
       expect(secret.substitution.body).toBe(true);
     },
   );

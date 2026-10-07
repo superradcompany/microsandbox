@@ -10,8 +10,8 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    extract_str_enum, is_exact_sdk_type, parse_violation_action_obj, restore_builder_from_args,
-    sandbox_builder_from_args, str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
+    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -31,6 +31,7 @@ pub struct PySandbox {
     // Immutable identity is available even while a consuming operation holds the wrapper lock.
     stop_name: String,
     stop_identity: String,
+    local_backend: bool,
 }
 
 /// One child outcome from a capture-once batch.
@@ -90,6 +91,7 @@ impl PySandbox {
         Self {
             stop_name: inner.name().to_string(),
             stop_identity: inner.id().to_string(),
+            local_backend: inner.backend_kind().as_str() == "local",
             inner: Arc::new(Mutex::new(Some(inner))),
         }
     }
@@ -1087,13 +1089,14 @@ impl PySandbox {
     }
 
     /// Deprecated: use fork for live execution duplication.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1103,17 +1106,18 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork(py, name, record_integrity, guest_flush)
+        self.fork(py, name, record_integrity, guest_flush, volumes)
     }
 
     /// Deprecated: use fork_many for live execution duplication.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1123,18 +1127,21 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork_many(py, names, record_integrity, guest_flush)
+        self.fork_many(py, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1144,6 +1151,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             Ok(PySandbox::from_rust(
                 builder.fork().await.map_err(to_py_err)?,
             ))
@@ -1151,14 +1159,17 @@ impl PySandbox {
     }
 
     /// Capture once for all names; return an outcome for each child in input order.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1168,6 +1179,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }
@@ -1518,6 +1530,11 @@ pub(crate) fn build_secret_patches(
                                 "substitution.headers",
                                 &obj.getattr("headers")?,
                             )?,
+                            header_fields: obj.getattr("header_fields")?.extract().map_err(|_| {
+                                PyValueError::new_err(format!(
+                                    "secret {name:?}: \"substitution.header_fields\" must be a sequence of strings"
+                                ))
+                            })?,
                             query: extract_secret_bool(
                                 &name,
                                 "substitution.query",
@@ -2701,6 +2718,7 @@ mod tests {
 
     #[test]
     fn python_secret_modify_options_reach_rust_patch() {
+        let _guard = crate::helpers::tests::PYTHON_TYPES_LOCK.lock().unwrap();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             // Load the public Python types without requiring a built extension or VM.
@@ -2756,8 +2774,19 @@ mod tests {
             let patches = parse("dict(substitution=SecretSubstitution())").unwrap();
             let substitution = patches[0].substitution.as_ref().unwrap();
             assert!(substitution.headers);
+            assert!(substitution.header_fields.is_empty());
             assert!(!substitution.query);
             assert!(!substitution.body);
+
+            let patches = parse(
+                "dict(substitution=SecretSubstitution(header_fields=('authorization', 'x-api-key')))",
+            )
+            .unwrap();
+            let wire = serde_json::to_value(&patches[0]).unwrap();
+            assert_eq!(
+                wire["substitution"]["header_fields"],
+                serde_json::json!(["authorization", "x-api-key"])
+            );
 
             for expression in ["{}", "dict(value='private-material')"] {
                 let patches = parse(expression).unwrap();

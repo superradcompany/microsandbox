@@ -5,6 +5,8 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -171,7 +173,7 @@ impl ProcessIdentity {
 
 impl DatabaseIdentity {
     pub fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
-        let file = File::open(path.as_ref()).map_err(ClientError::from)?;
+        let file = open_database_identity(path.as_ref()).map_err(ClientError::from)?;
         let id = file_id(&file)?;
         Ok(Self {
             path: path.as_ref().to_owned(),
@@ -181,7 +183,8 @@ impl DatabaseIdentity {
     }
 
     pub fn verify(&self) -> ControlClientResult<()> {
-        let current = File::open(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
+        let current =
+            open_database_identity(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
         if file_id(&current)? != self.id {
             return Err(ControlClientError::RuntimeChanged);
         }
@@ -192,6 +195,24 @@ impl DatabaseIdentity {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn open_database_identity(path: &Path) -> std::io::Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        // Closing an ordinary descriptor releases this process's POSIX locks
+        // on the inode, including SQLite's locks on other descriptors. O_PATH
+        // pins the inode for replacement detection without participating in
+        // those locks, including when a retained identity is dropped.
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_PATH)
+            .open(path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        File::open(path)
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn linux_start(pid: i32) -> ControlClientResult<ProcessStart> {

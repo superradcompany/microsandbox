@@ -7,11 +7,12 @@ use std::sync::atomic::{
 
 use crate::layout::{
     HEADER_SIZE, Header, NAME_BYTES, REGISTRY_VERSION, SAMPLE_FLAG_MEMORY_AVAILABLE,
-    SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SLOT_ACTIVE, SLOT_SIZE, registry_size,
+    SAMPLE_FLAG_MEMORY_HOST_RESIDENT, SAMPLE_FLAG_MEMORY_USED, SLOT_ACTIVE, SLOT_SIZE,
+    registry_size,
 };
 use crate::registry::{
-    MappedRegion, WaitForReadyError, flag_value, ms_to_datetime, open_existing_read_only_region,
-    validate_header_version, wait_for_ready,
+    MappedRegion, WaitForReadyError, flag_set, flag_value, ms_to_datetime,
+    open_existing_read_only_region, validate_header_version, wait_for_ready,
 };
 use crate::{LiveMetric, LiveMetricState, MetricsError, MetricsRegistry, MetricsResult};
 
@@ -200,6 +201,7 @@ impl LegacyRegistryV2 {
                 cpu_percent: f32::from_bits(cpu_bits),
                 vcpu_time_ns,
                 memory_bytes: memory,
+                memory_bytes_reported: flag_set(sample_flags, SAMPLE_FLAG_MEMORY_USED),
                 memory_available_bytes: flag_value(
                     sample_flags,
                     SAMPLE_FLAG_MEMORY_AVAILABLE,
@@ -211,6 +213,7 @@ impl LegacyRegistryV2 {
                     memory_host_resident,
                 ),
                 memory_limit_bytes: memory_limit,
+                memory_limit_live: false,
                 disk_read_bytes: disk_read,
                 disk_write_bytes: disk_write,
                 net_rx_bytes: net_rx,
@@ -295,7 +298,6 @@ mod tests {
     use super::*;
     use crate::layout::{
         HEADER_STATE_INITIALIZING, HEADER_STATE_READY, REGISTRY_MAGIC, SAMPLE_FLAG_CPU,
-        SAMPLE_FLAG_MEMORY_USED,
     };
     use crate::registry::{create_region, unlink_region};
 
@@ -385,6 +387,7 @@ mod tests {
         assert_eq!(snapshot.run_id, 99);
         assert_eq!(snapshot.name, "legacy-sandbox");
         assert_eq!(snapshot.cpu_percent, 12.5);
+        assert!(snapshot.memory_bytes_reported);
         assert_eq!(snapshot.memory_available_bytes, Some(3072));
         assert_eq!(snapshot.upper_used_bytes, None);
         assert_eq!(snapshot.upper_free_bytes, None);

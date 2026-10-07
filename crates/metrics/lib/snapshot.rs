@@ -42,14 +42,19 @@ pub struct LiveMetric {
     pub cpu_percent: f32,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: u64,
-    /// Guest-used memory in bytes.
+    /// Guest-used memory in bytes; 0 when `memory_bytes_reported` is false.
     pub memory_bytes: u64,
+    /// Whether `memory_bytes` holds a reported value for this sample.
+    pub memory_bytes_reported: bool,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
+    /// Whether `memory_limit_bytes` came from live VM memory state rather than the reservation.
+    pub memory_limit_live: bool,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
     /// Cumulative guest logical storage bytes written.
@@ -73,13 +78,16 @@ pub struct SandboxMetrics {
     pub cpu_percent: f32,
     /// Cumulative guest vCPU execution time across all vCPUs.
     pub vcpu_time_ns: u64,
-    /// Guest-used memory in bytes.
+    /// Guest-used memory in bytes; 0 when `memory_bytes_reported` is false.
     pub memory_bytes: u64,
+    /// Whether `memory_bytes` holds a reported value for this sample.
+    pub memory_bytes_reported: bool,
     /// Guest-available memory in bytes when reported by the guest.
     pub memory_available_bytes: Option<u64>,
     /// Host-resident guest memory in bytes for capacity diagnostics.
     pub memory_host_resident_bytes: Option<u64>,
-    /// Configured guest memory limit in bytes.
+    /// Effective guest memory limit in bytes: the boot allocation at reservation, refreshed by
+    /// runtimes that observe live memory state.
     pub memory_limit_bytes: u64,
     /// Cumulative guest logical storage bytes read.
     pub disk_read_bytes: u64,
@@ -131,6 +139,7 @@ impl From<LiveMetric> for SandboxMetricSnapshot {
                 cpu_percent: live.cpu_percent,
                 vcpu_time_ns: live.vcpu_time_ns,
                 memory_bytes: live.memory_bytes,
+                memory_bytes_reported: live.memory_bytes_reported,
                 memory_available_bytes: live.memory_available_bytes,
                 memory_host_resident_bytes: live.memory_host_resident_bytes,
                 memory_limit_bytes: live.memory_limit_bytes,

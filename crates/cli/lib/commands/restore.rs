@@ -8,7 +8,8 @@ use microsandbox::sandbox::{
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
 use super::common::{
-    display_restore_warnings, guest_clock_parser, parse_restore_volume, parse_vsock_route,
+    display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
+    parse_vsock_route,
 };
 use crate::ui;
 
@@ -59,6 +60,9 @@ pub struct RestoreResourceArgs {
     /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
     /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
     #[cfg(feature = "net")]
     #[arg(short, long)]
@@ -263,6 +267,10 @@ macro_rules! apply_resources {
                     let (guest, mount) = parse_restore_volume(volume)?;
                     builder = builder.volume(guest, |_| mount);
                 }
+                for spec in &self.mount_disk {
+                    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+                    builder = builder.volume(guest, |_| mount);
+                }
                 for route in &self.vsock {
                     let (host, port, kind) = parse_vsock_route(route)?;
                     builder = match kind {
@@ -335,6 +343,70 @@ mod tests {
             explicit.args.resources.external_mount_policy.as_deref(),
             Some("strict")
         );
+    }
+
+    #[test]
+    fn restore_attaches_mount_disk_like_create() {
+        let spec = "/images/seed.img:/data2:ro,fstype=ext4";
+        let cli =
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(cli.args.resources.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.resources.mount_disk[0]).unwrap();
+        assert_eq!(guest, "/data2");
+        match mount.build().unwrap() {
+            microsandbox::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mount_disk_reaches_run_builder_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let cli = TestCli::try_parse_from([
+            "restore",
+            missing.to_str().unwrap(),
+            "--name",
+            "restore-disk-binding",
+            "--mount-disk",
+            "/images/seed.img:/:ro,fstype=ext4",
+        ])
+        .unwrap();
+        // A root guest path is rejected by mount validation before the snapshot is
+        // opened, so this fails only if `run` hands the disk to the restore builder.
+        let error = run(cli.args, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mount a volume at guest root /"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn mount_disk_specs_are_applied_to_the_restore_builder() {
+        let args = |spec: &str| {
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap()
+                .args
+                .resources
+        };
+        let good = args("/images/seed.img:/data2:ro,fstype=ext4");
+        assert!(good.apply_restore(Sandbox::restore("group:snap")).is_ok());
+        let bad = args("/images/seed.img");
+        assert!(bad.apply_restore(Sandbox::restore("group:snap")).is_err());
     }
 
     #[test]

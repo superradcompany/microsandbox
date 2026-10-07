@@ -724,7 +724,7 @@ async fn released_v0_7_check_works_on_read_only_connection() {
         .execute_unprepared("PRAGMA query_only = ON")
         .await
         .unwrap();
-    for patch in 0..=2 {
+    for patch in 0..=6 {
         prepare(
             db.inner(),
             &Version::parse(&format!("0.7.{patch}")).unwrap(),
@@ -978,6 +978,113 @@ async fn invalid_active_policy_rolls_back_all_config_writes() {
         .unwrap()
         .unwrap();
     assert_eq!(row.try_get::<String>("", "config").unwrap(), raw);
+}
+
+/// Refusal must roll back earlier rows as well as either saved-config column.
+#[tokio::test]
+async fn scoped_header_downgrade_refuses_without_changing_the_catalog() {
+    let mut failures = Vec::new();
+    for version in [
+        "0.6.0", "0.6.18", "0.7.0", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+    ] {
+        for column in ["config", "active_config"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = open_downgrade_db(&dir.path().join("source.db"))
+                .await
+                .unwrap();
+            db.inner()
+                .execute_unprepared(
+                    "CREATE TABLE sandbox(id INTEGER PRIMARY KEY, config TEXT, active_config TEXT)",
+                )
+                .await
+                .unwrap();
+
+            let raw = current_saved_config();
+            let mut restricted: Value = serde_json::from_str(&raw).unwrap();
+            restricted["network"]["secrets"]["secrets"][0]["substitution"] = serde_json::json!({"headers":true,"header_fields":["authorization"],"query":false,"body":false});
+
+            let restricted = restricted.to_string();
+            let (config, active) = if column == "config" {
+                (&restricted, &raw)
+            } else {
+                (&raw, &restricted)
+            };
+
+            db.inner()
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "INSERT INTO sandbox VALUES (1, ?, ?), (2, ?, ?)",
+                    [
+                        raw.clone().into(),
+                        raw.clone().into(),
+                        config.clone().into(),
+                        active.clone().into(),
+                    ],
+                ))
+                .await
+                .unwrap();
+
+            let target = Version::parse(version).unwrap();
+            for (phase, result) in [
+                (
+                    "preflight",
+                    preflight_schema_rollback(
+                        db.inner(),
+                        &dir.path().join("preflight.db"),
+                        0,
+                        &target,
+                    )
+                    .await,
+                ),
+                (
+                    "rollback",
+                    rollback_schema_for_target(db.inner(), 0, Some(&target)).await,
+                ),
+            ] {
+                match result {
+                    Err(error) => {
+                        let error = error.to_string();
+                        assert!(
+                            error.contains("header-field") && error.contains(column),
+                            "{version} {phase}: {error}"
+                        );
+                        assert!(!error.contains("synthetic"), "{version} {phase}: {error}");
+                    }
+                    Ok(()) => failures.push(format!(
+                        "{version} {column} {phase}: unsafe downgrade accepted"
+                    )),
+                }
+            }
+
+            let rows = db
+                .inner()
+                .query_all_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    "SELECT config, active_config FROM sandbox ORDER BY id",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+
+            for (row, (expected_config, expected_active)) in
+                rows.iter().zip([(&raw, &raw), (config, active)])
+            {
+                assert_eq!(
+                    &row.try_get::<String>("", "config").unwrap(),
+                    expected_config,
+                    "{version} {column}"
+                );
+
+                assert_eq!(
+                    &row.try_get::<String>("", "active_config").unwrap(),
+                    expected_active,
+                    "{version} {column}"
+                );
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Uses catalogs created and upgraded by real release/candidate binaries.

@@ -3,6 +3,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::mount_builder::JsMountBuilder;
 use crate::sandbox::Sandbox;
 use crate::storage::{StorageItemUsageJs, item_to_js};
 use crate::types::*;
@@ -215,65 +216,95 @@ impl JsSandboxHandle {
     }
 
     /// @deprecated Use fork for live execution duplication.
-    #[napi]
-    pub async fn branch(
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn branch<'env>(
         &self,
+        env: &'env Env,
         name: String,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<crate::sandbox::Sandbox> {
-        self.fork(name, record_integrity, guest_flush).await
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        self.fork(env, name, record_integrity, guest_flush, volumes)
     }
 
     /// @deprecated Use forkMany for live execution duplication.
-    #[napi]
-    pub async fn branch_many(
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn branch_many<'env>(
         &self,
+        env: &'env Env,
         names: Vec<String>,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
-        self.fork_many(names, record_integrity, guest_flush).await
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Vec<crate::sandbox::JsBranchOutcome>>> {
+        self.fork_many(env, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[napi]
-    pub async fn fork(
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn fork<'env>(
         &self,
+        env: &'env Env,
         name: String,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<crate::sandbox::Sandbox> {
-        let mut builder = self
-            .inner
-            .fork(name)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(crate::sandbox::Sandbox::from_rust(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.inner.backend_kind().as_str() == "local",
+        );
+        let mut builder = self.inner.fork(name);
+
+        env.spawn_future(async move {
+            let volumes = volumes?;
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(Sandbox::from_rust(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
+        })
     }
 
     /// Capture once and return individual child startup outcomes.
-    #[napi]
-    pub async fn fork_many(
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn fork_many<'env>(
         &self,
+        env: &'env Env,
         names: Vec<String>,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Vec<crate::sandbox::JsBranchOutcome>> {
-        let mut builder = self
-            .inner
-            .fork_many(names)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(crate::sandbox::branch_outcomes(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Vec<crate::sandbox::JsBranchOutcome>>> {
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.inner.backend_kind().as_str() == "local",
+        );
+        let mut builder = self.inner.fork_many(names);
+
+        env.spawn_future(async move {
+            let volumes = volumes?;
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(crate::sandbox::branch_outcomes(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
+        })
     }
 
     /// Explicit resident pause through host control.

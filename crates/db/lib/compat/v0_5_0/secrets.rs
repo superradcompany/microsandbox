@@ -31,6 +31,7 @@ pub fn to_previous_version(raw: &str) -> Result<Option<String>, &'static str> {
     else {
         return Ok(None);
     };
+    crate::compat::secrets::reject_scoped_header_fields(secrets)?;
     let current = secrets.get("violation_action").is_some()
         || secrets.get("passthrough_hosts").is_some()
         || secrets
@@ -52,6 +53,22 @@ pub fn to_previous_version(raw: &str) -> Result<Option<String>, &'static str> {
     let original = secrets.clone();
     let fields = secrets.as_object_mut().ok_or("invalid secrets object")?;
     types_compat::v0_5_0::local::secrets::to_current(fields)?;
+
+    // An explicit empty allowlist and an omitted one both allow every header.
+    // Normalize only this field; unknown fields must still fail preservation.
+    if let Some(entries) = secrets.get_mut("secrets").and_then(Value::as_array_mut) {
+        for entry in entries {
+            if let Some(scopes) = entry.get_mut("substitution").and_then(Value::as_object_mut)
+                && scopes
+                    .get("header_fields")
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+            {
+                scopes.remove("header_fields");
+            }
+        }
+    }
+
     let expected: SecretsConfig =
         serde_json::from_value(secrets.clone()).map_err(|_| "invalid secret policy")?;
     let canonical = serde_json::to_value(expected).map_err(|_| "invalid secret policy")?;

@@ -270,6 +270,7 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
 | `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
+| `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]`, as in `msb create`; it wins over `-v` at the same guest path. A full restore accepts a disk only at a guest path captured in the snapshot, and the image must hold that disk's contents; use `--disk-only` to attach one at a new path |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
 | `--tcp-accept-queue-size` | Accept-queue depth for the child's published TCP ports (default: `1024`) |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
@@ -366,7 +367,7 @@ msb resume devbox
 
 <Tooltip tip="Forking is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s writes stay private.
+Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s memory writes stay private.
 
 ```bash
 msb fork devbox -n experiment
@@ -385,11 +386,14 @@ msb fork devbox --names worker-{1..10} # Bash/Zsh expand the names
 | `--names NAME...` | Several child names from one capture |
 | `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [advanced guest flushing](/sandboxes/snapshots#guest-flushing) |
 | `--integrity` | Record disk content hashes |
+| `--mount-disk` | Rebind a captured disk to a host image: `SOURCE:DEST[:OPTIONS]`, as in `msb create`; it wins over `-v` at the same guest path |
 | `-q`, `--quiet` | Suppress progress |
 
 Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
 Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
+
+A fork cannot add a new block device. `--mount-disk` only rebinds a captured disk, such as a named disk volume, at `DEST` to a host image consistent with the captured state. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 
@@ -517,7 +521,7 @@ Resize can take time. The output and JSON `resize_status` report `applied`, `con
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 
-`--secret` reads the same-named host environment variable; inline values are rejected. Options are `query`, `body`, `no-headers`, and `passthrough=HOST` or `passthrough=[HOST,...]`. Repeated declarations merge. See [secret updates](/sandboxes/secrets#update-secrets).
+`--secret` reads the same-named host environment variable; inline values are rejected. Options are `query`, `body`, `no-headers`, `headers=[FIELD,...]` (substitute only in those header fields; `headers=*` restores all headers, `*` cannot be combined with named fields, and `headers=` cannot be combined with `no-headers`), and `passthrough=HOST` or `passthrough=[HOST,...]`. Restrict `headers` to the credential header the API reads, since substituting in every header lets a reflecting endpoint return the secret to the guest. Repeated declarations merge. See [secret updates](/sandboxes/secrets#update-secrets).
 
 | Flag | Description |
 |------|-------------|
@@ -777,7 +781,7 @@ msb metrics --format json   # One-shot JSON output
 | --- | --- |
 | `STATE` | `running`: fresh sample; `stalled`: no sample for three sampling intervals; `exited`: final sample |
 | `CPU` | Busy cores / allocated cores, such as `0.80 / 2c` |
-| `MEM` | Guest-used memory / configured limit |
+| `MEM` | Guest-used memory / current memory limit |
 | Disk and network rates | Per-second change; exited rows show cumulative totals |
 
 Limits reflect live resizes. One-shot output samples twice to calculate rates. JSON and follow output keep cumulative counters and include `state` and `cpus`.

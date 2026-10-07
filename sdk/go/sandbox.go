@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
@@ -36,10 +38,11 @@ const (
 	GuestFlushSkip GuestFlush = "skip"
 )
 
-// ForkOptions controls optional integrity and guest writeback for a local fork.
-type ForkOptions struct {
-	RecordIntegrity bool
-	GuestFlush      GuestFlush
+// forkOptions holds the private configuration for a local fork.
+type forkOptions struct {
+	recordIntegrity bool
+	guestFlush      GuestFlush
+	volumes         map[string]MountConfig
 }
 
 // ForkOutcome contains either a running child or its startup error.
@@ -50,12 +53,7 @@ type ForkOutcome struct {
 }
 
 // ForkOption configures a local fork.
-type ForkOption func(*ForkOptions)
-
-// BranchOptions configures a live fork.
-//
-// Deprecated: use ForkOptions.
-type BranchOptions = ForkOptions
+type ForkOption func(*forkOptions)
 
 // BranchOption configures a live fork.
 //
@@ -79,12 +77,20 @@ func WithBranchGuestFlush(policy GuestFlush) ForkOption { return WithForkGuestFl
 
 // WithForkIntegrity records disk content hashes; RAM backing remains unhashed.
 func WithForkIntegrity() ForkOption {
-	return func(options *ForkOptions) { options.RecordIntegrity = true }
+	return func(options *forkOptions) { options.recordIntegrity = true }
+}
+
+// WithForkVolumes rebinds captured disks to host images consistent with the
+// captured state. A fork cannot add a new block device. Each child attaches
+// the supplied image directly, without a private copy, so batch forks should
+// not share a writable image.
+func WithForkVolumes(volumes map[string]MountConfig) ForkOption {
+	return func(options *forkOptions) { options.volumes = volumes }
 }
 
 // WithForkGuestFlush selects guest writeback before capturing a live fork.
 func WithForkGuestFlush(policy GuestFlush) ForkOption {
-	return func(options *ForkOptions) { options.GuestFlush = policy }
+	return func(options *forkOptions) { options.guestFlush = policy }
 }
 
 // BackendKind returns the backend retained by this sandbox.
@@ -277,9 +283,10 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 			Placeholder:        s.Placeholder,
 			RequireTLSIdentity: s.RequireTLSIdentity,
 			Substitution: ffi.SecretSubstitutionOptions{
-				Headers: s.Substitution.Headers,
-				Query:   s.Substitution.Query,
-				Body:    s.Substitution.Body,
+				Headers:      s.Substitution.Headers,
+				HeaderFields: s.Substitution.HeaderFields,
+				Query:        s.Substitution.Query,
+				Body:         s.Substitution.Body,
 			},
 			ViolationAction: string(s.ViolationAction),
 		})
@@ -1016,11 +1023,15 @@ func (h *SandboxHandle) RequestStop(ctx context.Context) error {
 
 // ForkMany captures once and returns each named child's startup outcome in input order.
 func (h *SandboxHandle) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
-	options := ForkOptions{}
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ffi.BranchManyByName(ctx, 0, h.name, h.id, names, options.recordIntegrity, volumes, string(options.guestFlush))
 	return wrapBranchOutcomes(rows, err)
 }
 
@@ -1040,11 +1051,15 @@ func (h *SandboxHandle) BranchMany(ctx context.Context, names []string, opts ...
 
 // Fork creates an independent local CoW child without publishing a durable full snapshot.
 func (h *SandboxHandle) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
-	options := ForkOptions{}
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := ffi.BranchSandboxByName(ctx, h.name, name, options.recordIntegrity, volumes, string(options.guestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1225,11 +1240,15 @@ func (s *Sandbox) BranchMany(ctx context.Context, names []string, opts ...ForkOp
 
 // Fork creates an independent local CoW child without publishing a durable full snapshot.
 func (s *Sandbox) Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error) {
-	options := ForkOptions{}
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	inner, err := s.inner.Branch(ctx, name, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := s.inner.Branch(ctx, name, options.recordIntegrity, volumes, string(options.guestFlush))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -1244,12 +1263,56 @@ func (s *Sandbox) Resume(ctx context.Context) error {
 // ForkMany captures once and returns each child's outcome in input order.
 // Validation/capture errors fail the call; individual startup failures are returned in Error.
 func (s *Sandbox) ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error) {
-	options := ForkOptions{}
+	options := forkOptions{}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	rows, err := s.inner.BranchMany(ctx, names, options.RecordIntegrity, string(options.GuestFlush))
+	volumes, err := ffiForkVolumes(options.volumes)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.inner.BranchMany(ctx, names, options.recordIntegrity, volumes, string(options.guestFlush))
 	return wrapBranchOutcomes(rows, err)
+}
+
+// ffiForkVolumes validates and encodes fork volumes like restore volumes.
+func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, error) {
+	if len(volumes) == 0 {
+		return nil, nil
+	}
+	if err := validateOwnedMounts(volumes); err != nil {
+		return nil, err
+	}
+	specs := buildFFICreateOptions(SandboxConfig{Volumes: volumes}).Volumes
+	// Fork is always local. Resolve host paths now so a later chdir cannot change
+	// which file the native fork opens.
+	var cwd string
+	for guestPath, spec := range specs {
+		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
+			if *hostPath == "" || filepath.IsAbs(*hostPath) {
+				continue
+			}
+			var abs string
+			var err error
+			if filepath.Separator == '\\' {
+				abs, err = filepath.Abs(*hostPath)
+			} else {
+				if cwd == "" {
+					cwd, err = os.Getwd()
+				}
+				if err == nil {
+					// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
+					abs = strings.TrimSuffix(cwd, "/") + "/" + *hostPath
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
+			}
+			*hostPath = abs
+		}
+		specs[guestPath] = spec
+	}
+	return specs, nil
 }
 
 func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {

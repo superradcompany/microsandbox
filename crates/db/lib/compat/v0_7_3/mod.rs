@@ -1,10 +1,7 @@
-//! Live secret storage and substitution implementation.
+//! Saved configuration compatibility for the shape introduced in v0.7.3.
 
 //--------------------------------------------------------------------------------------------------
 // Exports
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) mod config;
-pub mod handle;
-pub mod handler;
-mod hpack;
+pub mod secrets;
