@@ -495,6 +495,15 @@ impl JsSandboxBuilder {
         self
     }
 
+    /// Enable TLS interception, preserving existing network and TLS settings.
+    /// Does not re-enable disabled networking. Later network() calls replace configuration.
+    #[napi(js_name = "tlsIntercept")]
+    pub fn tls_intercept(&mut self) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.tls_intercept());
+        self
+    }
+
     /// Configure networking via a callback.
     #[napi]
     pub fn network(

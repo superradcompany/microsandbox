@@ -674,6 +674,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Enable TLS interception, preserving existing network and TLS settings.
+    ///
+    /// Use `.network(|n| n.tls(...))` to configure bypass hosts or custom CAs.
+    /// This does not re-enable networking if it has been disabled.
+    #[cfg(feature = "net")]
+    pub fn tls_intercept(self) -> Self {
+        self.network(|network| network.tls_overlay(|tls| tls.enabled(true)))
+    }
+
     /// Configure networking via a closure.
     ///
     /// ```ignore
@@ -3207,6 +3216,58 @@ mod tests {
         assert!(network.tls.intercept_ca.cert_path.is_none());
         assert!(network.tls.intercept_ca.key_path.is_none());
         assert_eq!(config.spec.network.ports.len(), 2);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn tls_intercept_preserves_existing_settings_and_respects_later_changes() {
+        let layers = BackendConfig::new(Default::default(), Default::default());
+        let builder = SandboxBuilder::new("tls-shortcut")
+            .image("alpine")
+            .port(8080, 80)
+            .network(|network| {
+                network.tls(|tls| {
+                    tls.enabled(false)
+                        .bypass("pinned.example.com")
+                        .intercept_ca_cert("/test/ca.pem")
+                        .intercept_ca_key("/test/ca.key")
+                })
+            })
+            .disable_network()
+            .tls_intercept()
+            .tls_intercept();
+        let config = builder.finish(Some(&layers), None).unwrap();
+        let network = config.local_network_config().unwrap();
+
+        assert!(network.tls.enabled);
+        assert_eq!(network.tls.bypass, ["pinned.example.com"]);
+        assert_eq!(
+            network.tls.intercept_ca.cert_path,
+            Some("/test/ca.pem".into())
+        );
+        assert_eq!(
+            network.tls.intercept_ca.key_path,
+            Some("/test/ca.key".into())
+        );
+        assert!(!network.enabled);
+        assert_eq!(
+            network.policy.default_egress,
+            microsandbox_network::policy::Action::Deny
+        );
+        assert_eq!(
+            network.policy.default_ingress,
+            microsandbox_network::policy::Action::Deny
+        );
+        assert!(network.policy.rules.is_empty());
+        assert_eq!(config.spec.network.ports.len(), 1);
+
+        let config = SandboxBuilder::new("tls-disabled")
+            .image("alpine")
+            .tls_intercept()
+            .network(|network| network.tls(|tls| tls.enabled(false)))
+            .finish(Some(&layers), None)
+            .unwrap();
+        assert!(!config.local_network_config().unwrap().tls.enabled);
     }
 
     #[test]

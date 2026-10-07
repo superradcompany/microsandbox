@@ -1134,3 +1134,31 @@ func TestForkOptionsKeepBranchAliases(t *testing.T) {
 		t.Fatal("restore lost the deprecated Forked field")
 	}
 }
+
+func TestWithTLSInterceptPreservesNetworkWithoutMutatingInput(t *testing.T) {
+	original := NetworkConfig{DefaultEgress: PolicyActionDeny, DenyDomains: []string{"blocked.example"}}
+	var config SandboxConfig
+	WithNetwork(&original)(&config)
+	WithTLSIntercept()(&config)
+	WithTLSIntercept()(&config)
+
+	wire := buildFFINetwork(config.Network)
+	if wire.TLS == nil || config.Network.DefaultEgress != PolicyActionDeny || !reflect.DeepEqual(config.Network.DenyDomains, original.DenyDomains) {
+		t.Fatal("TLS shortcut lost network policy or did not enable interception")
+	}
+	if original.TLS != nil {
+		t.Fatal("TLS shortcut mutated the caller's network configuration")
+	}
+
+	original.TLS = &TLSConfig{Bypass: []string{"pinned.example"}, CACert: "/test/ca.pem", CAKey: "/test/ca.key"}
+	WithNetwork(&original)(&config)
+	WithTLSIntercept()(&config)
+	if !reflect.DeepEqual(buildFFINetwork(config.Network).TLS, buildFFINetwork(&original).TLS) {
+		t.Fatal("TLS shortcut reset existing TLS settings")
+	}
+
+	WithNetwork(&NetworkConfig{})(&config)
+	if buildFFINetwork(config.Network).TLS != nil {
+		t.Fatal("later network configuration did not replace TLS settings")
+	}
+}

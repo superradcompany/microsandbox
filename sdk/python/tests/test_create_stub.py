@@ -39,6 +39,7 @@ EXPECTED_KWARGS = [
     "ports",
     "vsock",
     "network",
+    "tls_intercept",
     "secrets",
     "secret_violation_action",
     "detached",

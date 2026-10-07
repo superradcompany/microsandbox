@@ -1019,6 +1019,21 @@ func WithNetwork(net *NetworkConfig) SandboxOption {
 	return func(o *SandboxConfig) { o.Network = net }
 }
 
+// WithTLSIntercept enables TLS interception while preserving existing network and
+// TLS settings. A later WithNetwork replaces the network configuration.
+func WithTLSIntercept() SandboxOption {
+	return func(o *SandboxConfig) {
+		network := NetworkConfig{}
+		if o.Network != nil {
+			network = *o.Network
+		}
+		if network.TLS == nil {
+			network.TLS = &TLSConfig{}
+		}
+		o.Network = &network
+	}
+}
+
 // WithProxy sets the single proxy used for outbound sandbox connections.
 func WithProxy(proxy *OutboundProxy) SandboxOption {
 	return func(o *SandboxConfig) { o.Proxy = proxy }
