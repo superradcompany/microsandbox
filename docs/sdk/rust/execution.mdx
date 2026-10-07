@@ -1262,6 +1262,8 @@ let page = sb.list_jobs_with(|b| b.all(true).limit(50)).await?;
 
 `Job` provides `id`, `inspect`, `wait`, `logs`, `log_stream`, `follow_logs`, `attach`, `attach_with`, `signal`, `kill` and `eof`. Configure an attachment with `read_only(true)` and `replay(JobReplay::Recent { max_bytes })` or `JobReplay::After(cursor)`. `JobAttachment` provides concurrent `recv`, `write_stdin`, `resize` and `detach`; only one receiver may run at once. `interact_terminal()` adds terminal input, resize, raw-mode restoration and Ctrl-] detach using those same operations. Cancelling a wait or input future never kills the job.
 
+Terminal interaction keeps shortcut reads active while stdin is blocked, with a 1 MiB lookahead limit. Ctrl-] drains earlier input for at most two seconds. Overflow reports input loss immediately and discards further input while keeping the attachment open until Ctrl-], host EOF or process completion. Overflow or an incomplete drain returns `input_not_flushed` in the final result. Detach does not terminate the job or close guest stdin; do not automatically resend unconfirmed bytes.
+
 
 Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
 
