@@ -17,12 +17,12 @@ func TestWithImage(t *testing.T) {
 }
 
 func TestBranchIntegrityOption(t *testing.T) {
-	var options BranchOptions
-	if options.RecordIntegrity {
+	var options forkOptions
+	if options.recordIntegrity {
 		t.Fatal("branch integrity must be opt-in")
 	}
 	WithForkIntegrity()(&options)
-	if !options.RecordIntegrity {
+	if !options.recordIntegrity {
 		t.Fatal("explicit branch integrity option was lost")
 	}
 }
@@ -1118,16 +1118,16 @@ func TestSandboxConfigCompose(t *testing.T) {
 }
 
 func TestForkOptionsKeepBranchAliases(t *testing.T) {
-	var canonical ForkOptions
-	var legacy BranchOptions
+	var canonical forkOptions
+	var legacy forkOptions
 	WithForkIntegrity()(&canonical)
 	WithForkGuestFlush(GuestFlushRequired)(&canonical)
 	WithBranchIntegrity()(&legacy)
 	WithBranchGuestFlush(GuestFlushRequired)(&legacy)
-	if canonical != legacy {
+	if !reflect.DeepEqual(canonical, legacy) {
 		t.Fatalf("legacy options differ: %#v versus %#v", canonical, legacy)
 	}
-	// Old variadic method types remain assignable after the type aliases change.
+	// Deprecated option aliases remain assignable to the fork method types.
 	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
 	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
 	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {

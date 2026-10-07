@@ -2,6 +2,7 @@ import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./j
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
+import { forkMountBuilders } from "./internal/fork-volumes.js";
 import {
   compactionResultFromJson,
   type DiskCompactionOptions,
@@ -31,6 +32,7 @@ import {
 } from "./logs.js";
 import {
   Sandbox,
+  type ForkOptions,
   type SandboxPingResult,
   type SandboxTouchResult,
 } from "./sandbox.js";
@@ -203,24 +205,30 @@ export class SandboxHandle {
   }
 
   /** @deprecated Use fork() for live execution duplication. */
-  async branch(name: string, options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<Sandbox> {
+  async branch(name: string, options: ForkOptions = {}): Promise<Sandbox> {
     return this.fork(name, options);
   }
 
   /** @deprecated Use forkMany() for capture-once live duplication. */
-  async branchMany(names: string[], options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
+  async branchMany(names: string[], options: ForkOptions = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
     return this.forkMany(names, options);
   }
 
   /** Create an independent local CoW child without a durable full snapshot. */
-  async fork(name: string, options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<Sandbox> {
-    const child = await withMappedErrors(() => this.inner.fork(name, options.recordIntegrity, options.guestFlush));
+  async fork(name: string, options: ForkOptions = {}): Promise<Sandbox> {
+    const volumes = forkMountBuilders(options.volumes);
+    const child = await withMappedErrors(() => this.inner.fork(
+      name, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return new Sandbox(child, name, false);
   }
 
   /** Capture once; return each named child's startup outcome in input order. */
-  async forkMany(names: string[], options: { recordIntegrity?: boolean; guestFlush?: import("./snapshot.js").GuestFlush } = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
-    const outcomes = await withMappedErrors(() => this.inner.forkMany(names, options.recordIntegrity, options.guestFlush));
+  async forkMany(names: string[], options: ForkOptions = {}): Promise<import("./sandbox.js").ForkOutcome[]> {
+    const volumes = forkMountBuilders(options.volumes);
+    const outcomes = await withMappedErrors(() => this.inner.forkMany(
+      names, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
+    ));
     return outcomes.map(o => o.sandbox
       ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
       : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });

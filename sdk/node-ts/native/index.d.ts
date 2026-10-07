@@ -1159,13 +1159,13 @@ export declare class Sandbox {
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1570,13 +1570,13 @@ export declare class SandboxHandle {
    */
   stop(): Promise<void>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */

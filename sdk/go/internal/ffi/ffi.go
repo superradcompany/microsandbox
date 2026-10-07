@@ -2805,18 +2805,18 @@ type BranchOutcome struct {
 	Error   error
 }
 
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	// Zero selects name lookup in the shared native entry point. A closed live handle
 	// must not take that path, including when Close races with this call.
 	handle := s.handle.Load()
 	if handle == 0 {
 		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
 	}
-	return BranchManyByName(ctx, handle, s.name, "", names, integrity, policy...)
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity, volumes, policy...)
 }
 
 // BranchManyByName uses one native operation, never a loop of branch captures.
-func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2834,10 +2834,11 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 		names = []string{}
 	}
 	encoded, err := json.Marshal(struct {
-		Names      []string `json:"names"`
-		Identity   string   `json:"source_identity"`
-		GuestFlush string   `json:"guest_flush,omitempty"`
-	}{names, identity, flush})
+		Names      []string             `json:"names"`
+		Identity   string               `json:"source_identity"`
+		GuestFlush string               `json:"guest_flush,omitempty"`
+		Volumes    map[string]MountSpec `json:"volumes,omitempty"`
+	}{names, identity, flush, volumes})
 	if err != nil {
 		return nil, err
 	}
@@ -2878,18 +2879,18 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, policy...)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, policy...)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, 0, source, name, recordIntegrity)

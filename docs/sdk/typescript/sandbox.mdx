@@ -24,16 +24,18 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### fork() and forkMany()
 
 ```typescript
-fork(name: string, options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<Sandbox>
-forkMany(names: string[], options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<ForkOutcome[]>
+fork(name: string, options?: ForkOptions): Promise<Sandbox>
+forkMany(names: string[], options?: ForkOptions): Promise<ForkOutcome[]>
 ```
 
-`recordIntegrity` records disk hashes. `guestFlush` selects `"auto"`, `"required"`, or `"skip"`; the default is `"auto"`. Copy-on-write memory is inherent to a live fork, so no restore option is needed.
+`ForkOptions` is `{ recordIntegrity?: boolean; guestFlush?: GuestFlush; volumes?: Record<string, (m: MountBuilder) => MountBuilder> }`. `recordIntegrity` records disk hashes. `guestFlush` selects `"auto"`, `"required"`, or `"skip"`; the default is `"auto"`. Copy-on-write memory is inherent to a live fork, so no restore option is needed.
+
+`volumes` rebinds a captured disk to a host image consistent with the captured state, for example `{ "/data": m => m.disk("./seed.img") }`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 ### ForkOutcome
 
