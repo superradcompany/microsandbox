@@ -679,7 +679,7 @@ impl SandboxBuilder {
     /// Use `.network(|n| n.tls(...))` to configure bypass hosts or custom CAs.
     /// This does not re-enable networking if it has been disabled.
     #[cfg(feature = "net")]
-    pub fn tls_intercept(self) -> Self {
+    pub fn intercept_tls(self) -> Self {
         self.network(|network| network.tls_overlay(|tls| tls.enabled(true)))
     }
 
@@ -3220,7 +3220,7 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
-    fn tls_intercept_preserves_existing_settings_and_respects_later_changes() {
+    fn intercept_tls_preserves_existing_settings_and_respects_later_changes() {
         let layers = BackendConfig::new(Default::default(), Default::default());
         let builder = SandboxBuilder::new("tls-shortcut")
             .image("alpine")
@@ -3234,8 +3234,8 @@ mod tests {
                 })
             })
             .disable_network()
-            .tls_intercept()
-            .tls_intercept();
+            .intercept_tls()
+            .intercept_tls();
         let config = builder.finish(Some(&layers), None).unwrap();
         let network = config.local_network_config().unwrap();
 
@@ -3263,7 +3263,7 @@ mod tests {
 
         let config = SandboxBuilder::new("tls-disabled")
             .image("alpine")
-            .tls_intercept()
+            .intercept_tls()
             .network(|network| network.tls(|tls| tls.enabled(false)))
             .finish(Some(&layers), None)
             .unwrap();

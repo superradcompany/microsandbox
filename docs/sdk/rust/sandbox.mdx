@@ -1464,10 +1464,10 @@ Control whether the sandbox clock follows the host. Full snapshots save this set
   </div>
 </div>
 
-#### <span className="msb-recv">sandbox.</span><span className="msb-hn">tls_intercept()</span>
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">intercept_tls()</span>
 
 ```rust
-fn tls_intercept(self) -> Self
+fn intercept_tls(self) -> Self
 ```
 
 Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved, including bypass hosts and custom CAs. Does not re-enable disabled networking.

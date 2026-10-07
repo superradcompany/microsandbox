@@ -1792,10 +1792,10 @@ Publish ports on explicit host bind addresses, such as `0.0.0.0`. See [`PortBind
   </div>
 </div>
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithTLSIntercept()</span>
+#### <span className="msb-recv"></span><span className="msb-hn">WithInterceptTLS()</span>
 
 ```go
-func WithTLSIntercept() SandboxOption
+func WithInterceptTLS() SandboxOption
 ```
 
 Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved. A later `WithNetwork()` option replaces the network configuration.

@@ -1049,13 +1049,13 @@ describe("restore copy-on-write memory naming", () => {
 describe("SandboxBuilder TLS shortcut", () => {
   it("enables interception through the native builder without resetting TLS options", async () => {
     const defaults = await Sandbox.builder("tls-defaults").image("alpine")
-      .tlsIntercept()
+      .interceptTls()
       .build();
     expect(defaults.network.tls.enabled).toBe(true);
 
     const config = await Sandbox.builder("tls-shortcut").image("alpine")
       .network(n => n.tls(t => t.bypass("pinned.example.com")))
-      .tlsIntercept()
+      .interceptTls()
       .build();
 
     expect(config.network.tls.enabled).toBe(true);

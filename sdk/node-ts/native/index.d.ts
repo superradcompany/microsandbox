@@ -1330,7 +1330,7 @@ export declare class SandboxBuilder {
    * Enable TLS interception, preserving existing network and TLS settings.
    * Does not re-enable disabled networking. Later network() callbacks preserve settings unless changed.
    */
-  tlsIntercept(): this
+  interceptTls(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Configure the single proxy used for outbound sandbox connections. */

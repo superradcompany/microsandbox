@@ -1135,12 +1135,12 @@ func TestForkOptionsKeepBranchAliases(t *testing.T) {
 	}
 }
 
-func TestWithTLSInterceptPreservesNetworkWithoutMutatingInput(t *testing.T) {
+func TestWithInterceptTLSPreservesNetworkWithoutMutatingInput(t *testing.T) {
 	original := NetworkConfig{DefaultEgress: PolicyActionDeny, DenyDomains: []string{"blocked.example"}}
 	var config SandboxConfig
 	WithNetwork(&original)(&config)
-	WithTLSIntercept()(&config)
-	WithTLSIntercept()(&config)
+	WithInterceptTLS()(&config)
+	WithInterceptTLS()(&config)
 
 	wire := buildFFINetwork(config.Network)
 	if wire.TLS == nil || config.Network.DefaultEgress != PolicyActionDeny || !reflect.DeepEqual(config.Network.DenyDomains, original.DenyDomains) {
@@ -1152,7 +1152,7 @@ func TestWithTLSInterceptPreservesNetworkWithoutMutatingInput(t *testing.T) {
 
 	original.TLS = &TLSConfig{Bypass: []string{"pinned.example"}, CACert: "/test/ca.pem", CAKey: "/test/ca.key"}
 	WithNetwork(&original)(&config)
-	WithTLSIntercept()(&config)
+	WithInterceptTLS()(&config)
 	if !reflect.DeepEqual(buildFFINetwork(config.Network).TLS, buildFFINetwork(&original).TLS) {
 		t.Fatal("TLS shortcut reset existing TLS settings")
 	}

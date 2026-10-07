@@ -24,7 +24,7 @@ For new local sandboxes, relative paths to upstream CA certificates and intercep
 
 ## Enabling interception
 
-Use `.tlsIntercept()` to enable TLS interception with the default settings.
+Use `.interceptTls()` to enable TLS interception with the default settings.
 To configure bypass hosts, custom CAs, or other TLS options, use
 `.network(n => n.tls(...))`. Calling `.tls(...)` enables interception too,
 so you don't need both. The examples below show the shortcut in each SDK and the CLI.
@@ -35,7 +35,7 @@ import { Sandbox } from "microsandbox";
 
 await using sb = await Sandbox.builder("worker")
   .image("python")
-  .tlsIntercept()
+  .interceptTls()
   .create();
 ```
 
@@ -44,7 +44,7 @@ use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .tls_intercept()
+    .intercept_tls()
     .create()
     .await?;
 ```
@@ -55,21 +55,21 @@ from microsandbox import Sandbox
 sb = await Sandbox.create(
     "worker",
     image="python",
-    tls_intercept=True,
+    intercept_tls=True,
 )
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
-    m.WithTLSIntercept(),
+    m.WithInterceptTLS(),
 )
 ```
 
 ```ruby Ruby
 require "microsandbox"
 
-sb = Microsandbox::Sandbox.create("worker", image: "python", tls_intercept: true)
+sb = Microsandbox::Sandbox.create("worker", image: "python", intercept_tls: true)
 ```
 
 ```bash CLI
@@ -92,7 +92,7 @@ import { Sandbox } from "microsandbox";
 
 const sb = await Sandbox.builder("app")
   .image("ubuntu:24.04")
-  .tlsIntercept()
+  .interceptTls()
   .patch((p) => p.copyFile("./msb-trust.sh", "/msb-trust.sh"))
   .create();
 
@@ -106,7 +106,7 @@ use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("app")
     .image("ubuntu:24.04")
-    .tls_intercept()
+    .intercept_tls()
     .patch(|p| p.copy_file("./msb-trust.sh", "/msb-trust.sh", None, false))
     .create()
     .await?;
@@ -124,7 +124,7 @@ from microsandbox import Patch, Sandbox
 sb = await Sandbox.create(
     "app",
     image="ubuntu:24.04",
-    tls_intercept=True,
+    intercept_tls=True,
     patches=[Patch.copy_file("./msb-trust.sh", "/msb-trust.sh")],
 )
 
@@ -137,7 +137,7 @@ print(setup.stdout_text)
 ```go Go
 sb, err := m.CreateSandbox(ctx, "app",
     m.WithImage("ubuntu:24.04"),
-    m.WithTLSIntercept(),
+    m.WithInterceptTLS(),
     m.WithPatches(m.Patch.CopyFile(
         "./msb-trust.sh", "/msb-trust.sh", m.PatchOptions{},
     )),
@@ -159,7 +159,7 @@ fmt.Print(setup.Stdout())
 ```ruby Ruby
 require "microsandbox"
 
-sb = Microsandbox::Sandbox.create("app", image: "ubuntu:24.04", tls_intercept: true)
+sb = Microsandbox::Sandbox.create("app", image: "ubuntu:24.04", intercept_tls: true)
 sb.fs.write("/msb-trust.sh", File.binread("./msb-trust.sh"))
 
 setup = sb.shell("sh /msb-trust.sh all")

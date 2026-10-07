@@ -51,7 +51,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "ports",
     "vsock",
     "network",
-    "tls_intercept",
+    "intercept_tls",
     "proxy",
     "secrets",
     "secret_violation_action",
@@ -719,8 +719,8 @@ pub fn sandbox_builder_from_args(
     }
 
     // The shortcut overlays the supplied network settings without resetting TLS options.
-    if extract_opt::<bool>(kwargs, "tls_intercept")?.unwrap_or(false) {
-        builder = builder.tls_intercept();
+    if extract_opt::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
+        builder = builder.intercept_tls();
     }
 
     // Outbound proxy.
