@@ -189,7 +189,7 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
   .msb-platform-strip { grid-template-columns: 1fr; }
 }
 
-/* Introduction handoff to the examples library. */
+/* Introduction handoff to the task-guide library. */
 .msb-examples-cta {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -738,4 +738,104 @@ span:has(> .msb-badge-cloud) {
 .dark .enterprise-contact-surface {
   background: rgb(var(--background-dark));
   isolation: isolate;
+}
+
+/* Compact grouped links for the guide overview. */
+.msb-guides-grid {
+  column-count: 2;
+  column-gap: 2.5rem;
+  margin: 1.5rem 0 2rem;
+}
+
+/* Keep each topic together while columns fill independently, top to bottom. */
+.msb-guide-group {
+  break-inside: avoid;
+  margin-bottom: 2rem;
+}
+
+.msb-guide-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.65rem !important;
+  padding: 0 0 0.7rem;
+  border-bottom: 1px solid var(--msb-code-border);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.msb-guide-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.msb-guide-heading > *:first-child {
+  flex-shrink: 0;
+}
+
+.msb-guides-overview .msb-guide-group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.msb-guides-overview .msb-guide-group li {
+  margin: 0;
+  padding: 0;
+}
+
+.msb-guide-group li::before {
+  display: none;
+}
+
+.msb-guide-group li a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-bottom: 0 !important;
+  color: inherit;
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.5;
+  text-decoration: none;
+}
+
+.msb-guide-group li a > :last-child {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.msb-guide-group li a:hover {
+  color: var(--msb-code-header-text);
+}
+
+.msb-guide-group a:focus-visible {
+  outline: 2px solid var(--msb-code-header-text);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+
+/* Give the overview the space otherwise reserved for a TOC. */
+body:has(.msb-guides-overview) #table-of-contents-layout {
+  display: none;
+}
+
+@media (min-width: 1280px) {
+  .msb-guides-grid {
+    column-count: 3;
+    column-gap: 1.75rem;
+  }
+
+  #content-area:has(.msb-guides-overview) {
+    width: 100% !important;
+    max-width: 72rem !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .msb-guides-grid { column-count: 1; }
 }
