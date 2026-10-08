@@ -40,6 +40,7 @@ local = [
     "dep:rayon",
     "dep:reqwest",
     "dep:sea-orm",
+    "dep:socket2",
     "dep:tar",
 ]
 cloud = [
@@ -101,6 +102,7 @@ russh = { workspace = true, optional = true }
 russh-sftp = { workspace = true, optional = true }
 scopeguard.workspace = true
 sea-orm = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true

@@ -3846,6 +3846,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "sha2 0.11.0",
+ "socket2",
  "tar",
  "tempfile",
  "test-utils",

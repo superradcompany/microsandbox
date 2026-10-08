@@ -3,6 +3,7 @@
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpSocket;
 
 use super::{
@@ -239,16 +240,31 @@ fn overlaps(a: &PublishedPortSpec, b: &PublishedPortSpec) -> bool {
     if a.host_port != b.host_port || a.protocol != b.protocol {
         return false;
     }
+    let protocol = a.protocol;
     let (Some(a), Some(b)) = (
         endpoint(&a.host_bind, a.host_port),
         endpoint(&b.host_bind, b.host_port),
     ) else {
         return false;
     };
-    a == b || (a.is_ipv4() == b.is_ipv4() && (a.ip().is_unspecified() || b.ip().is_unspecified()))
-        // IPv6 wildcard listeners may also cover IPv4 depending on the OS.
-        || (a.is_ipv6() && a.ip().is_unspecified())
-        || (b.is_ipv6() && b.ip().is_unspecified())
+    if a.is_ipv4() == b.is_ipv4() {
+        return a == b || a.ip().is_unspecified() || b.ip().is_unspecified();
+    }
+    let ipv6 = if a.is_ipv6() { a } else { b };
+    if !ipv6.ip().is_unspecified() {
+        return false;
+    }
+
+    // The publisher leaves IPV6_V6ONLY at the host default. An unbound socket
+    // reads that same default without changing sysctls or reserving a port.
+    // If IPv6 is unavailable, preflight will report the actual bind error.
+    let (kind, protocol) = match protocol {
+        PortProtocol::Tcp => (Type::STREAM, Protocol::TCP),
+        PortProtocol::Udp => (Type::DGRAM, Protocol::UDP),
+    };
+    Socket::new(Domain::IPV6, kind, Some(protocol))
+        .and_then(|socket| socket.only_v6())
+        .is_ok_and(|only_v6| !only_v6)
 }
 
 fn format_port(port: &PublishedPortSpec) -> String {
