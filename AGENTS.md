@@ -255,9 +255,12 @@ path = "bin/main.rs"
 - Separate logical steps with blank lines: setup, early returns, normalization, validation, operations, and final results. Apply the same spacing to test setup, actions, and assertions; do not rely on `cargo fmt` to provide it.
 - Prefer named intermediate values when an expression combines distinct steps, especially fallible lookups, parsing, and validation. Make each failure point easy to identify.
 - Keep iterator chains simple. Prefer a straightforward loop when nested closures or branching make the logic harder to follow; do not add helpers solely to hide that complexity.
-- Write comments to explain intent, constraints, or non-obvious behavior rather than narrating the code. Name values for what they represent at that point, without implying an operation has already happened.
+- Keep straightforward logic together. Extract helpers when they clarify a distinct responsibility or remove meaningful duplication, rather than merely shortening a function.
+- Write comments to explain intent, constraints, or non-obvious behavior rather than narrating the code.
+- Name values for what they currently represent. Avoid names that imply an action has already happened when the value describes a requirement or planned action.
 - During refactors, conflict resolution, bug fixes, and feature work, call out any expected behavior, API, or data-format changes and wait for direction when the risk is material.
 - Use `thiserror` or existing local error patterns for typed errors. Include enough context for callers to understand the failing operation.
+- Keep shared library and SDK errors interface-neutral: describe the problem and remedy without CLI flags or command syntax. Add command-specific guidance in the CLI layer.
 - In async code, avoid holding locks across `.await`. Prefer explicit ownership, short critical sections, and existing Tokio patterns in the surrounding module.
 - Keep feature-gated code close to the feature it gates and use existing `#[cfg(feature = "...")]` patterns.
 - Do not add examples under `examples/` unless requested or clearly required. Prefer tests and docs for small usage coverage.
