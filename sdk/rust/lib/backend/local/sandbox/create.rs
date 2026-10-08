@@ -259,7 +259,7 @@ impl LocalBackend {
         // Archive metadata supplies effective runtime requirements; validating the
         // builder alone misses those. Publication below is a rename, not another copy.
         let mut archive_stage = None;
-        if let Some(archive) = config.snapshot_archive_source.take() {
+        if let Some(archive) = config.snapshot_archive_source.clone() {
             tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
             let stage = tempfile::Builder::new()
                 .prefix(".archive-restore-")
@@ -336,9 +336,21 @@ impl LocalBackend {
                         }
                     }));
             }
+            // Archive descriptors are resolved here, after the builder's initial validation.
+            // Do not let a disk archive turn an explicit CoW restore into a fresh boot, and
+            // reject it before replacement can remove the existing sandbox.
+            if config.forked && config.checkpoint_restore.is_none() {
+                return Err(crate::MicrosandboxError::InvalidConfig(
+                    "copy-on-write memory requires a full snapshot restore".into(),
+                ));
+            }
+
             // Archive metadata is now available. Check policy against captured state
-            // before admitting it or touching the replacement target.
+            // before admitting it or touching the replacement target. The archive
+            // source stays set until then: disk-only restores carry no checkpoint,
+            // so it is their only proof of a snapshot source.
             config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
+            config.snapshot_archive_source = None;
             // Keep launch-time restore intent in this check, not just cold-start state.
             launch_contract::validate_runtime_config(&config, self.config()).await?;
             archive_stage = Some(stage);
@@ -438,13 +450,6 @@ impl LocalBackend {
             super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
         }
 
-        // Archive descriptors are resolved here, after the builder's initial validation.
-        // Do not let a disk archive turn an explicit CoW restore into a fresh boot.
-        if config.forked && config.checkpoint_restore.is_none() {
-            return Err(crate::MicrosandboxError::InvalidConfig(
-                "copy-on-write memory requires a full snapshot restore".into(),
-            ));
-        }
         if !installed_file_sources.is_empty() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
             let virtual_size = installed_file_virtual_size.ok_or_else(|| {

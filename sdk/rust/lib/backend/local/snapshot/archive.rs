@@ -601,7 +601,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
 ///
 /// The runtime-owned checkpoint closure is read as the archive payload. No installed snapshot
 /// artifact or snapshot-index row is created.
-pub(super) async fn save_direct_checkpoint_snapshot(
+pub(in crate::backend::local) async fn save_direct_checkpoint_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
