@@ -270,6 +270,18 @@ network:
 
 A non-empty `allow` list implies deny-by-default egress. `strict` defaults to `true` and requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Set `strict: false` to opt out. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
 
+Both `ports` lists accept inclusive, equal-length host and guest ranges, including bind addresses and `/tcp` or `/udp`:
+
+```yaml
+network:
+  policy: open
+  ports:
+    - "0.0.0.0:10240-11264:10240-11264/udp"
+    - "8000-8002:80-82"
+```
+
+Ranges pair ports in ascending order and expand into individual mappings before launch. Endpoints must be from 1 to 65535; reversed, malformed, out-of-bounds, and unequal-length ranges are rejected. The first entry opens 1,025 host sockets, so provision host socket/file-descriptor capacity accordingly. See [Published ports](/cli/sandbox-commands#published-ports) for bind addresses and resource considerations.
+
 ### Secrets
 
 Every secret requires a non-empty destination allowlist. When `value` is omitted, the host environment variable with the same name is used. An exact `${NAME}` value records `NAME` as the host-side source instead of copying its plaintext into durable config.

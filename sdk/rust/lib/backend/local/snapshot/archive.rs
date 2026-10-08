@@ -199,6 +199,9 @@ pub(crate) struct ArchiveChildMaterialization {
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
     pub(crate) disk_mounts: Vec<microsandbox_types::VolumeMount>,
+    /// Guest paths of captured external binds that a disk-only restore of a checkpoint needs
+    /// destination mounts for.
+    pub(crate) required_bind_paths: Vec<String>,
 }
 
 /// Updates a member transport hash as the archive writer consumes the source.
@@ -1163,6 +1166,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: None,
             upper_layers: Vec::new(),
             disk_mounts: Vec::new(),
+            required_bind_paths: Vec::new(),
         });
     };
     let member = inventory
@@ -1230,12 +1234,17 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             }
             #[cfg(windows)]
             remove_private_stage_leases(child_stage).await?;
+
+            let required_bind_paths =
+                crate::sandbox::external_bind_guest_paths(&checkpoint.resources)?;
+
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
                 disk_mounts: materialized.disk_mounts,
+                required_bind_paths,
             });
         }
         let child_closure = child_stage.join(".checkpoint-restore");
@@ -1265,6 +1274,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
             disk_mounts: materialized.disk_mounts,
+            required_bind_paths: Vec::new(),
         });
     }
     let SnapshotState::File(file) = &manifest.state else {
@@ -1333,6 +1343,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
         disk_mounts: materialized.disk_mounts,
+        required_bind_paths: Vec::new(),
     })
 }
 

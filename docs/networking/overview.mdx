@@ -281,6 +281,8 @@ Use an explicit bind address, such as `0.0.0.0`, only when you intentionally wan
 
 If the host starts without IPv4 or IPv6 routes, microsandbox assigns private guest addresses for published ports unless guest addresses are already configured. A specific host bind address must still exist at startup.
 
+CLI `-p` and YAML `ports` lists also accept inclusive, equal-length port ranges: `-p 8000-8002:80-82` forwards three TCP ports, while `-p 0.0.0.0:10240-11264:10240-11264/udp` publishes 1,025 UDP ports. Ranges expand into the same individual mappings used by the SDKs, with one host socket per port. See [Published ports](/cli/sandbox-commands#published-ports) for validation and host resource requirements.
+
 On Windows, the first published port may trigger a Windows Defender Firewall prompt for `msb.exe` because the runtime opens a host listening socket. For local development, keep the bind address on `127.0.0.1`. Only allow private/public network access in the firewall prompt when you intentionally bind a published port beyond loopback.
 
 ## Rate limits

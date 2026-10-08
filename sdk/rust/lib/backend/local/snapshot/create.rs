@@ -12,6 +12,7 @@ use microsandbox_image::snapshot::{
     ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
     SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, layer_path,
 };
+use microsandbox_types::{VolumeMount, canonicalize_volume_mounts};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
@@ -64,6 +65,8 @@ struct FileSnapshotMetadata<'a> {
     source_sandbox: &'a str,
     root_disk: SnapshotRootDisk,
     user: Option<String>,
+    /// Guest paths of source mounts whose host-side backing this snapshot does not carry.
+    external_mounts: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -392,6 +395,7 @@ async fn capture_installed(
 
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let artifact_started = Instant::now();
+    let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
     let built = build_artifact(
         &staging_dir,
         &disk,
@@ -403,6 +407,7 @@ async fn capture_installed(
             source_sandbox: &source_sandbox,
             root_disk,
             user: sandbox_config.spec.runtime.user.clone(),
+            external_mounts,
         },
     )
     .await;
@@ -718,6 +723,8 @@ pub(super) async fn create_snapshot_archive(
     manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
         user: sandbox_config.spec.runtime.user.clone(),
     })?;
+    let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
+    manifest.set_external_mounts(external_mounts)?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -1073,6 +1080,7 @@ async fn build_artifact(
         source_sandbox,
         root_disk,
         user,
+        external_mounts,
     } = metadata;
     let total_started = Instant::now();
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
@@ -1147,6 +1155,7 @@ async fn build_artifact(
         root_disk,
     )?;
     manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults { user })?;
+    manifest.set_external_mounts(external_mounts)?;
     let canonical = manifest
         .to_canonical_bytes()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest serialize: {e}")))?;
@@ -1312,6 +1321,28 @@ fn new_file_manifest_with_id(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Guest paths of mounts backed by host state that a disk snapshot never captures.
+fn uncaptured_mount_paths(mounts: &[VolumeMount]) -> MicrosandboxResult<Vec<String>> {
+    let mut guest_paths = Vec::new();
+    for mount in mounts {
+        let is_host_backed = matches!(
+            mount,
+            VolumeMount::Bind { .. } | VolumeMount::Named { .. } | VolumeMount::DiskImage { .. }
+        );
+        if !is_host_backed {
+            continue;
+        }
+
+        // Older versions saved guest paths as typed (`/data/`); restore compares canonical ones.
+        let mut mount = mount.clone();
+        canonicalize_volume_mounts(std::slice::from_mut(&mut mount))?;
+
+        guest_paths.push(mount.guest().to_string());
+    }
+
+    Ok(guest_paths)
+}
 
 /// Resolve the root layout carried by a snapshot while retaining the ownership boundary for
 /// caller-provided disk images.
@@ -2115,6 +2146,7 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
     use super::*;
+    use crate::sandbox::SandboxBuilder;
 
     const CAPTURE_BASE_ID: &str = "layer_00000000000000000000000000000001";
 
@@ -2160,6 +2192,7 @@ mod tests {
             source_sandbox: "box",
             root_disk,
             user: None,
+            external_mounts: Vec::new(),
         }
     }
 
@@ -2969,6 +3002,23 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("disk-image"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn uncaptured_mount_paths_lists_only_host_backed_mounts() {
+        let config = SandboxBuilder::new("source")
+            .volume("/data//./", |m| m.bind("/host/dir"))
+            .volume("/shared", |m| m.named("shared"))
+            .volume("/disk", |m| m.disk("/host/disk.img"))
+            .volume("/scratch", |m| m.tmpfs())
+            .volume("/own", |m| m.owned())
+            .config
+            .into_config();
+
+        let paths = uncaptured_mount_paths(&config.spec.mounts).unwrap();
+
+        assert_eq!(paths, ["/data", "/shared", "/disk"]);
+        assert_eq!(config.spec.mounts[0].guest(), "/data//./");
     }
 
     #[tokio::test]

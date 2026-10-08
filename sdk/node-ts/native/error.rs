@@ -33,7 +33,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::RuntimeNotInstalled(_) => "RuntimeNotInstalled",
         MicrosandboxError::RuntimeIncomplete(_) => "RuntimeIncomplete",
         MicrosandboxError::Database(_) => "Database",
-        MicrosandboxError::InvalidConfig(_) => "InvalidConfig",
+        MicrosandboxError::InvalidConfig(_) | MicrosandboxError::MissingRestoreBindings { .. } => {
+            "InvalidConfig"
+        }
         MicrosandboxError::NoDefaultCommand => "NoDefaultCommand",
         MicrosandboxError::SandboxNotFound(_) => "SandboxNotFound",
         MicrosandboxError::SandboxAlreadyExists(_) => "SandboxAlreadyExists",
@@ -90,7 +92,19 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox::RestoreKind;
+
     use super::*;
+
+    #[test]
+    fn missing_restore_bindings_keep_the_invalid_config_code() {
+        let error = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+
+        assert_eq!(error_type_str(&error), "InvalidConfig");
+    }
 
     #[test]
     fn source_recovery_error_preserves_structured_native_payload() {
