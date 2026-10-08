@@ -63,8 +63,8 @@ struct Waiter(Arc<Entry>);
 
 impl ControlSessions {
     /// Called when this backend opens its database, not each time a path is reused.
-    pub fn bind_database(&self, path: &Path) -> Result<(), SharedError> {
-        let identity = Arc::new(DatabaseIdentity::capture(path).map_err(Arc::new)?);
+    pub async fn bind_database(&self, path: &Path) -> Result<(), SharedError> {
+        let identity = Arc::new(DatabaseIdentity::capture(path).await.map_err(Arc::new)?);
         let existing = self
             .database
             .lock()

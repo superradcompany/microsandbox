@@ -1,19 +1,37 @@
 //! Kernel identity and actual shared-connection tests; no VM is needed here.
 
+use std::time::Duration;
+
+use microsandbox_db::pool::DbPools;
+use sea_orm::ConnectionTrait;
+
 use super::identity::DatabaseIdentity;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-#[test]
-fn database_identity_detects_replacement_but_not_ordinary_writes() {
+#[tokio::test]
+async fn database_identity_detects_replacement_but_not_ordinary_writes() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("database");
-    std::fs::write(&path, b"original").unwrap();
-    let identity = DatabaseIdentity::capture(&path).unwrap();
-    std::fs::write(&path, b"updated contents").unwrap();
+    let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
+        .await
+        .unwrap();
+    pools
+        .write()
+        .execute_unprepared("CREATE TABLE item (id INTEGER)")
+        .await
+        .unwrap();
+    let identity = DatabaseIdentity::capture(&path).await.unwrap();
+    pools
+        .write()
+        .execute_unprepared("INSERT INTO item VALUES (1)")
+        .await
+        .unwrap();
     identity.verify().unwrap();
+    pools.read().inner().close_by_ref().await.unwrap();
+    pools.write().inner().close_by_ref().await.unwrap();
     std::fs::rename(&path, directory.path().join("old")).unwrap();
     assert!(matches!(
         identity.verify(),

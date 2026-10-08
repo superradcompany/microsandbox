@@ -1,5 +1,6 @@
 //! OS identity without any new runtime handshake field or persisted schema.
 
+#[cfg(not(target_os = "macos"))]
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -14,6 +15,8 @@ use std::path::{Path, PathBuf};
 #[cfg(not(any(target_os = "macos", windows)))]
 use microsandbox_control_client::ErrorKind;
 use microsandbox_control_client::{ClientError, ControlClientError, ControlClientResult};
+#[cfg(target_os = "macos")]
+use microsandbox_db::file::DbFilePin;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{FILETIME, WAIT_TIMEOUT},
@@ -45,7 +48,10 @@ pub(in crate::backend::local) struct DatabaseIdentity {
     id: (u64, u64, u64),
     // Keep the original object alive so an unlinked inode/file ID cannot be
     // recycled and mistaken for this backend's database.
+    #[cfg(not(target_os = "macos"))]
     _file: File,
+    #[cfg(target_os = "macos")]
+    _pin: DbFilePin,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -172,20 +178,45 @@ impl ProcessIdentity {
 }
 
 impl DatabaseIdentity {
-    pub fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
-        let file = open_database_identity(path.as_ref()).map_err(ClientError::from)?;
-        let id = file_id(&file)?;
-        Ok(Self {
-            path: path.as_ref().to_owned(),
-            id,
-            _file: file,
-        })
+    pub async fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            let path = path.as_ref().to_owned();
+            let id = database_path_id(&path)?;
+            let pin = DbFilePin::open(&path)
+                .await
+                .map_err(|error| ClientError::from(std::io::Error::other(error)))?;
+            let identity = Self {
+                path,
+                id,
+                _pin: pin,
+            };
+            identity.verify()?;
+            Ok(identity)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let file = open_database_identity(path.as_ref()).map_err(ClientError::from)?;
+            let id = file_id(&file)?;
+            Ok(Self {
+                path: path.as_ref().to_owned(),
+                id,
+                _file: file,
+            })
+        }
     }
 
     pub fn verify(&self) -> ControlClientResult<()> {
+        #[cfg(target_os = "macos")]
         let current =
-            open_database_identity(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
-        if file_id(&current)? != self.id {
+            database_path_id(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
+        #[cfg(not(target_os = "macos"))]
+        let current = {
+            let file = open_database_identity(&self.path)
+                .map_err(|_| ControlClientError::RuntimeChanged)?;
+            file_id(&file)?
+        };
+        if current != self.id {
             return Err(ControlClientError::RuntimeChanged);
         }
         Ok(())
@@ -196,6 +227,7 @@ impl DatabaseIdentity {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(not(target_os = "macos"))]
 fn open_database_identity(path: &Path) -> std::io::Result<File> {
     #[cfg(target_os = "linux")]
     {
@@ -212,6 +244,14 @@ fn open_database_identity(path: &Path) -> std::io::Result<File> {
     {
         File::open(path)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn database_path_id(path: &Path) -> ControlClientResult<(u64, u64, u64)> {
+    // A raw open/close would release this process's SQLite locks. stat follows
+    // the same path without opening a descriptor; the SQLite pin prevents reuse.
+    let metadata = std::fs::metadata(path).map_err(ClientError::from)?;
+    Ok((metadata.dev(), metadata.ino(), 0))
 }
 
 #[cfg(target_os = "linux")]
@@ -306,6 +346,7 @@ fn windows_start(handle: &OwnedHandle) -> ControlClientResult<ProcessStart> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn file_id(file: &File) -> ControlClientResult<(u64, u64, u64)> {
     #[cfg(unix)]
     {

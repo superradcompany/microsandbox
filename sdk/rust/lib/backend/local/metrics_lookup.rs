@@ -46,8 +46,10 @@ struct CachedMatch {
 //--------------------------------------------------------------------------------------------------
 
 impl MetricsLookup {
-    pub(super) fn bind_database(&self, path: &Path) -> MicrosandboxResult<()> {
-        let identity = DatabaseIdentity::capture(path).map_err(metrics_error)?;
+    pub(super) async fn bind_database(&self, path: &Path) -> MicrosandboxResult<()> {
+        let identity = DatabaseIdentity::capture(path)
+            .await
+            .map_err(metrics_error)?;
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = &state.database {
             existing.verify().map_err(metrics_error)?;

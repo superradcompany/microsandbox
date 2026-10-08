@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use microsandbox_db::{DbReadConnection, entity::volume};
+use microsandbox_db::{DbReadConnection, entity::volume, pool::DbPools};
 use sea_orm::{ConnectionTrait, DbBackend, EntityTrait, Statement};
 use tokio::process::Command;
 
@@ -88,18 +88,26 @@ fn lock(file: &File) -> std::io::Result<()> {
 async fn database_identity_preserves_process_locks() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("database");
-    let file = File::create(&path).unwrap();
-    lock(&file).unwrap();
-    let identity = DatabaseIdentity::capture(&path).unwrap();
+    let pools = DbPools::open(&path, 1, Duration::from_secs(5), Duration::from_secs(5))
+        .await
+        .unwrap();
+    pools
+        .write()
+        .execute_unprepared("CREATE TABLE item (id INTEGER PRIMARY KEY)")
+        .await
+        .unwrap();
+    let identity = DatabaseIdentity::capture(&path).await.unwrap();
     child(&path, "locked").await;
     identity.verify().unwrap();
     child(&path, "locked").await;
     // A second backend/metrics reader can release its identity while another
     // SQLite connection in this process still owns locks on the same inode.
-    drop(DatabaseIdentity::capture(&path).unwrap());
+    drop(DatabaseIdentity::capture(&path).await.unwrap());
     child(&path, "locked").await;
     drop(identity);
     child(&path, "locked").await;
+    pools.read().inner().close_by_ref().await.unwrap();
+    pools.write().inner().close_by_ref().await.unwrap();
 }
 
 #[tokio::test]
@@ -112,21 +120,24 @@ async fn acknowledged_volumes_survive_other_processes_closing_catalog() {
         drop(Volume::builder("parent").create().await.unwrap());
         child(home.path(), "child-two").await;
 
-        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-        let shm = home.path().canonicalize().unwrap().join("db/msb.db-shm");
-        let mappings: Vec<_> = maps
-            .lines()
-            .filter(|line| line.contains(shm.to_str().unwrap()))
-            .collect();
-        assert!(
-            !mappings.is_empty(),
-            "parent has no SHM mapping for {}: {maps}",
-            shm.display()
-        );
-        assert!(
-            !mappings.iter().any(|line| line.contains("(deleted)")),
-            "parent SHM mapping was deleted: {mappings:?}"
-        );
+        #[cfg(target_os = "linux")]
+        {
+            let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+            let shm = home.path().canonicalize().unwrap().join("db/msb.db-shm");
+            let mappings: Vec<_> = maps
+                .lines()
+                .filter(|line| line.contains(shm.to_str().unwrap()))
+                .collect();
+            assert!(
+                !mappings.is_empty(),
+                "parent has no SHM mapping for {}: {maps}",
+                shm.display()
+            );
+            assert!(
+                !mappings.iter().any(|line| line.contains("(deleted)")),
+                "parent SHM mapping was deleted: {mappings:?}"
+            );
+        }
 
         child(home.path(), "read").await;
     })
