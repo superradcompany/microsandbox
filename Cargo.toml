@@ -96,8 +96,8 @@ microsandbox-runtime = { version = "=0.7.7", path = "crates/runtime", default-fe
 microsandbox-utils = { version = "=0.7.7", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.7.7", path = "crates/vsock" }
 # Keep runtime APIs and shared metrics types on the same published release.
-msb_krun = "=0.1.40"
-msb_krun_utils = "=0.1.40"
+msb_krun = "=0.1.41"
+msb_krun_utils = "=0.1.41"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
