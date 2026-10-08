@@ -115,18 +115,29 @@ mod local_usage {
     //--------------------------------------------------------------------------------------------------
 
     pub(super) async fn usage(local: &LocalBackend) -> MicrosandboxResult<StorageUsage> {
-        let db = local.db().await?.read();
+        let catalog = local.read_current_catalog().await?;
+        let db = match &catalog {
+            Some(catalog) => &catalog.read,
+            None => local.db().await?.read(),
+        };
         let images = image_ref::Entity::find().all(db).await?;
         let snapshots = snapshot::Entity::find().all(db).await?;
         let sandboxes = sandbox::Entity::find().all(db).await?;
         let volumes = volume::Entity::find().all(db).await?;
+        drop(catalog);
+
         let cache_root = local.cache_dir();
         let snapshot_root = local.snapshots_dir();
-        let snapshot_journals = crate::backend::local::snapshot::deletion::recovery_parents(local)?;
+        let snapshot_journals = crate::backend::local::snapshot::deletion::recovery_parents(local);
         let sandbox_root = local.sandboxes_dir();
         let volume_root = local.volumes_dir();
 
         tokio::task::spawn_blocking(move || {
+            let (snapshot_journals, snapshot_discovery_error) = match snapshot_journals {
+                Ok(parents) => (parents, None),
+                Err(error) => (Default::default(), Some(error)),
+            };
+
             // Image references share materialized layers. Scan each cache component once instead
             // of summing per-reference sizes, which counts shared layers repeatedly.
             let image_roots: Vec<_> = ["layers", "fsmeta", "vmdk", "flat", "manifests", "tmp", ".image-deletions"]
@@ -181,6 +192,12 @@ mod local_usage {
                 ],
                 ..Default::default()
             };
+            if let Some(error) = snapshot_discovery_error {
+                usage.snapshots.logical_bytes = None;
+                usage.snapshots.allocated_bytes = None;
+                usage.snapshots.notes.push(format!("Snapshot deletion journal discovery unavailable: {error}"));
+            }
+
             match inspect_memory_cache(&cache_root.join("memory")) {
                 Ok(report) => {
                     usage.branch_memory = memory_category(&report.entries, MemoryCacheKind::BranchMemory);
@@ -683,6 +700,51 @@ mod local_usage {
             assert_eq!(report.images.count, Some(0));
             assert!(!cache.join("memory").exists());
             assert!(!cache.join("manifests").exists());
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn inaccessible_snapshot_discovery_keeps_other_categories_available() {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Root bypasses the permissions this regression exercises.
+            if unsafe { libc::geteuid() } == 0 {
+                return;
+            }
+
+            for deny_registry in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let local = crate::test_support::local_backend_builder(home.path())
+                    .build()
+                    .await
+                    .unwrap();
+                std::fs::create_dir_all(local.cache_dir().join("layers")).unwrap();
+                std::fs::write(local.cache_dir().join("layers/fixture"), b"image bytes").unwrap();
+                let directory = if deny_registry {
+                    local.cache_dir().join(".snapshot-deletion-parents")
+                } else {
+                    local.snapshots_dir()
+                };
+                std::fs::create_dir_all(&directory).unwrap();
+                let permissions = std::fs::metadata(&directory).unwrap().permissions();
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o111))
+                    .unwrap();
+
+                drop(local);
+                let local = crate::test_support::local_backend_builder(home.path())
+                    .build_lazy()
+                    .unwrap();
+                let result = crate::Storage::usage_local(&local).await;
+                std::fs::set_permissions(&directory, permissions).unwrap();
+
+                let usage = result.unwrap();
+                assert_eq!(usage.images.logical_bytes, Some(11));
+                assert_eq!(usage.snapshots.logical_bytes, None);
+                assert_eq!(usage.snapshots.allocated_bytes, None);
+                assert!(!usage.snapshots.notes.is_empty());
+                assert_eq!(usage.sandboxes.logical_bytes, Some(0));
+                assert_eq!(usage.volumes.logical_bytes, Some(0));
+            }
         }
 
         #[cfg(feature = "cloud")]

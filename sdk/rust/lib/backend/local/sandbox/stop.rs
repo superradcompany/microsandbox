@@ -413,11 +413,14 @@ fn schedule_stopped_memory_sweep_with(
         token
     };
     let sweep = Arc::new(sweep);
+    let registration = StopMemorySweepRegistration {
+        root: root.clone(),
+        token,
+    };
+
     tokio::spawn(async move {
-        let _registration = StopMemorySweepRegistration {
-            root: root.clone(),
-            token,
-        };
+        // Own the guard before the first poll so runtime shutdown cannot strand this root.
+        let _registration = registration;
         loop {
             let targets = {
                 let mut sweeps = STOP_MEMORY_SWEEPS
@@ -736,28 +739,33 @@ mod tests {
 
     #[test]
     fn stopped_memory_sweep_registration_clears_on_runtime_shutdown() {
-        let home = tempfile::tempdir().unwrap();
-        let root = home.path().join("memory");
-        let started = Arc::new(Notify::new());
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            schedule_stopped_memory_sweep_with(root.clone(), None, {
-                let started = Arc::clone(&started);
-                move |_| {
-                    started.notify_one();
-                    false
+        for wait_for_start in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let root = home.path().join("memory");
+            let started = Arc::new(Notify::new());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            runtime.block_on(async {
+                schedule_stopped_memory_sweep_with(root.clone(), None, {
+                    let started = Arc::clone(&started);
+                    move |_| {
+                        started.notify_one();
+                        false
+                    }
+                });
+
+                if wait_for_start {
+                    tokio::time::timeout(Duration::from_secs(2), started.notified())
+                        .await
+                        .unwrap();
                 }
             });
-            tokio::time::timeout(Duration::from_secs(2), started.notified())
-                .await
-                .unwrap();
-        });
-        drop(runtime);
-        assert!(!STOP_MEMORY_SWEEPS.lock().unwrap().contains_key(&root));
+            drop(runtime);
+            assert!(!STOP_MEMORY_SWEEPS.lock().unwrap().contains_key(&root));
+        }
     }
 
     async fn fixture(name: &str) -> (tempfile::TempDir, LocalBackend, i32, i32) {

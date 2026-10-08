@@ -2,6 +2,7 @@
 //! cannot unlink a new publication at the same name after an interrupted cleanup.
 
 use std::fs::File;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use microsandbox_image::{
@@ -72,8 +73,10 @@ impl Journal {
             retained.push(relative.to_path_buf());
         }
         let record = stage.path().join("files.json");
-        std::fs::write(&record, serde_json::to_vec(&retained)?)?;
-        File::open(&record)?.sync_all()?;
+        let mut file = File::create(&record)?;
+        file.write_all(&serde_json::to_vec(&retained)?)?;
+        file.sync_all()?;
+        drop(file);
         sync_dir(stage.path())?;
         let path = directory.join(format!("delete-{:032x}", rand::random::<u128>()));
         std::fs::rename(stage.path(), &path)?;
