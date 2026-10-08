@@ -582,6 +582,9 @@ export class Sandbox implements AsyncDisposable {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
+      throw new Error("published-port modification requires an updated native library");
+    }
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );

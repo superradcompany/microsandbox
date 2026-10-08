@@ -211,10 +211,10 @@ pub(crate) use external_mounts::{
 #[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
-    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
-    ResourceResizeStatus, SandboxModificationBuilder, SandboxModificationPatch,
-    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPatchBuilder,
-    SecretPlannedChange, SecretSource,
+    ModificationPolicy, ModificationWarning, PlannedChange, PublishedPortKey,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, SandboxModificationBuilder,
+    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
+    SecretPatchBuilder, SecretPlannedChange, SecretSource,
 };
 #[cfg(feature = "ssh")]
 pub use ssh::{

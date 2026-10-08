@@ -21,6 +21,7 @@ export const napi = native;
 // dependency on the generated d.ts.
 
 export interface NativeBindings {
+  readonly supportsPortModification?: () => boolean;
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
@@ -450,6 +451,8 @@ export interface NapiSandboxTouchResult {
 
 /** Native option object accepted by `modify()`. */
 export interface NapiSandboxModifyOptions {
+  ports?: import("../modify.js").ModifyPort[];
+  portsRemove?: import("../modify.js").ModifyPortEndpoint[];
   cpus?: number;
   maxCpus?: number;
   memoryMib?: number;

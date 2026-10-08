@@ -23,7 +23,7 @@ pub struct ModifyArgs {
     pub name: String,
 
     /// Compact sealed layers of the root and sandbox-owned data disks without changing snapshots.
-    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "next_start", "restart"])]
+    #[arg(long, conflicts_with_all = ["cpus", "max_cpus", "memory", "max_memory", "root_disk", "oci_upper_size", "env", "env_remove", "labels", "label_remove", "workdir", "secrets", "secret_remove", "ports", "ports_remove", "next_start", "restart"])]
     pub compact: bool,
 
     /// Merge up to N oldest sealed physical layers per disk, including the base (minimum 2).
@@ -102,6 +102,14 @@ pub struct ModifyArgs {
     #[arg(long = "secret-rm", value_name = "NAME")]
     pub secret_remove: Vec<String>,
 
+    /// Add or update a published port: `[BIND_ADDR:]HOST:GUEST[/tcp|udp]`.
+    #[arg(short = 'p', long = "port", value_name = "MAPPING")]
+    pub ports: Vec<String>,
+
+    /// Remove a published host endpoint: `[BIND_ADDR:]HOST[/tcp|udp]`.
+    #[arg(long = "port-rm", value_name = "ENDPOINT")]
+    pub ports_remove: Vec<String>,
+
     /// Show the plan without applying anything.
     #[arg(long)]
     pub dry_run: bool,
@@ -179,6 +187,7 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
     builder = apply_resource_args(builder, &args)?;
     builder = apply_spec_args(builder, &args)?;
     builder = apply_secret_args(builder, &args)?;
+    builder = apply_port_args(builder, &args)?;
 
     let plan = builder.clone().dry_run().await?;
     if args.dry_run {
@@ -247,6 +256,48 @@ fn apply_spec_args(
     }
     if let Some(workdir) = &args.workdir {
         builder = builder.workdir(workdir);
+    }
+    Ok(builder)
+}
+
+#[allow(unused_mut)]
+fn apply_port_args(
+    mut builder: SandboxModificationBuilder,
+    args: &ModifyArgs,
+) -> anyhow::Result<SandboxModificationBuilder> {
+    #[cfg(feature = "net")]
+    for value in &args.ports {
+        let (bind, host, guest, udp) = common::parse_port_mapping(value)?;
+        builder = builder.port_mapping(microsandbox_types::PublishedPortSpec {
+            host_bind: bind.to_string(),
+            host_port: host,
+            guest_port: guest,
+            protocol: if udp {
+                microsandbox_types::PortProtocol::Udp
+            } else {
+                microsandbox_types::PortProtocol::Tcp
+            },
+        });
+    }
+    #[cfg(feature = "net")]
+    for value in &args.ports_remove {
+        let (endpoint, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
+        let mapping = format!("{endpoint}:1/{protocol}");
+        let (bind, host, _, udp) = common::parse_port_mapping(&mapping)?;
+        builder = builder.remove_port(microsandbox::sandbox::PublishedPortKey {
+            host_bind: bind.to_string(),
+            host_port: host,
+            protocol: if udp {
+                microsandbox_types::PortProtocol::Udp
+            } else {
+                microsandbox_types::PortProtocol::Tcp
+            },
+        });
+    }
+
+    #[cfg(not(feature = "net"))]
+    if !args.ports.is_empty() || !args.ports_remove.is_empty() {
+        anyhow::bail!("published port changes require a build with networking support");
     }
     Ok(builder)
 }
@@ -715,6 +766,13 @@ fn replayed_args(args: &ModifyArgs) -> String {
     }
     for secret in &args.secret_remove {
         rendered.push(format!("--secret-rm {secret}"));
+    }
+
+    for port in &args.ports {
+        rendered.push(format!("--port {port}"));
+    }
+    for port in &args.ports_remove {
+        rendered.push(format!("--port-rm {port}"));
     }
 
     if rendered.is_empty() {

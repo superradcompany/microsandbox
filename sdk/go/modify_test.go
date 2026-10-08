@@ -270,3 +270,22 @@ func TestParseModificationPlan(t *testing.T) {
 		t.Fatalf("resize status = %+v", plan.ResizeStatus)
 	}
 }
+
+func TestModifyPortWireDefaultsAndExplicitRemoval(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Ports:       []PortBinding{{HostPort: 8080, GuestPort: 80}},
+		PortsRemove: []PortEndpoint{{Bind: "::1", HostPort: 5353, Protocol: PortProtocolUDP}},
+	})
+	patch := out["patch"].(map[string]any)
+	port := patch["ports"].([]any)[0].(map[string]any)
+	if port["host_bind"] != "127.0.0.1" || port["protocol"] != "tcp" || port["guest_port"] != float64(80) {
+		t.Fatalf("unexpected port wire mapping: %v", port)
+	}
+	removal := patch["ports_remove"].([]any)[0].(map[string]any)
+	if removal["host_bind"] != "::1" || removal["protocol"] != "udp" || removal["host_port"] != float64(5353) {
+		t.Fatalf("unexpected removal: %v", removal)
+	}
+	if _, present := removal["guest_port"]; present {
+		t.Fatal("removal must not include a guest destination")
+	}
+}

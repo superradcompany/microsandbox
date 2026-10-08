@@ -2882,6 +2882,8 @@ A requested sandbox modification. Omitted fields are left unchanged.
 | rootDiskSize | `number` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
 | env | `Record<string, string>` | Environment variables to set for future execs |
 | envRemove | `string[]` | Environment variable keys to remove |
+| ports | `ModifyPort[]` | Add/update `{hostPort, guestPort, hostBind?, protocol?}` mappings; other endpoints stay unchanged |
+| portsRemove | `ModifyPortEndpoint[]` | Remove `{hostPort, hostBind?, protocol?}` endpoints; loopback TCP by default |
 | labels | `Record<string, string>` | Labels to set |
 | labelsRemove | `string[]` | Label keys to remove |
 | workdir | `string` | Working directory for future execs |

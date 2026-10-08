@@ -60,6 +60,8 @@ export type {
   ModificationPolicy,
   ModificationWarning,
   ModifyOptions,
+  ModifyPort,
+  ModifyPortEndpoint,
   PlannedChange,
   ResourceConvergenceState,
   ResourceKind,

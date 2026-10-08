@@ -19,11 +19,15 @@ use microsandbox_control_client::{
 
 use super::{SandboxConfig, SandboxStatus};
 
+#[path = "modify_ports.rs"]
+mod ports;
+
 pub use microsandbox_types::modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
-    ModificationPolicy, ModificationWarning, PlannedChange, ResourceConvergenceState, ResourceKind,
-    ResourceResizeStatus, SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind,
-    SecretModificationPatch, SecretPlannedChange, SecretSource,
+    ModificationPolicy, ModificationWarning, PlannedChange, PublishedPortKey,
+    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, SandboxModificationPatch,
+    SandboxModificationPlan, SecretChangeKind, SecretModificationPatch, SecretPlannedChange,
+    SecretSource,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -198,6 +202,28 @@ impl SandboxModificationBuilder {
         self
     }
 
+    /// Add or update a published mapping without changing other host endpoints.
+    /// This requires restart or next-start policy on a running sandbox.
+    pub fn port(self, host_port: u16, guest_port: u16) -> Self {
+        self.port_mapping(microsandbox_types::PublishedPortSpec {
+            host_port,
+            guest_port,
+            ..Default::default()
+        })
+    }
+
+    /// Add or update a mapping with an explicit host address and protocol.
+    pub fn port_mapping(mut self, port: microsandbox_types::PublishedPortSpec) -> Self {
+        self.patch.ports.push(port);
+        self
+    }
+
+    /// Remove one published host endpoint. Missing endpoints are rejected.
+    pub fn remove_port(mut self, port: PublishedPortKey) -> Self {
+        self.patch.ports_remove.push(port);
+        self
+    }
+
     /// Persist the requested changes for the next start.
     pub fn next_start(mut self) -> Self {
         self.policy = ModificationPolicy::NextStart;
@@ -266,15 +292,27 @@ impl SandboxModificationBuilder {
         let active = handle.active_config().ok().flatten();
         let (live, _) =
             live_control(&self.backend, &self.name, status, &self.patch, self.policy).await?;
-        Ok(build_plan(
+        let mut plan = build_plan(
             self.name,
             status,
             &config,
             active.as_ref(),
             live,
-            self.patch,
+            self.patch.clone(),
             self.policy,
-        ))
+        );
+        if ports::requested(&self.patch) && plan.conflicts.is_empty() {
+            if handle.local().is_none() {
+                return Err(MicrosandboxError::local_only(Operation::SandboxModify));
+            }
+            if let Err(error) = ports::preflight(&config, active.as_ref(), &self.patch, status) {
+                plan.conflicts.push(ModificationConflict {
+                    field: "port".into(),
+                    message: error.to_string(),
+                });
+            }
+        }
+        Ok(plan)
     }
 
     /// Apply supported changes, preserving any earlier live effects on failure.
@@ -324,6 +362,12 @@ impl SandboxModificationBuilder {
         );
 
         validate_apply_supported(&plan)?;
+        if ports::requested(&self.patch) {
+            if handle.local().is_none() {
+                return Err(MicrosandboxError::local_only(Operation::SandboxModify));
+            }
+            ports::preflight(&config, active.as_ref(), &self.patch, status)?;
+        }
         if handle.local().is_some() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
@@ -604,6 +648,15 @@ fn build_plan(
         }
     }
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
+    ports::plan(
+        status,
+        config,
+        active,
+        &patch,
+        policy,
+        &mut changes,
+        &mut conflicts,
+    );
     push_secret_changes(
         status,
         config,
@@ -1245,6 +1298,10 @@ fn plan_requires_restart(plan: &SandboxModificationPlan) -> bool {
 }
 
 fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModificationPatch) {
+    if ports::requested(patch) {
+        // The planner validated the complete resulting set before any mutation.
+        config.spec.network.ports = ports::desired(config, patch);
+    }
     if let Some(cpus) = patch.cpus {
         config.spec.resources.cpus = cpus;
     }

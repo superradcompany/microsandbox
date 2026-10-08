@@ -21,6 +21,8 @@ EXPECTED_KWARGS = [
     "workdir",
     "secrets",
     "secrets_rm",
+    "ports",
+    "ports_rm",
     "policy",
     "dry_run",
 ]

@@ -1581,6 +1581,22 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortEndpoint:
+    """Published host endpoint to remove through modify(ports_rm=...)."""
+
+    host_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "bind": self.bind,
+            "protocol": _enum_value(self.protocol, PortProtocol, "PortEndpoint.protocol"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PortBinding:
     """Published host-to-guest port with an optional host bind address."""
 

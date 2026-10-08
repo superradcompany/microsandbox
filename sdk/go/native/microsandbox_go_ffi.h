@@ -60,6 +60,11 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+/**
+ * Capability marker for published-port modification in the Go bindings.
+ */
+bool msb_supports_port_modification(void);
+
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,

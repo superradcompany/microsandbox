@@ -1813,6 +1813,71 @@ fn apply_ports<B: ResourceBuilder>(
     Ok(builder)
 }
 
+/// Parse modify's public PortBinding values through the same typed config boundary as create.
+pub(crate) fn modify_ports(
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<microsandbox::sandbox::PublishedPortSpec>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    if let Some(mapping) = mapping_to_dict(value)? {
+        return mapping
+            .iter()
+            .map(|(host, guest)| {
+                Ok(microsandbox::sandbox::PublishedPortSpec {
+                    host_port: host.extract()?,
+                    guest_port: guest.extract()?,
+                    ..Default::default()
+                })
+            })
+            .collect();
+    }
+    value
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            let dict = config_dict(&item, "PortBinding")?;
+            Ok(microsandbox::sandbox::PublishedPortSpec {
+                host_port: extract_required(&dict, "host_port")?,
+                guest_port: extract_required(&dict, "guest_port")?,
+                host_bind: extract_required(&dict, "bind")?,
+                protocol: modify_port_protocol(&dict)?,
+            })
+        })
+        .collect()
+}
+
+/// Parse published host endpoints to remove.
+pub(crate) fn modify_ports_remove(
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<microsandbox::sandbox::PublishedPortKey>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    value
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            let dict = config_dict(&item, "PortEndpoint")?;
+            Ok(microsandbox::sandbox::PublishedPortKey {
+                host_port: extract_required(&dict, "host_port")?,
+                host_bind: extract_required(&dict, "bind")?,
+                protocol: modify_port_protocol(&dict)?,
+            })
+        })
+        .collect()
+}
+
+fn modify_port_protocol(dict: &Bound<'_, PyDict>) -> PyResult<microsandbox::sandbox::PortProtocol> {
+    match extract_required::<String>(dict, "protocol")?.as_str() {
+        "tcp" => Ok(microsandbox::sandbox::PortProtocol::Tcp),
+        "udp" => Ok(microsandbox::sandbox::PortProtocol::Udp),
+        value => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid port protocol: {value}"
+        ))),
+    }
+}
+
 /// Token bucket values from a Python `TokenBucket` dict.
 struct TokenBucketOpts {
     size: u64,

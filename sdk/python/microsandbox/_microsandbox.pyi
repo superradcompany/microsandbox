@@ -30,6 +30,7 @@ from microsandbox.types import (
     NetworkPolicy,
     PatchConfig,
     PortBinding,
+    PortEndpoint,
     PullEventType,
     PullPolicy,
     RegistryAuth,
@@ -439,6 +440,8 @@ class Sandbox:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        ports_rm: Sequence[PortEndpoint] | None = None,
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...
@@ -582,6 +585,8 @@ class SandboxHandle:
         workdir: str | None = None,
         secrets: Mapping[str, SecretModifySpec] | None = None,
         secrets_rm: list[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        ports_rm: Sequence[PortEndpoint] | None = None,
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...

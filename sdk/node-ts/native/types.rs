@@ -51,8 +51,29 @@ pub struct SandboxModifyOptions {
     pub workdir: Option<String>,
     pub secrets: Option<HashMap<String, SecretModifySpec>>,
     pub secrets_remove: Option<Vec<String>>,
+    pub ports: Option<Vec<ModifyPort>>,
+    pub ports_remove: Option<Vec<ModifyPortEndpoint>>,
     pub policy: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+/// Published port to add or update. Defaults to loopback TCP.
+#[napi(object)]
+#[derive(Clone)]
+pub struct ModifyPort {
+    pub host_port: f64,
+    pub guest_port: f64,
+    pub host_bind: Option<String>,
+    pub protocol: Option<String>,
+}
+
+/// Published host endpoint to remove. Defaults to loopback TCP.
+#[napi(object)]
+#[derive(Clone)]
+pub struct ModifyPortEndpoint {
+    pub host_port: f64,
+    pub host_bind: Option<String>,
+    pub protocol: Option<String>,
 }
 
 /// Desired state for one secret in `SandboxModifyOptions.secrets`, keyed by

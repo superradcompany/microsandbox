@@ -543,6 +543,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
 | `--workdir` | Working directory for future execs |
+| `-p`, `--port` | Add or update `[BIND_ADDR:]HOST:GUEST[/tcp\|udp]`; other mappings stay unchanged |
+| `--port-rm` | Remove `[BIND_ADDR:]HOST[/tcp\|udp]`; defaults to loopback TCP |
 | `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
 | `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
 | `--dry-run` | Show the plan without applying anything |

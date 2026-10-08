@@ -442,6 +442,10 @@ static msb_sandbox_compact_fn ptr_msb_sandbox_compact = NULL;
 // dlopen handle — set once by load_microsandbox, never closed.
 static void *lib_handle = NULL;
 
+bool has_port_modification(void) {
+    return lib_handle && dlsym(lib_handle, "msb_supports_port_modification") != NULL;
+}
+
 // load_error holds a static error string on dlopen/dlsym failure.
 // Not freed by callers — it lives for the process lifetime.
 static char load_error[1024] = {0};
@@ -5988,4 +5992,15 @@ func Jobs(ctx context.Context, sandbox uint64, request any) (json.RawMessage, er
 		return C.call_msb_jobs(cancelID, C.uint64_t(sandbox), arg, buf, length)
 	})
 	return json.RawMessage(raw), err
+}
+
+// RequirePortModification rejects requests that an older library would ignore.
+func RequirePortModification() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_port_modification()) {
+		return fmt.Errorf("published-port modification requires an updated native library")
+	}
+	return nil
 }

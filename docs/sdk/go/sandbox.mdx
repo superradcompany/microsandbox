@@ -2837,6 +2837,8 @@ A requested sandbox modification. Zero-valued fields are left unchanged (`0` is 
 | Workdir | `string` | Working directory for future execs |
 | Secrets | `map[string]SecretModifySpec` | Desired secret specs keyed by stable secret name |
 | SecretsRemove | `[]string` | Secret names to remove explicitly |
+| Ports | `[]PortBinding` | Add/update published mappings; other endpoints stay unchanged |
+| PortsRemove | `[]PortEndpoint` | Remove host endpoints (`Bind`, `HostPort`, `Protocol`); loopback TCP by default |
 | Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
 | DryRun | `bool` | Compute the plan without applying anything |
 

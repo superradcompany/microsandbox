@@ -1261,6 +1261,33 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        ports: options
+            .ports
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|port| {
+                Ok(microsandbox::sandbox::PublishedPortSpec {
+                    host_port: modify_port_number(port.host_port, "hostPort")?,
+                    guest_port: modify_port_number(port.guest_port, "guestPort")?,
+                    host_bind: port.host_bind.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                    protocol: modify_port_protocol(port.protocol.as_deref())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        ports_remove: options
+            .ports_remove
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|port| {
+                Ok(microsandbox::sandbox::PublishedPortKey {
+                    host_port: modify_port_number(port.host_port, "hostPort")?,
+                    host_bind: port.host_bind.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                    protocol: modify_port_protocol(port.protocol.as_deref())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
 
     let builder = builder.with_patch(patch);
@@ -1274,6 +1301,27 @@ pub(crate) fn configure_modify(
             )));
         }
     })
+}
+
+fn modify_port_number(value: f64, name: &str) -> Result<u16> {
+    u16::try_from(crate::numeric::safe_integer(value, name)?)
+        .map_err(|_| Error::from_reason(format!("{name} must be between 1 and 65535")))
+}
+
+fn modify_port_protocol(protocol: Option<&str>) -> Result<microsandbox::sandbox::PortProtocol> {
+    match protocol.unwrap_or("tcp") {
+        "tcp" => Ok(microsandbox::sandbox::PortProtocol::Tcp),
+        "udp" => Ok(microsandbox::sandbox::PortProtocol::Udp),
+        value => Err(Error::from_reason(format!(
+            "invalid port protocol: {value}"
+        ))),
+    }
+}
+
+/// Whether this native library understands published-port modification.
+#[napi]
+pub fn supports_port_modification() -> bool {
+    true
 }
 
 pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {

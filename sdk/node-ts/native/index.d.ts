@@ -2356,6 +2356,21 @@ export interface MemoryCacheReportJs {
   truncated: boolean
 }
 
+/** Published port to add or update. Defaults to loopback TCP. */
+export interface ModifyPort {
+  hostPort: number
+  guestPort: number
+  hostBind?: string
+  protocol?: string
+}
+
+/** Published host endpoint to remove. Defaults to loopback TCP. */
+export interface ModifyPortEndpoint {
+  hostPort: number
+  hostBind?: string
+  protocol?: string
+}
+
 export interface NetworkPolicy {
   defaultEgress: string
   defaultIngress: string
@@ -2571,6 +2586,8 @@ export interface SandboxModifyOptions {
   workdir?: string
   secrets?: Record<string, SecretModifySpec>
   secretsRemove?: Array<string>
+  ports?: Array<ModifyPort>
+  portsRemove?: Array<ModifyPortEndpoint>
   policy?: string
   dryRun?: boolean
 }
@@ -2871,6 +2888,9 @@ export interface StreamOpenResult {
   /** Opaque stream handle. Pass to `streamNext()` and `streamClose()`. */
   handle: bigint
 }
+
+/** Whether this native library understands published-port modification. */
+export declare function supportsPortModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

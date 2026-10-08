@@ -2724,6 +2724,12 @@ struct SandboxModifyOpts {
     dry_run: bool,
 }
 
+/// Capability marker for published-port modification in the Go bindings.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_supports_port_modification() -> bool {
+    true
+}
+
 fn parse_sandbox_modify_opts(raw: &str) -> Result<SandboxModifyOpts, FfiError> {
     serde_json::from_str(raw)
         .map_err(|e| FfiError::invalid_argument(format!("invalid modify opts JSON: {e}")))

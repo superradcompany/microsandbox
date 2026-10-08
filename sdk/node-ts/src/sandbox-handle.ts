@@ -1,3 +1,4 @@
+import { napi } from "./internal/napi.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -132,6 +133,9 @@ export class SandboxHandle {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
+      throw new Error("published-port modification requires an updated native library");
+    }
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
