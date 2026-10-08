@@ -25,16 +25,15 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use microsandbox_protocol::{
+    FS_STATE_LIMIT_DEFAULT_MIB, FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
+};
 use microsandbox_types::SandboxLogLevel as LogLevel;
 use microsandbox_types::{
     ConfigPatch, CpuPlacement, DeploymentProfile, OutboundProxy, PlacementProfile, RootDisk,
     TransparentHugePagePolicy,
 };
 use serde::{Deserialize, Serialize};
-
-use microsandbox_protocol::{
-    FS_STATE_LIMIT_DEFAULT_MIB, FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
-};
 
 use crate::backend::Profile;
 #[cfg(feature = "local")]
