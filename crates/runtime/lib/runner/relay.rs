@@ -3942,8 +3942,9 @@ async fn route_guest_lane_frame(
 
             // The shared arena is a local optimization only. If all fitting slots are leased,
             // preserve forward progress by sending this record through the original socket path.
-            // Any error other than temporary capacity means the negotiated local transport is
-            // corrupt and must fail closed instead of silently changing its interpretation.
+            // A closed arena means the client is disconnecting. Any other error means the
+            // negotiated local transport is corrupt and must fail closed instead of silently
+            // changing its interpretation.
             #[cfg(unix)]
             if frame.flags == FLAG_BULK
                 && let Some(producer) = route.local_outbound
@@ -3973,6 +3974,16 @@ async fn route_guest_lane_frame(
                         return Ok(());
                     }
                     Err(LocalShmError::Full(_)) => {}
+                    // Client teardown closed the arena after this route was cloned. Drop the
+                    // record as for any departed client instead of failing the shared reader.
+                    Err(LocalShmError::Closed) => {
+                        tracing::debug!(
+                            "agent relay: local arena closed for slot={client_slot} id={} (frame dropped)",
+                            frame.id
+                        );
+                        let _ = route.disconnect_tx.send(true);
+                        return Ok(());
+                    }
                     Err(error) => {
                         return Err(RuntimeError::Custom(format!(
                             "agent relay: local shared-arena output failed: {error}"
@@ -5726,6 +5737,56 @@ mod tests {
         let (release_tx, _release_rx) = mpsc::unbounded_channel();
         let received = client.inbound.receive(descriptor, release_tx).unwrap();
         assert_eq!(received.payload, payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guest_bulk_to_closed_local_arena_drops_frame_without_failing_reader() {
+        let server = LocalShmServer::create().unwrap();
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let clients = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            ClientState {
+                exec_control: None,
+                incarnation: Some(TEST_INCARNATION),
+                active_sessions: HashSet::new(),
+                active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                write_tx,
+                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                disconnect_tx,
+                local_outbound: Some(server.outbound.clone()),
+            },
+        )])));
+        // Client teardown closes the arena between route cloning and try_prepare.
+        server.outbound.close();
+        let wire = encoded_raw_flow(1, BulkFlow::GuestToHost, 0, b"bytes for a departed client");
+        let lane_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
+        let lane_permit = Arc::clone(&lane_budget)
+            .try_acquire_many_owned(wire.len() as u32)
+            .unwrap();
+
+        route_guest_lane_frame(
+            LaneFrame {
+                frame: RawFrame {
+                    data: Bytes::from(wire),
+                    id: 1,
+                    flags: FLAG_BULK,
+                },
+                incarnation: Some(TEST_INCARNATION),
+                _permit: lane_permit,
+            },
+            true,
+            &clients,
+            None,
+            &std::sync::Mutex::new(HashMap::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(*disconnect_rx.borrow());
+        assert!(write_rx.try_recv().is_err());
+        assert_eq!(lane_budget.available_permits(), CLIENT_OUTPUT_BYTE_CAPACITY);
     }
 
     #[cfg(unix)]
