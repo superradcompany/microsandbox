@@ -36,6 +36,10 @@ jobs:
   changes:
     name: Detect code changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # paths-filter reads the PR's changed files through the GitHub API.
+      pull-requests: read
     outputs:
       code: ${{ steps.filter.outputs.code }}
       ruby: ${{ steps.filter.outputs.ruby }}
@@ -94,6 +98,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check TypeScript-first documentation
         run: python3 scripts/check-docs-language-order.py
+
+  trust-helper:
+    name: Application trust helper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check standalone script matches its sources
+        run: sh scripts/msb-trust/build.sh --check
+      - name: Lint shell scripts
+        run: shellcheck -s sh scripts/msb-trust/build.sh scripts/msb-trust/msb-trust.sh
 
   release-notes:
     name: Release note contracts
@@ -336,6 +350,7 @@ jobs:
 
       - name: Smoke test installed runtime discovery
         run: |
+          python3 scripts/smoke/cli/test_runtime_discovery.py
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
@@ -407,7 +422,7 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -743,7 +758,10 @@ jobs:
       - name: Smoke test installed runtime discovery
         if: matrix.component == 'CLI'
         shell: pwsh
-        run: python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
+        run: |
+          python scripts/smoke/cli/test_runtime_discovery.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
 
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
@@ -1534,6 +1552,7 @@ jobs:
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
         # The short operation deadline excludes image setup and bounded cleanup.
@@ -1612,7 +1631,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
         with:
           tool: cargo-nextest@0.9.143
 
@@ -1665,14 +1684,35 @@ jobs:
           printf '%s\n' '{"runtime":{"block_writeback":{"mode":"auto","pool_mib":4096}}}' > "$integration_config"
           export MSB_CONFIG_PATH="$integration_config"
           # Catalog/control compatibility and binary-replacement fixtures require caller-selected
-          # historical binaries, existing VMs, and dummy secrets. Keep them out of this
-          # self-provisioning batch; the catalog fixture is provisioned separately below.
+          # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
+          # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
+          # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
+          # catalog and managed-job fixtures are provisioned separately below.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
+
+      - name: Managed-job integration fixtures
+        if: ${{ !cancelled() }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/smoke/cli/managed-job-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/managed-job-integration-results
+
+      - name: Upload managed-job integration results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: managed-job-integration-results
+          path: build/managed-job-integration-results/
+          if-no-files-found: warn
 
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
@@ -1926,6 +1966,26 @@ jobs:
           export MSB_HOME
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
+      - name: Python managed-job and null-stdin regression
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          chmod +x build/msb build/agentd
+          python3 scripts/smoke/cli/managed-job-integration.py \
+            --binary build/msb --agent build/agentd \
+            --firmware "build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" \
+            --workspace "${{ github.workspace }}" \
+            --python sdk/python/.venv/bin/python --python-only \
+            --output build/python-managed-job-results
+
+      - name: Upload Python managed-job regression results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-managed-job-results
+          path: build/python-managed-job-results/
+          if-no-files-found: warn
+
       - name: Disk usage
         if: always()
         run: scripts/ci/clean-runner-disk.sh --finish
@@ -2133,6 +2193,7 @@ jobs:
     needs:
       - changes
       - docs-language-order
+      - trust-helper
       - build-kernel
       - build-kernel-x86_64
       - build-agentd-aarch64

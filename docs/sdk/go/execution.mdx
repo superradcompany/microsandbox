@@ -222,6 +222,8 @@ Run `<configured-shell> -c command` with streaming output. The shell comes from 
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ErrExecTimeout` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
 
 ```go
@@ -920,3 +922,31 @@ type ExecOption func(*ExecConfig)
 ```
 
 A functional option that mutates an [`ExecConfig`](#execconfig). Construct them with the `WithExec*` functions below.
+
+## Managed jobs
+
+```go
+job, err := sb.ExecDetached(ctx, "cat", nil, msb.WithExecCwd("/tmp"))
+if err != nil { return err }
+defer job.Close()
+io, err := job.Attach(ctx)
+if err != nil { return err }
+defer io.Close()
+if err := io.WriteStdin(ctx, []byte("hello\n")); err != nil { return err }
+if err := io.Detach(ctx); err != nil { return err }
+if err := job.EOF(ctx); err != nil { return err }
+result, err := job.Wait(ctx)
+```
+
+`ExecDetached(ctx, cmd, args, opts...)` accepts existing `ExecOption` values, plus `WithJobInput(bytes)` and `WithJobRlimits(...)`. Detached input defaults to a retained pipe; select `WithExecStdinNull()` for EOF. `GetJob(ctx, id)` and `ListJobs(ctx, opts...)` are available on `Sandbox` and `SandboxHandle`; listing accepts `WithAllJobs`, `WithJobLimit` and `WithJobCursor`.
+
+`Job` provides `ID`, `Inspect`, `Wait`, `Logs`, `LogStream`, `FollowLogs`, `Attach`, `Signal`, `Kill`, `EOF` and `Close`. Job methods performing I/O take a context. `Attach` accepts `WithJobReadOnly`, `WithJobReplayRecent` or `WithJobReplayAfter`; the attachment has `Recv`, `WriteStdin`, `Resize`, `Detach` and `Close`. Log streams have `Next(ctx)` and `Close()`, with `io.EOF` at the end. Cancelling a context cancels that operation without terminating the managed process. Release native handles with `Close()` when finished.
+
+
+Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
+
+A job handle exposes inspection, an output-independent wait, bounded logs, attachment, signal, kill and EOF. Only one attachment owns input; read-only observers may coexist. Dropping or detaching an attachment preserves the job and its stdin. Pipe EOF is permanent; PTYs reject EOF and use terminal control characters. Each input write admits at most 16 KiB. Finite launch input is limited to 64 KiB, followed by EOF; use attachment writes for larger streams.
+
+Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
+
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.

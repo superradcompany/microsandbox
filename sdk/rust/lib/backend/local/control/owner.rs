@@ -233,8 +233,11 @@ async fn current_run(
     sandbox_id: i32,
     allow_starting: bool,
 ) -> ControlClientResult<run::Model> {
+    // Resident pause keeps the same host runtime and run alive. Operation-specific guards
+    // decide what is allowed while paused; identity verification must not retire its session.
     let mut statuses = vec![
         sandbox::SandboxStatus::Running,
+        sandbox::SandboxStatus::Paused,
         sandbox::SandboxStatus::Draining,
     ];
     if allow_starting {

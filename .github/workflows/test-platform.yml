@@ -37,8 +37,21 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: "0"
+      # Workspace test binaries exhaust hosted-runner disks with full debug info.
+      # Match the integration archive while preserving file:line backtraces.
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Free disk space (hosted Linux)
+        if: inputs.os == 'linux' && runner.environment == 'github-hosted'
+        run: |
+          # Workspace tests do not use Android, .NET, or Haskell SDKs. Only
+          # disposable hosted runners may remove these preinstalled tools.
+          df -h /
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 

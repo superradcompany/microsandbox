@@ -36,6 +36,10 @@ pub struct LogsArgs {
     /// Sandbox to read logs from.
     pub name: String,
 
+    /// Select one managed job's captured output.
+    #[arg(long)]
+    pub job: Option<String>,
+
     /// Show only the last N entries.
     #[arg(long)]
     pub tail: Option<usize>,
@@ -165,6 +169,9 @@ struct LogEntry {
 
 /// Execute the `msb logs` command.
 pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
+    if args.job.is_some() {
+        return run_job_logs(args).await;
+    }
     if let Some(boot_error) = logs::boot_error(&args.name).await? {
         render_boot_error(&boot_error, &args.name, args.json)?;
     }
@@ -345,6 +352,72 @@ fn engine_entry_to_cli(entry: &EngineLogEntry) -> LogEntry {
     }
 }
 
+/// Job selection keeps sandbox-wide logs unchanged and delegates replay/follow to the SDK.
+async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
+    let id = args.job.as_deref().expect("job branch requires a selector");
+    let job = microsandbox::Sandbox::get(&args.name)
+        .await?
+        .get_job(id)
+        .await?;
+    let sources = resolve_sources(&args.source)
+        .to_engine_sources()
+        .into_iter()
+        .map(|source| {
+            match source {
+                LogSource::Stdout => "stdout",
+                LogSource::Stderr => "stderr",
+                LogSource::Output => "output",
+                LogSource::System => "system",
+            }
+            .to_string()
+        })
+        .collect();
+    let options = microsandbox::jobs::JobLogOptions {
+        tail: args.tail,
+        since: parse_time_arg(args.since.as_deref())?.map(|time| time.timestamp_millis()),
+        until: parse_time_arg(args.until.as_deref())?.map(|time| time.timestamp_millis()),
+        sources,
+        follow: args.follow,
+        ..Default::default()
+    };
+    let grep = args
+        .grep
+        .as_deref()
+        .map(Regex::new)
+        .transpose()
+        .context("invalid --grep regex")?;
+    let color = if args.no_color || std::env::var_os("NO_COLOR").is_some() {
+        ColorMode::Never
+    } else {
+        args.color
+    };
+    let mut output = job.log_stream(&options).await?;
+    while let Some(entry) = output.next().await {
+        let entry = entry?;
+        if !grep_matches(grep.as_ref(), &String::from_utf8_lossy(&entry.data)) {
+            continue;
+        }
+        let timestamp = DateTime::<Utc>::from_timestamp_millis(entry.timestamp)
+            .context("invalid job log timestamp")?;
+        let (d, e) = match std::str::from_utf8(&entry.data) {
+            Ok(text) => (text.to_string(), None),
+            Err(_) => (
+                base64::engine::general_purpose::STANDARD.encode(&entry.data),
+                Some("b64".into()),
+            ),
+        };
+        let record = LogEntry {
+            t: timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+            s: entry.source,
+            d,
+            id: None,
+            e,
+        };
+        render_entry(&record, &args, color)?;
+    }
+    Ok(())
+}
+
 fn grep_matches(re: Option<&Regex>, body: &str) -> bool {
     re.is_none_or(|r| r.is_match(body))
 }
@@ -397,7 +470,7 @@ fn render_entry(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::
             "t": entry.t,
             "s": entry.s,
             "d": entry.d,
-            "id": entry.id,
+            "id": args.job.as_ref().map_or_else(|| serde_json::json!(entry.id), |job| serde_json::json!(job)),
             "e": entry.e,
         }))?;
         let stdout = std::io::stdout();
@@ -425,7 +498,10 @@ fn render_one(entry: &LogEntry, args: &LogsArgs, color: ColorMode) -> anyhow::Re
     };
 
     let id_prefix = if want_id_prefix {
-        Some(format_id_prefix(entry.id, want_session_color))
+        Some(args.job.as_ref().map_or_else(
+            || format_id_prefix(entry.id, want_session_color),
+            |job| format!("[id:{job}] "),
+        ))
     } else {
         None
     };

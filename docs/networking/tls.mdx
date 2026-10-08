@@ -24,6 +24,176 @@ For new local sandboxes, relative paths to upstream CA certificates and intercep
 
 ## Enabling interception
 
+Use `.interceptTls()` to enable TLS interception with the default settings.
+To configure bypass hosts, custom CAs, or other TLS options, use
+`.network(n => n.tls(...))`. Calling `.tls(...)` enables interception too,
+so you don't need both. The examples below show the shortcut in each SDK and the CLI.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+  .image("python")
+  .interceptTls()
+  .create();
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .intercept_tls()
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    intercept_tls=True,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithInterceptTLS(),
+)
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.create("worker", image: "python", intercept_tls: true)
+```
+
+```bash CLI
+msb create python --name worker --tls-intercept
+```
+</CodeGroup>
+
+<a id="application-trust"></a>
+
+## Trusting certificates in applications
+
+Applications with their own certificate stores may need extra setup.
+We provide [msb-trust.sh](https://github.com/superradcompany/microsandbox/blob/main/scripts/msb-trust/msb-trust.sh),
+a helper script that configures common applications to trust the Microsandbox TLS CA.
+Save it as `./msb-trust.sh`, copy it into the sandbox, and run it after boot.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.builder("app")
+  .image("ubuntu:24.04")
+  .interceptTls()
+  .patch((p) => p.copyFile("./msb-trust.sh", "/msb-trust.sh"))
+  .create();
+
+const setup = await sb.shell("sh /msb-trust.sh all");
+if (!setup.success) throw new Error(setup.stderr());
+console.log(setup.stdout());
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("app")
+    .image("ubuntu:24.04")
+    .intercept_tls()
+    .patch(|p| p.copy_file("./msb-trust.sh", "/msb-trust.sh", None, false))
+    .create()
+    .await?;
+
+let setup = sb.shell("sh /msb-trust.sh all").await?;
+if !setup.status().success {
+    return Err(setup.stderr()?.into());
+}
+print!("{}", setup.stdout()?);
+```
+
+```python Python
+from microsandbox import Patch, Sandbox
+
+sb = await Sandbox.create(
+    "app",
+    image="ubuntu:24.04",
+    intercept_tls=True,
+    patches=[Patch.copy_file("./msb-trust.sh", "/msb-trust.sh")],
+)
+
+setup = await sb.shell("sh /msb-trust.sh all")
+if setup.exit_code != 0:
+    raise RuntimeError(setup.stderr_text)
+print(setup.stdout_text)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "app",
+    m.WithImage("ubuntu:24.04"),
+    m.WithInterceptTLS(),
+    m.WithPatches(m.Patch.CopyFile(
+        "./msb-trust.sh", "/msb-trust.sh", m.PatchOptions{},
+    )),
+)
+if err != nil {
+    log.Fatal(err)
+}
+
+setup, err := sb.Shell(ctx, "sh /msb-trust.sh all")
+if err != nil {
+    log.Fatal(err)
+}
+if !setup.Success() {
+    log.Fatal(setup.Stderr())
+}
+fmt.Print(setup.Stdout())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+sb = Microsandbox::Sandbox.create("app", image: "ubuntu:24.04", intercept_tls: true)
+sb.fs.write("/msb-trust.sh", File.binread("./msb-trust.sh"))
+
+setup = sb.shell("sh /msb-trust.sh all")
+raise setup.stderr unless setup.success?
+puts setup.stdout
+sb.detach
+```
+
+```bash CLI
+msb create ubuntu:24.04 --name app \
+  --tls-intercept \
+  --copy-file ./msb-trust.sh:/msb-trust.sh
+
+msb exec app -- sh /msb-trust.sh all
+```
+</CodeGroup>
+
+The examples use `all` to configure supported applications whose tools are installed
+and report missing prerequisites. To choose specific applications, run
+`sh /msb-trust.sh --help` for the supported names, then pass one or more names
+instead of `all`.
+The helper tries every selected application and returns an error if any cannot be configured.
+
+<Note>
+Missing your application? PRs are welcome. We consider broad usefulness and
+maintenance effort when deciding which applications to support.
+</Note>
+
+## Bypass patterns
+
+Some clients trust a specific certificate or public key instead of the guest's trust store. Interception will fail for these clients.
+
+Add their hosts to the bypass list. Exact domains such as `api.example.com` and wildcards such as `*.apple.com` are supported. Bypassed traffic stays encrypted between the guest and upstream server, so content-based policy checks and secret injection do not apply.
+
 <CodeGroup>
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
@@ -79,12 +249,6 @@ msb create python --name worker \
   --tls-bypass "*.gov"
 ```
 </CodeGroup>
-
-## Bypass patterns
-
-Some clients trust a specific certificate or public key instead of the guest's trust store. Interception will fail for these clients.
-
-Add their hosts to the bypass list. Exact domains such as `api.example.com` and wildcards such as `*.apple.com` are supported. Bypassed traffic stays encrypted between the guest and upstream server, so content-based policy checks and secret injection do not apply.
 
 ## Upstream CA trust
 
@@ -187,16 +351,7 @@ msb run alpine --trust-host-cas -- apk update
 Host CA trust gives the guest every root certificate trusted by the host. Enable it only when you trust the host's CA store.
 </Note>
 
-## Using both
-
-TLS inspection covers configured ports, with port `443` enabled by default. TLS inspection and host CA trust solve different problems:
-
-| Feature | Covers |
-| --- | --- |
-| TLS inspection | Configured TLS ports and hosts that are not bypassed |
-| Host CA trust | Any guest connection that uses the guest's system trust store |
-
-Use both when you need HTTPS inspection and also need raw TLS connections to trust corporate certificates. Raw TLS includes bypassed hosts, custom TLS ports, and protocols such as Postgres or Redis over TLS.
+Host CA trust can be used alongside TLS inspection. Enable both when connections that bypass inspection, such as Postgres or Redis over TLS, also need to trust your host's certificates.
 
 ## Reference
 

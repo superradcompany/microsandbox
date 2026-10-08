@@ -357,6 +357,8 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ExecTimeoutError` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
 
 `str`
@@ -682,3 +684,30 @@ String enum (`enum.StrEnum`) naming a limitable POSIX resource.
 | `RlimitResource.NICE` | `"nice"` | Nice priority ceiling |
 | `RlimitResource.RTPRIO` | `"rtprio"` | Real-time priority ceiling |
 | `RlimitResource.RTTIME` | `"rttime"` | Real-time CPU time |
+
+## Managed jobs
+
+```python
+job = await sb.exec_detached("cat", cwd="/tmp")
+io = await job.attach()
+await io.write_stdin(b"hello\n")
+await io.detach()
+job = await sb.get_job(job.id)
+await job.eof()
+result = await job.wait()
+output = await job.logs()
+page = await sb.list_jobs(all=True, limit=50)
+```
+
+`exec_detached` accepts the same command arguments and keyword options as `exec`: `cwd`, `user`, `env`, `timeout`, `stdin`, `tty` and `rlimits`. Omitted stdin retains a pipe; `Stdin.null()` closes it, and bytes provide finite input. `get_job(id)` and `list_jobs(all=False, limit=50, cursor=None)` are also available on `SandboxHandle`.
+
+`Job` exposes `id`, `inspect()`, `wait()`, `logs()`, `log_stream()`, `follow_logs()`, `attach()`, `signal(number)`, `kill()` and `eof()`. Log methods accept `tail`, `since`, `until`, `sources` and `from_cursor`; `log_stream` also accepts `follow`. Attach accepts `read_only`, `replay_bytes` or `cursor`. Its `recv()`, `write_stdin(bytes)`, `resize(rows, cols)` and `detach()` methods are asynchronous; reads may run concurrently with writes. Log streams and attachments support async iteration. Close log streams and explicitly detach attachments when finished. Cancelling an await leaves the managed process running.
+
+
+Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
+
+A job handle exposes inspection, an output-independent wait, bounded logs, attachment, signal, kill and EOF. Only one attachment owns input; read-only observers may coexist. Dropping or detaching an attachment preserves the job and its stdin. Pipe EOF is permanent; PTYs reject EOF and use terminal control characters. Each input write admits at most 16 KiB. Finite launch input is limited to 64 KiB, followed by EOF; use attachment writes for larger streams.
+
+Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
+
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.

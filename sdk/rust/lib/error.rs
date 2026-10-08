@@ -102,6 +102,23 @@ pub enum MicrosandboxError {
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
+    /// A restore was refused because guest paths lack destination bindings.
+    ///
+    /// Callers can branch on `restore` to offer interface-specific remedies, such as selecting a
+    /// captured disk, which only a full restore accepts.
+    #[error(
+        "invalid config: restore requires destination bindings for: {}; {}",
+        .missing.join(", "),
+        .restore.missing_bindings_remedy()
+    )]
+    MissingRestoreBindings {
+        /// Sorted resources without a destination, each a kind and guest path such as
+        /// `mount /data`, `disk /data`, or `filesystem /work`.
+        missing: Vec<String>,
+        /// Which restore refused, which decides how the missing resources can be supplied.
+        restore: RestoreKind,
+    },
+
     /// The sandbox's effective entrypoint and CMD do not provide an executable default command.
     #[error(
         "sandbox has no default command; configure an entrypoint or cmd, or execute a literal command"
@@ -359,6 +376,15 @@ pub enum MicrosandboxError {
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+/// Which restore operation reported missing destination bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreKind {
+    /// A disk restore; only destination mounts can satisfy its recorded guest paths.
+    Disk,
+    /// A full restore; destination mounts or its captured disks can satisfy missing resources.
+    Full,
 }
 
 /// An SDK operation that a backend may decline to perform.
@@ -661,6 +687,21 @@ impl MicrosandboxError {
     }
 }
 
+impl RestoreKind {
+    /// Interface-neutral remedy for resources this restore is missing.
+    fn missing_bindings_remedy(self) -> &'static str {
+        match self {
+            RestoreKind::Disk => {
+                "provide a destination mount for each path or explicitly allow missing resources"
+            }
+            RestoreKind::Full => {
+                "provide a destination mount or select a \
+                 captured disk for each path, or explicitly allow missing resources"
+            }
+        }
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -731,6 +772,31 @@ impl microsandbox_db::retry::IsSqliteBusy for MicrosandboxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_restore_bindings_name_each_restore_remedy() {
+        let disk = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into(), "mount /logs".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
+
+        assert_eq!(
+            disk.to_string(),
+            "invalid config: restore requires destination bindings for: mount /data, \
+             mount /logs; provide a destination mount for each path or explicitly allow \
+             missing resources"
+        );
+        assert_eq!(
+            full.to_string(),
+            "invalid config: restore requires destination bindings for: disk /data, \
+             filesystem /work; provide a destination mount or select a captured disk for \
+             each path, or explicitly allow missing resources"
+        );
+    }
 
     #[test]
     fn snapshot_source_recovery_details_keep_artifact_and_diagnostics_structured() {

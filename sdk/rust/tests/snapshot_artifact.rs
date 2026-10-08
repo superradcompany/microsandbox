@@ -632,23 +632,62 @@ async fn typed_id_reference_is_resolved_by_the_local_backend() {
 
 #[tokio::test]
 async fn indexed_handle_can_remove_a_missing_local_artifact() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let snapshots = home.join("snapshots");
-    std::fs::create_dir_all(&snapshots).unwrap();
-    let (dir, digest) = make_artifact(&snapshots, "stale", b"upper data");
-    let backend = isolated_backend(&home).await;
+    for (grouped, remove_parent) in [(true, true), (true, false), (false, false), (false, true)] {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let snapshots = tmp.path().join("external-snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
+        let snapshots = snapshots.canonicalize().unwrap();
+        let (source, digest) = make_artifact(&snapshots, "stale", b"upper data");
+        let backend = isolated_backend(&home).await;
 
-    microsandbox::with_backend(backend, async {
-        Snapshot::reindex(&snapshots).await.unwrap();
-        let handle = Snapshot::get(&digest).await.unwrap();
-        assert_eq!(handle.path().unwrap(), std::fs::canonicalize(&dir).unwrap());
-        std::fs::remove_dir_all(dir).unwrap();
+        microsandbox::with_backend(backend, async {
+            let handle = if grouped {
+                let archive = tmp.path().join("snapshot.msb");
+                Snapshot::save(source.to_str().unwrap(), &archive, SaveOpts::default())
+                    .await
+                    .unwrap();
+                Snapshot::remove(source.to_str().unwrap(), false)
+                    .await
+                    .unwrap();
 
-        handle.remove(false).await.unwrap();
-        assert!(Snapshot::get(&digest).await.is_err());
-    })
-    .await;
+                Snapshot::load_with_options(
+                    &archive,
+                    microsandbox::snapshot::LoadOpts {
+                        dest: Some(snapshots.clone()),
+                        group: Some("external".into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+                Snapshot::get(&digest).await.unwrap()
+            } else {
+                Snapshot::reindex(&snapshots).await.unwrap();
+                Snapshot::get(&digest).await.unwrap()
+            };
+            let dir = handle.path().unwrap().to_path_buf();
+            let group_record = dir.parent().unwrap().join("group.json");
+            let group_before = grouped.then(|| std::fs::read(&group_record).unwrap());
+            std::fs::remove_dir_all(if remove_parent { &snapshots } else { &dir }).unwrap();
+
+            if grouped && !remove_parent {
+                // A surviving group must retain its head checks, even for a missing member.
+                assert!(handle.remove(true).await.is_err());
+                assert_eq!(std::fs::read(group_record).unwrap(), group_before.unwrap());
+                assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+            } else {
+                handle.remove(false).await.unwrap();
+                assert!(Snapshot::get(&digest).await.is_err());
+                assert!(Snapshot::list().await.unwrap().is_empty());
+                assert!(matches!(
+                    handle.remove(false).await,
+                    Err(microsandbox::MicrosandboxError::SnapshotNotFound(_))
+                ));
+            }
+        })
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -1377,6 +1416,8 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
     let competing_id = artifact_id(&second);
     let archive = tmp.path().join("first.msb");
     let competing = tmp.path().join("second.msb");
+    let renamed_archive = tmp.path().join("renamed.msb");
+
     microsandbox::with_backend(backend, async {
         for (source, destination) in [(&first, &archive), (&second, &competing)] {
             Snapshot::save(
@@ -1387,6 +1428,17 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
             .await
             .unwrap();
         }
+
+        let renamed_source = first.with_file_name("renamed");
+        std::fs::rename(&first, &renamed_source).unwrap();
+        Snapshot::save(
+            renamed_source.to_str().unwrap(),
+            &renamed_archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+
         let options = microsandbox::snapshot::LoadOpts {
             group: Some("work".into()),
             ..Default::default()
@@ -1394,7 +1446,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         let installed = Snapshot::load_with_options(&archive, options.clone())
             .await
             .unwrap();
-        let error = Snapshot::load_with_options(&competing, options)
+        let error = Snapshot::load_with_options(&competing, options.clone())
             .await
             .unwrap_err();
         assert!(
@@ -1415,6 +1467,32 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         );
         assert!(!home.join("snapshots/work").join(competing_id).exists());
         assert_eq!(Snapshot::list().await.unwrap().len(), 1);
+
+        // A live namespace pin (as held by Windows readers) must not hide an intact
+        // snapshot after a failed same-ID import. Recovery cannot mask the failure here.
+        let _pin =
+            microsandbox_image::storage_lease::StorageLease::shared(installed.path().unwrap())
+                .unwrap();
+        let error = Snapshot::load_with_options(&renamed_archive, options)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            microsandbox::MicrosandboxError::SnapshotAlreadyExists(_)
+        ));
+
+        let listed = Snapshot::list().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].availability(), "ready");
+        assert_eq!(listed[0].name(), Some("clean"));
+        assert_eq!(
+            Snapshot::group_head("work").await.unwrap().head,
+            original_id
+        );
+        assert_eq!(
+            std::fs::read(artifact_payload_path(installed.path().unwrap())).unwrap(),
+            b"first"
+        );
     })
     .await;
 }
@@ -2775,41 +2853,51 @@ async fn from_snapshot_rejects_unknown_required_extension_but_open_works() {
 
 #[tokio::test]
 async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
-    let tmp = TempDir::new().unwrap();
-    let home = tmp.path().join("home");
-    let backend = isolated_backend(&home).await;
-    let snapshots = home.join("snapshots");
-    std::fs::create_dir_all(&snapshots).unwrap();
+    for missing_child in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let backend = isolated_backend(&home).await;
+        let snapshots = home.join("snapshots");
+        std::fs::create_dir_all(&snapshots).unwrap();
 
-    microsandbox::with_backend(backend, async {
-        let (pdir, _pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
-        let parent_id = artifact_id(&pdir);
-        let (cdir, _c1) =
-            make_artifact_with_parent(&snapshots, "child", b"child v1", Some(parent_id.clone()));
-        Snapshot::reindex(&snapshots).await.unwrap();
+        microsandbox::with_backend(backend, async {
+            let (pdir, _pdigest) = make_artifact(&snapshots, "parent", b"parent upper");
+            let parent_id = artifact_id(&pdir);
+            let (cdir, _c1) = make_artifact_with_parent(
+                &snapshots,
+                "child",
+                b"child v1",
+                Some(parent_id.clone()),
+            );
+            Snapshot::reindex(&snapshots).await.unwrap();
 
-        // Replace the child in place: same name and path, different digest,
-        // same parent. Opening it runs the auto-reindex upsert, which must
-        // not double-count the parent edge.
-        std::fs::remove_dir_all(&cdir).unwrap();
-        make_artifact_with_parent(
-            &snapshots,
-            "child",
-            b"child v2 with different size",
-            Some(parent_id),
-        );
-        Snapshot::open(cdir.to_string_lossy().as_ref())
-            .await
-            .unwrap();
+            // Replace the child in place: same name and path, different digest,
+            // same parent. Opening it runs the auto-reindex upsert, which must
+            // not double-count the parent edge.
+            std::fs::remove_dir_all(&cdir).unwrap();
+            make_artifact_with_parent(
+                &snapshots,
+                "child",
+                b"child v2 with different size",
+                Some(parent_id),
+            );
+            Snapshot::open(cdir.to_string_lossy().as_ref())
+                .await
+                .unwrap();
 
-        Snapshot::remove(cdir.to_string_lossy().as_ref(), false)
-            .await
-            .unwrap();
-        Snapshot::remove(pdir.to_string_lossy().as_ref(), false)
-            .await
-            .expect("parent should be removable once its only child is gone");
-    })
-    .await;
+            let child = Snapshot::get(cdir.to_string_lossy().as_ref())
+                .await
+                .unwrap();
+            if missing_child {
+                std::fs::remove_dir_all(&cdir).unwrap();
+            }
+            child.remove(false).await.unwrap();
+            Snapshot::remove(pdir.to_string_lossy().as_ref(), false)
+                .await
+                .expect("parent should be removable once its only child is gone");
+        })
+        .await;
+    }
 }
 
 #[tokio::test]

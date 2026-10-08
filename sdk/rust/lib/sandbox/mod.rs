@@ -24,6 +24,7 @@ pub mod fs;
 mod handle;
 pub(crate) mod identity;
 pub mod init;
+pub mod jobs;
 pub(crate) mod metrics;
 #[cfg(feature = "local")]
 mod modify;
@@ -203,7 +204,10 @@ mod external_mounts;
 mod restore_warnings;
 mod stop;
 #[cfg(feature = "local")]
-pub(crate) use external_mounts::resolve_external_mounts;
+pub(crate) use external_mounts::{
+    external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
+    resolve_external_mounts,
+};
 #[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,

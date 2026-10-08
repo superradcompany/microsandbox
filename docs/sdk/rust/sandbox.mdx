@@ -54,7 +54,7 @@ Batch results follow input order. Validation or capture failures fail the whole 
 
 ### External mount restore
 
-Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct forks retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+Restore requires captured external filesystems (and, for full restore, additional disks) by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources (full restore records warnings). `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct forks retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
 ### Creation and restore progress
 
@@ -1463,6 +1463,14 @@ Control whether the sandbox clock follows the host. Full snapshots save this set
     <div className="msb-param-desc"><code>Sync</code> (default) follows host time; <code>Off</code> stops host clock updates after boot.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">intercept_tls()</span>
+
+```rust
+fn intercept_tls(self) -> Self
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved, including bypass hosts and custom CAs. Does not re-enable disabled networking.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">network()</span>
 

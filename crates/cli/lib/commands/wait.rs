@@ -15,6 +15,10 @@ pub struct WaitArgs {
     /// Sandbox to wait for.
     pub name: String,
 
+    /// Wait for a managed job instead of sandbox shutdown.
+    #[arg(long)]
+    pub job: Option<String>,
+
     /// Stop waiting after this duration (e.g. 30s, 5m, 1h).
     #[arg(short = 't', long)]
     pub timeout: Option<String>,
@@ -30,6 +34,15 @@ pub struct WaitArgs {
 
 /// Execute the `msb wait` command.
 pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
+    if let Some(job) = &args.job {
+        return super::jobs::wait(
+            &args.name,
+            job,
+            args.timeout.as_deref(),
+            args.format.as_deref() == Some("json"),
+        )
+        .await;
+    }
     let wait = async {
         let handle = Sandbox::get(&args.name).await?;
         anyhow::Ok(handle.wait_until_stopped().await?)

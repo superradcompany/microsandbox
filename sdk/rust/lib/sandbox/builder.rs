@@ -674,6 +674,15 @@ impl SandboxBuilder {
         self
     }
 
+    /// Enable TLS interception, preserving existing network and TLS settings.
+    ///
+    /// Use `.network(|n| n.tls(...))` to configure bypass hosts or custom CAs.
+    /// This does not re-enable networking if it has been disabled.
+    #[cfg(feature = "net")]
+    pub fn intercept_tls(self) -> Self {
+        self.network(|network| network.tls_overlay(|tls| tls.enabled(true)))
+    }
+
     /// Configure networking via a closure.
     ///
     /// ```ignore
@@ -2035,6 +2044,7 @@ pub(crate) fn prepare_local_snapshot_restore(
     config.spec.image = RootfsSource::oci(snap_ref);
     config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
     apply_snapshot_root_layout(config, &snap.manifest().root_disk)?;
+    crate::sandbox::require_recorded_mounts(config, snap.manifest())?;
 
     let file_state = match &snap.manifest().state {
         crate::snapshot::SnapshotState::File(state) => state,
@@ -2058,6 +2068,14 @@ pub(crate) fn prepare_local_snapshot_restore(
                 ));
             }
             crate::snapshot::validate_checkpoint_owned_inventory(snap.manifest(), &opened)?;
+            if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
+                // A disk-only restore does not reconnect captured external binds; require
+                // destination mounts up front.
+                let required_bind_paths =
+                    crate::sandbox::external_bind_guest_paths(&opened.resources)?;
+
+                crate::sandbox::require_guest_mounts(config, required_bind_paths)?;
+            }
             if config.snapshot_restore_mode == SnapshotRestoreMode::Full {
                 if opened.architecture != std::env::consts::ARCH {
                     return Err(crate::MicrosandboxError::SnapshotIntegrity(
@@ -2424,10 +2442,12 @@ mod tests {
         BackendConfig, SandboxBuilder, SandboxConfigPatch, apply_checkpoint_resources,
         checkpoint_network_override_conflicts,
     };
-    use crate::LogLevel;
     use crate::config::GlobalConfigPatch;
     use crate::sandbox::config::RestoreOverrideIntent;
+    #[cfg(feature = "local")]
+    use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
+    use crate::{LogLevel, MicrosandboxError, RestoreKind};
     use std::collections::BTreeMap;
 
     #[cfg(feature = "net")]
@@ -3209,6 +3229,58 @@ mod tests {
         assert_eq!(config.spec.network.ports.len(), 2);
     }
 
+    #[cfg(feature = "net")]
+    #[test]
+    fn intercept_tls_preserves_existing_settings_and_respects_later_changes() {
+        let layers = BackendConfig::new(Default::default(), Default::default());
+        let builder = SandboxBuilder::new("tls-shortcut")
+            .image("alpine")
+            .port(8080, 80)
+            .network(|network| {
+                network.tls(|tls| {
+                    tls.enabled(false)
+                        .bypass("pinned.example.com")
+                        .intercept_ca_cert("/test/ca.pem")
+                        .intercept_ca_key("/test/ca.key")
+                })
+            })
+            .disable_network()
+            .intercept_tls()
+            .intercept_tls();
+        let config = builder.finish(Some(&layers), None).unwrap();
+        let network = config.local_network_config().unwrap();
+
+        assert!(network.tls.enabled);
+        assert_eq!(network.tls.bypass, ["pinned.example.com"]);
+        assert_eq!(
+            network.tls.intercept_ca.cert_path,
+            Some("/test/ca.pem".into())
+        );
+        assert_eq!(
+            network.tls.intercept_ca.key_path,
+            Some("/test/ca.key".into())
+        );
+        assert!(!network.enabled);
+        assert_eq!(
+            network.policy.default_egress,
+            microsandbox_network::policy::Action::Deny
+        );
+        assert_eq!(
+            network.policy.default_ingress,
+            microsandbox_network::policy::Action::Deny
+        );
+        assert!(network.policy.rules.is_empty());
+        assert_eq!(config.spec.network.ports.len(), 1);
+
+        let config = SandboxBuilder::new("tls-disabled")
+            .image("alpine")
+            .intercept_tls()
+            .network(|network| network.tls(|tls| tls.enabled(false)))
+            .finish(Some(&layers), None)
+            .unwrap();
+        assert!(!config.local_network_config().unwrap().tls.enabled);
+    }
+
     #[test]
     fn managed_root_disk_sizes_are_resolved_after_final_resources() {
         let managed: GlobalConfigPatch = serde_json::from_str(
@@ -3940,6 +4012,69 @@ mod tests {
             .into_config();
         super::apply_snapshot_guest_clock(&mut config, &sync).unwrap();
         assert_eq!(config.spec.runtime.guest_clock, Some(GuestClockPolicy::Off));
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn disk_restore_requires_a_destination_for_each_recorded_mount() {
+        let mut manifest = manifest_with_guest_clock(GuestClockPolicy::Sync);
+        manifest
+            .set_external_mounts(vec!["/data".into(), "/logs".into()])
+            .unwrap();
+        let config = |builder: SandboxBuilder, complete: bool| {
+            let mut config = builder.config.into_config();
+            config.restore_resources.require_complete = complete;
+            config
+        };
+        let refused = |config: &crate::SandboxConfig, manifest: &_| {
+            let Err(MicrosandboxError::MissingRestoreBindings { missing, restore }) =
+                require_recorded_mounts(config, manifest)
+            else {
+                panic!("the restore must be refused");
+            };
+            (missing, restore)
+        };
+
+        let (missing, restore) = refused(&config(SandboxBuilder::new("restore"), true), &manifest);
+
+        assert_eq!(missing, ["mount /data", "mount /logs"]);
+        assert_eq!(restore, RestoreKind::Disk);
+
+        let error = MicrosandboxError::MissingRestoreBindings { missing, restore }.to_string();
+
+        assert!(
+            error.contains("restore requires destination bindings for: mount /data, mount /logs")
+        );
+        assert!(!error.contains("captured disk"));
+
+        let partial = SandboxBuilder::new("restore").volume("/data", |m| m.bind("/tmp/data"));
+
+        let (missing, restore) = refused(&config(partial, true), &manifest);
+
+        assert_eq!(missing, ["mount /logs"]);
+        assert_eq!(restore, RestoreKind::Disk);
+
+        // A tmpfs at a recorded path is not a host binding: still refused.
+        let tmpfs = SandboxBuilder::new("restore")
+            .volume("/data", |m| m.tmpfs())
+            .volume("/logs", |m| m.named("logs"));
+
+        let (missing, restore) = refused(&config(tmpfs, true), &manifest);
+
+        assert_eq!(missing, ["mount /data"]);
+        assert_eq!(restore, RestoreKind::Disk);
+
+        let full = SandboxBuilder::new("restore")
+            .volume("/data/", |m| m.bind("/tmp/data"))
+            .volume("/logs", |m| m.named("logs"));
+
+        require_recorded_mounts(&config(full, true), &manifest).unwrap();
+        require_recorded_mounts(&config(SandboxBuilder::new("restore"), false), &manifest).unwrap();
+
+        // Snapshots without the extension (older or no external mounts) are unaffected.
+        let plain = manifest_with_guest_clock(GuestClockPolicy::Sync);
+
+        require_recorded_mounts(&config(SandboxBuilder::new("restore"), true), &plain).unwrap();
     }
 
     #[test]

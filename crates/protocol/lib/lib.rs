@@ -9,6 +9,9 @@
 
 mod error;
 
+/// Runtime-owned execution jobs on the host-control extension.
+pub mod jobs;
+
 //--------------------------------------------------------------------------------------------------
 // Constants: Host↔Guest Shutdown Timings
 //--------------------------------------------------------------------------------------------------
@@ -444,6 +447,7 @@ pub mod codec;
 pub mod control;
 pub mod core;
 pub mod exec;
+pub mod exec_control;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;

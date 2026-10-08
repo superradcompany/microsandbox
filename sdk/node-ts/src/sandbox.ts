@@ -1,3 +1,4 @@
+import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import { validateStopTimeout } from "./internal/stop.js";
@@ -236,6 +237,21 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
+  async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
+  async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
+  async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
+    const b = configure(new JobListBuilder());
+    return jobPageFromJson(await jobCall(() => this.inner.listJobs(b.includeAll, b.pageSize, b.after)));
+  }
+
+  async execDetached(cmd: string, args: Iterable<string> = []): Promise<Job> {
+    return new Job(await jobCall(() => this.inner.execDetached(cmd, Array.from(args))));
+  }
+  async execDetachedWith(cmd: string, configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder): Promise<Job> {
+    const builder = configure(new napi.ExecOptionsBuilder().stdinPipe());
+    return new Job(await jobCall(() => this.inner.execDetachedWithBuilder(cmd, builder)));
+  }
+
   /** Prepare restoration; no VM starts until the builder's restore terminal. */
   static restore(snapshot: NapiSnapshotSeed): RestoreBuilder {
     const builder = typeof snapshot === "string"

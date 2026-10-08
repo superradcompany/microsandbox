@@ -1485,6 +1485,14 @@ Set the interval, in milliseconds, at which the host samples background metrics 
   </div>
 </div>
 
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">interceptTls()</span>
+
+```typescript
+interceptTls(): this
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved. Later `network()` callbacks preserve settings unless explicitly changed. Calling `tls()` inside the callback replaces the TLS settings.
+
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">network()</span>
 
 ```typescript

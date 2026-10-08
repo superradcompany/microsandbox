@@ -7,6 +7,8 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
 
+use crate::jobs::{JsJob, job_error, json, list_options};
+
 use crate::attach_options_builder::JsAttachOptionsBuilder;
 use crate::error::to_napi_error;
 use crate::exec::{ExecOutput, JsExecHandle};
@@ -110,6 +112,51 @@ impl Sandbox {
 
 #[napi]
 impl Sandbox {
+    /// Retrieve a retained managed job in this sandbox.
+    #[napi]
+    pub async fn get_job(&self, id: String) -> Result<JsJob> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb.get_job(id).await.map_err(job_error)?,
+        })
+    }
+
+    /// List bounded managed-job metadata without creating processes.
+    #[napi]
+    pub async fn list_jobs(&self, all: bool, limit: u32, cursor: Option<String>) -> Result<String> {
+        let options = list_options(all, limit, cursor)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        json(sb.list_jobs_with(|_| options).await.map_err(job_error)?)
+    }
+
+    /// Launch with runtime-owned I/O, retaining pipe input by default.
+    #[napi]
+    pub async fn exec_detached(&self, cmd: String, args: Option<Vec<String>>) -> Result<JsJob> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb
+                .exec_detached(cmd, args.unwrap_or_default())
+                .await
+                .map_err(job_error)?,
+        })
+    }
+
+    #[napi(js_name = "execDetachedWithBuilder")]
+    pub async unsafe fn exec_detached_with_builder(
+        &self,
+        cmd: String,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<JsJob> {
+        let options = builder.take_inner_builder()?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb
+                .exec_detached_with(cmd, |_| options)
+                .await
+                .map_err(job_error)?,
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------

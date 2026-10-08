@@ -37,6 +37,7 @@
 
 mod creation_progress;
 mod exec_adapter;
+mod jobs;
 mod restore;
 mod setup;
 mod storage;
@@ -565,7 +566,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
-            MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
+            MicrosandboxError::InvalidConfig(_)
+            | MicrosandboxError::MissingRestoreBindings { .. } => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
@@ -7772,6 +7774,24 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox::{MicrosandboxError, RestoreKind};
+
+    use super::FfiError;
+
+    #[test]
+    fn missing_restore_bindings_keep_the_invalid_config_kind() {
+        let error = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let message = error.to_string();
+
+        let ffi = FfiError::from(error);
+
+        assert_eq!(ffi.kind, super::error_kind::INVALID_CONFIG);
+        assert_eq!(ffi.message, message);
+    }
+
     #[test]
     fn tcp_network_aliases_are_exclusive() {
         for name in ["max_connections", "max_tcp_connections"] {

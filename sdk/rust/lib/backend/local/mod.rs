@@ -17,7 +17,7 @@
 
 #[cfg(test)]
 mod config_paths;
-mod control;
+pub(crate) mod control;
 mod control_lookup;
 mod database;
 pub(crate) mod host_paths;

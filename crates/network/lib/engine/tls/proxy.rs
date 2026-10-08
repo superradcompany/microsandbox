@@ -730,6 +730,7 @@ async fn flush_to_guest(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -742,12 +743,40 @@ mod tests {
     use crate::secrets::{config::SecretsConfig, handle::SecretsHandle};
     use microsandbox_types::TlsConfig;
 
+    fn isolated_tls_state(mut config: TlsConfig, secrets: SecretsHandle) -> TlsState {
+        static NEXT_CA: AtomicUsize = AtomicUsize::new(0);
+        // Parallel fixtures must not load or overwrite a shared persisted CA pair. Create an
+        // exclusive, disposable directory; an old directory or symlink is never reused.
+        let directory = loop {
+            let directory = std::env::temp_dir().join(format!(
+                "msb-proxy-ca-{}-{}",
+                std::process::id(),
+                NEXT_CA.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => break directory,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create test CA directory: {error}"),
+            }
+        };
+        let ca = crate::engine::tls::ca::CertAuthority::generate();
+        let cert_path = directory.join("ca.crt");
+        let key_path = directory.join("ca.key");
+        std::fs::write(&cert_path, ca.cert_pem()).unwrap();
+        std::fs::write(&key_path, ca.key_pem()).unwrap();
+        config.intercept_ca.cert_path = Some(cert_path);
+        config.intercept_ca.key_path = Some(key_path);
+        let state = TlsState::new(config, secrets);
+        // Construction reads both files synchronously and retains the CA material in memory.
+        std::fs::remove_dir_all(directory).unwrap();
+        state.unwrap()
+    }
+
     async fn tls_denial_response(chunks: &[&[u8]], close_input: bool, enabled: bool) -> Vec<u8> {
-        let state = TlsState::new(
+        let state = isolated_tls_state(
             microsandbox_types::TlsConfig::default(),
             SecretsHandle::new(SecretsConfig::default()),
-        )
-        .unwrap();
+        );
         let mut roots = rustls::RootCertStore::empty();
         roots.add(state.intercept_ca.cert_der.clone()).unwrap();
         let config = rustls::ClientConfig::builder()
@@ -888,16 +917,13 @@ mod tests {
     }
 
     fn test_tls_state(secrets: SecretsConfig) -> Arc<TlsState> {
-        Arc::new(
-            TlsState::new(
-                TlsConfig {
-                    verify_upstream: false,
-                    ..Default::default()
-                },
-                SecretsHandle::new(secrets),
-            )
-            .unwrap(),
-        )
+        Arc::new(isolated_tls_state(
+            TlsConfig {
+                verify_upstream: false,
+                ..Default::default()
+            },
+            SecretsHandle::new(secrets),
+        ))
     }
 
     fn host_bound_secret_config() -> SecretsConfig {

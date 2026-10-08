@@ -95,10 +95,9 @@ microsandbox-protocol = { version = "=0.7.7", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.7.7", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.7.7", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.7.7", path = "crates/vsock" }
-# Keep runtime APIs and shared metrics types on the same libkrun revision.
-# Pinned to libkrun PR #151 until its shared state codec API is released.
-msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "eb36bed9b1079cd6ba7efc1e602804596673a093" }
-msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "eb36bed9b1079cd6ba7efc1e602804596673a093" }
+# Keep runtime APIs and shared metrics types on the same published release.
+msb_krun = "=0.1.41"
+msb_krun_utils = "=0.1.41"
 test-macros = { path = "crates/testing/macros" }
 test-utils = { path = "crates/testing/utils" }
 
@@ -218,5 +217,5 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 lru = "0.18.0"
 parking_lot = "0.12"
 rpassword = "7"
-russh = "0.63.1"
+russh = "0.64.0"
 russh-sftp = "2.3.0"

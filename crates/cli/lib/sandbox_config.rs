@@ -1670,23 +1670,21 @@ fn materialize_network_patch(
     }
 
     if let Some(ports) = input.ports {
-        let ports = ports
-            .iter()
-            .map(|value| {
-                let (host_bind, host_port, guest_port, udp) = parse_port_mapping(value)?;
-                Ok(PublishedPortSpec {
-                    host_port,
-                    guest_port,
-                    protocol: if udp {
-                        PortProtocol::Udp
-                    } else {
-                        PortProtocol::Tcp
+        let mut expanded = Vec::new();
+        for value in ports {
+            for port in parse_port_mapping(&value)? {
+                expanded.push(PublishedPortSpec {
+                    host_port: port.host_port,
+                    guest_port: port.guest_port,
+                    protocol: match port.protocol {
+                        microsandbox_network::config::PortProtocol::Udp => PortProtocol::Udp,
+                        microsandbox_network::config::PortProtocol::Tcp => PortProtocol::Tcp,
                     },
-                    host_bind: host_bind.to_string(),
-                })
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        patch = patch.ports(ports);
+                    host_bind: port.host_bind.to_string(),
+                });
+            }
+        }
+        patch = patch.ports(expanded);
     }
     if let Some(dns) = input.dns {
         let mut value = DnsConfigPatch::new();
@@ -1885,6 +1883,80 @@ mod tests {
                 error.to_string().contains("TCP accept queue size"),
                 "{invalid}: {error}"
             );
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn published_port_ranges_lower_from_yaml_and_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = write_config(
+            dir.path(),
+            "ports.yaml",
+            r#"
+image: alpine
+ports: ["8000-8002:80-82"]
+network:
+  policy: open
+  ports: ["0.0.0.0:10240-11264:10240-11264/udp"]
+"#,
+        );
+        let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
+        let resolved = resolve(&sources).unwrap();
+        let builder = resolved.apply(SandboxBuilder::new("port-ranges")).unwrap();
+        let opts = crate::commands::common::SandboxOpts {
+            port: vec!["[::1]:9000-9001:90-91/tcp".to_owned()],
+            ..Default::default()
+        };
+        let builder =
+            crate::commands::common::apply_sandbox_opts_after_config(builder, &opts).unwrap();
+        let config = resolved
+            .image(None, None)
+            .unwrap()
+            .apply(builder)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let ports = &config.spec.network.ports;
+        assert_eq!(ports.len(), 1030);
+        for (offset, port) in ports[..1025].iter().enumerate() {
+            assert_eq!(port.host_port, 10240 + offset as u16);
+            assert_eq!(port.guest_port, 10240 + offset as u16);
+            assert_eq!(port.host_bind, "0.0.0.0");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Udp);
+        }
+        for (offset, port) in ports[1025..1028].iter().enumerate() {
+            assert_eq!(port.host_port, 8000 + offset as u16);
+            assert_eq!(port.guest_port, 80 + offset as u16);
+            assert_eq!(port.host_bind, "127.0.0.1");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Tcp);
+        }
+        for (offset, port) in ports[1028..].iter().enumerate() {
+            assert_eq!(port.host_port, 9000 + offset as u16);
+            assert_eq!(port.guest_port, 90 + offset as u16);
+            assert_eq!(port.host_bind, "::1");
+            assert_eq!(port.protocol, microsandbox_types::PortProtocol::Tcp);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn published_port_ranges_reject_invalid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        for (spec, expected) in [
+            ("8000-8002:80-81", "equal lengths"),
+            ("8000-8002:82-80/udp", "guest port range is reversed"),
+        ] {
+            for contents in [
+                format!("network:\n  ports: [\"{spec}\"]\n"),
+                format!("ports: [\"{spec}\"]\n"),
+            ] {
+                let root = write_config(dir.path(), "ports.yaml", &contents);
+                let sources = SandboxConfigSources::default().source(SandboxConfigKind::Root, root);
+                let error = resolve(&sources).unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+            }
         }
     }
 

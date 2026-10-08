@@ -19,6 +19,9 @@ from microsandbox._microsandbox import (
     ImageHandle,
     ImageLayerDetail,
     ImagePruneReport,
+    Job,
+    JobAttachment,
+    JobLogStream,
     LogEntry,
     LogStream,
     MemoryCacheEntry,
@@ -80,6 +83,7 @@ from microsandbox.errors import (
     ImagePullFailedError,
     InvalidConfigError,
     IoError,
+    JobError,
     MetricsDisabledError,
     MetricsUnavailableError,
     MicrosandboxError,
@@ -104,6 +108,7 @@ from microsandbox.errors import (
     UnsupportedOperationError,
     VolumeNotFoundError,
 )
+from microsandbox.jobs import JobEvent, JobExit, JobInfo, JobLogEntry, JobPage, JobState
 from microsandbox.setup import (
     InstallOptions,
     ResolvedRuntime,
@@ -214,6 +219,16 @@ if _bundled_msb.is_file():
     _set_packaged_msb_path(str(_bundled_msb))
 
 __all__ = [
+    "Job",
+    "JobAttachment",
+    "JobLogStream",
+    "JobError",
+    "JobEvent",
+    "JobExit",
+    "JobInfo",
+    "JobLogEntry",
+    "JobPage",
+    "JobState",
     # Backend selection
     "BackendInfo",
     "default_backend_info",
