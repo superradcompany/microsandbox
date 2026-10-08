@@ -47,7 +47,9 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason}
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
 
-use super::{CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store};
+use super::{
+    CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store, validate_checkpoint_owned_inventory,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1217,7 +1219,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         let member_dir = child_stage.join(&member.snapshot_id);
         let extracted_closure = member_dir.join(CHECKPOINT_DIRECTORY);
         let checkpoint = CheckpointClosure::inspect_manifest(&extracted_closure, None)?;
-        super::validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
+        validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
         if disk_only {
             let materialized = super::materialize_checkpoint_child_disk_state(
                 &extracted_closure,
@@ -1810,7 +1812,7 @@ fn checkpoint_archive_members(
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     let closure = CheckpointClosure::open_portable(closure_root, Some(&expected), fs_state_limit)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    super::validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
+    validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
     let prefix = format!("checkpoints/{snapshot_id}");
     let checkpoint_path = closure_root.join("checkpoint.json");
     let mut members = vec![CheckpointArchiveMember {
@@ -3787,7 +3789,24 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        snapshots.push(store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?);
+        let snapshot = store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?;
+
+        // Checkpoint admission must not depend on the optional archive inventory.
+        if let SnapshotState::Checkpoint(state) = &snapshot.manifest().state {
+            let expected = ObjectId::new(&state.checkpoint_root)
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+            let closure = CheckpointClosure::open_portable(
+                snapshot.path().join(CHECKPOINT_DIRECTORY),
+                Some(&expected),
+                local.config().fs_state_limit(),
+            )
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+            validate_checkpoint_owned_inventory(snapshot.manifest(), closure.checkpoint())?;
+        }
+
+        snapshots.push(snapshot);
     }
 
     if snapshots.is_empty() {
@@ -5479,6 +5498,39 @@ mod tests {
                 .is_file()
         );
 
+        // Inventory-free archives must enforce the same admission budget.
+        let without_inventory = directory.path().join("without-inventory.tar");
+        let compressed = tokio::fs::File::open(&archive).await.unwrap();
+        let mut decoder = ZstdDecoder::new(tokio::io::BufReader::new(compressed));
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).await.unwrap();
+        let mut source_tar = tar::Archive::new(decoded.as_slice());
+        let mut builder = tar::Builder::new(std::fs::File::create(&without_inventory).unwrap());
+        for entry in source_tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            if path == Path::new("archive.json") {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes.as_slice())
+                .unwrap();
+        }
+        builder.finish().unwrap();
+        drop(builder);
+
+        let destination = directory.path().join("without-inventory-import");
+        let imported = load_snapshot(&local, &without_inventory, Some(&destination))
+            .await
+            .unwrap();
+        assert_eq!(imported.id(), snapshot_id.as_str());
+
         let default_home = directory.path().join("default-home");
         let receiving = crate::test_support::local_backend_builder(&default_home)
             .build()
@@ -5488,17 +5540,23 @@ mod tests {
             receiving.config().fs_state_limit(),
             crate::test_support::DEFAULT_FS_STATE_LIMIT
         );
-        let error = load_snapshot(&receiving, &archive, None).await.unwrap_err();
-        assert!(
-            error.to_string().contains("max_filesystem_state_mib"),
-            "{error}"
-        );
-        assert!(
-            !receiving
-                .snapshots_dir()
-                .join(snapshot_id.as_str())
-                .exists()
-        );
+        for input in [&archive, &without_inventory] {
+            let error = load_snapshot_with_options(
+                &receiving,
+                input,
+                LoadOpts {
+                    group: Some("budget-rejected".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("max_filesystem_state_mib"),
+                "{error}"
+            );
+            assert!(!receiving.snapshots_dir().join("budget-rejected").exists());
+        }
     }
 
     /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
