@@ -542,14 +542,6 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-A running sandbox requires an explicit policy. `--next-start` preserves its current
-mappings and connections until it stops. `--restart` preserves persistent disk contents
-but interrupts running processes and TCP connections; UDP forwarding state is recreated.
-Stopped sandboxes save changes without starting. Use `--dry-run` to preview the diff.
+For running sandboxes, use `--next-start` to defer changes or `--restart` to apply them immediately. Restart preserves disk contents but interrupts processes and connections. Stopped sandboxes save changes for their next start. Use `--dry-run` to preview changes.
 
-Modify checks newly requested host bindings before saving or stopping, and rejects known
-conflicts without applying the patch. Bindings overlapping the sandbox's active listeners
-cannot be checked until those listeners stop. Preflight does not reserve ports for a later
-start: another process can claim a port afterward. Startup retains its existing behavior
-of logging listener failures; a successful modification records desired configuration,
-not a guarantee that every listener bound successfully. These operations are local-only.
+Known port conflicts are rejected before changes are applied, but ports aren't reserved: binding can still fail at startup and will be logged. Port modification is supported only for local sandboxes.
