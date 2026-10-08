@@ -346,11 +346,9 @@ impl LocalBackend {
             }
 
             // Archive metadata is now available. Check policy against captured state
-            // before admitting it or touching the replacement target. The archive
-            // source stays set until then: disk-only restores carry no checkpoint,
-            // so it is their only proof of a snapshot source.
+            // before admitting it or touching the replacement target. The archive path
+            // stays set so this check sees a disk-only restore's snapshot source.
             config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-            config.snapshot_archive_source = None;
             // Keep launch-time restore intent in this check, not just cold-start state.
             launch_contract::validate_runtime_config(&config, self.config()).await?;
             archive_stage = Some(stage);
