@@ -48,7 +48,7 @@ module Microsandbox
     end
 
     %i[
-      image cpus max_cpus memory max_memory workdir shell hostname user
+      image cpus max_cpus memory max_memory nested_virt workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
       disable_network intercept_tls quiet_logs entrypoint init proxy vsock vsock_dgram
     ].each do |name|

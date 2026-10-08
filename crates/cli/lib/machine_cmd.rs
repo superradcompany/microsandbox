@@ -317,6 +317,9 @@ pub fn run(args: MachineArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        nested_virt: launch
+            .nested_virt
+            .unwrap_or_else(microsandbox_types::default_nested_virt),
         guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,

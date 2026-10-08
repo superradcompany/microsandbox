@@ -2300,3 +2300,11 @@ Discriminator returned by [`PullEvent.event_type`](#pullevent).
 | `PullEventType.STITCH_WRITING_VMDK` | `"stitch_writing_vmdk"` | VMDK image is being written |
 | `PullEventType.STITCH_COMPLETE` | `"stitch_complete"` | Image stitching completed |
 | `PullEventType.COMPLETE` | `"complete"` | Image pull completed |
+
+## Nested virtualization
+
+Nested virtualization is disabled by default on current runtimes. If you leave the setting unspecified, older runtimes keep their existing behavior. An explicit on/off setting requires a runtime that can honor it; otherwise startup returns an upgrade-required error. Enable it for a local sandbox, or set `sandbox_defaults.nested_virt` in [global configuration](/configuration#sandbox_defaults). The host hardware and hypervisor must support nesting, and the guest kernel must include KVM support. Startup fails if the host cannot honor an enabled setting. Full snapshots, execution restore, and forks are unavailable while nesting is enabled; disk-only snapshots remain available.
+
+```python
+sandbox = await Sandbox.create(name="nested", image="alpine", nested_virt=True)
+```

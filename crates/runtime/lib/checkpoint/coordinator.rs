@@ -73,6 +73,7 @@ pub(crate) struct CheckpointCoordinator {
     local_baseline: Option<LocalMemoryPin>,
     inherited_memory: Option<LocalMemoryPin>,
     boot_geometry: (u8, u8, u32, u32),
+    nested_virt: bool,
     guest_clock: microsandbox_types::GuestClockPolicy,
 }
 
@@ -488,6 +489,7 @@ impl CheckpointCoordinator {
             local_baseline: None,
             inherited_memory: None,
             boot_geometry: (vm.vcpus, vm.max_cpus, vm.memory_mib, vm.max_memory_mib),
+            nested_virt: vm.nested_virt,
             guest_clock: vm.guest_clock,
         })
     }
@@ -771,6 +773,13 @@ impl CheckpointCoordinator {
         record_integrity: bool,
         guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        // Capturing ordinary CPU state does not preserve an active nested guest on every
+        // backend. Refuse both snapshots and local forks before mutating the source.
+        if self.nested_virt {
+            return Err(CheckpointFailure::before_pause(
+                "full snapshots and forks are unavailable when nested virtualization is enabled",
+            ));
+        }
         // All RAM captures pass through this executor-owned method. Consume the construction
         // handoff before either durable or local capture can publish a newer token. Dirty
         // tracking has run since the pristine mapping was installed, not since this adoption.

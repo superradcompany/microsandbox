@@ -1805,6 +1805,7 @@ mod tests {
                 cpu_placement: microsandbox_types::CpuPlacement::Spread,
                 placement_profile: None,
                 thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                nested_virt: None,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),

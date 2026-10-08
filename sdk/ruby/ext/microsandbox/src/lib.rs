@@ -774,6 +774,7 @@ fn apply_builder_options(
         "max_cpus",
         "memory",
         "max_memory",
+        "nested_virt",
         "detached",
         "workdir",
         "shell",
@@ -813,6 +814,9 @@ fn apply_builder_options(
     }
     if let Some(v) = keyword::<u32>(kwargs, "memory")? {
         builder = builder.memory(v);
+    }
+    if let Some(enabled) = keyword::<bool>(kwargs, "nested_virt")? {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(v) = keyword::<u32>(kwargs, "max_memory")? {
         builder = builder.max_memory(v);
@@ -1096,6 +1100,9 @@ impl RubySandboxBuilder {
     }
     fn memory(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.memory(v))
+    }
+    fn nested_virt(this: typed_data::Obj<Self>, enabled: bool) -> Result<(), Error> {
+        put_builder(&this, |b| b.nested_virt(enabled))
     }
     fn max_memory(this: typed_data::Obj<Self>, v: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.max_memory(v))
@@ -2787,6 +2794,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("cpus!", method!(RubySandboxBuilder::cpus, 1))?;
     builder.define_method("max_cpus!", method!(RubySandboxBuilder::max_cpus, 1))?;
     builder.define_method("memory!", method!(RubySandboxBuilder::memory, 1))?;
+    builder.define_method("nested_virt!", method!(RubySandboxBuilder::nested_virt, 1))?;
     builder.define_method("max_memory!", method!(RubySandboxBuilder::max_memory, 1))?;
     builder.define_method("env!", method!(RubySandboxBuilder::env, 2))?;
     builder.define_method("label!", method!(RubySandboxBuilder::label, 2))?;

@@ -255,3 +255,11 @@ A job handle exposes inspection, an output-independent wait, bounded logs, attac
 Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
 
 If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.
+
+## Nested virtualization
+
+Nested virtualization is disabled by default on current runtimes. If you leave the setting unspecified, older runtimes keep their existing behavior. An explicit on/off setting requires a runtime that can honor it; otherwise startup returns an upgrade-required error. Enable it for a local sandbox, or set `sandbox_defaults.nested_virt` in [global configuration](/configuration#sandbox_defaults). The host hardware and hypervisor must support nesting, and the guest kernel must include KVM support. Startup fails if the host cannot honor an enabled setting. Full snapshots, execution restore, and forks are unavailable while nesting is enabled; disk-only snapshots remain available.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
+```

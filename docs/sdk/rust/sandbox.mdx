@@ -3226,3 +3226,11 @@ Point-in-time resource usage snapshot.
 | `Paused` | VM is paused |
 | `Stopped` | VM shut down; configuration persisted; can be restarted |
 | `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+Nested virtualization is disabled by default on current runtimes. If you leave the setting unspecified, older runtimes keep their existing behavior. An explicit on/off setting requires a runtime that can honor it; otherwise startup returns an upgrade-required error. Enable it for a local sandbox, or set `sandbox_defaults.nested_virt` in [global configuration](/configuration#sandbox_defaults). The host hardware and hypervisor must support nesting, and the guest kernel must include KVM support. Startup fails if the host cannot honor an enabled setting. Full snapshots, execution restore, and forks are unavailable while nesting is enabled; disk-only snapshots remain available.
+
+```rust
+Sandbox::builder("nested").image("alpine").nested_virt(true).create().await?;
+```

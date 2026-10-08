@@ -1273,6 +1273,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */

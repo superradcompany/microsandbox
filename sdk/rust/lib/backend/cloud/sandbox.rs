@@ -553,6 +553,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    if config.spec.resources.nested_virt == Some(true) {
+        return Err(unsupported("nested_virt (local-only)"));
+    }
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }
@@ -1481,13 +1484,16 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 12] = [
+        let cases: [(&str, ConfigMutation); 13] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("nested_virt (local-only)", |config| {
+                config.spec.resources.nested_virt = Some(true)
             }),
             ("guest_clock", |config| {
                 config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)

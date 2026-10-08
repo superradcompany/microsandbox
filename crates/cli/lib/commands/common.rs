@@ -148,6 +148,10 @@ pub struct SandboxOpts {
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
 
+    /// Enable or disable nested virtualization. Omission uses the runtime default.
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub nested_virt: Option<bool>,
+
     /// Guest wall-clock policy: `sync` (default) keeps the guest clock in step with the
     /// host; `off` leaves it alone after boot, including across full snapshot restores.
     #[arg(long = "guest-clock", value_name = "POLICY", value_parser = guest_clock_parser())]
@@ -1059,6 +1063,7 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
+            || self.nested_virt.is_some()
             || self.guest_clock.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
@@ -1335,6 +1340,9 @@ fn apply_sandbox_opts_inner(
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(enabled) = opts.nested_virt {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(ref thp) = opts.thp {
         let policy = thp
@@ -4219,6 +4227,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn nested_virtualization_cli_preserves_explicit_false() {
+        for (args, expected) in [
+            (vec!["create"], None),
+            (vec!["create", "--nested-virt", "alpine"], Some(true)),
+            (vec!["create", "--nested-virt=true"], Some(true)),
+            (vec!["create", "--nested-virt=false"], Some(false)),
+        ] {
+            let matches =
+                SandboxOpts::augment_args(Command::new("create").arg(clap::Arg::new("image")))
+                    .try_get_matches_from(args)
+                    .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(config.spec.resources.nested_virt, expected);
+        }
+        assert!(
+            SandboxOpts::augment_args(Command::new("create").arg(clap::Arg::new("image")))
+                .try_get_matches_from(["create", "--nested-virt=invalid"])
+                .is_err()
+        );
     }
 
     #[tokio::test]

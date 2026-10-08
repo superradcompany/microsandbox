@@ -244,6 +244,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `memory_mib` | `512` | Guest memory in MiB |
 | `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
 | `placement_profile` | `null` | Name of a host-defined entry in `runtime.placement_profiles` |
+| `nested_virt` | unset | Expose hardware virtualization to local guests. When unset, current runtimes disable nesting and older runtimes keep their existing behavior. Explicit settings require a runtime that can honor them. Requires host hypervisor support for nesting and KVM support in the guest kernel. Startup fails if the host cannot honor an enabled setting. |
 | `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
 | `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
@@ -253,6 +254,18 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
 An ordinary `outbound_proxy` default can be overridden per sandbox. A managed value takes precedence over CLI/SDK proxy options; managed `null` clears them. The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`; SOCKS5 accepts `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`. Passwords are resolved at sandbox startup. Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
+
+For example, explicitly disable nested virtualization while allowing individual local sandboxes to opt in. Older runtimes that cannot disable nesting will require an upgrade:
+
+```json
+{
+  "sandbox_defaults": {
+    "nested_virt": false
+  }
+}
+```
+
+Per-sandbox SDK settings and `--nested-virt=true` override this user default. A managed configuration override takes precedence over both. Full snapshots, execution restore, and forks are unavailable while nesting is enabled; disk-only snapshots remain available.
 
 ### `sandbox_defaults.oci`
 

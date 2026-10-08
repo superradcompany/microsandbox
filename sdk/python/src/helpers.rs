@@ -24,6 +24,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpu_placement",
     "placement_profile",
     "thp",
+    "nested_virt",
     "workdir",
     "shell",
     "security",
@@ -498,6 +499,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
         builder = builder.placement_profile(placement_profile);
+    }
+    if let Some(enabled) = extract_opt::<bool>(kwargs, "nested_virt")? {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
         let policy = thp

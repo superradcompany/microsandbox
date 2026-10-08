@@ -13,6 +13,7 @@ EXPECTED_KWARGS = [
     "cpus",
     "max_memory",
     "max_cpus",
+    "nested_virt",
     "workdir",
     "shell",
     "security",

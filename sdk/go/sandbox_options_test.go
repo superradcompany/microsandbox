@@ -1065,7 +1065,7 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 
 	for _, key := range []string{
 		"image", "snapshot", "memory_mib", "cpus", "max_memory_mib", "max_cpus", "workdir", "shell",
-		"thp",
+		"thp", "nested_virt",
 		"hostname", "user", "replace", "detached", "env", "scripts",
 		"ports", "ports_udp", "vsock", "network", "secrets", "patches", "volumes",
 		"proxy", "init", "registry_auth", "registry_insecure", "registry_ca_certs", "root_disk",
@@ -1073,6 +1073,15 @@ func TestFFIWireShape_EmptyConfigOmitsOptionalFields(t *testing.T) {
 		if _, present := got[key]; present {
 			body, _ := json.Marshal(got)
 			t.Errorf("empty config emitted key %q; payload = %s", key, body)
+		}
+	}
+}
+
+func TestFFIWireShape_NestedVirt(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		got := marshalCreateOptions(t, WithNestedVirt(enabled))
+		if value, ok := got["nested_virt"].(bool); !ok || value != enabled {
+			t.Fatalf("nested_virt = %v, want %v", got["nested_virt"], enabled)
 		}
 	}
 }

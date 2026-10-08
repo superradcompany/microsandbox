@@ -1874,6 +1874,7 @@ mod tests {
         let mut vm = super::VmConfig {
             libkrunfw_path: Default::default(),
             thp: Default::default(),
+            nested_virt: false,
             guest_clock: Default::default(),
             memory_cache_dir: None,
             vcpus: 1,

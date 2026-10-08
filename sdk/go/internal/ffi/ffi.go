@@ -1759,6 +1759,7 @@ type CreateOptions struct {
 	MaxCPUs              uint8                `json:"max_cpus,omitempty"`
 	CPUPlacement         string               `json:"cpu_placement,omitempty"`
 	PlacementProfile     string               `json:"placement_profile,omitempty"`
+	NestedVirt           *bool                `json:"nested_virt,omitempty"`
 	THP                  string               `json:"thp,omitempty"`
 	Workdir              string               `json:"workdir,omitempty"`
 	Shell                string               `json:"shell,omitempty"`
