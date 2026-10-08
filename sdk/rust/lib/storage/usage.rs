@@ -79,11 +79,12 @@ impl Storage {
 
 #[cfg(feature = "local")]
 mod local_usage {
-    #[cfg(unix)]
     use std::collections::HashSet;
     use std::io;
     use std::path::{Path, PathBuf};
 
+    #[cfg(windows)]
+    use cap_primitives::fs::_WindowsByHandle;
     #[cfg(unix)]
     use cap_std::fs::MetadataExt;
     use cap_std::fs::{Dir, Metadata};
@@ -105,7 +106,6 @@ mod local_usage {
     struct Scan {
         logical: u64,
         allocated: u64,
-        #[cfg(unix)]
         seen: HashSet<(u64, u64)>,
         skipped: u64,
     }
@@ -462,7 +462,16 @@ mod local_usage {
         let parent = directory.into_std_file();
         for entry in entries {
             let entry = entry?;
+            #[cfg(unix)]
             let metadata = entry.metadata()?;
+            // Windows directory entries omit file identity. A relative, no-follow stat
+            // obtains it without reading contents or escaping the admitted directory.
+            #[cfg(windows)]
+            let metadata = cap_primitives::fs::stat(
+                &parent,
+                Path::new(&entry.file_name()),
+                cap_primitives::fs::FollowSymlinks::No,
+            )?;
             if metadata.file_type().is_symlink() {
                 scan.skipped += 1;
             } else if metadata.is_dir() {
@@ -484,6 +493,15 @@ mod local_usage {
         #[cfg(unix)]
         if !scan.seen.insert((metadata.dev(), metadata.ino())) {
             return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let identity = metadata.volume_serial_number().zip(metadata.file_index());
+            let (volume, index) =
+                identity.ok_or_else(|| io::Error::other("storage file identity is unavailable"))?;
+            if !scan.seen.insert((u64::from(volume), index)) {
+                return Ok(());
+            }
         }
         scan.logical = scan
             .logical
