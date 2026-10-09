@@ -22,6 +22,7 @@ use microsandbox_protocol::transport::ClientIncarnation;
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
+use crate::exec_security::PreparedSecurity;
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
 use crate::serial::InputCharge;
@@ -954,6 +955,7 @@ impl ExecSession {
 
         // Pre-parse rlimits before fork (no allocations in child).
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let security = PreparedSecurity::new(req.security.as_ref(), security_profile)?;
 
         // Prevent the central reaper from observing this child before its PID
         // and generation are registered.
@@ -1023,7 +1025,13 @@ impl ExecSession {
             }
 
             if apply_exec_security_profile(security_profile).is_err() {
-                unsafe { libc::_exit(1) };
+                write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
+            }
+            if let Err(error) = security.before_user() {
+                write_exec_errno_and_exit(
+                    err_pipe.write_end.as_raw_fd(),
+                    error.raw_os_error().unwrap_or(libc::EPERM),
+                );
             }
 
             // Group lookup can open /etc/group; finish it before restrictive limits.
@@ -1050,6 +1058,13 @@ impl ExecSession {
                 unsafe {
                     libc::setenv(key.as_ptr(), home.as_ptr(), 1);
                 }
+            }
+
+            if let Err(error) = security.after_user() {
+                write_exec_errno_and_exit(
+                    err_pipe.write_end.as_raw_fd(),
+                    error.raw_os_error().unwrap_or(libc::EPERM),
+                );
             }
 
             // execvp — on success this never returns.
@@ -1143,6 +1158,7 @@ impl ExecSession {
 
         // Apply the security profile and resource limits in the child before exec.
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let security = PreparedSecurity::new(req.security.as_ref(), security_profile)?;
         unsafe {
             cmd.pre_exec(move || {
                 // This uses only write(2) in the child and therefore remains
@@ -1157,11 +1173,12 @@ impl ExecSession {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
+                apply_exec_security_profile(security_profile).map_err(agentd_to_pre_exec_error)?;
+                security.before_user()?;
 
                 // Group lookup must finish before limits can prevent opening /etc/group.
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_groups(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_groups(user).map_err(agentd_to_pre_exec_error)?;
                 }
 
                 // Apply limits before dropping the privilege needed to raise hard limits.
@@ -1172,8 +1189,9 @@ impl ExecSession {
                 }
 
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_user(user).map_err(agentd_to_pre_exec_error)?;
                 }
+                security.after_user()?;
                 Ok(())
             });
         }
@@ -1302,6 +1320,10 @@ fn new_exec_error_pipe() -> AgentdResult<ExecErrorPipe> {
 
 fn write_exec_error_and_exit(err_fd: RawFd) -> ! {
     let errno = unsafe { *libc::__errno_location() };
+    write_exec_errno_and_exit(err_fd, errno)
+}
+
+fn write_exec_errno_and_exit(err_fd: RawFd, errno: i32) -> ! {
     let bytes = errno.to_ne_bytes();
     let _ = unsafe { libc::write(err_fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
     unsafe { libc::_exit(127) }
@@ -1571,6 +1593,9 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
         )
     };
     if rc != 0 {
+        if passwd_lookup_errno_means_missing(rc) {
+            return Ok(ResolvedUserLookup::Numeric(uid));
+        }
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
@@ -1629,6 +1654,10 @@ fn lookup_buffer_len() -> usize {
     if size > 0 { size as usize } else { 16 * 1024 }
 }
 
+fn passwd_lookup_errno_means_missing(errno: libc::c_int) -> bool {
+    matches!(errno, libc::ENOENT | libc::ESRCH)
+}
+
 fn apply_resolved_groups(user: &ResolvedUser) -> AgentdResult<()> {
     if let Some(ref name) = user.initgroups_user {
         if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
@@ -1676,8 +1705,12 @@ fn env_contains_key(env: &[String], key: &str) -> bool {
     })
 }
 
-fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
-    std::io::Error::other(err.to_string())
+fn agentd_to_pre_exec_error(err: AgentdError) -> std::io::Error {
+    match err {
+        AgentdError::Io(err) => err,
+        AgentdError::Nix(err) => std::io::Error::from_raw_os_error(err as i32),
+        _ => std::io::Error::from_raw_os_error(libc::EINVAL),
+    }
 }
 
 /// Keep one owned descriptor across readiness waits; cancellation cannot leave a blocking task
@@ -2075,6 +2108,7 @@ mod tests {
 
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
             env: Vec::new(),
@@ -2219,6 +2253,7 @@ mod tests {
                 let _runtime = handle.enter();
                 let code = 20 + offset as i32;
                 let req = ExecRequest {
+                    security: None,
                     cmd: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), format!("exit {code}")],
                     env: Vec::new(),
@@ -2308,6 +2343,7 @@ mod tests {
     async fn run_single_pipe_spawn(id: u32, code: i32) {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), format!("exit {code}")],
             env: Vec::new(),
@@ -2470,9 +2506,24 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
+            for (profile, security) in [SecurityProfile::Default, SecurityProfile::Restricted]
+                .into_iter()
+                .flat_map(|profile| {
+                    [
+                        (profile, None),
+                        (
+                            profile,
+                            Some(microsandbox_protocol::exec::ExecSecurity {
+                                no_new_privileges: true,
+                                capabilities: Some(Default::default()),
+                            }),
+                        ),
+                    ]
+                })
+            {
                 let (tx, mut rx) = SessionOutputSender::channel();
                 let req = ExecRequest {
+                    security,
                     cmd: std::env::current_exe().unwrap().to_str().unwrap().into(),
                     args: vec![
                         "--exact".into(),
@@ -2541,6 +2592,7 @@ mod tests {
     async fn test_pty_reader_drains_ready_fd() {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
@@ -2597,6 +2649,197 @@ mod tests {
         );
     }
 
+    async fn security_status(
+        tty: bool,
+        security: microsandbox_protocol::exec::ExecSecurity,
+        user: Option<&str>,
+    ) -> String {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req = ExecRequest {
+            cmd: "/bin/cat".into(),
+            args: vec!["/proc/self/status".into()],
+            env: Vec::new(),
+            cwd: None,
+            user: user.map(str::to_owned),
+            tty,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            security: Some(security),
+        };
+        let session = ExecSession::spawn(80, &req, tx, None, SecurityProfile::Default, None)
+            .expect("security session must start");
+        let mut output = Vec::new();
+        let result = time::timeout(Duration::from_secs(5), async {
+            while let Some(envelope) = rx.recv().await {
+                match envelope.output {
+                    SessionOutput::Stdout(data) => output.extend_from_slice(&data),
+                    SessionOutput::Exited(code) => {
+                        assert_eq!(code, 0);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            panic!("security session ended without an exit event");
+        })
+        .await;
+        if result.is_err() {
+            let _ = session.send_signal(libc::SIGKILL);
+        }
+        result.expect("security session timeout");
+        String::from_utf8(output).unwrap()
+    }
+
+    #[tokio::test]
+    async fn security_no_new_privileges_pipe_and_pty() {
+        let before = std::fs::read_to_string("/proc/self/status").unwrap();
+        for tty in [false, true] {
+            let status = security_status(
+                tty,
+                microsandbox_protocol::exec::ExecSecurity {
+                    no_new_privileges: true,
+                    capabilities: None,
+                },
+                None,
+            )
+            .await;
+            assert!(
+                status.lines().any(|line| line.trim() == "NoNewPrivs:\t1"),
+                "{status}"
+            );
+        }
+        let after = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(
+            before.lines().find(|l| l.starts_with("NoNewPrivs:")),
+            after.lines().find(|l| l.starts_with("NoNewPrivs:"))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root with CAP_SETPCAP, CAP_SETUID and CAP_SETGID"]
+    async fn security_drop_all_pipe_pty_and_nonroot() {
+        for tty in [false, true] {
+            for user in [None, Some("1234:1234")] {
+                let status = security_status(
+                    tty,
+                    microsandbox_protocol::exec::ExecSecurity {
+                        no_new_privileges: false,
+                        capabilities: Some(Default::default()),
+                    },
+                    user,
+                )
+                .await;
+                for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+                    let line = status
+                        .lines()
+                        .find(|line| line.starts_with(&format!("{name}:")))
+                        .unwrap();
+                    assert_eq!(
+                        line.split_whitespace().nth(1),
+                        Some("0000000000000000"),
+                        "{status}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn security_invalid_capability_rejects_before_workload() {
+        for tty in [false, true] {
+            let (tx, _rx) = SessionOutputSender::channel();
+            let req = ExecRequest {
+                cmd: "/bin/true".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: Some(microsandbox_protocol::exec::ExecSecurity {
+                    capabilities: Some(microsandbox_protocol::exec::ExecCapabilities {
+                        bounding: vec!["CAP_UNKNOWN".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            };
+            let result = ExecSession::spawn(81, &req, tx, None, SecurityProfile::Default, None);
+            assert!(matches!(result, Err(error) if error.to_string().contains("CAP_UNKNOWN")));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root with CAP_SETPCAP, CAP_SETUID and CAP_SETGID"]
+    async fn security_ambient_capability_survives_nonroot_exec() {
+        use microsandbox_protocol::exec::{ExecCapabilities, ExecSecurity};
+        for tty in [false, true] {
+            let status = security_status(
+                tty,
+                ExecSecurity {
+                    no_new_privileges: true,
+                    capabilities: Some(ExecCapabilities {
+                        bounding: vec!["CAP_CHOWN".into()],
+                        permitted: vec!["CAP_CHOWN".into()],
+                        effective: vec!["CAP_CHOWN".into()],
+                        inheritable: vec!["CAP_CHOWN".into()],
+                        ambient: vec!["CAP_CHOWN".into()],
+                    }),
+                },
+                Some("1234:1234"),
+            )
+            .await;
+            for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+                let line = status
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{name}:")))
+                    .unwrap();
+                assert_eq!(
+                    line.split_whitespace().nth(1),
+                    Some("0000000000000001"),
+                    "{status}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a container with CAP_SYS_ADMIN absent from its bounding set"]
+    async fn security_unavailable_capability_reports_spawn_failure() {
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_CAPBSET_READ, 21, 0, 0, 0) },
+            0
+        );
+        for tty in [false, true] {
+            let (tx, _rx) = SessionOutputSender::channel();
+            let req = ExecRequest {
+                cmd: "/bin/true".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: Some(microsandbox_protocol::exec::ExecSecurity {
+                    capabilities: Some(microsandbox_protocol::exec::ExecCapabilities {
+                        bounding: vec!["CAP_SYS_ADMIN".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            };
+            let result = ExecSession::spawn(82, &req, tx, None, SecurityProfile::Default, None);
+            assert!(
+                matches!(result, Err(AgentdError::ExecSpawnFailed(error)) if error.errno == Some(libc::EPERM))
+            );
+        }
+    }
+
     #[test]
     fn test_resolve_user_spec_for_current_uid_gid() {
         let uid = unsafe { libc::getuid() };
@@ -2609,6 +2852,7 @@ mod tests {
     #[test]
     fn test_request_user_overrides_config_default() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2627,6 +2871,7 @@ mod tests {
     #[test]
     fn test_config_default_user_used_when_request_has_none() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2650,6 +2895,7 @@ mod tests {
     #[test]
     fn test_request_without_user_does_not_apply_user_switch() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2674,6 +2920,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_resolved_user_home() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2703,6 +2950,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_root_when_user_absent() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2727,6 +2975,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_respects_explicit_home_env() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: vec!["HOME=/tmp/custom".to_string()],
@@ -2755,6 +3004,7 @@ mod tests {
     async fn test_spawn_pipe_error_does_not_include_probe_details() {
         let (tx, _rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/definitely/not/a/real/binary".to_string(),
             args: Vec::new(),
             env: Vec::new(),

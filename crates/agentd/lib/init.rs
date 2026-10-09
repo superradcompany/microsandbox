@@ -57,6 +57,12 @@ pub fn init(
     tls::install_host_cas()?;
     linux::ensure_scripts_path_in_profile()?;
     linux::create_run_dir()?;
+    if matches!(
+        params.block_root,
+        Some(crate::config::BlockRootSpec::ReadOnlyVirtiofs)
+    ) {
+        crate::readonly_root::seal()?;
+    }
     Ok(())
 }
 
@@ -204,8 +210,9 @@ mod linux {
             "/dev/pts",
             Some("devpts"),
             noexec_nosuid,
-            None::<&str>,
+            Some("ptmxmode=0666,mode=0620"),
         )?;
+        ensure_dev_ptmx()?;
 
         // /dev/shm — tmpfs
         mkdir_ignore_exists("/dev/shm")?;
@@ -255,6 +262,16 @@ mod linux {
         mount_ignore_busy(Some("sysfs"), "/sys", Some("sysfs"), flags, None::<&str>)
     }
 
+    fn ensure_dev_ptmx() -> AgentdResult<()> {
+        let ptmx = Path::new("/dev/ptmx");
+        if fs::symlink_metadata(ptmx).is_ok() {
+            return Ok(());
+        }
+
+        unix_fs::symlink("pts/ptmx", ptmx)
+            .map_err(|e| AgentdError::Init(format!("failed to symlink /dev/ptmx: {e}")))
+    }
+
     /// Mounts the virtiofs runtime filesystem at the canonical mount point.
     pub fn mount_runtime() -> AgentdResult<()> {
         mkdir_ignore_exists(microsandbox_protocol::RUNTIME_MOUNT_POINT)?;
@@ -275,6 +292,7 @@ mod linux {
         mkdir_ignore_exists("/newroot")?;
 
         match spec {
+            BlockRootSpec::ReadOnlyVirtiofs => crate::readonly_root::mount()?,
             BlockRootSpec::DiskImage { device, fstype } => {
                 mount_disk_image(device, fstype.as_deref())?;
                 crate::root_disk::register("/newroot", device);

@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::exec::ExecRlimit;
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Virtiofs export used as the immutable lower layer of an OCI read-only root.
+pub const READ_ONLY_ROOTFS_TAG: &str = "msb-readonly-root";
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -20,7 +27,7 @@ pub struct GuestBootstrap {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub init_failure_ack: bool,
 
-    /// Block-backed root filesystem assembly, when required.
+    /// Guest root filesystem assembly, when required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_root: Option<BootstrapBlockRoot>,
 
@@ -80,10 +87,16 @@ pub struct GuestBootstrap {
     pub handoff_init: Option<BootstrapHandoffInit>,
 }
 
-/// Block-backed root filesystem configuration.
+/// Guest root filesystem assembly configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BootstrapBlockRoot {
+    /// An immutable virtiofs lower with a temporary boot overlay, sealed before ready.
+    ///
+    /// The export uses [`READ_ONLY_ROOTFS_TAG`]. A distinct variant makes older
+    /// agents reject this request rather than silently boot a writable root.
+    ReadOnlyVirtiofs,
+
     /// A single filesystem image mounted as the guest root.
     DiskImage {
         /// Guest block-device path.
@@ -320,6 +333,36 @@ mod tests {
         codec,
         message::{Message, MessageType, PROTOCOL_VERSION},
     };
+
+    #[test]
+    fn readonly_root_uses_a_distinct_required_bootstrap_variant() {
+        let bootstrap = GuestBootstrap {
+            init_failure_ack: true,
+            block_root: Some(BootstrapBlockRoot::ReadOnlyVirtiofs),
+            ..GuestBootstrap::default()
+        };
+        let message = Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
+        let decoded = message.payload::<GuestBootstrap>().unwrap();
+        assert_eq!(decoded, bootstrap);
+        let json = serde_json::to_value(&bootstrap).unwrap();
+        assert_eq!(json["init_failure_ack"], true);
+        assert_eq!(json["block_root"]["kind"], "read-only-virtiofs");
+
+        // Historical agents only knew these two variants. Unknown intent must fail closed.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case")]
+        enum PreviousBlockRoot {
+            DiskImage {
+                #[serde(rename = "device")]
+                _device: String,
+            },
+            OciErofs {
+                #[serde(rename = "lower")]
+                _lower: String,
+            },
+        }
+        assert!(serde_json::from_value::<PreviousBlockRoot>(json["block_root"].clone()).is_err());
+    }
 
     #[test]
     fn guest_bootstrap_round_trips_transport_sensitive_values() {

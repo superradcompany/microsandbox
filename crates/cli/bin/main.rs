@@ -300,6 +300,7 @@ fn main() {
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
                     protocols: vec![2, 1],
                     required_restore_backing: true,
+                    oci_readonly_root: cfg!(all(target_os = "linux", feature = "oci-runtime")),
                     tcp_accept_queue_size: true,
                     http_deny_message: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),

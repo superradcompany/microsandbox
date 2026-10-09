@@ -201,6 +201,7 @@ mod tests {
             .await
             .unwrap();
         let request = ExecRequest {
+            security: None,
             cmd: "/bin/true".into(),
             args: Vec::new(),
             env: Vec::new(),
@@ -407,6 +408,7 @@ mod tests {
         assert!(client.ready().supports(MessageType::ExecRequest));
 
         let request = ExecRequest {
+            security: None,
             cmd: "echo".into(),
             args: vec!["hi".into()],
             env: Vec::new(),

@@ -5824,6 +5824,7 @@ mod tests {
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
             let request = ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
@@ -6030,6 +6031,7 @@ mod tests {
             )
             .unwrap();
             let request = |script: &str| ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 env: vec![],

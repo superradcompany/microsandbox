@@ -55,6 +55,8 @@ pub use crate::launch::{
     BRANCH_MEMORY_FD, CONFIG_FD, MetricsSlotHandoff, PARENT_WATCH_DETACH, PARENT_WATCH_FD,
     STARTUP_FD, StartupCommand,
 };
+#[cfg(all(unix, feature = "oci-runtime"))]
+pub use crate::launch::{OCI_CONSOLE_FD, OCI_STDIN_FD};
 use crate::logging::LogLevel;
 use crate::metrics::run_metrics_sampler;
 use crate::relay::{self, AgentRelay};
@@ -175,6 +177,10 @@ pub struct Config {
     /// detached launchers can detach stdout/stderr from birth.
     #[cfg(unix)]
     pub startup_fd: Option<OwnedFd>,
+
+    /// Terminal inherited for the startup workload.
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    pub startup_console: Option<OwnedFd>,
 
     /// Dedicated Windows startup JSON pipe.
     ///
@@ -661,6 +667,14 @@ fn run(
     let startup_writer = startup_writer
         .map(|writer| failure_channel.retain(writer))
         .transpose()?;
+    #[cfg(feature = "net")]
+    let defer_network_until_start = defer_network_until_oci_start(&config);
+    #[cfg(feature = "oci-runtime")]
+    let startup_stdio = startup_stdio(&config)?;
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    let startup_console = config.startup_console.take();
+    #[cfg(all(not(unix), feature = "oci-runtime"))]
+    let startup_console = None;
     setup_log_capture(&config.log_dir, config.forward_output)?;
 
     tracing::info!(sandbox = %config.sandbox_name, "sandbox starting");
@@ -1130,6 +1144,8 @@ fn run(
     }
     let krun_metrics_handle = vm.metrics_handle();
     let exit_handle = vm.exit_handle();
+    #[cfg(feature = "oci-runtime")]
+    let vm_exit_code = vm.exit_code();
     let upper_host_path = oci_upper_host_path(&config.vm);
 
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
@@ -1306,6 +1322,14 @@ fn run(
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
+    let startup_command = config.startup_command.clone();
+    let startup_agent_sock_path = config.agent_sock_path.clone();
+    let startup_shared = Arc::clone(&shared);
+    let startup_exit_handle = exit_handle.clone();
+    let startup_reason = Arc::clone(&exit_reason);
+    let startup_shutdown_flush_timeout = shutdown_flush_timeout;
+    #[cfg(feature = "oci-runtime")]
+    let startup_vm_exit_code = Arc::clone(&vm_exit_code);
     tokio_rt.spawn(async move {
         let ready_result = tokio::task::spawn_blocking(move || {
             if let (Some(restored), Some(control)) =
@@ -1339,11 +1363,18 @@ fn run(
                     return;
                 }
                 #[cfg(feature = "net")]
-                if let Some(network_activation) = network_activation_handle {
+                let startup_network_activation = if defer_network_until_start {
+                    network_activation_handle
+                } else {
                     // Published-port listeners and all packet processing start only after the
                     // restored workload and local control surfaces are ready.
-                    network_activation.activate();
-                }
+                    if let Some(network_activation) = network_activation_handle {
+                        network_activation.activate();
+                    }
+                    None
+                };
+                #[cfg(all(feature = "net", not(feature = "oci-runtime")))]
+                let _ = startup_network_activation;
                 #[cfg(not(feature = "net"))]
                 let _ = network_activation_handle;
                 if let Some((
@@ -1371,13 +1402,119 @@ fn run(
                         upper_host_path,
                     }));
                 }
-                if let Err(e) = relay.run(relay_shutdown_rx, relay_drain_tx).await {
-                    tracing::error!("agent relay error: {e}");
-                    relay_exit_reason.store(
-                        EXIT_REASON_AGENT_UNRESPONSIVE,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    relay_exit_handle.trigger();
+                let relay_task =
+                    tokio::spawn(async move { relay.run(relay_shutdown_rx, relay_drain_tx).await });
+                tokio::task::yield_now().await;
+
+                // Startup workload: detached `msb run -- CMD` makes the sandbox process
+                // own the command lifecycle. Run it only after agentd has reported ready
+                // and after the relay accept loop has been scheduled, otherwise the startup
+                // exec can race the relay and fail before OCI `start`.
+                if let Some(startup_command) = startup_command {
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            cmd = %startup_command.cmd,
+                            args = ?startup_command.args,
+                            "starting startup command"
+                        );
+
+                        #[cfg(feature = "oci-runtime")]
+                        let startup_result = crate::startup::run_startup_command(
+                            &startup_agent_sock_path,
+                            startup_command,
+                            startup_stdio,
+                            startup_console,
+                            #[cfg(feature = "net")]
+                            startup_network_activation,
+                        )
+                        .await;
+                        #[cfg(not(feature = "oci-runtime"))]
+                        let startup_result = crate::startup::run_startup_command(
+                            &startup_agent_sock_path,
+                            startup_command,
+                        )
+                        .await;
+
+                        match startup_result {
+                            Ok(crate::startup::StartupCommandExit::Exited(0)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code.store(0, std::sync::atomic::Ordering::SeqCst);
+                                tracing::info!("startup command exited successfully");
+                            }
+                            Ok(crate::startup::StartupCommandExit::Exited(code)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code
+                                    .store(code, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(code, "startup command exited with non-zero status");
+                            }
+                            Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code
+                                    .store(127, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(
+                                    error = %failed.message,
+                                    "startup command failed to spawn"
+                                );
+                            }
+                            Err(err) => {
+                                #[cfg(feature = "oci-runtime")]
+                                startup_vm_exit_code.store(1, std::sync::atomic::Ordering::SeqCst);
+                                startup_reason.store(
+                                    EXIT_REASON_STARTUP_COMMAND_FAILED,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                                tracing::warn!(error = %err, "startup command failed");
+                            }
+                        }
+
+                        if startup_shared
+                            .resident_paused
+                            .load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            startup_exit_handle.trigger();
+                            return;
+                        }
+                        match request_guest_shutdown_async(&startup_shared).await {
+                            Ok(()) => {
+                                tokio::time::sleep(startup_shutdown_flush_timeout).await;
+                                tracing::info!("startup command shutdown flush window elapsed");
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    "startup command shutdown request failed, triggering host exit"
+                                );
+                            }
+                        }
+                        startup_exit_handle.trigger();
+                    });
+                }
+                match relay_task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "agent relay error");
+                        relay_exit_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        relay_exit_handle.trigger();
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "agent relay task panicked");
+                        relay_exit_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        relay_exit_handle.trigger();
+                    }
                 }
             }
             Ok(Err(e)) => {
@@ -1423,74 +1560,6 @@ fn run(
                 );
                 tracing::info!("graceful shutdown requested; waiting for guest poweroff");
             }
-        });
-    }
-
-    // Startup workload: detached `msb run -- CMD` makes the sandbox process
-    // own the command lifecycle. Once the command terminates, stop the VM so
-    // named sandboxes become stopped and ephemeral sandboxes can self-clean.
-    if let Some(startup_command) = config.startup_command.clone() {
-        let startup_agent_sock_path = config.agent_sock_path.clone();
-        let startup_shared = Arc::clone(&shared);
-        let startup_exit_handle = exit_handle.clone();
-        let startup_reason = Arc::clone(&exit_reason);
-        let startup_shutdown_flush_timeout = shutdown_flush_timeout;
-        tokio_rt.spawn(async move {
-            tracing::info!(
-                cmd = %startup_command.cmd,
-                args = ?startup_command.args,
-                "starting startup command"
-            );
-
-            match crate::startup::run_startup_command(&startup_agent_sock_path, startup_command)
-                .await
-            {
-                Ok(crate::startup::StartupCommandExit::Exited(0)) => {
-                    tracing::info!("startup command exited successfully");
-                }
-                Ok(crate::startup::StartupCommandExit::Exited(code)) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(code, "startup command exited with non-zero status");
-                }
-                Ok(crate::startup::StartupCommandExit::Failed(failed)) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(error = %failed.message, "startup command failed to spawn");
-                }
-                Err(err) => {
-                    startup_reason.store(
-                        EXIT_REASON_STARTUP_COMMAND_FAILED,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-                    tracing::warn!(error = %err, "startup command failed");
-                }
-            }
-
-            if startup_shared
-                .resident_paused
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                startup_exit_handle.trigger();
-                return;
-            }
-            match request_guest_shutdown_async(&startup_shared).await {
-                Ok(()) => {
-                    tokio::time::sleep(startup_shutdown_flush_timeout).await;
-                    tracing::info!("startup command shutdown flush window elapsed");
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "startup command shutdown request failed, triggering host exit"
-                    );
-                }
-            }
-            startup_exit_handle.trigger();
         });
     }
 
@@ -1959,13 +2028,50 @@ fn build_vm(
         });
 
     // Root filesystem.
+    if matches!(
+        bootstrap.block_root,
+        Some(BootstrapBlockRoot::ReadOnlyVirtiofs)
+    ) && (!cfg!(all(target_os = "linux", feature = "oci-runtime")) || vm.rootfs_path.is_none())
+    {
+        return Err(RuntimeError::Custom(
+            "read-only virtiofs root requires a directory rootfs and Linux OCI runtime support"
+                .into(),
+        ));
+    }
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        let backend = bind_rootfs_backend(
-            rootfs_path,
-            vm.rootfs_follow_root_symlinks,
-            vm.fs_state_limit(),
-        )?;
-        builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        #[cfg(all(target_os = "linux", feature = "oci-runtime"))]
+        if matches!(
+            bootstrap.block_root,
+            Some(BootstrapBlockRoot::ReadOnlyVirtiofs)
+        ) {
+            let backend = readonly_rootfs_backend(
+                rootfs_path,
+                vm.rootfs_follow_root_symlinks,
+                vm.fs_state_limit(),
+            )?;
+            builder = builder.fs(move |fs| {
+                fs.tag(microsandbox_protocol::bootstrap::READ_ONLY_ROOTFS_TAG)
+                    .custom(Box::new(backend))
+            });
+            let trampoline = bootstrap_trampoline_backend(vm.fs_state_limit())?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(trampoline)));
+        } else {
+            let backend = bind_rootfs_backend(
+                rootfs_path,
+                vm.rootfs_follow_root_symlinks,
+                vm.fs_state_limit(),
+            )?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
+        #[cfg(not(all(target_os = "linux", feature = "oci-runtime")))]
+        {
+            let backend = bind_rootfs_backend(
+                rootfs_path,
+                vm.rootfs_follow_root_symlinks,
+                vm.fs_state_limit(),
+            )?;
+            builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
+        }
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
@@ -2620,7 +2726,7 @@ fn build_vm(
             network_secrets_handle = Some(network.secrets_handle());
         }
 
-        if vm.checkpoint_restore.is_some() {
+        if vm.checkpoint_restore.is_some() || defer_network_until_oci_start(config) {
             network_activation_handle = Some(network.defer_activation());
         }
 
@@ -2770,6 +2876,23 @@ fn build_vm(
         restored_agent,
         owned_directory_checkpoints,
     ))
+}
+
+#[cfg(feature = "net")]
+fn defer_network_until_oci_start(config: &Config) -> bool {
+    #[cfg(all(target_os = "linux", feature = "oci-runtime"))]
+    {
+        config.vm.checkpoint_restore.is_none()
+            && config
+                .startup_command
+                .as_ref()
+                .is_some_and(|command| command.start_signal_path.is_some())
+    }
+    #[cfg(not(all(target_os = "linux", feature = "oci-runtime")))]
+    {
+        let _ = config;
+        false
+    }
 }
 
 fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
@@ -3022,6 +3145,22 @@ fn bind_rootfs_backend(
     PassthroughFs::new(cfg).map_err(|e| RuntimeError::Custom(format!("rootfs: {e}")))
 }
 
+#[cfg(all(target_os = "linux", feature = "oci-runtime"))]
+fn readonly_rootfs_backend(
+    rootfs_path: &Path,
+    follow_root_symlinks: bool,
+    limit: usize,
+) -> RuntimeResult<PassthroughFs> {
+    PassthroughFs::new(PassthroughConfig {
+        max_state_bytes: limit,
+        root_dir: rootfs_path.to_path_buf(),
+        no_symlink_root: !follow_root_symlinks,
+        readonly: true,
+        ..Default::default()
+    })
+    .map_err(|error| RuntimeError::Custom(format!("read-only rootfs: {error}")))
+}
+
 /// Canonicalize a microsandbox-owned mount root so it is symlink-free.
 ///
 /// These roots are created and owned by the runtime (temp trampolines, the
@@ -3074,6 +3213,49 @@ fn release_reserved_metrics_slot(handoff: Option<&MetricsSlotHandoff>) {
     if let Ok(reg) = MetricsRegistry::open(&handoff.shm_name) {
         let _ = reg.release_reserved(handoff.slot, handoff.generation);
     }
+}
+
+#[cfg(all(unix, feature = "oci-runtime"))]
+fn startup_stdio(config: &Config) -> RuntimeResult<Option<crate::startup::StartupStdio>> {
+    if !config
+        .startup_command
+        .as_ref()
+        .is_some_and(|command| command.forward_stdio)
+    {
+        return Ok(None);
+    }
+
+    let stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if stdout < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stderr = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if stderr < 0 {
+        let _ = unsafe { libc::close(stdout) };
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let stdout = unsafe { std::fs::File::from_raw_fd(stdout) };
+    let stderr = unsafe { std::fs::File::from_raw_fd(stderr) };
+    Ok(Some(crate::startup::StartupStdio {
+        stdin: if config
+            .startup_command
+            .as_ref()
+            .is_some_and(|command| !command.tty)
+        {
+            // Reopen instead of dup: nonblocking flags must not affect the shim's fd.
+            Some(crate::startup::open_startup_stdin(OCI_STDIN_FD)?)
+        } else {
+            None
+        },
+        stdout,
+        stderr,
+    }))
+}
+
+#[cfg(all(windows, feature = "oci-runtime"))]
+fn startup_stdio(_config: &Config) -> RuntimeResult<Option<crate::startup::StartupStdio>> {
+    Ok(None)
 }
 
 #[cfg(unix)]
@@ -4097,6 +4279,38 @@ mod tests {
 
         assert_ne!(host.inode, init.inode);
         assert_eq!(init.inode, 2);
+    }
+
+    #[cfg(all(target_os = "linux", feature = "oci-runtime"))]
+    #[test]
+    fn readonly_rootfs_backend_refuses_host_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("original"), b"unchanged").unwrap();
+        let fs = super::readonly_rootfs_backend(
+            root.path(),
+            false,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
+        fs.init(FsOptions::empty()).unwrap();
+        assert!(fs.lookup(fs_context(), 1, c"original").is_ok());
+        let error = fs
+            .mkdir(
+                fs_context(),
+                1,
+                c"new-directory",
+                0o755,
+                0,
+                Default::default(),
+            )
+            .err()
+            .expect("read-only filesystem must reject directory creation");
+        assert_eq!(error.raw_os_error(), Some(libc::EROFS));
+        assert!(!root.path().join("new-directory").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("original")).unwrap(),
+            b"unchanged"
+        );
     }
 
     #[cfg(unix)]

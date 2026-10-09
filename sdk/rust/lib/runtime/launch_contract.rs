@@ -387,6 +387,15 @@ impl LaunchContract {
 
     /// Check SDK launch intent before preparation can replace an existing sandbox.
     pub(crate) fn validate_launch_intent(self, config: &SandboxConfig) -> MicrosandboxResult<()> {
+        #[cfg(feature = "oci-runtime")]
+        if super::spawn::oci_readonly_root(config)
+            && (!matches!(config.spec.image, crate::sandbox::RootfsSource::Bind { .. })
+                || config.checkpoint_restore.is_some())
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "OCI read-only rootfs requires a directory root and cannot be restored".into(),
+            ));
+        }
         #[cfg(feature = "net")]
         self.validate_network(
             &config.local_network_config()?,
@@ -551,6 +560,10 @@ pub(crate) async fn validate_runtime_config(
         Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
         Err(error) => return Err(error),
     };
+    #[cfg(feature = "oci-runtime")]
+    if super::spawn::oci_readonly_root(config) {
+        require_oci_readonly_root(&runtime.msb_path).await?;
+    }
     let contract = resolve(&runtime.msb_path).await?;
     contract.validate_launch_intent(config)?;
     #[cfg(feature = "net")]
@@ -757,6 +770,22 @@ async fn probe(path: &Path) -> MicrosandboxResult<Version> {
     parse_version(&bounded_probe(path, "--version").await?)
 }
 
+/// Refuse older or feature-disabled runtimes before launching a read-only root.
+#[cfg(feature = "oci-runtime")]
+pub(crate) async fn require_oci_readonly_root(path: &Path) -> MicrosandboxResult<()> {
+    let output = bounded_probe(path, "__launch-protocol").await?;
+    let supported =
+        serde_json::from_slice::<LaunchCapabilities>(&output).is_ok_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.oci_readonly_root
+        });
+    if !supported {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "OCI read-only rootfs",
+        )));
+    }
+    Ok(())
+}
+
 async fn bounded_probe(path: &Path, argument: &str) -> MicrosandboxResult<Vec<u8>> {
     let mut child = Command::new(path)
         .arg(argument)
@@ -903,6 +932,42 @@ mod tests {
             "printf '%s' '{\"protocols\":[2],\"required_restore_backing\":\"true\"}'",
         );
         assert!(require_restore_backing(&malformed).await.is_err());
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[tokio::test]
+    async fn readonly_root_probe_refuses_old_and_feature_disabled_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, response, accepted) in [
+            ("old", r#"{"protocols":[2,1]}"#, false),
+            (
+                "disabled",
+                r#"{"protocols":[2],"oci_readonly_root":false}"#,
+                false,
+            ),
+            (
+                "supported",
+                r#"{"protocols":[2],"oci_readonly_root":true}"#,
+                true,
+            ),
+            (
+                "wrong-generation",
+                r#"{"protocols":[1],"oci_readonly_root":true}"#,
+                false,
+            ),
+            (
+                "malformed",
+                r#"{"protocols":[2],"oci_readonly_root":"true"}"#,
+                false,
+            ),
+        ] {
+            let executable = script(dir.path(), name, &format!("printf '%s' '{response}'"));
+            let result = require_oci_readonly_root(&executable).await;
+            assert_eq!(result.is_ok(), accepted, "{name}");
+            if let Err(error) = result {
+                assert!(error.to_string().contains("upgrade msb"));
+            }
+        }
     }
 
     #[cfg(all(unix, feature = "net"))]

@@ -65,7 +65,7 @@ pub struct SmoltcpNetwork {
     gateway_mac: [u8; 6],
     mtu: u16,
     // IPv4 / IPv6 are `Some` when active for this sandbox: the user supplied
-    // an explicit address, the host has a route, or published ports need that family.
+    // an explicit address or pool, the host has a route, or published ports need that family.
     guest_ipv4: Option<Ipv4Addr>,
     gateway_ipv4: Option<Ipv4Addr>,
     guest_ipv6: Option<Ipv6Addr>,
@@ -237,7 +237,9 @@ impl SmoltcpNetwork {
         let no_guest_address = !host_routes.ipv4
             && !host_routes.ipv6
             && config.interface.ipv4_address.is_none()
-            && config.interface.ipv6_address.is_none();
+            && config.interface.ipv6_address.is_none()
+            && config.interface.ipv4_pool.is_none()
+            && config.interface.ipv6_pool.is_none();
         let published_ipv4 = no_guest_address
             && config
                 .ports
@@ -251,25 +253,29 @@ impl SmoltcpNetwork {
 
         let guest_ipv4 = match config.interface.ipv4_address {
             Some(address) => Some(address),
-            None if host_routes.ipv4 || published_ipv4 => Some(derive_guest_ipv4(
-                config
-                    .interface
-                    .ipv4_pool
-                    .unwrap_or_else(default_guest_ipv4_pool),
-                slot,
-            )?),
+            None if host_routes.ipv4 || config.interface.ipv4_pool.is_some() || published_ipv4 => {
+                Some(derive_guest_ipv4(
+                    config
+                        .interface
+                        .ipv4_pool
+                        .unwrap_or_else(default_guest_ipv4_pool),
+                    slot,
+                )?)
+            }
             None => None,
         };
         let gateway_ipv4 = guest_ipv4.map(gateway_from_guest_ipv4);
         let guest_ipv6 = match config.interface.ipv6_address {
             Some(address) => Some(address),
-            None if host_routes.ipv6 || published_ipv6 => Some(derive_guest_ipv6(
-                config
-                    .interface
-                    .ipv6_pool
-                    .unwrap_or_else(default_guest_ipv6_pool),
-                slot,
-            )?),
+            None if host_routes.ipv6 || config.interface.ipv6_pool.is_some() || published_ipv6 => {
+                Some(derive_guest_ipv6(
+                    config
+                        .interface
+                        .ipv6_pool
+                        .unwrap_or_else(default_guest_ipv6_pool),
+                    slot,
+                )?)
+            }
             None => None,
         };
         let gateway_ipv6 = guest_ipv6.map(gateway_from_guest_ipv6);
@@ -1081,6 +1087,62 @@ mod tests {
             derive_guest_ipv4(pool, 0),
             Err(NetworkInitError::Ipv4PoolCapacity { slot: 0, .. })
         ));
+    }
+
+    #[test]
+    fn explicit_ipv4_pool_survives_missing_startup_route() {
+        let mut config = NetworkConfig::default();
+        config.interface.ipv4_pool = Some(default_guest_ipv4_pool());
+
+        let network = SmoltcpNetwork::build(
+            resolved(config),
+            0,
+            DeploymentProfile::SingleTenant,
+            HostRoutes {
+                ipv4: false,
+                ipv6: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(network.guest_ipv4, Some(Ipv4Addr::new(172, 16, 0, 2)));
+        assert_eq!(network.gateway_ipv4, Some(Ipv4Addr::new(172, 16, 0, 1)));
+    }
+
+    #[test]
+    fn published_ports_preserve_explicit_pool_address_family_without_routes() {
+        for ipv6 in [false, true] {
+            let mut config = NetworkConfig::default();
+            if ipv6 {
+                config.interface.ipv6_pool = Some(default_guest_ipv6_pool());
+            } else {
+                config.interface.ipv4_pool = Some(default_guest_ipv4_pool());
+            }
+            config.ports = vec![
+                PublishedPort {
+                    host_port: 8080,
+                    guest_port: 8000,
+                    protocol: PortProtocol::Tcp,
+                    host_bind: Ipv4Addr::LOCALHOST.into(),
+                },
+                PublishedPort {
+                    host_port: 8081,
+                    guest_port: 8001,
+                    protocol: PortProtocol::Udp,
+                    host_bind: Ipv6Addr::LOCALHOST.into(),
+                },
+            ];
+            let network = SmoltcpNetwork::build(
+                resolved(config),
+                0,
+                DeploymentProfile::SingleTenant,
+                routes(false, false),
+            )
+            .unwrap();
+
+            assert_eq!(network.guest_ipv4.is_some(), !ipv6);
+            assert_eq!(network.guest_ipv6.is_some(), ipv6);
+        }
     }
 
     #[test]

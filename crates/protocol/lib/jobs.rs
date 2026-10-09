@@ -141,6 +141,8 @@ pub struct JobRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
+// OCI security settings enlarge ExecRequest; preserve the existing by-value API.
+#[allow(clippy::large_enum_variant)]
 pub enum JobOperation {
     /// Discover support without creating a process.
     Hello,
