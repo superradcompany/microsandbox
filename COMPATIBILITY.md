@@ -212,7 +212,7 @@ Runtime SDK and environment path inputs are captured when a local backend is con
 
 The SQLite database under `MSB_HOME` is a durable protocol between releases. Host and runtime processes must also agree on WAL, busy timeout, foreign-key, synchronous, and writer settings.
 
-On macOS, catalog identity checks read filesystem metadata without opening an extra descriptor. A dedicated read-only SQLite connection retains the original file until its identity is released, including after ordinary pool connections expire. SQLite owns that connection's close so verification and identity teardown preserve other connections' POSIX locks. Linux retains its `O_PATH` handles and Windows retains its file handles. Database replacement detection, schemas, journal modes, and SDK/runtime protocols are unchanged.
+On Unix, catalog identity checks read filesystem metadata without opening an extra descriptor. Control and metrics lookups share one database identity per backend. On macOS, that identity retains a dedicated read-only SQLite connection, including after ordinary pool connections expire. SQLite owns that connection's close so verification and identity teardown preserve other connections' POSIX locks. Linux retains its `O_PATH` handles and Windows retains its file handles. Database replacement detection, schemas, journal modes, and SDK/runtime protocols are unchanged.
 
 Compatibility-sensitive elements include migration IDs and order, migration semantics, schema columns and constraints, persisted enum/tag spellings, JSON configuration shapes, desired versus active configuration, install and maintenance leases, allocation state, recovery journals, and the downgrade floor.
 

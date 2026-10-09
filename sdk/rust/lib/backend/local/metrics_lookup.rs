@@ -1,7 +1,6 @@
 //! Backend-scoped dual-name metrics lookup. Writers and persisted state are untouched.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use microsandbox_db::entity::{run, sandbox};
@@ -26,7 +25,7 @@ pub(super) struct MetricsLookup {
 
 #[derive(Default)]
 struct LookupState {
-    database: Option<DatabaseIdentity>,
+    database: Option<Arc<DatabaseIdentity>>,
     matches: HashMap<i32, CachedMatch>,
 }
 
@@ -46,10 +45,7 @@ struct CachedMatch {
 //--------------------------------------------------------------------------------------------------
 
 impl MetricsLookup {
-    pub(super) async fn bind_database(&self, path: &Path) -> MicrosandboxResult<()> {
-        let identity = DatabaseIdentity::capture(path)
-            .await
-            .map_err(metrics_error)?;
+    pub(super) fn bind_database(&self, identity: Arc<DatabaseIdentity>) -> MicrosandboxResult<()> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = &state.database {
             existing.verify().map_err(metrics_error)?;

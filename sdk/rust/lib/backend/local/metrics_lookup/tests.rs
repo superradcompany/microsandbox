@@ -93,6 +93,53 @@ fn cleanup(names: &[String]) {
 //--------------------------------------------------------------------------------------------------
 
 #[tokio::test]
+async fn metrics_retain_the_shared_database_identity_after_control_is_dropped() {
+    let home = tempfile::tempdir().unwrap();
+    let mut local = crate::test_support::local_backend(crate::config::GlobalConfig {
+        home: Some(home.path().to_path_buf()),
+        ..Default::default()
+    });
+    local.db().await.unwrap();
+    let identity = local
+        .metrics_lookup
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .clone()
+        .unwrap();
+    assert_eq!(Arc::strong_count(&identity), 3);
+    drop(std::mem::take(&mut local.control_sessions));
+    assert_eq!(Arc::strong_count(&identity), 2);
+    assert!(
+        local
+            .verified_metrics(None, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let path = home.path().join("db/msb.db");
+    std::fs::rename(&path, home.path().join("db/old.db")).unwrap();
+    assert!(
+        local
+            .verified_metrics(None, false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("metrics lookup: runtime session changed")
+    );
+    std::fs::write(path, b"replacement").unwrap();
+    assert!(
+        local
+            .verified_metrics(None, false)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("metrics lookup: runtime session changed")
+    );
+}
+
+#[tokio::test]
 async fn dual_names_validate_runs_merge_and_invalidate_reused_slots() {
     let home = tempfile::tempdir().unwrap();
     let mut local = LocalBackend::builder()

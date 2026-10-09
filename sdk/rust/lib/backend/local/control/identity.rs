@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use microsandbox_control_client::ErrorKind;
 use microsandbox_control_client::{ClientError, ControlClientError, ControlClientResult};
 #[cfg(target_os = "macos")]
-use microsandbox_db::file::DbFilePin;
+use sea_orm::sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{FILETIME, WAIT_TIMEOUT},
@@ -51,7 +51,7 @@ pub(in crate::backend::local) struct DatabaseIdentity {
     #[cfg(not(target_os = "macos"))]
     _file: File,
     #[cfg(target_os = "macos")]
-    _pin: DbFilePin,
+    _connection: SqliteConnection,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -179,38 +179,44 @@ impl ProcessIdentity {
 
 impl DatabaseIdentity {
     pub async fn capture(path: impl AsRef<Path>) -> ControlClientResult<Self> {
+        let path = path.as_ref().to_owned();
         #[cfg(target_os = "macos")]
-        {
-            let path = path.as_ref().to_owned();
+        let (id, connection) = {
             let id = database_path_id(&path)?;
-            let pin = DbFilePin::open(&path)
+            // SQLite coordinates descriptor teardown with its other connections.
+            // An idle pool connection could expire before this identity is dropped.
+            let options = SqliteConnectOptions::new()
+                .filename(&path)
+                .read_only(true)
+                .create_if_missing(false);
+            let connection = SqliteConnection::connect_with(&options)
                 .await
                 .map_err(|error| ClientError::from(std::io::Error::other(error)))?;
-            let identity = Self {
-                path,
-                id,
-                _pin: pin,
-            };
-            identity.verify()?;
-            Ok(identity)
-        }
+            (id, connection)
+        };
         #[cfg(not(target_os = "macos"))]
-        {
-            let file = open_database_identity(path.as_ref()).map_err(ClientError::from)?;
+        let (id, file) = {
+            let file = open_database_identity(&path).map_err(ClientError::from)?;
             let id = file_id(&file)?;
-            Ok(Self {
-                path: path.as_ref().to_owned(),
-                id,
-                _file: file,
-            })
-        }
+            (id, file)
+        };
+        let identity = Self {
+            path,
+            id,
+            #[cfg(target_os = "macos")]
+            _connection: connection,
+            #[cfg(not(target_os = "macos"))]
+            _file: file,
+        };
+        identity.verify()?;
+        Ok(identity)
     }
 
     pub fn verify(&self) -> ControlClientResult<()> {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         let current =
             database_path_id(&self.path).map_err(|_| ControlClientError::RuntimeChanged)?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(unix))]
         let current = {
             let file = open_database_identity(&self.path)
                 .map_err(|_| ControlClientError::RuntimeChanged)?;
@@ -246,10 +252,10 @@ fn open_database_identity(path: &Path) -> std::io::Result<File> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn database_path_id(path: &Path) -> ControlClientResult<(u64, u64, u64)> {
     // A raw open/close would release this process's SQLite locks. stat follows
-    // the same path without opening a descriptor; the SQLite pin prevents reuse.
+    // the same path without opening a descriptor; the retained file prevents reuse.
     let metadata = std::fs::metadata(path).map_err(ClientError::from)?;
     Ok((metadata.dev(), metadata.ino(), 0))
 }

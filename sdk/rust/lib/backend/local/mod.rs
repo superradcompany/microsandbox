@@ -50,6 +50,7 @@ use microsandbox_utils::process_lock::{lock_exclusive, open_lock_file, unlock};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
+use self::control::identity::DatabaseIdentity;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
@@ -170,13 +171,15 @@ impl LocalBackend {
                     &self.config().snapshots_dir(),
                 )
                 .await?;
+                let identity = Arc::new(
+                    DatabaseIdentity::capture(db_dir.join(microsandbox_utils::DB_FILENAME))
+                        .await
+                        .map_err(|error| MicrosandboxError::ControlClient(Arc::new(error)))?,
+                );
                 self.control_sessions
-                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
-                    .await
+                    .bind_database(identity.clone())
                     .map_err(MicrosandboxError::ControlClient)?;
-                self.metrics_lookup
-                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
-                    .await?;
+                self.metrics_lookup.bind_database(identity)?;
                 Ok(pools)
             })
             .await
