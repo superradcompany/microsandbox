@@ -118,12 +118,21 @@ async fn metrics_retain_the_shared_database_identity_after_control_is_dropped() 
             .unwrap()
             .is_empty()
     );
+    // Windows SQLite connections prevent renaming the open catalog. Retain only
+    // the shared identity and use binding verification after closing the pools.
+    let pools = local.db().await.unwrap();
+    pools.read().inner().close_by_ref().await.unwrap();
+    pools.write().inner().close_by_ref().await.unwrap();
+    local
+        .metrics_lookup
+        .bind_database(identity.clone())
+        .unwrap();
     let path = home.path().join("db/msb.db");
     std::fs::rename(&path, home.path().join("db/old.db")).unwrap();
     assert!(
         local
-            .verified_metrics(None, false)
-            .await
+            .metrics_lookup
+            .bind_database(identity.clone())
             .unwrap_err()
             .to_string()
             .contains("metrics lookup: runtime session changed")
@@ -131,8 +140,8 @@ async fn metrics_retain_the_shared_database_identity_after_control_is_dropped() 
     std::fs::write(path, b"replacement").unwrap();
     assert!(
         local
-            .verified_metrics(None, false)
-            .await
+            .metrics_lookup
+            .bind_database(identity)
             .unwrap_err()
             .to_string()
             .contains("metrics lookup: runtime session changed")
