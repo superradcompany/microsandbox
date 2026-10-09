@@ -26,7 +26,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         self.assertTrue(tests)
         self.assertCountEqual(HARNESS.CASES, tests)
         for test in tests:
-            command = HARNESS.test_command(Path("/archive"), Path("/workspace"), test)
+            command = HARNESS.test_command(Path("/extracted"), Path("/workspace"), test)
             self.assertIn("--run-ignored=only", command)
             self.assertEqual(command[command.index("--no-tests") + 1], "fail")
             self.assertEqual(command[-1], f"binary(=jobs) & test(={test})")
@@ -74,7 +74,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         self.assertEqual(len(extractions), 1)
         self.assertFalse(extractions[0].exists(), "failed suites must remove extracted binaries")
         cases = [call for call in suite.run.call_args_list
-                 if not call.args[0].endswith("-create") and call.args[0] != "extract-tests"]
+                 if "env" in call.kwargs and not call.args[0].endswith("-create")]
         self.assertEqual(len(cases), len(HARNESS.CASES) + 2)
         self.assertEqual(len({call.kwargs["env"]["MSB_JOB_TEST_SANDBOX"] for call in cases}), len(cases))
         self.assertEqual(suite.cleanup.call_count, len(cases) + 1)
@@ -89,6 +89,24 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             suite.execute()
         self.assertEqual(suite.run.call_count, 3)
+
+    def test_failed_extraction_removes_partial_archive_without_provisioning(self):
+        suite = self.suite()
+        labels = []
+        extractions = []
+
+        def run(label, command, **kwargs):
+            labels.append(label)
+            extracted = Path(command[command.index("--extract-to") + 1])
+            extractions.append(extracted)
+            (extracted / "partial-binary").write_bytes(b"partial")
+            raise subprocess.CalledProcessError(1, command)
+
+        suite.run = run
+        with self.assertRaises(subprocess.CalledProcessError):
+            suite.execute()
+        self.assertEqual(labels, ["extract-tests"])
+        self.assertFalse(extractions[0].exists())
 
     def test_python_regression_gets_an_explicit_disposable_sandbox(self):
         suite = self.suite()
