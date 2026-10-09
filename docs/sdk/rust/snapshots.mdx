@@ -1024,7 +1024,7 @@ let child = Sandbox::restore("api:baseline")
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
-Full restore rejects missing external filesystems and additional disks by default. Use `allow_missing_resources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+Restore rejects missing external filesystems (and, for full restore, additional disks) by default. Use `allow_missing_resources()` to resume with unavailable devices (full restore records warnings). This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
 
 <Accordion title="Destination options">
 
@@ -1037,12 +1037,12 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `guest_clock()` | Override the snapshot's clock setting with `Sync` or `Off`. Supports full restores. |
 | `max_duration(), idle_timeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `volume()` | Map host volumes or select captured private volumes. |
+| `volume()` | Map host volumes or select captured private volumes. A host disk image: `.volume("/data", \|v\| v.disk("./seed.img").fstype("ext4"))`. |
 | `port(), port_bind(), port_udp(), port_udp_bind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsock_dgram()` | Bind destination vsock endpoints. |
 | `user(), log_level()` | Default user for new execs and host runtime log level. |
 | `dangerously_inherit_resources()` | Explicitly inherit host resources. Disabled by default. |
-| `allow_missing_resources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `allow_missing_resources()` | Allow unavailable external filesystems or additional disks (full restore records warnings). Restore otherwise requires their bindings. |
 | `external_mount_policy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are whole seconds. Network policy accepts `NetworkPolicy`. Use `|v| v.captured()` for a private captured volume.

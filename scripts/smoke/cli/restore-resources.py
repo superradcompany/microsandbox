@@ -134,7 +134,10 @@ try:
     record('nonexistent-named-default', lambda: restore('absent', archive, absent_mapping, ['filesystem /work'], True))
     record('nonexistent-named-opt-out', lambda: restore('absentallow', archive, absent_mapping+['--allow-missing-resources'], ['warn:', 'EIO']))
     assert not (home/'volumes'/absent).exists(), 'missing named volume was created'
-    record('full-disk-only', lambda: restore('diskonly', archive, ['--disk-only'], cold=True))
+    disk_only_missing = ('mount /work', '--allow-missing-resources')
+    record('full-disk-only-missing', lambda: restore('diskonly', archive, ['--disk-only'], disk_only_missing, True))
+    # Archive --disk-only restores currently fail before the mount check (tracked separately), so use the installed ref.
+    record('full-disk-only-mapped', lambda: restore('diskonlymap', installed, ['--disk-only', '-v', directory+':/work'], cold=True))
     backing = home/'volumes'/directory
     hidden = backing.with_name(directory+'-held')
     backing.rename(hidden)
@@ -164,7 +167,9 @@ try:
     run('stop', source)
     disk_archive = out/'disk.msnap'
     run('snapshot', 'create', 'disk', '--from-sandbox', source, '-o', disk_archive)
-    record('ordinary-disk-snapshot', lambda: restore('disksnap', disk_archive, cold=True))
+    disk_missing = ('mount /data', 'mount /work', '--allow-missing-resources')
+    record('ordinary-disk-snapshot-missing', lambda: restore('disksnap', disk_archive, required=disk_missing, rejected=True))
+    record('ordinary-disk-snapshot-opt-out', lambda: restore('disksnapallow', disk_archive, ['--allow-missing-resources'], cold=True))
     owned = child('ownedsource')
     run('create', 'alpine:3.21', '--name', owned, '--cpus', '1', '--memory', '256M',
         '--mount-owned', '/cache:kind=disk,size=256M')

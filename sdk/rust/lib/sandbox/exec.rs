@@ -1,6 +1,12 @@
 //! Execution types for running commands inside sandboxes.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use microsandbox_protocol::{
@@ -100,6 +106,15 @@ pub struct ExecHandle {
 
     /// Bridge reference for sending signals/stdin.
     client: Arc<AgentClient>,
+
+    /// Client-owned deadline state, shared with the independent event pump.
+    timeout: Option<Arc<StreamTimeout>>,
+}
+
+struct StreamTimeout {
+    duration: Duration,
+    expired: AtomicBool,
+    failure: Mutex<Option<String>>,
 }
 
 /// Cloneable control handle for a streaming exec session.
@@ -308,17 +323,19 @@ impl ExecOutput {
 
 impl ExecHandle {
     /// Create a new exec handle.
-    pub(crate) fn new(
+    fn new(
         id: u32,
         events: mpsc::UnboundedReceiver<ExecEvent>,
         stdin: Option<ExecSink>,
         client: Arc<AgentClient>,
+        timeout: Option<Arc<StreamTimeout>>,
     ) -> Self {
         Self {
             id,
             events,
             stdin,
             client,
+            timeout,
         }
     }
 
@@ -356,7 +373,9 @@ impl ExecHandle {
 
     /// Receive the next exec event.
     ///
-    /// Returns `None` when the session has ended.
+    /// Returns `None` when the session has ended. A configured timeout is enforced even
+    /// while no events are polled. This raw event API reports the actual exit event;
+    /// [`Self::wait`] and [`Self::collect`] report `ExecTimeout` after a timed-out exit.
     pub async fn recv(&mut self) -> Option<ExecEvent> {
         self.events.recv().await
     }
@@ -369,10 +388,15 @@ impl ExecHandle {
     }
 
     /// Wait for the command to complete and return the exit status.
+    ///
+    /// Returns `ExecTimeout` after the process exits following its configured deadline.
+    /// Cancelling this wait does not cancel the deadline. Failure to deliver termination
+    /// is reported separately, without claiming that the process exited.
     pub async fn wait(&mut self) -> MicrosandboxResult<ExitStatus> {
         while let Some(event) = self.events.recv().await {
             match event {
                 ExecEvent::Exited { code } => {
+                    self.check_timeout()?;
                     return Ok(ExitStatus {
                         code,
                         success: code == 0,
@@ -385,12 +409,12 @@ impl ExecHandle {
             }
         }
 
-        Err(crate::MicrosandboxError::Runtime(
-            "exec session ended without exit event".into(),
-        ))
+        Err(self.incomplete_error())
     }
 
     /// Wait for completion and collect all stdout/stderr.
+    ///
+    /// Uses the same timeout and termination-confirmation behavior as [`Self::wait`].
     pub async fn collect(&mut self) -> MicrosandboxResult<ExecOutput> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -406,6 +430,7 @@ impl ExecHandle {
                     stderr.extend_from_slice(&data);
                 }
                 ExecEvent::Exited { code } => {
+                    self.check_timeout()?;
                     exit_code = Some(code);
                     break;
                 }
@@ -416,9 +441,7 @@ impl ExecHandle {
             }
         }
 
-        let code = exit_code.ok_or_else(|| {
-            crate::MicrosandboxError::Runtime("exec session ended without exit event".into())
-        })?;
+        let code = exit_code.ok_or_else(|| self.incomplete_error())?;
 
         Ok(ExecOutput {
             status: ExitStatus {
@@ -444,6 +467,25 @@ impl ExecHandle {
     /// Resize the PTY for this session.
     pub async fn resize(&self, rows: u16, cols: u16) -> MicrosandboxResult<()> {
         self.control().resize(rows, cols).await
+    }
+
+    fn check_timeout(&self) -> MicrosandboxResult<()> {
+        if let Some(timeout) = &self.timeout
+            && timeout.expired.load(Ordering::Acquire)
+        {
+            return Err(crate::MicrosandboxError::ExecTimeout(timeout.duration));
+        }
+        Ok(())
+    }
+
+    fn incomplete_error(&self) -> crate::MicrosandboxError {
+        let failure = self
+            .timeout
+            .as_ref()
+            .and_then(|timeout| timeout.failure.lock().unwrap().clone());
+        crate::MicrosandboxError::Runtime(
+            failure.unwrap_or_else(|| "exec session ended without exit event".into()),
+        )
     }
 }
 
@@ -514,21 +556,30 @@ pub(crate) mod agent {
     //!
     //! Opens a fresh agent UDS each call (option A in the parity plan).
 
-    use std::sync::Arc;
+    use std::{
+        sync::{Arc, Weak},
+        time::Duration,
+    };
 
     use bytes::Bytes;
     use microsandbox_protocol::{
         exec::{ExecExited, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
         message::{Message, MessageType},
     };
-    use tokio::sync::mpsc;
+    use tokio::{
+        sync::{mpsc, watch},
+        time::Instant,
+    };
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
         sandbox::{SandboxConfig, build_exec_request},
     };
 
-    use super::{ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode};
+    use super::{
+        ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
+        StreamTimeout,
+    };
 
     pub(crate) async fn exec_stream(
         backend: &dyn crate::backend::Backend,
@@ -558,8 +609,27 @@ pub(crate) mod agent {
             rlimits,
             tty,
             stdin: stdin_mode,
-            timeout: _,
+            timeout,
         } = opts;
+
+        // Validate before dispatch. Count execution time from request dispatch, but never
+        // signal a pre-start correlation: older agents also require ExecStarted first.
+        let deadline = timeout
+            .map(|duration| {
+                Instant::now().checked_add(duration).ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(
+                        "execution timeout exceeds the supported duration range".into(),
+                    )
+                })
+            })
+            .transpose()?;
+        let timeout = timeout.map(|duration| {
+            Arc::new(StreamTimeout {
+                duration,
+                expired: super::AtomicBool::new(false),
+                failure: super::Mutex::new(None),
+            })
+        });
 
         tracing::debug!(
             sandbox = %name,
@@ -580,21 +650,37 @@ pub(crate) mod agent {
             _ => None,
         };
 
-        if let StdinMode::Bytes(ref data) = stdin_mode {
-            let data = data.clone();
+        let finite_input = match stdin_mode {
+            // A pipe with no caller-owned writer still needs an explicit guest EOF.
+            // PTYs have no independent stdin half; retain their existing terminal semantics.
+            StdinMode::Null if !tty => Some(Vec::new()),
+            StdinMode::Bytes(data) => Some(data),
+            _ => None,
+        };
+        if let Some(data) = finite_input {
             let bridge = Arc::clone(&client);
             tokio::spawn(async move {
-                let payload = ExecStdin { data };
-                let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                if !data.is_empty() {
+                    let payload = ExecStdin { data };
+                    let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                }
+                // Empty finite input and null both send exactly one ordered EOF. Keeping
+                // this producer independent also lets cancellation of wait preserve delivery.
                 let close = ExecStdin { data: Vec::new() };
                 let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
             });
         }
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        tokio::spawn(event_mapper_task(rx, event_tx));
+        tokio::spawn(event_mapper_task(
+            rx,
+            event_tx,
+            deadline.zip(timeout.clone()),
+            Arc::downgrade(&client),
+            id,
+        ));
 
-        Ok(ExecHandle::new(id, event_rx, stdin, client))
+        Ok(ExecHandle::new(id, event_rx, stdin, client, timeout))
     }
 
     pub(crate) async fn exec(
@@ -602,9 +688,11 @@ pub(crate) mod agent {
         name: &str,
         config: &SandboxConfig,
         cmd: String,
-        opts: ExecOptions,
+        mut opts: ExecOptions,
     ) -> MicrosandboxResult<ExecOutput> {
-        let timeout_duration = opts.timeout;
+        // Buffered exec keeps its existing deadline and error contract. Do not start a
+        // second timer in its underlying streaming session.
+        let timeout_duration = opts.timeout.take();
         let mut handle = exec_stream(backend, name, config, cmd, opts).await?;
 
         match timeout_duration {
@@ -626,11 +714,56 @@ pub(crate) mod agent {
     async fn event_mapper_task(
         mut rx: mpsc::Receiver<Message>,
         tx: mpsc::UnboundedSender<ExecEvent>,
+        timeout: Option<(Instant, Arc<StreamTimeout>)>,
+        client: Weak<crate::agent::AgentClient>,
+        id: u32,
     ) {
-        while let Some(msg) = rx.recv().await {
+        let (started_tx, started_rx) = watch::channel(false);
+        let monitor = async {
+            let Some((deadline, state)) = &timeout else {
+                return std::future::pending::<Result<(), String>>().await;
+            };
+            enforce_deadline(*deadline, started_rx, state, async {
+                let client = client
+                    .upgrade()
+                    .ok_or("exec connection closed before timeout termination")?;
+                client
+                    .send(
+                        id,
+                        MessageType::ExecSignal,
+                        &microsandbox_protocol::exec::ExecSignal { signal: 9 },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+        };
+        tokio::pin!(monitor);
+        let mut deadline_done = false;
+        loop {
+            let msg = tokio::select! {
+                // Dropping the session cancels its timer without retaining the connection.
+                _ = tx.closed() => break,
+                result = &mut monitor, if !deadline_done => {
+                    deadline_done = true;
+                    if let Err(error) = result {
+                        let diagnostic = format!("exec timeout termination failed; process exit is unconfirmed: {error}");
+                        if let Some((_, state)) = &timeout {
+                            *state.failure.lock().unwrap() = Some(diagnostic.clone());
+                        }
+                        tracing::warn!(%diagnostic);
+                        break;
+                    }
+                    continue;
+                }
+                msg = rx.recv() => match msg { Some(msg) => msg, None => break },
+            };
             let event = match msg.t {
                 MessageType::ExecStarted => match msg.payload::<ExecStarted>() {
-                    Ok(started) => ExecEvent::Started { pid: started.pid },
+                    Ok(started) => {
+                        started_tx.send_replace(true);
+                        ExecEvent::Started { pid: started.pid }
+                    }
                     Err(_) => continue,
                 },
                 MessageType::ExecStdout => match msg.payload::<ExecStdout>() {
@@ -667,12 +800,192 @@ pub(crate) mod agent {
         }
     }
 
+    async fn enforce_deadline(
+        deadline: Instant,
+        mut started: watch::Receiver<bool>,
+        state: &StreamTimeout,
+        signal: impl std::future::Future<Output = Result<(), String>>,
+    ) -> Result<(), String> {
+        tokio::time::sleep_until(deadline).await;
+        started
+            .wait_for(|started| *started)
+            .await
+            .map_err(|_| "exec ended before startup acknowledgement")?;
+        state.expired.store(true, super::Ordering::Release);
+        // Older transports may block a signal behind input. Bound delivery instead of
+        // hanging the caller or falsely claiming that the guest has exited.
+        tokio::time::timeout(Duration::from_secs(5), signal)
+            .await
+            .map_err(|_| "signal delivery did not complete within five seconds".to_owned())?
+    }
+
     // Re-export so backend trait impl can also use ExitStatus for typing.
     #[allow(dead_code)]
     pub(crate) fn _exit_status(code: i32) -> ExitStatus {
         ExitStatus {
             code,
             success: code == 0,
+        }
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Tests
+    //--------------------------------------------------------------------------------------------------
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use super::*;
+
+        fn state() -> StreamTimeout {
+            StreamTimeout {
+                duration: Duration::from_secs(1),
+                expired: AtomicBool::new(false),
+                failure: Mutex::new(None),
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stream_deadline_waits_for_start_and_fires_once() {
+            let state = state();
+            let (started, receiver) = watch::channel(false);
+            let signalled = AtomicBool::new(false);
+            let deadline = enforce_deadline(Instant::now(), receiver, &state, async {
+                assert!(!signalled.swap(true, Ordering::SeqCst));
+                Ok(())
+            });
+            tokio::pin!(deadline);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), &mut deadline)
+                    .await
+                    .is_err()
+            );
+            assert!(!state.expired.load(Ordering::Acquire));
+            assert!(!signalled.load(Ordering::SeqCst));
+            started.send_replace(true);
+            deadline.await.unwrap();
+            assert!(state.expired.load(Ordering::Acquire));
+            assert!(signalled.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stream_deadline_cancelled_before_expiry_does_not_signal() {
+            let state = state();
+            let (_started, receiver) = watch::channel(true);
+            let signalled = AtomicBool::new(false);
+            {
+                let deadline = enforce_deadline(
+                    Instant::now() + Duration::from_secs(2),
+                    receiver,
+                    &state,
+                    async {
+                        signalled.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                );
+                tokio::pin!(deadline);
+                assert!(
+                    tokio::time::timeout(Duration::from_secs(1), &mut deadline)
+                        .await
+                        .is_err()
+                );
+            }
+            tokio::time::advance(Duration::from_secs(10)).await;
+            assert!(!state.expired.load(Ordering::Acquire));
+            assert!(!signalled.load(Ordering::SeqCst));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stream_deadline_bounds_and_reports_signal_failure() {
+            let state = state();
+            let (_started, receiver) = watch::channel(true);
+            assert_eq!(
+                enforce_deadline(Instant::now(), receiver.clone(), &state, async {
+                    Err("delivery_unconfirmed".into())
+                })
+                .await
+                .unwrap_err(),
+                "delivery_unconfirmed"
+            );
+            let before = Instant::now();
+            let error = enforce_deadline(before, receiver, &state, std::future::pending())
+                .await
+                .unwrap_err();
+            assert!(error.contains("five seconds"));
+            assert_eq!(Instant::now() - before, Duration::from_secs(5));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stream_pump_exit_cancels_deadline_without_late_signal() {
+            let state = Arc::new(state());
+            let (tx, rx) = mpsc::channel(2);
+            let (events_tx, mut events) = mpsc::unbounded_channel();
+            tx.send(
+                Message::with_payload(MessageType::ExecStarted, 1, &ExecStarted { pid: 123 })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            tx.send(
+                Message::with_payload(MessageType::ExecExited, 1, &ExecExited { code: 0 }).unwrap(),
+            )
+            .await
+            .unwrap();
+            event_mapper_task(
+                rx,
+                events_tx,
+                Some((Instant::now() + Duration::from_secs(1), state.clone())),
+                Weak::new(),
+                1,
+            )
+            .await;
+            assert!(matches!(
+                events.recv().await,
+                Some(ExecEvent::Started { pid: 123 })
+            ));
+            assert!(matches!(
+                events.recv().await,
+                Some(ExecEvent::Exited { code: 0 })
+            ));
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(!state.expired.load(Ordering::Acquire));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn stream_pump_reports_unconfirmed_termination_without_fake_exit() {
+            let state = Arc::new(state());
+            let (tx, rx) = mpsc::channel(1);
+            let (events_tx, mut events) = mpsc::unbounded_channel();
+            tx.send(
+                Message::with_payload(MessageType::ExecStarted, 1, &ExecStarted { pid: 123 })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            event_mapper_task(
+                rx,
+                events_tx,
+                Some((Instant::now(), state.clone())),
+                Weak::new(),
+                1,
+            )
+            .await;
+            assert!(matches!(
+                events.recv().await,
+                Some(ExecEvent::Started { .. })
+            ));
+            assert!(events.recv().await.is_none());
+            assert!(
+                state
+                    .failure
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .contains("process exit is unconfirmed")
+            );
         }
     }
 }

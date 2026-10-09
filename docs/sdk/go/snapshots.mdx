@@ -865,7 +865,7 @@ child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored", m.WithCowMem
 
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
-Full restore rejects missing external filesystems and additional disks by default. Use `WithAllowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
+Restore rejects missing external filesystems (and, for full restore, additional disks) by default. Use `WithAllowMissingResources()` to resume with unavailable devices (full restore records warnings). This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
 
 <Accordion title="Destination options">
 
@@ -877,12 +877,12 @@ Full restore rejects missing external filesystems and additional disks by defaul
 | `WithRestoreDisableNetwork` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `WithRestoreSecurityProfile` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `WithRestoreMaxDuration, WithRestoreIdleTimeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. |
+| `Volumes, CapturedVolumes` | Map host volumes or select captured private volumes. A host disk image: `"/data": m.Mount.Disk("./seed.img", m.DiskOptions{Fstype: "ext4"})`. |
 | `Ports` | Bind destination TCP or UDP ports. |
 | `Vsock` | Bind destination vsock endpoints. |
 | `User, LogLevel` | Default user for new execs and host runtime log level. |
 | `WithDangerouslyInheritResources` | Explicitly inherit host resources. Disabled by default. |
-| `WithAllowMissingResources()` | Allow unavailable external filesystems or additional disks, with warnings. Full restore otherwise requires their bindings. |
+| `WithAllowMissingResources()` | Allow unavailable external filesystems or additional disks (full restore records warnings). Restore otherwise requires their bindings. |
 | `WithExternalMountPolicy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations use `time.Duration`, rounded up to seconds. Binding fields belong in `WithRestoreConfig(RestoreConfig{...})`; nil pointers mean omitted. Network policy accepts factory results or `NetworkConfig` with only `Rules`, `DefaultEgress`, and `DefaultIngress`.

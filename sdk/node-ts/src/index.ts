@@ -48,6 +48,7 @@ export type {
   SandboxPingResult,
   SandboxTouchResult,
   ExternalMountWarning,
+  ForkOptions,
   ForkOutcome,
   BranchOutcome,
 } from "./sandbox.js";
@@ -629,3 +630,6 @@ export type PortRange = _Types.PortRange;
 
 export const Rule = _Factories.Rule;
 export type Rule = _Types.Rule;
+
+export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
+export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";

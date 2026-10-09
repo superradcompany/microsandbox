@@ -233,6 +233,7 @@ fn capture_linked(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Pa
 }
 
 pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::capture(fs);
     }
@@ -244,6 +245,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
                 state,
                 aliases: capture_aliases(fs)?,
             },
+            limit,
         );
     }
     if fs
@@ -290,15 +292,17 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             },
             aliases: capture_aliases(fs)?,
         },
+        limit,
     )
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::prepare(fs, bytes);
     }
     if let Some(options) = &fs.cfg.external_checkpoint {
-        let (mut external, aliases) = decode_external(bytes)?;
+        let (mut external, aliases) = decode_external(bytes, limit)?;
         validate_external_shape(&external)?;
         validate_aliases(&external.state, &aliases)?;
         validate_quota(fs, &external.state)?;
@@ -378,7 +382,7 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         prepared.invalid_inodes = invalid;
         return Ok(prepared);
     }
-    let (state, aliases) = decode_linked(bytes)?;
+    let (state, aliases) = decode_linked(bytes, limit)?;
     validate_semantics(fs, &state)?;
     validate_aliases(&state, &aliases)?;
     let mut prepared = rebuild(fs, state, None)?;
@@ -405,8 +409,8 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Validate a missing export's payload without opening any host paths.
-pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
-    let (external, aliases) = decode_external(bytes)?;
+pub(super) fn validate_unavailable(bytes: &[u8], limit: usize) -> io::Result<()> {
+    let (external, aliases) = decode_external(bytes, limit)?;
     validate_external_shape(&external)?;
     validate_aliases(&external.state, &aliases)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)
@@ -416,11 +420,12 @@ pub(super) fn prepare_single_file_state(
     bytes: &[u8],
     source: &std::ffi::CStr,
     destination: &std::ffi::CStr,
+    limit: usize,
 ) -> io::Result<(
     Vec<u8>,
     crate::backends::passthroughfs::ExternalSingleFileIndex,
 )> {
-    let (mut external, mut aliases) = decode_external(bytes)?;
+    let (mut external, mut aliases) = decode_external(bytes, limit)?;
     validate_external_shape(&external)?;
     validate_aliases(&external.state, &aliases)?;
     validate_shape(&external.state, false, false, &external.invalid_inodes)?;
@@ -490,6 +495,7 @@ pub(super) fn prepare_single_file_state(
         mobility::encode(
             ALIASED_EXTERNAL_KIND,
             &AliasedExternalState { external, aliases },
+            limit,
         )?,
         index,
     ))
@@ -510,23 +516,23 @@ fn canonical_aliases(state: &PassthroughState) -> Vec<AliasState> {
         .collect()
 }
 
-fn decode_linked(bytes: &[u8]) -> io::Result<(PassthroughState, Vec<AliasState>)> {
+fn decode_linked(bytes: &[u8], limit: usize) -> io::Result<(PassthroughState, Vec<AliasState>)> {
     if bytes.starts_with(ALIASED_KIND) {
-        let saved: AliasedState = mobility::decode(ALIASED_KIND, bytes)?;
+        let saved: AliasedState = mobility::decode(ALIASED_KIND, bytes, limit)?;
         Ok((saved.state, saved.aliases))
     } else {
-        let state: PassthroughState = mobility::decode(KIND, bytes)?;
+        let state: PassthroughState = mobility::decode(KIND, bytes, limit)?;
         let aliases = canonical_aliases(&state);
         Ok((state, aliases))
     }
 }
 
-fn decode_external(bytes: &[u8]) -> io::Result<(ExternalState, Vec<AliasState>)> {
+fn decode_external(bytes: &[u8], limit: usize) -> io::Result<(ExternalState, Vec<AliasState>)> {
     if bytes.starts_with(ALIASED_EXTERNAL_KIND) {
-        let saved: AliasedExternalState = mobility::decode(ALIASED_EXTERNAL_KIND, bytes)?;
+        let saved: AliasedExternalState = mobility::decode(ALIASED_EXTERNAL_KIND, bytes, limit)?;
         Ok((saved.external, saved.aliases))
     } else {
-        let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
         let aliases = canonical_aliases(&external.state);
         Ok((external, aliases))
     }
@@ -1158,10 +1164,12 @@ mod tests {
                         identities,
                         invalid_inodes: BTreeSet::new(),
                     },
+                    msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
                 )
                 .unwrap()
             } else {
-                mobility::encode(KIND, &state).unwrap()
+                mobility::encode(KIND, &state, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES)
+                    .unwrap()
             };
             let destination = backend(temp.path(), external, false);
             restore(&destination, &bytes).unwrap();

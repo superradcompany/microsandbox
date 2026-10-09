@@ -3017,8 +3017,11 @@ dependencies = [
 name = "microsandbox-ruby"
 version = "0.7.7"
 dependencies = [
+ "futures",
  "magnus",
  "microsandbox",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

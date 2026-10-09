@@ -20,6 +20,10 @@ pub struct ExecArgs {
     /// Sandbox to run the command in.
     pub name: String,
 
+    /// Start a runtime-owned job and print its ID without consuming host stdin.
+    #[arg(short = 'd', long, conflicts_with = "stream")]
+    pub detach: bool,
+
     /// Set an environment variable (KEY=value).
     #[arg(short, long)]
     pub env: Vec<String>,
@@ -36,7 +40,7 @@ pub struct ExecArgs {
     #[arg(short = 't', long, conflicts_with = "no_tty")]
     pub tty: bool,
 
-    /// Disable pseudo-terminal allocation and run non-interactively.
+    /// Disable pseudo-terminal allocation and use pipes.
     #[arg(long = "no-tty", conflicts_with = "tty")]
     pub no_tty: bool,
 
@@ -110,6 +114,41 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .transpose()?
         .map(Duration::from_secs);
 
+    if args.detach {
+        let handle = Sandbox::get(&args.name).await?;
+        anyhow::ensure!(
+            handle.status_snapshot() == microsandbox::sandbox::SandboxStatus::Running,
+            "detached execution requires a running sandbox; start it with `msb start {}`",
+            args.name
+        );
+        let sandbox = handle.connect().await?;
+        let tty = args.tty || interactive;
+        let (cmd, command_args) =
+            super::common::resolve_exec_command(sandbox.config(), args.command, tty)?;
+        let cmd = cmd.ok_or_else(|| {
+            anyhow::anyhow!("detached execution requires a command or configured default")
+        })?;
+        let job = sandbox
+            .exec_detached_with(cmd, |options| {
+                let options = apply_common_exec_opts(
+                    options.args(command_args).tty(tty),
+                    &env_pairs,
+                    &args.workdir,
+                    &args.user,
+                    timeout,
+                    &rlimits,
+                );
+                if args.no_stdin {
+                    options.stdin_null()
+                } else {
+                    options.stdin_pipe()
+                }
+            })
+            .await?;
+        println!("{}", job.id());
+        return Ok(());
+    }
+
     let sandbox = super::resolve_and_start(&args.name, args.quiet).await?;
 
     let result = run_started(
@@ -167,7 +206,8 @@ async fn run_started(
             &env_pairs,
             &workdir,
             &args.user,
-            timeout,
+            // drive_stream owns the CLI deadline and its existing diagnostic/exit behavior.
+            None,
             &rlimits,
         );
         if args.no_stdin {
@@ -331,9 +371,8 @@ async fn forward_stdin(sink: ExecSink) -> anyhow::Result<()> {
 /// Pump events from a streaming exec session to the host's stdout/stderr until
 /// the guest exits, returning its exit code.
 ///
-/// Enforces `timeout` by killing the guest on expiry — the SDK leaves timeout
-/// enforcement to the stream driver, mirroring the buffered path's
-/// `tokio::time::timeout` + kill.
+/// Owns the CLI timeout and its diagnostic/exit behavior. The underlying SDK stream
+/// is opened without a second deadline so the two timers cannot race each other.
 async fn drive_stream(
     handle: &mut ExecHandle,
     timeout: Option<Duration>,

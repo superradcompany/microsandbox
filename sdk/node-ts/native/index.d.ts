@@ -237,6 +237,12 @@ export declare class HttpBuilder {
 }
 export type JsHttpBuilder = HttpBuilder
 
+/** Builds an HTTP CONNECT outbound proxy. */
+export declare class HttpConnectProxyBuilder {
+
+}
+export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
+
 /**
  * Fluent builder for an explicit rootfs image source.
  *
@@ -341,6 +347,33 @@ export declare class InterfaceOverridesBuilder {
   ipv6(address: string): this
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
+
+export declare class Job {
+  get id(): string
+  inspect(): Promise<string>
+  wait(): Promise<string>
+  signal(signal: number): Promise<void>
+  kill(): Promise<void>
+  eof(): Promise<void>
+  logs(options: string): Promise<string>
+  logStream(options: string): Promise<JobLogStream>
+  attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
+}
+export type JsJob = Job
+
+export declare class JobAttachment {
+  recv(): Promise<string | null>
+  writeStdin(data: Buffer): Promise<void>
+  resize(rows: number, cols: number): Promise<void>
+  detach(): Promise<void>
+}
+export type JsJobAttachment = JobAttachment
+
+export declare class JobLogStream {
+  next(): Promise<string | null>
+  close(): Promise<void>
+}
+export type JsJobLogStream = JobLogStream
 
 /**
  * A streaming subscription for sandbox log entries.
@@ -628,9 +661,6 @@ export declare class OutboundProxyBuilder {
   socks5(address: string): Socks5ProxyBuilder
 }
 export type JsOutboundProxyBuilder = OutboundProxyBuilder
-
-/** Builds an HTTP CONNECT outbound proxy. */
-export declare class HttpConnectProxyBuilder {}
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -1009,6 +1039,13 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
+  /** Launch with runtime-owned I/O, retaining pipe input by default. */
+  execDetached(cmd: string, args?: Array<string> | undefined | null): Promise<Job>
+  execDetachedWithBuilder(cmd: string, builder: ExecOptionsBuilder): Promise<Job>
   /**
    * Start an existing stopped sandbox (attached mode).
    *
@@ -1122,13 +1159,13 @@ export declare class Sandbox {
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1326,6 +1363,11 @@ export declare class SandboxBuilder {
   pullPolicy(policy: string): this
   /** Disable networking entirely. */
   disableNetwork(): this
+  /**
+   * Enable TLS interception, preserving existing network and TLS settings.
+   * Does not re-enable disabled networking. Later network() callbacks preserve settings unless changed.
+   */
+  interceptTls(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Configure the single proxy used for outbound sandbox connections. */
@@ -1464,8 +1506,10 @@ export type JsSandboxFsOps = SandboxFsOps
  * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
  */
 export declare class SandboxHandle {
-  /** Observe object storage through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */
@@ -1478,6 +1522,8 @@ export declare class SandboxHandle {
   get configJson(): string
   /** Return a fresh handle for the same sandbox. */
   refresh(): Promise<SandboxHandle>
+  /** Observe this sandbox's managed directory through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   /** Creation timestamp as ms since Unix epoch. */
   get createdAt(): number | null
   /** Last update timestamp as ms since Unix epoch. */
@@ -1529,13 +1575,13 @@ export declare class SandboxHandle {
    */
   stop(): Promise<void>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1667,8 +1713,6 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
-  /** Observe object storage through its captured backend. */
-  storageUsage(): Promise<StorageItemUsageJs>
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
@@ -1721,6 +1765,8 @@ export declare class Snapshot {
   copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
   /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
+  /** Observe this artifact's storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
 }
 export type JsSnapshot = Snapshot
 
@@ -1790,7 +1836,7 @@ export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
-  /** Observe object storage through its captured backend. */
+  /** Observe this artifact's storage through its captured backend. */
   storageUsage(): Promise<StorageItemUsageJs>
   get group(): string | null
   get headUpdate(): HeadUpdate | null
@@ -2150,12 +2196,12 @@ export declare function imagePrune(): Promise<ImagePruneReportJs>
 
 /** Summary of artifacts removed by `imagePrune`. */
 export interface ImagePruneReportJs {
-  skippedInUse: number
   imageRefsRemoved: number
   manifestsRemoved: number
   layersRemoved: number
   fsmetaRemoved: number
   vmdkRemoved: number
+  skippedInUse: number
   bytesReclaimed?: number
 }
 
@@ -2288,6 +2334,26 @@ export interface LogStreamOptions {
    * new entries as they are written.
    */
   follow?: boolean
+}
+
+/** Per-file reclamation result, including ownership exclusions and errors. */
+export interface MemoryCacheEntryJs {
+  path: string
+  kind: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  state: string
+  error?: string
+}
+
+/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
+export interface MemoryCacheReportJs {
+  dryRun: boolean
+  entries: Array<MemoryCacheEntryJs>
+  filesRemoved: number
+  logicalBytesRemoved: bigint
+  physicalBytesReclaimed?: bigint
+  truncated: boolean
 }
 
 export interface NetworkPolicy {
@@ -2756,6 +2822,45 @@ export interface StdinMode {
   data?: Array<number>
 }
 
+/** Counts and observed bytes in one managed storage category. */
+export interface StorageCategoryUsageJs {
+  count?: number
+  inUse?: number
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  reclaimableLogicalBytes?: bigint
+  items: Array<StorageItemUsageJs>
+  notes: Array<string>
+}
+
+/** One object's storage usage and retention explanations. */
+export interface StorageItemUsageJs {
+  name: string
+  path: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  inUse?: boolean
+  reclaimable?: boolean
+  reasons: Array<string>
+}
+
+/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
+export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
+
+/** Observe storage in the selected local backend without removing files. */
+export declare function storageUsage(): Promise<StorageUsageJs>
+
+/** Aggregate storage usage. Unknown measurements remain nullable. */
+export interface StorageUsageJs {
+  images: StorageCategoryUsageJs
+  snapshots: StorageCategoryUsageJs
+  sandboxes: StorageCategoryUsageJs
+  volumes: StorageCategoryUsageJs
+  branchMemory: StorageCategoryUsageJs
+  snapshotMemory: StorageCategoryUsageJs
+  notes: Array<string>
+}
+
 /**
  * Result of opening a stream: the protocol correlation id (for follow-up
  * sends) and an opaque stream handle (for `streamNext` / `streamClose`).
@@ -2846,64 +2951,4 @@ export interface VolumeMount {
    * `None` when unset or for tmpfs/disks. Set together with `override_uid`.
    */
   overrideGid?: number
-}
-
-
-/** Observe storage in the selected local backend without removing files. */
-export declare function storageUsage(): Promise<StorageUsageJs>
-
-/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
-export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
-
-/** Aggregate storage usage. Unknown measurements remain nullable. */
-export interface StorageUsageJs {
-  images: StorageCategoryUsageJs
-  snapshots: StorageCategoryUsageJs
-  sandboxes: StorageCategoryUsageJs
-  volumes: StorageCategoryUsageJs
-  branchMemory: StorageCategoryUsageJs
-  snapshotMemory: StorageCategoryUsageJs
-  notes: Array<string>
-}
-
-/** Counts and observed bytes in one managed storage category. */
-export interface StorageCategoryUsageJs {
-  count?: number
-  inUse?: number
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  reclaimableLogicalBytes?: bigint
-  items: Array<StorageItemUsageJs>
-  notes: Array<string>
-}
-
-/** One object's storage usage and retention explanations. */
-export interface StorageItemUsageJs {
-  name: string
-  path: string
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  inUse?: boolean
-  reclaimable?: boolean
-  reasons: Array<string>
-}
-
-/** Per-file reclamation result, including ownership exclusions and errors. */
-export interface MemoryCacheEntryJs {
-  path: string
-  kind: string
-  logicalBytes?: bigint
-  allocatedBytes?: bigint
-  state: string
-  error?: string
-}
-
-/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
-export interface MemoryCacheReportJs {
-  dryRun: boolean
-  entries: Array<MemoryCacheEntryJs>
-  filesRemoved: number
-  logicalBytesRemoved: bigint
-  physicalBytesReclaimed?: bigint
-  truncated: boolean
 }

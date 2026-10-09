@@ -42,6 +42,9 @@ use microsandbox_protocol::core::{
     WorkloadThawed,
 };
 use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
+use microsandbox_protocol::exec_control::{
+    EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
+};
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
@@ -67,6 +70,7 @@ use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
+use super::exec_control::{ExecControlConnection, ExecControlLease, ExecControlRegistry};
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
 use crate::boot_error::BootError;
 use crate::checkpoint::RestoredAgentState;
@@ -184,6 +188,8 @@ const RELAY_FAILURE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::
 
 /// State for a connected client.
 struct ClientState {
+    /// Revoked when the primary connection leaves the routing map.
+    exec_control: Option<ExecControlConnection>,
     /// Transport identity for this leased ownership of the slot, independent of lane topology.
     incarnation: Option<ClientIncarnation>,
 
@@ -210,6 +216,7 @@ struct ClientState {
 
 /// One primary-lane write, optionally acknowledged after physical ring admission.
 pub(crate) struct ControlWrite {
+    exec_lease: Option<Arc<ExecControlLease>>,
     data: Bytes,
     completion: Option<oneshot::Sender<()>>,
     uses_data_credit: bool,
@@ -222,6 +229,9 @@ pub(crate) struct ControlWrite {
 #[derive(Clone, Copy)]
 enum ControlOrder {
     Correlation(u32),
+    ExecInput(u32),
+    ExecSignal(u32),
+    ShutdownFence,
     MaintenanceClock,
     TcpInputData(u32),
     TcpInputFinish(u32),
@@ -239,6 +249,7 @@ struct ControlAdmission {
 /// copied, and cancellation releases reservations without dropping any already accepted frame.
 #[derive(Clone)]
 pub(crate) struct ControlWriter {
+    pub(crate) exec_controls: Arc<ExecControlRegistry>,
     tx: mpsc::Sender<ControlWrite>,
     data_bytes: Arc<Semaphore>,
     data_frames: Arc<Semaphore>,
@@ -538,17 +549,19 @@ impl ControlWrite {
     }
 
     fn ordinary(data: Bytes, id: u32, uses_data_credit: bool) -> Self {
-        let order = if id == 0
-            || data
-                .get(LEN_PREFIX_SIZE + 4)
-                .is_some_and(|flags| flags & FLAG_SHUTDOWN != 0)
+        let order = if data
+            .get(LEN_PREFIX_SIZE + 4)
+            .is_some_and(|flags| flags & FLAG_SHUTDOWN != 0)
         {
+            ControlOrder::ShutdownFence
+        } else if id == 0 {
             ControlOrder::GlobalFence
         } else {
             ControlOrder::Correlation(id)
         };
         Self {
             data,
+            exec_lease: None,
             completion: None,
             uses_data_credit,
             order,
@@ -563,14 +576,39 @@ impl ControlWrite {
         }
     }
 
-    /// Only the independent TCP return-credit flow may cross ordered input. Raw metadata was
-    /// already validated by the client reader; parse only the two small control payloads here.
-    fn classify_tcp_order(
+    pub(crate) fn exec_signal(
+        data: Bytes,
+        id: u32,
+        lease: Arc<ExecControlLease>,
+        completion: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            order: ControlOrder::ExecSignal(id),
+            exec_lease: Some(lease),
+            completion: Some(completion),
+            ..Self::ordinary(data, id, false)
+        }
+    }
+
+    /// Signals interrupt exec input; TCP return credit advances the independent output flow.
+    /// Other operations retain their correlation order. Raw metadata was validated by the reader.
+    fn classify_message_order(
         &mut self,
         id: u32,
         raw: Option<(BulkKind, BulkFlow, u64, usize)>,
         message: Option<&Message>,
     ) {
+        // Shutdown interrupts outstanding exec input just as an explicit signal does. It still
+        // fences process creation, other control, filesystem effects, and all snapshot gates.
+        if message.is_some_and(|message| message.t == MessageType::Shutdown)
+            && self
+                .data
+                .get(LEN_PREFIX_SIZE + 4)
+                .is_some_and(|flags| flags & FLAG_SHUTDOWN != 0)
+        {
+            self.order = ControlOrder::ShutdownFence;
+            return;
+        }
         if matches!(self.order, ControlOrder::GlobalFence) {
             return;
         }
@@ -582,6 +620,12 @@ impl ControlWrite {
             return;
         };
         match message.t {
+            MessageType::ExecStdin if self.uses_data_credit => {
+                self.order = ControlOrder::ExecInput(id)
+            }
+            MessageType::ExecSignal if message.payload::<ExecSignal>().is_ok() => {
+                self.order = ControlOrder::ExecSignal(id)
+            }
             MessageType::BulkFinish
                 if message.payload::<BulkFinish>().is_ok_and(|finish| {
                     finish.kind == BulkKind::Tcp && finish.flow == BulkFlow::HostToGuest
@@ -608,6 +652,11 @@ impl ControlOrder {
     fn conflicts(self, other: Self) -> bool {
         match (self, other) {
             (Self::GlobalFence, _) | (_, Self::GlobalFence) => true,
+            (Self::ShutdownFence, Self::ExecInput(_))
+            | (Self::ExecInput(_), Self::ShutdownFence) => false,
+            (Self::ShutdownFence, _) | (_, Self::ShutdownFence) => true,
+            (Self::ExecSignal(_), Self::ExecInput(_))
+            | (Self::ExecInput(_), Self::ExecSignal(_)) => false,
             (Self::MaintenanceClock, Self::MaintenanceClock) => true,
             (Self::MaintenanceClock, _) | (_, Self::MaintenanceClock) => false,
             (Self::ClientFence { start: a, end: b }, Self::ClientFence { start: c, end: d }) => {
@@ -628,10 +677,15 @@ impl ControlOrder {
     fn id(self) -> u32 {
         match self {
             Self::Correlation(id)
+            | Self::ExecInput(id)
+            | Self::ExecSignal(id)
             | Self::TcpInputData(id)
             | Self::TcpInputFinish(id)
             | Self::TcpOutputCredit(id) => id,
-            Self::ClientFence { .. } | Self::GlobalFence | Self::MaintenanceClock => {
+            Self::ClientFence { .. }
+            | Self::GlobalFence
+            | Self::ShutdownFence
+            | Self::MaintenanceClock => {
                 unreachable!("fence or maintenance order handled first")
             }
         }
@@ -647,6 +701,7 @@ impl ControlWriter {
     fn from_sender(tx: mpsc::Sender<ControlWrite>) -> Self {
         Self {
             tx,
+            exec_controls: Arc::new(ExecControlRegistry::default()),
             data_bytes: Arc::new(Semaphore::new(AGENT_WRITE_DATA_BYTES)),
             data_frames: Arc::new(Semaphore::new(AGENT_WRITE_CLASS_FRAMES)),
             control_bytes: Arc::new(Semaphore::new(AGENT_WRITE_CONTROL_BYTES)),
@@ -1828,6 +1883,16 @@ impl AgentRelay {
         let ready_frame = self.ready_frame.take().ok_or_else(|| {
             RuntimeError::Custom("agent relay: run() called before wait_ready()".into())
         })?;
+        let ready_message = codec::decode_message_frame(&ready_frame)
+            .map_err(|error| RuntimeError::Custom(format!("decode relay Ready: {error}")))?;
+        let ready_payload = ready_message.payload::<Ready>().map_err(|error| {
+            RuntimeError::Custom(format!("decode relay Ready payload: {error}"))
+        })?;
+        // Only bundled peers with bounded, nonblocking guest input and range retirement can
+        // advertise the stronger delivery contract. Older agents retain their existing path.
+        let exec_control_supported = ready_payload.workload_transport_barrier_version
+            == Some(microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION)
+            && self.range_lease_active;
 
         let mut listener = self
             .listener
@@ -1840,6 +1905,10 @@ impl AgentRelay {
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
         let (agent_tx, agent_rx) = ControlWriter::new();
+        agent_tx
+            .exec_controls
+            .enabled
+            .store(exec_control_supported, Ordering::Release);
         self.shared
             .workload_control
             .register_ordinary_writer(agent_tx.clone());
@@ -2016,10 +2085,27 @@ impl AgentRelay {
                             let (reader_half, mut writer_half) = tokio::io::split(stream);
                             let (disconnect_tx, disconnect_rx) = watch::channel(false);
 
+                            let exec_control = exec_control_supported.then(|| agent_tx.exec_controls.connect(id_start, id_end_exclusive));
+                            let client_ready_frame = if let Some(connection) = exec_control.as_ref() {
+                                let capability = ExecControlReady {
+                                    version: EXEC_CONTROL_VERSION,
+                                    endpoint: crate::control::control_socket_path_for(&self.endpoint).to_string_lossy().into_owned(),
+                                    connection: connection.token(),
+                                };
+                                let advertisement = ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability };
+                                let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready: {error}")))?;
+                                ready.v = ready_message.v;
+                                let mut encoded = Vec::new();
+                                codec::encode_to_buf(&ready, &mut encoded)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready frame: {error}")))?;
+                                encoded
+                            } else { ready_frame.clone() };
+
                             let mut handshake = Vec::with_capacity(8 + ready_frame.len());
                             handshake.extend_from_slice(&id_start.to_be_bytes());
                             handshake.extend_from_slice(&id_end_exclusive.to_be_bytes());
-                            handshake.extend_from_slice(&ready_frame);
+                            handshake.extend_from_slice(&client_ready_frame);
 
                             if let Err(e) = writer_half.write_all(&handshake).await {
                                 tracing::error!(
@@ -2089,6 +2175,7 @@ impl AgentRelay {
                             {
                                 let mut map = clients.lock().await;
                                 map.insert(slot, ClientState {
+                                    exec_control,
                                     incarnation,
                                     active_sessions: HashSet::new(),
                                     active_bulk: Arc::clone(&active_bulk),
@@ -2237,6 +2324,7 @@ impl From<Bytes> for ControlWrite {
         let uses_data_credit = data.get(LEN_PREFIX_SIZE + 4) == Some(&FLAG_BULK);
         Self {
             data,
+            exec_lease: None,
             completion: None,
             uses_data_credit,
             order: ControlOrder::GlobalFence,
@@ -2996,13 +3084,21 @@ async fn ring_writer_task(
 }
 
 /// Keep the common FIFO path constant-time. Only a credit-blocked payload head enables a bounded
-/// scan for unrelated metadata or independent TCP return credit. Input/finish order and all
-/// cancellation, opening, lease and global fences remain intact.
+/// scan for unrelated metadata, independent TCP return credit, or exec termination. Stdin/EOF
+/// order and all cancellation, opening, lease and global fences remain intact.
 fn select_control_write(
     pending: &mut VecDeque<ControlWrite>,
     workload: &WorkloadControl,
     shared: Option<&ConsoleSharedState>,
 ) -> Result<(Option<ControlWrite>, bool), String> {
+    // Retired authority cannot survive a guest terminal or primary connection disconnect.
+    // Dropping its completion produces an explicit unconfirmed-delivery result for the caller.
+    while pending
+        .front()
+        .is_some_and(|write| write.exec_lease.as_ref().is_some_and(|lease| !lease.live()))
+    {
+        pending.pop_front();
+    }
     let mut wait_capacity = false;
     let Some(head) = pending.front_mut() else {
         return Ok((None, false));
@@ -3019,6 +3115,9 @@ fn select_control_write(
     if !head.uses_data_credit || workload.gated() {
         return Ok((None, wait_capacity));
     }
+    // The normal FIFO case above stays constant-time. Prune the rest only when a blocked data
+    // head already requires a bounded priority scan, freeing revoked signals' control permits.
+    pending.retain(|write| write.exec_lease.as_ref().is_none_or(|lease| lease.live()));
     for index in 1..pending.len() {
         let candidate = &pending[index];
         if candidate.uses_data_credit
@@ -3785,6 +3884,18 @@ async fn route_guest_lane_frame(
         if let Some(client) = map.get_mut(&client_slot)
             && (!dual_port || client.incarnation == incarnation)
         {
+            if let Some(connection) = client.exec_control.as_ref() {
+                if is_terminal {
+                    connection.retire(frame.id);
+                } else if frame.flags != FLAG_BULK
+                    && connection.pending(frame.id)
+                    && decode_frame(frame.data.as_ref())
+                        .is_ok_and(|message| message.t == MessageType::ExecStarted)
+                {
+                    // Observe before publishing Started to the caller, so immediate signals work.
+                    connection.started(frame.id);
+                }
+            }
             if is_terminal {
                 client.active_sessions.remove(&frame.id);
                 client.active_bulk.lock().unwrap().remove(&frame.id);
@@ -3831,8 +3942,9 @@ async fn route_guest_lane_frame(
 
             // The shared arena is a local optimization only. If all fitting slots are leased,
             // preserve forward progress by sending this record through the original socket path.
-            // Any error other than temporary capacity means the negotiated local transport is
-            // corrupt and must fail closed instead of silently changing its interpretation.
+            // A closed arena means the client is disconnecting. Any other error means the
+            // negotiated local transport is corrupt and must fail closed instead of silently
+            // changing its interpretation.
             #[cfg(unix)]
             if frame.flags == FLAG_BULK
                 && let Some(producer) = route.local_outbound
@@ -3862,6 +3974,16 @@ async fn route_guest_lane_frame(
                         return Ok(());
                     }
                     Err(LocalShmError::Full(_)) => {}
+                    // Client teardown closed the arena after this route was cloned. Drop the
+                    // record as for any departed client instead of failing the shared reader.
+                    Err(LocalShmError::Closed) => {
+                        tracing::debug!(
+                            "agent relay: local arena closed for slot={client_slot} id={} (frame dropped)",
+                            frame.id
+                        );
+                        let _ = route.disconnect_tx.send(true);
+                        return Ok(());
+                    }
                     Err(error) => {
                         return Err(RuntimeError::Custom(format!(
                             "agent relay: local shared-arena output failed: {error}"
@@ -4674,6 +4796,10 @@ async fn client_reader_task(
         if is_shutdown {
             tracing::info!("agent relay: client slot={slot} sent core.shutdown, notifying drain");
             let _ = drain_tx.try_send(());
+            agent_tx
+                .exec_controls
+                .stopping
+                .store(true, Ordering::Release);
         }
 
         // Register each ExecRequest in the session registry: assign a
@@ -4712,6 +4838,9 @@ async fn client_reader_task(
             if let Some(client) = map.get_mut(&slot) {
                 if is_exec_session_start {
                     client.active_sessions.insert(frame.id);
+                    if let Some(connection) = client.exec_control.as_ref() {
+                        connection.register(frame.id);
+                    }
                 }
                 if is_terminal {
                     client.active_sessions.remove(&frame.id);
@@ -4801,7 +4930,7 @@ async fn client_reader_task(
                 frame.flags == FLAG_BULK
                     || message_type.is_some_and(MessageType::uses_workload_data_credit),
             );
-            write.classify_tcp_order(frame.id, bulk_metadata, decoded_message.as_ref());
+            write.classify_message_order(frame.id, bulk_metadata, decoded_message.as_ref());
             if agent_tx.send(write).await.is_err() {
                 tracing::error!("agent relay: control ring writer channel closed");
                 break;
@@ -4892,7 +5021,10 @@ async fn client_reader_task(
             }
 
             if agent_tx
-                .send(ControlWrite::ordinary(Bytes::from(buf), session_id, false))
+                .send(ControlWrite {
+                    order: ControlOrder::ExecSignal(session_id),
+                    ..ControlWrite::ordinary(Bytes::from(buf), session_id, false)
+                })
                 .await
                 .is_err()
             {
@@ -5278,6 +5410,182 @@ mod tests {
         select_control_write(pending, workload, None).map(|(write, _)| write)
     }
 
+    #[tokio::test]
+    async fn exec_control_waits_for_creation_and_uses_reserved_capacity() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+        let (tx, mut rx) = ControlWriter::new();
+        let owner = tx.exec_controls.connect(100, 200);
+        let request = ExecControlRequest {
+            version: 1,
+            connection: owner.token(),
+            id: 101,
+            signal: 9,
+        };
+        // Fill the entire data class without consuming it; the control class remains available.
+        for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+            tx.send(ControlWrite::ordinary(
+                Bytes::from_static(b"input"),
+                101,
+                true,
+            ))
+            .await
+            .unwrap();
+        }
+        let task = tokio::spawn({
+            let tx = tx.clone();
+            async move { tx.exec_controls.signal(&tx, request).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        owner.register(101);
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        owner.started(101);
+        for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+            assert!(rx.recv().await.unwrap().uses_data_credit);
+        }
+        let mut write = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(write.order, ControlOrder::ExecSignal(101)));
+        write.completion.take().unwrap().send(()).unwrap();
+        assert!(task.await.unwrap().delivered);
+    }
+
+    #[tokio::test]
+    async fn exec_control_revokes_queued_signals_and_rejects_reused_slots() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+        let (tx, mut rx) = ControlWriter::new();
+        let owner = tx.exec_controls.connect(100, 200);
+        let token = owner.token();
+        owner.register(101);
+        owner.started(101);
+        let task = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                tx.exec_controls
+                    .signal(
+                        &tx,
+                        ExecControlRequest {
+                            version: 1,
+                            connection: token,
+                            id: 101,
+                            signal: 9,
+                        },
+                    )
+                    .await
+            }
+        });
+        let write = rx.recv().await.unwrap();
+        owner.retire(101);
+        let shared = workload_test_shared(4096, false);
+        let mut pending = VecDeque::from([write]);
+        assert!(
+            next_control_write(&mut pending, &shared.workload_control)
+                .unwrap()
+                .is_none()
+        );
+        assert!(pending.is_empty());
+        assert!(!task.await.unwrap().delivered);
+        drop(owner);
+        let replacement = tx.exec_controls.connect(100, 200);
+        replacement.register(101);
+        replacement.started(101);
+        let denied = tx
+            .exec_controls
+            .signal(
+                &tx,
+                ExecControlRequest {
+                    version: 1,
+                    connection: token,
+                    id: 101,
+                    signal: 9,
+                },
+            )
+            .await;
+        assert_eq!(denied.error_code.as_deref(), Some("execution_closed"));
+        let denied = tx
+            .exec_controls
+            .signal(
+                &tx,
+                ExecControlRequest {
+                    version: 1,
+                    connection: replacement.token(),
+                    id: 201,
+                    signal: 9,
+                },
+            )
+            .await;
+        assert_eq!(denied.error_code.as_deref(), Some("execution_closed"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn exec_signal_and_shutdown_interrupt_input_but_preserve_effect_fences() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        control
+            .restore(
+                WorkloadTransportPosition::default(),
+                WorkloadTransportCredit {
+                    control_bytes: 4096,
+                    control_frames: 16,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        let frame = Bytes::from_static(b"ordered");
+        let write = |order, data| ControlWrite {
+            order,
+            ..ControlWrite::ordinary(frame.clone(), 101, data)
+        };
+        let mut pending = VecDeque::from([
+            write(ControlOrder::ExecInput(101), true),
+            write(ControlOrder::ExecInput(101), true), // EOF uses the same ordered data class.
+            write(ControlOrder::ExecSignal(101), false),
+        ]);
+        let gate = control.gate();
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        gate.release();
+        assert!(matches!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .order,
+            ControlOrder::ExecSignal(101)
+        ));
+        pending.push_back(write(ControlOrder::ShutdownFence, false));
+        assert!(matches!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .order,
+            ControlOrder::ShutdownFence
+        ));
+        for fence in [
+            ControlOrder::Correlation(101),
+            ControlOrder::ClientFence {
+                start: 100,
+                end: 200,
+            },
+            ControlOrder::GlobalFence,
+        ] {
+            let mut pending = VecDeque::from([
+                write(fence, true),
+                write(ControlOrder::ExecSignal(101), false),
+            ]);
+            assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        }
+        let mut pending = VecDeque::from([
+            write(ControlOrder::Correlation(201), true),
+            write(ControlOrder::ShutdownFence, false),
+        ]);
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+    }
+
     #[cfg(unix)]
     use microsandbox_agent_client::local_shm::{
         LocalShmClient, LocalShmUpgrade, local_upgrade_request_frame, receive_local_shm_upgrade,
@@ -5385,6 +5693,7 @@ mod tests {
         let clients = Arc::new(Mutex::new(HashMap::from([(
             0,
             ClientState {
+                exec_control: None,
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -5428,6 +5737,56 @@ mod tests {
         let (release_tx, _release_rx) = mpsc::unbounded_channel();
         let received = client.inbound.receive(descriptor, release_tx).unwrap();
         assert_eq!(received.payload, payload);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guest_bulk_to_closed_local_arena_drops_frame_without_failing_reader() {
+        let server = LocalShmServer::create().unwrap();
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let clients = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            ClientState {
+                exec_control: None,
+                incarnation: Some(TEST_INCARNATION),
+                active_sessions: HashSet::new(),
+                active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                write_tx,
+                write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+                disconnect_tx,
+                local_outbound: Some(server.outbound.clone()),
+            },
+        )])));
+        // Client teardown closes the arena between route cloning and try_prepare.
+        server.outbound.close();
+        let wire = encoded_raw_flow(1, BulkFlow::GuestToHost, 0, b"bytes for a departed client");
+        let lane_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_BYTE_CAPACITY));
+        let lane_permit = Arc::clone(&lane_budget)
+            .try_acquire_many_owned(wire.len() as u32)
+            .unwrap();
+
+        route_guest_lane_frame(
+            LaneFrame {
+                frame: RawFrame {
+                    data: Bytes::from(wire),
+                    id: 1,
+                    flags: FLAG_BULK,
+                },
+                incarnation: Some(TEST_INCARNATION),
+                _permit: lane_permit,
+            },
+            true,
+            &clients,
+            None,
+            &std::sync::Mutex::new(HashMap::new()),
+        )
+        .await
+        .unwrap();
+
+        assert!(*disconnect_rx.borrow());
+        assert!(write_rx.try_recv().is_err());
+        assert_eq!(lane_budget.available_permits(), CLIENT_OUTPUT_BYTE_CAPACITY);
     }
 
     #[cfg(unix)]
@@ -5518,6 +5877,7 @@ mod tests {
         let clients = Arc::new(Mutex::new(HashMap::from([(
             0,
             ClientState {
+                exec_control: None,
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -5866,6 +6226,7 @@ mod tests {
         let clients = Arc::new(Mutex::new(HashMap::from([(
             slot,
             ClientState {
+                exec_control: None,
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -5949,7 +6310,11 @@ mod tests {
                 .unwrap();
             assert_eq!(admitted.data.as_ref(), wire);
             assert_eq!(admitted.uses_data_credit, uses_data_credit, "{kind:?}");
-            assert!(matches!(admitted.order, ControlOrder::Correlation(id) if id == id_start));
+            assert!(match admitted.order {
+                ControlOrder::ExecInput(id) => kind == MessageType::ExecStdin && id == id_start,
+                ControlOrder::Correlation(id) => kind != MessageType::ExecStdin && id == id_start,
+                _ => false,
+            });
         }
         active_bulk
             .lock()
@@ -5985,6 +6350,7 @@ mod tests {
         let clients = Arc::new(Mutex::new(HashMap::from([(
             slot,
             ClientState {
+                exec_control: None,
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6708,6 +7074,7 @@ mod tests {
         let clients = Arc::new(Mutex::new(HashMap::from([(
             0,
             ClientState {
+                exec_control: None,
                 incarnation: None,
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -7873,7 +8240,7 @@ mod tests {
         let mut encoded = Vec::new();
         codec::encode_to_buf(&message, &mut encoded).unwrap();
         let mut write = ControlWrite::ordinary(Bytes::from(encoded), 17, false);
-        write.classify_tcp_order(17, None, Some(&message));
+        write.classify_message_order(17, None, Some(&message));
         write
     }
 
@@ -7888,7 +8255,7 @@ mod tests {
         let mut encoded = Vec::new();
         codec::encode_bulk_to_buf(&record, &mut encoded).unwrap();
         let mut write = ControlWrite::ordinary(Bytes::from(encoded), 17, true);
-        write.classify_tcp_order(17, Some(bulk_wire_metadata(&write.data).unwrap()), None);
+        write.classify_message_order(17, Some(bulk_wire_metadata(&write.data).unwrap()), None);
         write
     }
 
@@ -8049,7 +8416,7 @@ mod tests {
             (BulkKind::Tcp, BulkFlow::GuestToHost),
         ] {
             let mut input = ControlWrite::ordinary(ordered_tcp_input().data, 17, true);
-            input.classify_tcp_order(17, Some((kind, flow, 0, 12)), None);
+            input.classify_message_order(17, Some((kind, flow, 0, 12)), None);
             let mut pending = VecDeque::from([input, tcp_output_credit()]);
             assert!(next_control_write(&mut pending, control).unwrap().is_none());
         }

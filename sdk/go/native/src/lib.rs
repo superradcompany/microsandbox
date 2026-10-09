@@ -37,6 +37,7 @@
 
 mod creation_progress;
 mod exec_adapter;
+mod jobs;
 mod restore;
 mod setup;
 mod storage;
@@ -500,6 +501,8 @@ struct BranchManyRequest {
     source_identity: Option<String>,
     #[serde(default)]
     guest_flush: microsandbox::snapshot::GuestFlush,
+    #[serde(default)]
+    volumes: HashMap<String, MountSpec>,
 }
 
 impl FfiError {
@@ -563,7 +566,8 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
-            MicrosandboxError::InvalidConfig(_) => error_kind::INVALID_CONFIG,
+            MicrosandboxError::InvalidConfig(_)
+            | MicrosandboxError::MissingRestoreBindings { .. } => error_kind::INVALID_CONFIG,
             MicrosandboxError::SandboxFsOps(_) => error_kind::FILESYSTEM,
             MicrosandboxError::ImageNotFound(_) => error_kind::IMAGE_NOT_FOUND,
             MicrosandboxError::ImageInUse(_) => error_kind::IMAGE_IN_USE,
@@ -3575,6 +3579,10 @@ pub unsafe extern "C" fn msb_sandbox_branch_many(
             builder = builder.guest_flush(request.guest_flush);
             if record_integrity {
                 builder = builder.record_integrity();
+            }
+            for (guest, spec) in &request.volumes {
+                let mount = volume_mount(guest, spec)?;
+                builder = builder.volume(guest, |_| mount);
             }
             let outcomes = builder.fork().await.map_err(FfiError::from)?;
             let mut rows = Vec::with_capacity(outcomes.len());
@@ -7766,6 +7774,24 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox::{MicrosandboxError, RestoreKind};
+
+    use super::FfiError;
+
+    #[test]
+    fn missing_restore_bindings_keep_the_invalid_config_kind() {
+        let error = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let message = error.to_string();
+
+        let ffi = FfiError::from(error);
+
+        assert_eq!(ffi.kind, super::error_kind::INVALID_CONFIG);
+        assert_eq!(ffi.message, message);
+    }
+
     #[test]
     fn tcp_network_aliases_are_exclusive() {
         for name in ["max_connections", "max_tcp_connections"] {
@@ -8042,6 +8068,34 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn branch_many_request_carries_disk_volumes() {
+        let request: BranchManyRequest = serde_json::from_str(
+            r#"{"names":["a"],"volumes":{"/data":{"disk":"/images/seed.img","fstype":"ext4","readonly":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(request.volumes.len(), 1);
+        let mount = volume_mount("/data", &request.volumes["/data"])
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        match mount.build().unwrap() {
+            microsandbox::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            _ => panic!("expected a disk mount"),
+        }
+        let plain: BranchManyRequest = serde_json::from_str(r#"{"names":["a"]}"#).unwrap();
+        assert!(plain.volumes.is_empty());
     }
 
     #[test]

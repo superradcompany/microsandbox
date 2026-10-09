@@ -9,6 +9,9 @@
 
 mod error;
 
+/// Runtime-owned execution jobs on the host-control extension.
+pub mod jobs;
+
 //--------------------------------------------------------------------------------------------------
 // Constants: Host↔Guest Shutdown Timings
 //--------------------------------------------------------------------------------------------------
@@ -89,6 +92,15 @@ pub const RUNTIME_FS_TAG: &str = "msb_runtime";
 /// used to fill the host disk. It is intentionally a fixed constant rather than
 /// a user-facing knob.
 pub const RUNTIME_FS_QUOTA_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Default per-device virtio-fs state budget, in MiB.
+pub const FS_STATE_LIMIT_DEFAULT_MIB: u32 = 4;
+
+/// Smallest configurable per-device virtio-fs state budget, in MiB.
+pub const FS_STATE_LIMIT_MIN_MIB: u32 = 1;
+
+/// Largest configurable per-device virtio-fs state budget, in MiB. The state framing is 32-bit.
+pub const FS_STATE_LIMIT_MAX_MIB: u32 = 4095;
 
 /// Guest mount point for the runtime filesystem.
 pub const RUNTIME_MOUNT_POINT: &str = "/.msb";
@@ -435,6 +447,7 @@ pub mod codec;
 pub mod control;
 pub mod core;
 pub mod exec;
+pub mod exec_control;
 pub mod fs;
 pub mod heartbeat;
 pub mod message;

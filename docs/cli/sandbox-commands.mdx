@@ -128,6 +128,17 @@ Flat roots support pre-boot patches and local snapshots. Patches change only the
 
 Ports bind to `127.0.0.1` by default. Use an explicit address to expose them beyond localhost. Windows may prompt for firewall access.
 
+`--port` (or `-p`) accepts inclusive, equal-length host and guest ranges, paired in ascending order:
+
+```bash
+msb create node --name media -p 0.0.0.0:10240-11264:10240-11264/udp
+msb create node --name services -p 8000-8002:80-82/tcp
+```
+
+The second mapping forwards host ports 8000, 8001, and 8002 to guest ports 80, 81, and 82. TCP is the default; `/udp` selects UDP. IPv6 bind addresses require brackets, for example `[::1]:8000-8002:80-82`. Range endpoints must be from 1 to 65535; reversed ranges and unequal lengths are rejected. The same syntax works with run, create, restore, and fork, and in configuration-file `ports` lists.
+
+Ranges expand into individual mappings. The UDP example opens 1,025 host sockets; large ranges require enough host socket/file-descriptor capacity and consume resources per port. A range does not reserve ports as one atomic block; existing per-port listener startup and error reporting apply.
+
 Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox, so a burst larger than the queue — for example a reverse proxy opening one upstream connection per request for a page that loads many assets at once — can fail at the proxy. Set `--tcp-accept-queue-size` to change the depth for every published TCP port of the sandbox:
 
 ```bash
@@ -268,8 +279,9 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `--forked` | Deprecated alias for `--cow-mem`; emits a warning |
 | `--disk-only` | Restore only the disk from a full snapshot; conflicts with `--cow-mem` and `--forked` |
 | `--snapshot-base` | Exact base snapshot or archive for a dependent export |
-| `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable, with warnings; full restore otherwise requires their bindings |
+| `--allow-missing-resources` | Resume with missing external filesystems or additional disks unavailable (full restore prints warnings); restore otherwise requires their bindings |
 | `-v`, `--volume` | Bind `SOURCE:GUEST[:OPTIONS]`, or select a private captured disk with `GUEST` alone |
+| `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]`, as in `msb create`; it wins over `-v` at the same guest path. A full restore accepts a disk only at a guest path captured in the snapshot, and the image must hold that disk's contents; use `--disk-only` to attach one at a new path |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
 | `--tcp-accept-queue-size` | Accept-queue depth for the child's published TCP ports (default: `1024`) |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
@@ -296,7 +308,7 @@ Full restore must keep captured CPU and memory settings and cannot apply a guest
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 
-Restore and fork do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct forking retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Restore and fork do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Restore refuses missing external filesystems and, for full restore, additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. A full restore prints warnings for unavailable resources, visible with `--quiet`; a disk restore with `--allow-missing-resources` starts without the unmapped mounts and prints no warning. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct forking retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
 
 ```bash
 msb snap restore saved.msb --name worker -v /srv/project:/work -v /data
@@ -366,7 +378,7 @@ msb resume devbox
 
 <Tooltip tip="Forking is not yet available on cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s writes stay private.
+Create a local child from running or paused execution without saving a snapshot. Memory is shared through copy-on-write; each child’s memory writes stay private.
 
 ```bash
 msb fork devbox -n experiment
@@ -385,11 +397,14 @@ msb fork devbox --names worker-{1..10} # Bash/Zsh expand the names
 | `--names NAME...` | Several child names from one capture |
 | `--guest-flush` | Guest writeback policy: `auto` (default), `required`, or `skip`; see [advanced guest flushing](/sandboxes/snapshots#guest-flushing) |
 | `--integrity` | Record disk content hashes |
+| `--mount-disk` | Rebind a captured disk to a host image: `SOURCE:DEST[:OPTIONS]`, as in `msb create`; it wins over `-v` at the same guest path |
 | `-q`, `--quiet` | Suppress progress |
 
 Both fork forms accept `--guest-flush auto|required|skip`. Auto and skip preserve dirty memory without flushing root or owned block filesystems; required adds writeback. Host-backed directory synchronization and host disk barriers remain in effect.
 
 Volume, port, TCP accept queue size, user, vsock, inheritance, and mount-policy flags match [`restore`](#msb-restore).
+
+A fork cannot add a new block device. `--mount-disk` only rebinds a captured disk, such as a named disk volume, at `DEST` to a host image consistent with the captured state. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 Batch forking captures once. Results follow input order; failed children produce a nonzero exit status without removing successful ones.
 
@@ -831,3 +846,72 @@ See [CLI management](/cli/management) for installation, updates, diagnostics, an
 <span id="msb-uninstall" />
 
 <span id="msb-self" />
+
+
+## Managed exec jobs
+
+`msb exec -d` starts a command owned by the sandbox runtime and prints its job ID after the guest confirms startup. The sandbox must already be running. Closing the launching terminal or dropping an SDK job handle does not terminate the command. Stopping or destroying the sandbox still terminates its processes.
+
+This self-contained walkthrough needs no script or counter file:
+
+```bash
+msb create alpine --name pause-walkthrough
+
+counter=$(msb exec -d --no-tty pause-walkthrough -- sh -c '
+  n=0
+  while true; do
+    n=$((n + 1))
+    echo "$n"
+    sleep 1
+  done
+')
+
+msb logs pause-walkthrough --job "$counter" --follow
+# Press Ctrl-C to stop following logs. The counter keeps running.
+
+msb pause pause-walkthrough
+msb logs pause-walkthrough --job "$counter" --tail 5
+# Wait a few seconds: the counter stays at the same value while paused.
+msb resume pause-walkthrough
+msb logs pause-walkthrough --job "$counter" --follow
+# Press Ctrl-C, then finish the demonstration:
+msb kill pause-walkthrough --job "$counter"
+msb inspect pause-walkthrough --job "$counter"
+```
+
+Detached execution uses the existing terminal detection. `--tty` forces a PTY and `--no-tty` forces pipes. Neither `--no-tty` nor detaching closes guest stdin: the runtime retains it for later attachment. `--no-stdin` explicitly gives the command EOF and disables automatic TTY allocation. Detached launch never reads the launching terminal's stdin; `--detach` conflicts with `--stream`.
+
+| Command | Behavior |
+| --- | --- |
+| `msb jobs <sandbox> [--all] [--limit N] [--cursor ID] [--format json]` | List active jobs, or retained history with `-a` / `--all`; no job selector applies to this listing |
+| `msb logs <sandbox> --job ID` | Read job output; existing `--follow`, `--tail`, time, source and output-format options apply |
+| `msb inspect <sandbox> --job ID [--format json]` | Inspect identity, command, state, PTY/input mode and exit result |
+| `msb attach <sandbox> --job ID [--read-only]` | Attach to the existing process; Ctrl-] detaches a terminal |
+| `msb wait <sandbox> --job ID [--timeout 30s] [--format json]` | Wait for a confirmed exit; a wait timeout leaves the process running |
+| `msb signal <sandbox> --job ID --signal TERM` | Send a Linux guest signal to the process group |
+| `msb kill <sandbox> --job ID` | Request SIGKILL; use wait or inspect to confirm completion |
+| `msb eof <sandbox> --job ID` | Permanently close pipe input after queued bytes; PTYs use terminal Ctrl-D instead |
+
+Each command also has its full `msb sandbox ...` form. Without `--job`, `logs`, `inspect` and `wait` keep their existing sandbox meaning.
+
+For a reattachable shell:
+
+```bash
+shell_job=$(msb exec -d --tty pause-walkthrough -- sh)
+msb attach pause-walkthrough --job "$shell_job"
+# Ctrl-] returns to the host. Attach again using the same ID.
+```
+
+Only one attachment owns input at a time. Other clients can attach with `--read-only` or follow logs. Detach and host input EOF do not implicitly close guest stdin. Input ownership expires within 30 seconds after an abruptly disconnected client; explicit detach releases it immediately. PTY output is merged under source `output`; pipe mode preserves `stdout` and `stderr` separately.
+
+Job IDs are opaque, sandbox-scoped identities independent of guest PIDs and ordinary exec correlation IDs. Metadata and bounded output survive CLI disconnects and remain inspectable after sandbox shutdown. A runtime restart never reruns jobs: an unconfirmed former process is reported as `lost`. Up to 32 jobs can run per sandbox, with at most 256 retained histories and two 512 KiB output segments per job. Pruned history produces an explicit cursor-gap error rather than silently pretending the missing bytes were delivered. The runtime also bounds launch deduplication history; after 65,536 admissions, restart the sandbox before admitting more jobs.
+
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.
+
+Execution `--timeout` remains enforced by the runtime after launch returns. Full snapshots and forks are rejected while managed jobs are active, because their host-side I/O ownership cannot yet be restored. Resident pause/resume remains supported. Older runtimes and unsupported backends reject job launch before dispatch; existing exec and sandbox APIs remain available.
+
+While resident-paused, job inspection and waits remain available. Waiting does not resume the sandbox; resume allows an active job to finish. Snapshot and fork refusals explain that you must wait for or terminate the active jobs first.
+
+Terminal attachment keeps reading Ctrl-] while guest input is blocked, using up to 1 MiB of lookahead beyond its bounded writer queue. After reading Ctrl-], it drains preceding input to runtime admission for at most two seconds, then detaches. Exceeding the lookahead limit reports `input_not_flushed` immediately and discards further input while keeping the attachment open, so an unfinished guest paste is not automatically handed to the host shell. Press Ctrl-] to detach; host EOF or process completion also ends the attachment. Overflow or a failed or timed-out drain returns `input_not_flushed` in the final result: some input was discarded or not confirmed. Detach releases the attachment and restores the terminal without closing guest stdin or terminating the job. Do not automatically resend unconfirmed input, since it may already have been accepted.
+
+Signals and runtime deadlines remain deliverable when job stdin is full. Signals can interrupt queued input; stdin bytes and EOF otherwise keep their order. Pause delays physical signal delivery until resume. `kill` acknowledges the request; `wait` confirms process exit, and `inspect` reports delivery failures. Graceful sandbox stop interrupts queued exec input while preserving filesystem ordering. A stop timeout reports failure without forcing termination.

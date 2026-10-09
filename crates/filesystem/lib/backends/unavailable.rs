@@ -11,7 +11,20 @@ use crate::{DynFileSystem, PassthroughFs, SingleFileFs};
 /// Error-serving backend used only by explicit relaxed external-mount restore.
 #[derive(Default)]
 pub struct UnavailableFs {
+    limits: msb_krun::DeviceStateLimits,
     state: Mutex<Option<Vec<u8>>>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl UnavailableFs {
+    /// Configure the state budget for a retained, unavailable mount.
+    pub fn with_state_limit(mut self, bytes: usize) -> Self {
+        self.limits = self.limits.with_fs_state_limit(bytes);
+        self
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -21,9 +34,9 @@ pub struct UnavailableFs {
 impl DynFileSystem for UnavailableFs {
     fn validate_state(&self, state: &[u8]) -> io::Result<()> {
         if state.starts_with(b"MSBSFILE") {
-            SingleFileFs::validate_external_state(state)
+            SingleFileFs::validate_external_state_with_limit(state, self.limits.fs_state_limit())
         } else {
-            PassthroughFs::validate_external_state(state)
+            PassthroughFs::validate_external_state_with_limit(state, self.limits.fs_state_limit())
         }
     }
 

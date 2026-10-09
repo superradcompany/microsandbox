@@ -190,6 +190,9 @@ impl ControlOperation {
 ///
 /// Unknown extension names remain caller-owned and therefore return `None`.
 pub fn control_message_min_generation(name: &str) -> Option<u8> {
+    if matches!(name, "control.jobs" | "control.jobs.result") {
+        return Some(2);
+    }
     if CONTROL_GENERATION_TWO_MESSAGES.contains(&name) {
         return Some(2);
     }

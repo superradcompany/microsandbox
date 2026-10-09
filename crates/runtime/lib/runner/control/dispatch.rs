@@ -21,6 +21,7 @@ use super::handler::{Handler, Reply};
 pub(crate) const CONNECTION_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const RUNTIME_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_QUEUED: usize = 256;
+const MAX_SIGNAL_QUEUED: usize = 64;
 // Generation-one replies contain only fixed records and static diagnostics.
 // This reservation is acquired before dispatching even a resource mutation.
 pub(crate) const REPLY_BYTES: u32 = MAX_HANDSHAKE_FRAME_SIZE + 4;
@@ -35,6 +36,9 @@ pub(crate) struct Dispatcher {
     handler: Arc<dyn Handler>,
     queues: Mutex<Queues>,
     wake: Notify,
+    signal_queues: Mutex<Queues>,
+    signal_wake: Notify,
+    connection_lanes: Mutex<HashMap<u64, bool>>,
     pub bytes: Arc<Semaphore>,
 }
 
@@ -92,13 +96,27 @@ impl Dispatcher {
             handler,
             queues: Mutex::new(Queues::default()),
             wake: Notify::new(),
+            signal_queues: Mutex::new(Queues::default()),
+            signal_wake: Notify::new(),
+            connection_lanes: Mutex::new(HashMap::new()),
             bytes: Arc::new(Semaphore::new(RUNTIME_BYTES)),
         })
     }
 
     pub fn submit(&self, connection: u64, job: Job) -> Result<(), Box<Job>> {
-        let mut queues = self.queues.lock().unwrap();
-        if queues.count >= MAX_QUEUED {
+        let signal = *self.connection_lanes.lock().unwrap().entry(connection).or_insert_with(|| {
+            matches!(&job.input, Input::Framed { frame, generation, .. }
+                if *generation >= 2 && Envelope::decode(&frame.body).is_ok_and(|envelope| envelope.t == microsandbox_protocol::exec_control::EXEC_CONTROL_REQUEST))
+        });
+        // A connection keeps one lane for its whole lifetime, preserving its FIFO even when a
+        // low-level client mixes operations. The native signal helper uses a dedicated connection.
+        let (queue, wake, limit) = if signal {
+            (&self.signal_queues, &self.signal_wake, MAX_SIGNAL_QUEUED)
+        } else {
+            (&self.queues, &self.wake, MAX_QUEUED)
+        };
+        let mut queues = queue.lock().unwrap();
+        if queues.count >= limit {
             return Err(Box::new(job));
         }
         let queue = queues.by_connection.entry(connection).or_default();
@@ -109,20 +127,29 @@ impl Dispatcher {
         }
         queues.count += 1;
         drop(queues);
-        self.wake.notify_one();
+        wake.notify_one();
         Ok(())
     }
 
     pub fn cancel(&self, connection: u64) {
-        let mut queues = self.queues.lock().unwrap();
-        if let Some(jobs) = queues.by_connection.remove(&connection) {
-            queues.count -= jobs.len();
+        self.connection_lanes.lock().unwrap().remove(&connection);
+        for queue in [&self.queues, &self.signal_queues] {
+            let mut queues = queue.lock().unwrap();
+            if let Some(jobs) = queues.by_connection.remove(&connection) {
+                queues.count -= jobs.len();
+            }
+            queues.ready.retain(|id| *id != connection);
         }
-        queues.ready.retain(|id| *id != connection);
     }
 
-    fn next(&self) -> Option<Job> {
-        let mut queues = self.queues.lock().unwrap();
+    fn next_lane(&self, signal: bool) -> Option<Job> {
+        let mut queues = if signal {
+            &self.signal_queues
+        } else {
+            &self.queues
+        }
+        .lock()
+        .unwrap();
         let connection = queues.ready.pop_front()?;
         let queue = queues.by_connection.get_mut(&connection).unwrap();
         let job = queue.pop_front().unwrap();
@@ -136,9 +163,20 @@ impl Dispatcher {
     }
 
     pub async fn run(self: Arc<Self>) {
+        // A paused signal waiting for guest delivery must not prevent Resume from dispatching.
+        // Both lanes stay bounded and lifecycle mutation still enters the runtime executor.
+        tokio::join!(self.clone().run_lane(false), self.run_lane(true));
+    }
+
+    async fn run_lane(self: Arc<Self>, signal: bool) {
         loop {
-            let notified = self.wake.notified();
-            if let Some(job) = self.next() {
+            let notified = if signal {
+                &self.signal_wake
+            } else {
+                &self.wake
+            }
+            .notified();
+            if let Some(job) = self.next_lane(signal) {
                 if !job.cancelled.is_cancelled() {
                     let dispatcher = self.clone();
                     let _ = tokio::task::spawn_blocking(move || dispatcher.execute(job)).await;
@@ -204,6 +242,25 @@ impl Dispatcher {
         } else if matches!(envelope.t.as_str(), "control.hello" | "control.welcome") {
             // Repeated setup cannot reset the parser, IDs, or negotiated limits.
             return Err(invalid());
+        } else if envelope.t == microsandbox_protocol::exec_control::EXEC_CONTROL_REQUEST
+            && generation >= 2
+        {
+            match envelope.payload::<microsandbox_protocol::exec_control::ExecControlRequest>() {
+                Ok(request) => Reply::ExecSignal(self.handler.handle_exec_signal(request)),
+                Err(_) => Reply::Error(ControlError::rejected(
+                    "invalid_request",
+                    "invalid exec control payload",
+                )),
+            }
+        } else if envelope.t == microsandbox_protocol::jobs::JOB_REQUEST && generation >= 2 {
+            // Keep the released, exhaustively matchable control enums source-compatible.
+            match envelope.payload::<microsandbox_protocol::jobs::JobRequest>() {
+                Ok(request) => Reply::Job(self.handler.handle_job(request)),
+                Err(_) => Reply::Error(ControlError::rejected(
+                    "invalid_request",
+                    "invalid job request payload",
+                )),
+            }
         } else {
             match ControlOperation::from_envelope(&envelope, generation) {
                 Ok(request) => self.handler.handle(request, generation).framed,
@@ -344,6 +401,9 @@ pub(crate) fn reply_bytes(frame: &RawFrame, generation: u8) -> io::Result<u32> {
         // The result contains one entry per selected disk and can legitimately approach the
         // negotiated frame ceiling. Reserving it here prevents mutation without reply capacity.
         "control.disk.checkpoint.create" | "control.disk.compact" => codec::MAX_FRAME_SIZE + 4,
+        // Job metadata, list pages, and replay chunks are bounded below this ceiling.
+        // Reserving a full frame here would close an 8 MiB session on two overlapping reads.
+        "control.jobs" => microsandbox_protocol::jobs::JOB_REPLY_BYTES,
         _ => EXTENDED_REPLY_BYTES,
     })
 }

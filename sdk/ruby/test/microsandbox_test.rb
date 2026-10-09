@@ -145,8 +145,11 @@ class MicrosandboxTest < Test::Unit::TestCase
       constant.is_a?(Class) && constant < Microsandbox::Error
     end
 
-    assert_equal ERROR_CLASSES.sort, defined_classes.sort
-    ERROR_CLASSES.each do |name|
+    # JobError carries a code from the managed-job operation, while ERROR_CLASSES
+    # contains the fixed-code errors checked by test_error_codes_are_unique_kebab_case.
+    expected_classes = ERROR_CLASSES + [:JobError]
+    assert_equal expected_classes.sort, defined_classes.sort
+    expected_classes.each do |name|
       assert_equal Microsandbox::Error, Microsandbox.const_get(name).superclass, name
     end
   end

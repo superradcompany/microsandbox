@@ -4,6 +4,7 @@ mod exec;
 mod fs;
 mod helpers;
 mod image;
+mod jobs;
 mod logs;
 mod metrics;
 mod sandbox;
@@ -73,6 +74,9 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<sandbox::PyExternalMountWarning>()?;
     m.add_class::<sandbox::PySandboxPage>()?;
     m.add_class::<sandbox_handle::PySandboxHandle>()?;
+    m.add_class::<jobs::PyJob>()?;
+    m.add_class::<jobs::PyJobAttachment>()?;
+    m.add_class::<jobs::PyJobLogStream>()?;
     m.add_class::<exec::PyExecOutput>()?;
     m.add_class::<exec::PyExecHandle>()?;
     m.add_class::<exec::PyExecSink>()?;

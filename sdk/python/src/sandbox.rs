@@ -10,8 +10,8 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    extract_str_enum, is_exact_sdk_type, parse_violation_action_obj, restore_builder_from_args,
-    sandbox_builder_from_args, str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
+    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -31,6 +31,7 @@ pub struct PySandbox {
     // Immutable identity is available even while a consuming operation holds the wrapper lock.
     stop_name: String,
     stop_identity: String,
+    local_backend: bool,
 }
 
 /// One child outcome from a capture-once batch.
@@ -90,6 +91,7 @@ impl PySandbox {
         Self {
             stop_name: inner.name().to_string(),
             stop_identity: inner.id().to_string(),
+            local_backend: inner.backend_kind().as_str() == "local",
             inner: Arc::new(Mutex::new(Some(inner))),
         }
     }
@@ -233,6 +235,38 @@ impl PySandboxTouchResult {
 
 #[pymethods]
 impl PySandbox {
+    fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            Ok(crate::jobs::PyJob {
+                inner: sandbox.get_job(id).await.map_err(crate::jobs::job_error)?,
+            })
+        })
+    }
+    #[pyo3(signature = (*, all = false, limit = 50, cursor = None))]
+    fn list_jobs<'py>(
+        &self,
+        py: Python<'py>,
+        all: bool,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = crate::jobs::list_options(all, limit, cursor)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let page = sandbox
+                .list_jobs_with(|_| options)
+                .await
+                .map_err(crate::jobs::job_error)?;
+            crate::jobs::decode(
+                "page",
+                serde_json::to_value(page).map_err(crate::jobs::invalid)?,
+            )
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
@@ -609,6 +643,46 @@ impl PySandbox {
                 .await
                 .map_err(to_py_err)?;
             Ok(PyExecOutput::from_rust(output))
+        })
+    }
+
+    /// Execute a command with runtime-owned I/O.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        cmd,
+        args = None,
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        timeout = None,
+        stdin = None,
+        tty = false,
+        rlimits = None,
+    ))]
+    fn exec_detached<'py>(
+        &self,
+        py: Python<'py>,
+        cmd: String,
+        args: Option<&Bound<'py, PyAny>>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout: Option<f64>,
+        stdin: Option<&Bound<'py, PyAny>>,
+        tty: bool,
+        rlimits: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox
+                .exec_detached_with(&cmd, |e| apply_exec_options(e, args, opts))
+                .await
+                .map_err(crate::jobs::job_error)?;
+            Ok(crate::jobs::PyJob { inner: handle })
         })
     }
 
@@ -1087,13 +1161,14 @@ impl PySandbox {
     }
 
     /// Deprecated: use fork for live execution duplication.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1103,17 +1178,18 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork(py, name, record_integrity, guest_flush)
+        self.fork(py, name, record_integrity, guest_flush, volumes)
     }
 
     /// Deprecated: use fork_many for live execution duplication.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1123,18 +1199,21 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork_many(py, names, record_integrity, guest_flush)
+        self.fork_many(py, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1144,6 +1223,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             Ok(PySandbox::from_rust(
                 builder.fork().await.map_err(to_py_err)?,
             ))
@@ -1151,14 +1231,17 @@ impl PySandbox {
     }
 
     /// Capture once for all names; return an outcome for each child in input order.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1168,6 +1251,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }
@@ -2059,7 +2143,9 @@ fn normalize_stdin(
     data: Option<Vec<u8>>,
 ) -> PyResult<(Option<String>, Option<Vec<u8>>)> {
     match mode.as_str() {
-        "null" => Ok((None, None)),
+        // Absence keeps the caller's builder default; explicit null must override a retained
+        // detached pipe, just as it overrides any other explicitly configured stdin mode.
+        "null" => Ok((Some(mode), None)),
         "pipe" => Ok((Some(mode), None)),
         "bytes" => Ok((Some(mode), Some(data.unwrap_or_default()))),
         _ => Err(PyValueError::new_err(format!(
@@ -2186,6 +2272,7 @@ fn apply_exec_options(
     }
     // Stdin mode.
     match opts.stdin_mode.as_deref() {
+        Some("null") => builder = builder.stdin_null(),
         Some("pipe") => builder = builder.stdin_pipe(),
         Some("bytes") => {
             if let Some(data) = opts.stdin_data {
@@ -2603,6 +2690,67 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stdin_omission_preserves_defaults_but_explicit_null_overrides_a_pipe() {
+        use microsandbox::sandbox::ExecOptionsBuilder;
+        use microsandbox::sandbox::exec::StdinMode;
+
+        for builder in [
+            ExecOptionsBuilder::default(),
+            ExecOptionsBuilder::default().stdin_pipe(),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin("null".into(), None).unwrap();
+            let options = apply_exec_options(
+                builder,
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            assert!(matches!(options.stdin, StdinMode::Null));
+        }
+        let ordinary =
+            apply_exec_options(ExecOptionsBuilder::default(), vec![], ExecOpts::default())
+                .build()
+                .unwrap();
+        assert!(matches!(ordinary.stdin, StdinMode::Null));
+        let detached = apply_exec_options(
+            ExecOptionsBuilder::default().stdin_pipe(),
+            vec![],
+            ExecOpts::default(),
+        )
+        .build()
+        .unwrap();
+        assert!(matches!(detached.stdin, StdinMode::Pipe));
+        for (mode, data) in [
+            ("pipe", None),
+            ("bytes", Some(vec![])),
+            ("bytes", Some(b"finite".to_vec())),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin(mode.into(), data.clone()).unwrap();
+            let options = apply_exec_options(
+                ExecOptionsBuilder::default(),
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            match options.stdin {
+                StdinMode::Pipe => assert_eq!(mode, "pipe"),
+                StdinMode::Bytes(bytes) => assert_eq!(Some(bytes), data),
+                StdinMode::Null => panic!("explicit pipe/bytes became null"),
+            }
+        }
+    }
+
+    #[test]
     fn execution_timeouts_reject_non_finite_and_overflowing_values() {
         pyo3::prepare_freethreaded_python();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
@@ -2706,6 +2854,7 @@ mod tests {
 
     #[test]
     fn python_secret_modify_options_reach_rust_patch() {
+        let _guard = crate::helpers::tests::PYTHON_TYPES_LOCK.lock().unwrap();
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             // Load the public Python types without requiring a built extension or VM.

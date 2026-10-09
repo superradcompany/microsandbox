@@ -709,3 +709,50 @@ fn reclaim_abandoned_memory(root: &Path) {
         }
     });
 }
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "local"))]
+mod tests {
+    use super::*;
+
+    fn fork() -> ForkBuilder {
+        let backend = crate::test_support::local_backend(Default::default());
+        ForkBuilder::new(
+            Arc::new(backend),
+            "source",
+            SandboxIdentity::Local(1),
+            "child".into(),
+        )
+    }
+
+    fn assert_disk_mount(config: &SandboxConfig) {
+        let mounts = &config.spec.mounts;
+        assert_eq!(mounts.len(), 1);
+        assert!(matches!(
+            &mounts[0],
+            crate::sandbox::VolumeMount::DiskImage { host, guest, .. }
+                if host == Path::new("/images/seed.img") && guest == "/data"
+        ));
+        assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    #[test]
+    fn fork_and_fork_many_accept_a_host_disk_volume() {
+        let disk = |v: crate::sandbox::MountBuilder| v.disk("/images/seed.img");
+        let single = fork().volume("/data", disk);
+        assert_disk_mount(&single.inner.config.clone().into_config());
+        let many = ForkManyBuilder::new(fork(), ["a", "b"]).volume("/data", disk);
+        assert_disk_mount(&many.inner.config.clone().into_config());
+    }
+
+    #[test]
+    fn a_later_disk_volume_replaces_a_bind_at_the_same_guest_path() {
+        let builder = fork()
+            .volume("/data", |v| v.bind("/host/data"))
+            .volume("/data", |v| v.disk("/images/seed.img"));
+        assert_disk_mount(&builder.inner.config.clone().into_config());
+    }
+}

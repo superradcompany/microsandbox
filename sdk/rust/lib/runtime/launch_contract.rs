@@ -230,6 +230,9 @@ impl LaunchContract {
         if !launch.guest_clock.is_sync() {
             return unsupported("guest clock policy");
         }
+        if launch.fs_state_limit_bytes.is_some() {
+            return unsupported("filesystem state budget");
+        }
         if !launch.owned_volumes.is_empty() {
             return unsupported("sandbox-owned volumes");
         }
@@ -558,6 +561,7 @@ pub(crate) async fn validate_runtime_config(
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
+    validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
 }
 
@@ -680,6 +684,33 @@ pub(crate) async fn validate_guest_clock(
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
             crate::error::UnsupportedReason::NotAvailable(upgrade_required("runtime.guest_clock")),
+        ));
+    }
+    Ok(())
+}
+
+/// Probe filesystem state budget support only when the budget differs from the default.
+/// Runtimes that predate the capability would otherwise keep the default budget silently.
+pub(crate) async fn validate_fs_state_limit(
+    path: &Path,
+    global: &GlobalConfig,
+) -> MicrosandboxResult<()> {
+    if global.fs_state_limit_override().is_none() {
+        return Ok(());
+    }
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.fs_state_limit
+        });
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required(
+                "snapshots.max_filesystem_state_mib",
+            )),
         ));
     }
     Ok(())
@@ -1090,6 +1121,40 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
         );
         validate_guest_clock(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_state_limit_requires_an_explicit_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut global = GlobalConfig::default();
+        // The default budget must avoid probing, including on an old runtime.
+        validate_fs_state_limit(&dir.path().join("no-probe"), &global)
+            .await
+            .unwrap();
+        global.snapshots.max_filesystem_state_mib = 64;
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":"true"}'"#,
+            r#"printf '%s' '{"protocols":[1],"fs_state_limit":true}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-fs-state", response);
+            let error = validate_fs_state_limit(&path, &global).await.unwrap_err();
+            assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib")
+            );
+        }
+        let path = script(
+            dir.path(),
+            "supports-fs-state",
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
+        );
+        validate_fs_state_limit(&path, &global).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1964,6 +2029,35 @@ mod protocol {
                 .as_object()
                 .unwrap()
                 .contains_key("guest_clock")
+        );
+    }
+
+    #[test]
+    fn legacy_codec_refuses_a_non_default_filesystem_state_budget() {
+        let config = LaunchConfig {
+            fs_state_limit_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        assert!(
+            encode_bytes(&config, LEGACY)
+                .unwrap_err()
+                .contains("requires a newer runtime launch contract")
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode_bytes(&config, current).unwrap()).unwrap()["fs_state_limit_bytes"],
+            64 * 1024 * 1024
+        );
+        let default = encode_bytes(&LaunchConfig::default(), current).unwrap();
+        assert!(
+            !serde_json::from_slice::<Value>(&default)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("fs_state_limit_bytes")
         );
     }
 

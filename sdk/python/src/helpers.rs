@@ -51,6 +51,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "ports",
     "vsock",
     "network",
+    "intercept_tls",
     "proxy",
     "secrets",
     "secret_violation_action",
@@ -62,7 +63,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
 //--------------------------------------------------------------------------------------------------
 
 /// Shared parsing vocabulary; restore applies its own resource authorization rules.
-trait ResourceBuilder: Sized {
+pub(crate) trait ResourceBuilder: Sized {
     fn volume(
         self,
         guest: impl Into<String>,
@@ -717,6 +718,11 @@ pub fn sandbox_builder_from_args(
         builder = apply_network(builder, &net_dict)?;
     }
 
+    // The shortcut overlays the supplied network settings without resetting TLS options.
+    if extract_opt::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
+        builder = builder.intercept_tls();
+    }
+
     // Outbound proxy.
     if let Some(proxy) = kwargs.get_item("proxy")?
         && !proxy.is_none()
@@ -999,6 +1005,51 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 //--------------------------------------------------------------------------------------------------
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
+
+/// Copy a fork's `Mapping[str, MountConfig]` into one owned dict per guest path.
+/// A local backend anchors relative `bind` and `disk` paths here, so later changes
+/// to the mapping or the working directory do not affect the fork.
+pub(crate) fn prepare_fork_volumes(
+    volumes: Option<&Bound<'_, PyAny>>,
+    local: bool,
+) -> PyResult<Vec<(String, Py<PyDict>)>> {
+    let Some(volumes) = volumes.filter(|volumes| !volumes.is_none()) else {
+        return Ok(Vec::new());
+    };
+    require_mapping_dict(volumes, "volumes")?
+        .iter()
+        .map(|(guest, mount)| {
+            let mount = config_dict(&mount, "MountConfig")?;
+            if local {
+                for key in ["bind", "disk"] {
+                    if let Some(path) = extract_opt::<String>(&mount, key)? {
+                        let path = std::path::absolute(path)?;
+                        let path = path.to_str().ok_or_else(|| {
+                            pyo3::exceptions::PyValueError::new_err(format!(
+                                "cannot encode {key} host path as UTF-8"
+                            ))
+                        })?;
+                        mount.set_item(key, path)?;
+                    }
+                }
+            }
+            Ok((guest.extract()?, mount.unbind()))
+        })
+        .collect()
+}
+
+/// Apply the mounts from [`prepare_fork_volumes`] to a fork builder.
+pub(crate) fn apply_fork_volumes<B: ResourceBuilder>(
+    mut builder: B,
+    volumes: &[(String, Py<PyDict>)],
+) -> PyResult<B> {
+    Python::with_gil(|py| {
+        for (guest, mount) in volumes {
+            builder = apply_mount(builder, guest.clone(), mount.bind(py))?;
+        }
+        Ok(builder)
+    })
+}
 
 fn apply_mount<B: ResourceBuilder>(
     builder: B,
@@ -2337,14 +2388,65 @@ macro_rules! resource_builder {
 }
 resource_builder!(SandboxBuilder);
 resource_builder!(microsandbox::sandbox::RestoreBuilder);
+resource_builder!(microsandbox::sandbox::ForkBuilder);
+resource_builder!(microsandbox::sandbox::ForkManyBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::ffi::CString;
+
     use super::*;
+
+    // Python imports can release the GIL while another test replaces sys.modules.
+    pub(crate) static PYTHON_TYPES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Load `microsandbox.types` without importing the native extension.
+    fn volumes(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+        let package = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+        let code = format!(
+            "import sys, types\n\
+             package = types.ModuleType('microsandbox')\n\
+             package.__path__ = [{package:?}]\n\
+             sys.modules['microsandbox'] = package\n\
+             from microsandbox.types import MountConfig, MountKind\n\
+             volumes = {{'/data': MountConfig(kind=MountKind.DISK, disk='./seed.img')}}\n"
+        );
+        let globals = PyDict::new(py);
+        py.run(&CString::new(code)?, Some(&globals), None)?;
+        Ok(globals.get_item("volumes")?.unwrap().downcast_into()?)
+    }
+
+    fn disk_of(py: Python<'_>, prepared: &[(String, Py<PyDict>)]) -> String {
+        prepared[0]
+            .1
+            .bind(py)
+            .get_item("disk")
+            .unwrap()
+            .unwrap()
+            .extract()
+            .unwrap()
+    }
+
+    #[test]
+    fn fork_volumes_are_copied_and_anchored_for_a_local_backend() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let mapping = volumes(py).unwrap();
+            let local = prepare_fork_volumes(Some(mapping.as_any()), true).unwrap();
+            let remote = prepare_fork_volumes(Some(mapping.as_any()), false).unwrap();
+            mapping.del_item("/data").unwrap();
+
+            let anchored = std::path::absolute("./seed.img").unwrap();
+            assert_eq!(local[0].0, "/data");
+            assert_eq!(disk_of(py, &local), anchored.to_string_lossy());
+            assert_eq!(disk_of(py, &remote), "./seed.img");
+        });
+    }
 
     #[test]
     fn policy_ports_preserve_ranges_and_reject_invalid_filters() {

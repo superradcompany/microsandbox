@@ -64,6 +64,10 @@ pub struct InspectArgs {
     /// Sandbox to inspect.
     pub name: String,
 
+    /// Inspect a managed job instead of the sandbox.
+    #[arg(long)]
+    pub job: Option<String>,
+
     /// Output format (json).
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
@@ -83,6 +87,9 @@ struct PendingConfigChange {
 
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
+    if let Some(job) = &args.job {
+        return super::jobs::inspect(&args.name, job, args.format.as_deref() == Some("json")).await;
+    }
     let handle = Sandbox::get(&args.name).await?;
     let desired_config = handle.config().ok();
     let active_config = handle.active_config().ok().flatten();

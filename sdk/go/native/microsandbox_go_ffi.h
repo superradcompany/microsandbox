@@ -1071,6 +1071,16 @@ char *msb_sandbox_shell_path(uint64_t cancel_id,
                              uintptr_t buf_len);
 
 /**
+ * Run a cancellable managed-job operation. Cancellation never terminates a job.
+ * The caller supplies borrowed request text and a writable output buffer.
+ */
+char *msb_jobs(uint64_t cancel_id,
+               uint64_t sandbox_handle,
+               const char *request,
+               unsigned char *buf,
+               uintptr_t buf_len);
+
+/**
  * Restore a detached sandbox through a dedicated C entry point.
  */
 char *msb_sandbox_restore(uint64_t cancel_id,

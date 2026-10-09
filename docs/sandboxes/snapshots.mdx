@@ -520,7 +520,7 @@ Existing callers can migrate gradually. Keep using the old name until you update
 
 `fork` is the live operation; the former `branch` SDK methods remain deprecated aliases.
 
-Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s memory writes stay private.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -555,6 +555,8 @@ msb fork worker --name experiment
 </CodeGroup>
 
 The source returns to its previous running or paused state. Each child needs a new name and cannot inherit published host ports. Host mounts follow the same [binding rules](#external-mounts).
+
+A fork cannot add a new block device, but it can rebind a captured disk to a host image consistent with the captured state: `--mount-disk` in the CLI, or a disk volume in the SDK. The image is attached directly to each child, without a private copy, so batch forks shouldn't share a writable image. Use separate fork calls with separate images for writable disks. To share one image in a batch, capture the disk read-only and keep the supplied binding read-only.
 
 <Accordion title="Create several children">
 
@@ -645,7 +647,7 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Full restore requires all captured external filesystems and additional disks to be available.
+Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Restore requires a destination for every external mount the snapshot recorded, and a full restore also requires its captured additional disks, unless you opt out with `allow_missing_resources`. Older disk snapshots do not record their mounts and restore as before.
 
 For either a disk or full snapshot, mount a host directory like this:
 
@@ -695,6 +697,7 @@ Using the same host directory for the source and restored sandbox shares its fil
 <Accordion title="Advanced restore options">
 
 - **Reuse source bindings:** Restore on the same host using the source's validated mounts. Missing dependencies still cause restore to fail.
+- **Attach a host disk image:** Mount one at restore time with `--mount-disk SOURCE:DEST[:OPTIONS]` in the CLI, or the SDK's disk volume (`Volume.disk()`, `Mount.Disk()`, `.volume(guest, v => v.disk(path))`). A full restore accepts a disk only at a guest path captured in the snapshot.
 - **Select a captured disk:** Restore a private copy of a named disk volume. External disk images are not converted to owned volumes.
 - **Allow missing resources:** Continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources fails and may disrupt applications or make filesystems read-only.
 

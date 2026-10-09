@@ -17,6 +17,7 @@ mod image;
 mod image_builder;
 mod init_options_builder;
 mod interface_overrides_builder;
+mod jobs;
 mod metrics;
 mod mount_builder;
 mod network_builder;

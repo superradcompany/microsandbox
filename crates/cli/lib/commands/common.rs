@@ -15,6 +15,8 @@ use microsandbox::sandbox::{
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
+use microsandbox_network::config::{PortProtocol, PublishedPort};
+#[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
@@ -353,7 +355,7 @@ pub struct SandboxOpts {
     pub vsock: Vec<String>,
 
     // --- Networking (requires "net" feature) ---
-    /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
+    /// Forward host ports (HOST:GUEST or BIND_ADDR:HOST:GUEST, with equal-length ranges and /udp).
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
@@ -2037,6 +2039,14 @@ pub fn apply_explicit_disk_mount(
     builder: SandboxBuilder,
     spec: &str,
 ) -> anyhow::Result<SandboxBuilder> {
+    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+    Ok(builder.volume(guest, |_| mount))
+}
+
+/// Parse a `--mount-disk` spec into its guest path and configured mount.
+///
+/// Shared by create, restore, and both fork forms.
+pub(crate) fn parse_explicit_disk_mount(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     let parsed = parse_cli_mount_spec(
         "mount-disk",
         spec,
@@ -2047,19 +2057,16 @@ pub fn apply_explicit_disk_mount(
         },
     )?;
 
-    let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
     let options = parsed.options;
-    Ok(builder.volume(guest, move |mut m| {
-        m = m.disk(&source);
-        if let Some(format) = options.format {
-            m = m.format(format);
-        }
-        if let Some(fstype) = options.fstype.as_deref() {
-            m = m.fstype(fstype);
-        }
-        apply_common_mount_options(m, options)
-    }))
+    let mut mount = MountBuilder::new(&guest).disk(parsed.source);
+    if let Some(format) = options.format {
+        mount = mount.format(format);
+    }
+    if let Some(fstype) = options.fstype.as_deref() {
+        mount = mount.fstype(fstype);
+    }
+    Ok((guest, apply_common_mount_options(mount, options)))
 }
 
 /// Apply a `--mount-named` spec to the builder.
@@ -2520,12 +2527,16 @@ fn apply_network_opts(
 
     // Port mappings.
     for port_str in &opts.port {
-        let (bind, host, guest, udp) = parse_port_mapping(port_str)?;
-        builder = if udp {
-            builder.port_udp_bind(bind, host, guest)
-        } else {
-            builder.port_bind(bind, host, guest)
-        };
+        for port in parse_port_mapping(port_str)? {
+            builder = match port.protocol {
+                PortProtocol::Udp => {
+                    builder.port_udp_bind(port.host_bind, port.host_port, port.guest_port)
+                }
+                PortProtocol::Tcp => {
+                    builder.port_bind(port.host_bind, port.host_port, port.guest_port)
+                }
+            };
+        }
     }
 
     // Some callers intentionally apply only additive ports after resolving network settings.
@@ -2881,8 +2892,9 @@ fn parse_rate(
 /// - `BIND_ADDR:HOST:GUEST/udp`
 ///
 /// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
+/// HOST and GUEST may be inclusive `START-END` ranges of equal length.
 #[cfg(feature = "net")]
-pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<Vec<PublishedPort>> {
     use std::net::{IpAddr, Ipv4Addr};
 
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
@@ -2922,16 +2934,54 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
         }
     };
 
-    let host: u16 = host_str
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid host port: {host_str}"))?;
-    let guest: u16 = guest_str
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid guest port: {guest_str}"))?;
+    let host = parse_published_port_range(host_str, "host")?;
+    let guest = parse_published_port_range(guest_str, "guest")?;
+    let host_count = u32::from(*host.end()) - u32::from(*host.start()) + 1;
+    let guest_count = u32::from(*guest.end()) - u32::from(*guest.start()) + 1;
+    anyhow::ensure!(
+        host_count == guest_count,
+        "host and guest port ranges must have equal lengths: {host_str}:{guest_str}"
+    );
 
-    Ok((bind, host, guest, udp))
+    Ok(host
+        .zip(guest)
+        .map(|(host_port, guest_port)| PublishedPort {
+            host_bind: bind,
+            host_port,
+            guest_port,
+            protocol: if udp {
+                PortProtocol::Udp
+            } else {
+                PortProtocol::Tcp
+            },
+        })
+        .collect())
+}
+
+/// Parse a single port or an inclusive range without changing single-port semantics.
+#[cfg(feature = "net")]
+fn parse_published_port_range(
+    value: &str,
+    side: &str,
+) -> anyhow::Result<std::ops::RangeInclusive<u16>> {
+    let parse = |port: &str| {
+        port.trim()
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("invalid {side} port: {value}"))
+    };
+    if let Some((start, end)) = value.trim().split_once('-') {
+        let start = parse(start)?;
+        let end = parse(end)?;
+        anyhow::ensure!(
+            start > 0 && end > 0,
+            "{side} port range endpoints must be between 1 and 65535: {value}"
+        );
+        anyhow::ensure!(start <= end, "{side} port range is reversed: {value}");
+        Ok(start..=end)
+    } else {
+        let port = parse(value)?;
+        Ok(port..=port)
+    }
 }
 
 /// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
@@ -5311,41 +5361,138 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn port_without_bind_defaults_to_loopback() {
-        let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
-        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_explicit_loopback_stays_loopback() {
-        let (bind, host, guest, udp) = parse_port_mapping("127.0.0.1:8080:80").unwrap();
-        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("127.0.0.1:8080:80").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_ipv4_bind() {
-        let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
-        assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(udp);
+        let ports = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Udp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_bracketed_ipv6_bind() {
-        let (bind, host, guest, udp) = parse_port_mapping("[::]:8080:80/tcp").unwrap();
-        assert_eq!(bind, "::".parse::<std::net::IpAddr>().unwrap());
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("[::]:8080:80/tcp").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(port.host_bind, "::".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_expand_in_order_with_bind_and_protocol() {
+        for (spec, bind, protocol) in [
+            ("8000-8002:80-82", "127.0.0.1", PortProtocol::Tcp),
+            ("0.0.0.0:8000-8002:80-82/udp", "0.0.0.0", PortProtocol::Udp),
+            ("[::1]:8000-8002:80-82/tcp", "::1", PortProtocol::Tcp),
+            ("[::]:8000-8002:80-82/udp", "::", PortProtocol::Udp),
+        ] {
+            let ports = parse_port_mapping(spec).unwrap();
+            assert_eq!(ports.len(), 3);
+            for (offset, port) in ports.iter().enumerate() {
+                assert_eq!(port.host_bind, bind.parse::<std::net::IpAddr>().unwrap());
+                assert_eq!(port.host_port, 8000 + offset as u16);
+                assert_eq!(port.guest_port, 80 + offset as u16);
+                assert_eq!(port.protocol, protocol);
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_cover_issue_example_and_boundaries() {
+        let ports = parse_port_mapping("0.0.0.0:10240-11264:10240-11264/udp").unwrap();
+        assert_eq!(ports.len(), 1025);
+        assert_eq!(ports.first().unwrap().host_port, 10240);
+        assert_eq!(ports.last().unwrap().guest_port, 11264);
+        for spec in ["65535:65535-65535", "65535-65535:65535", "0:80"] {
+            assert_eq!(parse_port_mapping(spec).unwrap().len(), 1);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_expand_the_full_port_space_without_binding() {
+        for suffix in ["/tcp", "/udp"] {
+            let ports = parse_port_mapping(&format!("1-65535:1-65535{suffix}")).unwrap();
+            assert_eq!(ports.len(), 65535);
+            for (offset, port) in ports.iter().enumerate() {
+                assert_eq!(port.host_port, offset as u16 + 1);
+                assert_eq!(port.guest_port, offset as u16 + 1);
+                assert_eq!(
+                    port.protocol,
+                    if suffix == "/udp" {
+                        PortProtocol::Udp
+                    } else {
+                        PortProtocol::Tcp
+                    }
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_reject_invalid_specs() {
+        for (spec, message) in [
+            ("8000-8002:80-81", "equal lengths"),
+            ("8000:80-81", "equal lengths"),
+            ("8000-8001:80", "equal lengths"),
+            ("8002-8000:80-82", "host port range is reversed"),
+            ("8000-8002:82-80", "guest port range is reversed"),
+            ("0-1:80-81", "range endpoints"),
+            ("8000-8001:0-1", "range endpoints"),
+            ("65535-65536:80-81", "invalid host port"),
+            ("8000-8001:65535-65536", "invalid guest port"),
+            ("-1:80", "invalid host port"),
+            ("8000-:80", "invalid host port"),
+            ("8000:80-", "invalid guest port"),
+            ("8000-8001-8002:80", "invalid host port"),
+            ("abc:80", "invalid host port"),
+            ("8000:abc", "invalid guest port"),
+            ("8000:80/sctp", "invalid guest port"),
+            ("bad:8000:80", "invalid bind address"),
+        ] {
+            let error = parse_port_mapping(spec).unwrap_err();
+            assert!(error.to_string().contains(message), "{spec}: {error}");
+        }
     }
 
     // --- parse_script_path ---

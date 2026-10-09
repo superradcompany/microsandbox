@@ -26,7 +26,7 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### fork() and fork_many()
 
@@ -35,7 +35,7 @@ let child = source.fork("experiment").fork().await?;
 let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
 ```
 
-`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
+`fork(name)` returns a `ForkBuilder`; `fork_many(names)` returns a `ForkManyBuilder`. Call `.fork().await` to start the operation. Both builders accept `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and explicit resource bindings. `.volume(guest, |v| v.disk(path))` rebinds a captured disk to a host image consistent with the captured state; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details. Import `GuestFlush` from `microsandbox::snapshot`; `Auto` is the default, and `Skip` skips optional guest writeback. The single-child builder also exposes `.fork_with_progress()` with the `local` feature.
 
 ### ForkOutcome
 
@@ -54,7 +54,7 @@ Batch results follow input order. Validation or capture failures fail the whole 
 
 ### External mount restore
 
-Full restore requires captured external filesystems and additional disks by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources with warnings. `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct forks retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
+Restore requires captured external filesystems (and, for full restore, additional disks) by default. Supply bindings or explicitly request validated source-local inheritance; `.allow_missing_resources()` instead accepts unavailable resources (full restore records warnings). `ExternalMountRestorePolicy::Strict` validates supplied objects; `.external_mount_policy(ExternalMountRestorePolicy::Relaxed)` accepts supported object mismatches without waiving required bindings. Direct forks retain their existing omission behavior. `sandbox.restore_warnings().await?` reports unavailable filesystems and accepted mismatches through `guest_path`, `reason`, and `stale_inodes`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
 
 ### Creation and restore progress
 
@@ -1463,6 +1463,14 @@ Control whether the sandbox clock follows the host. Full snapshots save this set
     <div className="msb-param-desc"><code>Sync</code> (default) follows host time; <code>Off</code> stops host clock updates after boot.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">intercept_tls()</span>
+
+```rust
+fn intercept_tls(self) -> Self
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved, including bypass hosts and custom CAs. Does not re-enable disabled networking.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">network()</span>
 

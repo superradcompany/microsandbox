@@ -2,6 +2,7 @@
 //! cannot unlink a new publication at the same name after an interrupted cleanup.
 
 use std::fs::File;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use microsandbox_image::{
@@ -72,11 +73,23 @@ impl Journal {
             retained.push(relative.to_path_buf());
         }
         let record = stage.path().join("files.json");
-        std::fs::write(&record, serde_json::to_vec(&retained)?)?;
-        File::open(&record)?.sync_all()?;
+        let mut file = File::create(&record)?;
+        file.write_all(&serde_json::to_vec(&retained)?)?;
+        file.sync_all()?;
+        drop(file);
         sync_dir(stage.path())?;
         let path = directory.join(format!("delete-{:032x}", rand::random::<u128>()));
+        // Windows cannot rename a directory with an open child, even with delete sharing.
+        // The parent coordinator excludes recovery until the active lock is held again.
+        #[cfg(windows)]
+        drop(lock);
         std::fs::rename(stage.path(), &path)?;
+        #[cfg(windows)]
+        let lock = {
+            let lock = process_lock::open_existing_lock_file(&path.join("active.lock"))?;
+            process_lock::lock_exclusive(&lock)?;
+            lock
+        };
         sync_dir(&directory)?;
         Ok(Some(Self {
             path,

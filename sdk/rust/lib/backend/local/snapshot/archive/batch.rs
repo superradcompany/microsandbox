@@ -163,7 +163,11 @@ pub(super) async fn load(
         }
         let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
         if let Some(inventory) = &item.unpacked.inventory {
-            validate_inventory_snapshot_bindings(inventory, &snapshots)?;
+            validate_inventory_snapshot_bindings(
+                inventory,
+                &snapshots,
+                local.config().fs_state_limit(),
+            )?;
         }
         let head_index = match item.unpacked.head.as_deref() {
             Some(head) => snapshots

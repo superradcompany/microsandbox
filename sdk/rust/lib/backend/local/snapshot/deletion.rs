@@ -37,16 +37,15 @@ pub(super) fn quarantine(source: &Path) -> MicrosandboxResult<()> {
     let lock = process_lock::open_lock_file(&path.join("active.lock"))?;
     process_lock::lock_exclusive(&lock)?;
     let record = path.join("source.json");
-    std::fs::write(
-        &record,
-        serde_json::to_vec(&PathBuf::from(source.file_name().unwrap()))?,
-    )?;
-    // FlushFileBuffers on Windows requires write access even after the write has closed.
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&record)?
-        .sync_all()?;
+    let temporary = path.join("source.json.part");
+    let mut file = File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec(&PathBuf::from(
+        source.file_name().unwrap(),
+    ))?)?;
+    file.sync_all()?;
+    drop(file);
+
+    std::fs::rename(&temporary, &record)?;
     sync_dir(&path)?;
     sync_dir(&root)?;
     std::fs::rename(source, path.join("payload")).map_err(|error| {
@@ -122,7 +121,27 @@ pub(super) async fn recover_parent(local: &LocalBackend, parent: &Path) -> Micro
             }
             Err(error) => return Err(error.into()),
         };
-        let name: PathBuf = serde_json::from_slice(&record)?;
+        let name: PathBuf = match serde_json::from_slice(&record) {
+            Ok(name) => name,
+            Err(error) => {
+                // Older writers could leave a partial record before moving the source.
+                // Without a valid name, never discard a quarantined payload or an index row.
+                match std::fs::symlink_metadata(entry.path().join("payload")) {
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => {
+                        discard(&entry.path())?;
+                        continue;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {
+                        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                            "cannot read snapshot deletion record {}: {error}; quarantined payload retained at {}; inspect the journal before retrying",
+                            entry.path().join("source.json").display(),
+                            entry.path().join("payload").display(),
+                        )));
+                    }
+                }
+            }
+        };
         if name.components().count() != 1
             || !matches!(name.components().next(), Some(Component::Normal(_)))
         {
@@ -238,7 +257,7 @@ fn discard(path: &Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     }
     sync_dir(path)?;
-    for name in ["source.json", "active.lock"] {
+    for name in ["source.json.part", "source.json", "active.lock"] {
         match std::fs::remove_file(path.join(name)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

@@ -120,6 +120,8 @@ msb snap rm worker:ready
 
 If other group members remain, select another head before removing the current one. `--force` does not bypass this rule.
 
+If an indexed artifact was deleted outside Microsandbox, removing it by its indexed path clears the stale entry. For a grouped snapshot, this requires the whole group directory to be gone; a surviving group still needs its head and membership checks. Indexed children still require `--force`.
+
 Removal also refuses an installed copy held by an active restore, export, verification, or import dependency read. `--force` does not bypass active readers. Independent copies of the same snapshot have independent leases. On Unix, copies sharing a hardlinked descriptor conservatively share reader protection; Windows normally protects each installed directory entry independently. Metadata handles alone do not keep snapshots busy. Saving or removing through a retained SDK handle rejects a replacement artifact at the same path.
 
 Deletion atomically retires the artifact directory before removing its contents. A later snapshot listing or removal can recover interrupted cleanup without deleting a new artifact at the original path. Unix readers lock the existing descriptor. Windows readers normally lock an entry-side coordination file outside the removable directory and fall back to the descriptor when an external parent is read-only. Publication and deletion require writable destinations for their coordination records. Concurrent cleanup requires participating SDKs and CLIs; coordinate maintenance when older clients share the storage.

@@ -8,8 +8,8 @@ use microsandbox_image::snapshot::{
     DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, Manifest, SnapshotState,
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait,
+    QueryFilter, QueryOrder, Statement,
 };
 
 use crate::backend::LocalBackend;
@@ -488,6 +488,21 @@ pub(crate) async fn remove_snapshot_expected(
     if !path.join(DESCRIPTOR_FILENAME).exists() && path.join(V066_DESCRIPTOR_FILENAME).exists() {
         super::migration::reconcile_explicit(pools, &path).await?;
     }
+    // A vanished external parent cannot host an entry lease. Serialize stale-row removal
+    // with catalog publication instead; no live artifact is deleted on this path.
+    if looks_like_path(path_or_name)
+        && let Some(parent) = path.parent()
+        && matches!(tokio::fs::symlink_metadata(parent).await, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        if remove_missing_snapshot(local, &path, force, expected).await? {
+            return Ok(());
+        }
+
+        return Err(MicrosandboxError::SnapshotNotFound(
+            path.display().to_string(),
+        ));
+    }
+
     if let Some(parent) = path.parent() {
         super::deletion::register_parent(local, parent)?;
         super::deletion::recover_parent(local, parent).await?;
@@ -502,29 +517,11 @@ pub(crate) async fn remove_snapshot_expected(
     let write_db = pools.write();
 
     // A retained handle identifies one exact installed copy, even after its directory
-    // disappears. Clean only that ungrouped stale row; grouped artifacts still require
-    // the group lock/head checks below, so a broken head is never silently forgotten.
+    // disappears. A surviving group still requires its lock/head checks below, so a
+    // broken head is never silently forgotten.
     if looks_like_path(path_or_name)
-        && matches!(tokio::fs::symlink_metadata(path_or_name).await, Err(ref error) if error.kind() == std::io::ErrorKind::NotFound)
-        && let Some(row) = indexed_path(local, Path::new(path_or_name)).await?
-        && row.group_path.is_none()
-        && super::group::group_path(Path::new(path_or_name)).is_none()
+        && remove_missing_snapshot(local, &path, force, expected).await?
     {
-        if expected.is_some_and(|expected| expected != row.digest) {
-            return Err(MicrosandboxError::SnapshotIntegrity(
-                "snapshot handle refers to a replaced artifact".into(),
-            ));
-        }
-        if row.child_count > 0 && !force {
-            return Err(MicrosandboxError::Custom(format!(
-                "snapshot {} has {} indexed child snapshot(s); pass --force to remove anyway",
-                row.digest, row.child_count
-            )));
-        }
-        snapshot_entity::Entity::delete_by_id(row.artifact_path)
-            .exec(write_db)
-            .await?;
-        recompute_children(write_db).await?;
         return Ok(());
     }
 
@@ -575,6 +572,81 @@ pub(crate) async fn remove_snapshot_expected(
         super::deletion::recover_parent(local, parent).await?;
     }
     Ok(())
+}
+
+/// Forget an absent artifact only if no surviving group needs its head/membership checks.
+async fn remove_missing_snapshot(
+    local: &LocalBackend,
+    path: &Path,
+    force: bool,
+    expected: Option<&str>,
+) -> MicrosandboxResult<bool> {
+    let path = path.to_path_buf();
+    let expected = expected.map(str::to_owned);
+
+    local.db().await?.write().transaction(|txn| {
+        let path = path.clone();
+        let expected = expected.clone();
+
+        async move {
+            let row = snapshot_entity::Entity::find_by_id(path.display().to_string())
+                .one(&txn)
+                .await?;
+            let Some(row) = row else {
+                return Ok((txn, false));
+            };
+            // Publishers record ownership before installing files. An absent source is
+            // not stale while that handoff is pending, including a recreated parent.
+            if row.availability == "publishing" {
+                return Ok((txn, false));
+            }
+            if let Some(group) = &row.group_path {
+                match tokio::fs::symlink_metadata(group).await {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => return Ok((txn, false)),
+                }
+            }
+            if let Some(parent) = path.parent() {
+                match tokio::fs::symlink_metadata(parent.join(super::group::GROUP_FILENAME)).await {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => return Ok((txn, false)),
+                }
+            }
+            match tokio::fs::symlink_metadata(&path).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+                Ok(_) => return Ok((txn, false)),
+            }
+            if expected.as_ref().is_some_and(|expected| expected != &row.digest) {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot handle refers to a replaced artifact".into(),
+                ));
+            }
+            if row.child_count > 0 && !force {
+                return Err(MicrosandboxError::Custom(format!(
+                    "snapshot {} has {} indexed child snapshot(s); pass --force to remove anyway",
+                    row.digest, row.child_count
+                )));
+            }
+
+            snapshot_entity::Entity::delete_by_id(row.artifact_path).exec(&txn).await?;
+            if let Some(parent) = row.parent_digest {
+                // Only this parent edge changed; preserve distinct-child counting across
+                // all its local copies without rewriting unrelated catalog rows.
+                txn.execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE snapshot_index SET child_count = \
+                    (SELECT COUNT(DISTINCT COALESCE(c.snapshot_id, c.digest)) \
+                    FROM snapshot_index c WHERE c.parent_digest = snapshot_index.snapshot_id) \
+                    WHERE snapshot_id = ?",
+                    [parent.into()],
+                )).await?;
+            }
+            Ok((txn, true))
+        }
+    }).await
 }
 
 pub(super) async fn reindex_dir(local: &LocalBackend, dir: &Path) -> MicrosandboxResult<usize> {
@@ -755,9 +827,12 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
 mod tests {
     use std::collections::BTreeMap;
 
-    use microsandbox_image::snapshot::{
-        CheckpointSnapshotState, ImageRef, SCHEMA, SnapshotCapture, SnapshotConsistency,
-        SnapshotId, SnapshotRootDisk,
+    use microsandbox_image::{
+        snapshot::{
+            CheckpointSnapshotState, ImageRef, SCHEMA, SnapshotCapture, SnapshotConsistency,
+            SnapshotId, SnapshotRootDisk,
+        },
+        storage_lease::StorageLease,
     };
 
     use super::*;
@@ -984,43 +1059,74 @@ mod tests {
             .unwrap();
         let group = super::super::group::ensure(&local.snapshots_dir(), Some("pending"))
             .await
+            .unwrap()
+            .canonicalize()
             .unwrap();
-        for published in [false, true] {
-            let data = manifest(if published { 910 } else { 911 }, None);
-            let path = group.join(data.snapshot_id.as_str());
-            let lease = microsandbox_image::storage_lease::StorageLease::shared(&path).unwrap();
-            super::super::publication::prepare(
-                local.db().await.unwrap().write(),
-                &path,
-                &data.digest().unwrap(),
-                &data,
-            )
-            .await
-            .unwrap();
-            super::super::publication::recover(&local).await.unwrap();
-            assert_eq!(
-                indexed_path(&local, &path)
+        for existing in [false, true] {
+            for published in [false, true] {
+                let data = manifest(910 + u128::from(published) + 2 * u128::from(existing), None);
+                let path = group.join(data.snapshot_id.as_str());
+                if existing {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(
+                        path.join(DESCRIPTOR_FILENAME),
+                        data.to_canonical_bytes().unwrap(),
+                    )
+                    .unwrap();
+                    super::super::publication::complete(
+                        local.db().await.unwrap().write(),
+                        &path,
+                        &data.digest().unwrap(),
+                        &data,
+                    )
                     .await
-                    .unwrap()
-                    .unwrap()
-                    .availability,
-                "publishing"
-            );
-            if published {
-                std::fs::create_dir(&path).unwrap();
-                std::fs::write(
-                    path.join(DESCRIPTOR_FILENAME),
-                    data.to_canonical_bytes().unwrap(),
+                    .unwrap();
+
+                    std::fs::remove_dir_all(&path).unwrap();
+                    assert_eq!(
+                        indexed_path(&local, &path)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .availability,
+                        "ready"
+                    );
+                }
+
+                let lease = StorageLease::shared(&path).unwrap();
+                super::super::publication::prepare(
+                    local.db().await.unwrap().write(),
+                    &path,
+                    &data.digest().unwrap(),
+                    &data,
                 )
+                .await
                 .unwrap();
-            }
-            drop(lease); // Simulate process exit on either side of filesystem publication.
-            super::super::publication::recover(&local).await.unwrap();
-            let row = indexed_path(&local, &path).await.unwrap();
-            if published {
-                assert_eq!(row.unwrap().availability, "ready");
-            } else {
-                assert!(row.is_none());
+                super::super::publication::recover(&local).await.unwrap();
+                assert_eq!(
+                    indexed_path(&local, &path)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .availability,
+                    "publishing"
+                );
+                if published {
+                    std::fs::create_dir(&path).unwrap();
+                    std::fs::write(
+                        path.join(DESCRIPTOR_FILENAME),
+                        data.to_canonical_bytes().unwrap(),
+                    )
+                    .unwrap();
+                }
+                drop(lease); // Simulate process exit on either side of filesystem publication.
+                super::super::publication::recover(&local).await.unwrap();
+                let row = indexed_path(&local, &path).await.unwrap();
+                if published {
+                    assert_eq!(row.unwrap().availability, "ready");
+                } else {
+                    assert!(row.is_none());
+                }
             }
         }
     }
@@ -1043,6 +1149,61 @@ mod tests {
             microsandbox_utils::process_lock::open_lock_file(&journal.join("active.lock")).unwrap();
             assert!(list_indexed(&local).await.unwrap().is_empty());
             assert!(!journal.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_deletion_records_preserve_live_snapshots_and_quarantined_payloads() {
+        for (record_name, record) in [
+            ("source.json", b"".as_slice()),
+            ("source.json", br#""unfinished"#),
+            ("source.json.part", br#""unfinished"#),
+        ] {
+            for quarantined in [false, true] {
+                if quarantined && record_name == "source.json.part" {
+                    continue; // The complete record is published before moving a payload.
+                }
+
+                let home = tempfile::tempdir().unwrap();
+                let local = crate::test_support::local_backend_builder(home.path())
+                    .build()
+                    .await
+                    .unwrap();
+                let data = manifest(903, None);
+                let live = install(&local, "live", "baseline", &data).await;
+                assert_eq!(
+                    reindex_dir(&local, &local.snapshots_dir()).await.unwrap(),
+                    1
+                );
+                let journal = local
+                    .snapshots_dir()
+                    .join(".snapshot-deletions")
+                    .join("delete-interrupted");
+                std::fs::create_dir_all(&journal).unwrap();
+                std::fs::write(journal.join(record_name), record).unwrap();
+                if quarantined {
+                    std::fs::create_dir(journal.join("payload")).unwrap();
+                    std::fs::write(journal.join("payload/bytes"), b"retained").unwrap();
+                }
+
+                let result = list_indexed(&local).await;
+
+                assert!(live.join(DESCRIPTOR_FILENAME).exists());
+                if quarantined {
+                    let error = result.unwrap_err();
+                    assert!(matches!(error, MicrosandboxError::SnapshotIntegrity(_)));
+                    let message = error.to_string();
+                    assert!(message.contains(journal.to_str().unwrap()));
+                    assert!(message.contains("payload"));
+                    assert_eq!(
+                        std::fs::read(journal.join("payload/bytes")).unwrap(),
+                        b"retained"
+                    );
+                } else {
+                    assert_eq!(result.unwrap().len(), 1);
+                    assert!(!journal.exists());
+                }
+            }
         }
     }
 
@@ -1171,9 +1332,7 @@ mod tests {
         index_upsert(&local, &artifact, opened.digest(), opened.manifest())
             .await
             .unwrap();
-        let lease = microsandbox_image::storage_lease::StorageLease::try_exclusive(&artifact)
-            .unwrap()
-            .unwrap();
+        let lease = StorageLease::try_exclusive(&artifact).unwrap().unwrap();
         super::super::deletion::quarantine(&artifact).unwrap();
         drop(lease);
         // Simulate a crash before removing the index row.

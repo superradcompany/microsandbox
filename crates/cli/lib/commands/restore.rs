@@ -1,16 +1,20 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
-use microsandbox::sandbox::{
-    ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+use microsandbox::{
+    MicrosandboxError, RestoreKind,
+    sandbox::{
+        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
+    },
 };
 
 #[cfg(feature = "net")]
 use super::common::parse_port_mapping;
 use super::common::{
-    display_restore_warnings, guest_clock_parser, parse_restore_volume, parse_vsock_route,
+    display_restore_warnings, guest_clock_parser, parse_explicit_disk_mount, parse_restore_volume,
+    parse_vsock_route,
 };
-use crate::ui;
+use crate::ui::{self, ErrorLine};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -59,7 +63,10 @@ pub struct RestoreResourceArgs {
     /// Map `SOURCE:GUEST[:OPTIONS]`, or select a captured private disk with GUEST alone.
     #[arg(short, long, value_name = "SOURCE:GUEST|GUEST")]
     pub volume: Vec<String>,
-    /// Publish a child listener: `[BIND:]HOST:GUEST[/tcp|udp]`.
+    /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
+    #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
+    pub mount_disk: Vec<String>,
+    /// Publish child listeners: `[BIND:]HOST:GUEST[/tcp|udp]`, with equal-length port ranges.
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
@@ -233,10 +240,37 @@ pub async fn run(
     }
     let result = task.await;
     display.finish();
-    let sandbox = result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))??;
+    let sandbox = match result.map_err(|error| anyhow::anyhow!("restore task failed: {error}"))? {
+        Ok(sandbox) => sandbox,
+        Err(error) => {
+            if let Some(hints) = missing_bindings_hints(&error) {
+                let lines: Vec<_> = hints.into_iter().map(ErrorLine::Hint).collect();
+                ui::error_with_lines(&error.to_string(), &lines);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+
+            return Err(error.into());
+        }
+    };
     display_restore_warnings(&sandbox).await;
     sandbox.detach().await;
     Ok(())
+}
+
+/// CLI guidance for a restore refused because guest paths lack destination bindings.
+fn missing_bindings_hints(error: &MicrosandboxError) -> Option<Vec<&'static str>> {
+    let MicrosandboxError::MissingRestoreBindings { restore, .. } = error else {
+        return None;
+    };
+
+    let mut hints = vec!["map each path with -v SOURCE:GUEST or --mount-disk SOURCE:GUEST"];
+    // Only a full restore can select disks it captured; a disk restore never offers that.
+    if *restore == RestoreKind::Full {
+        hints.push("select a captured disk with -v GUEST");
+    }
+    hints.push("or pass --allow-missing-resources to start without them");
+
+    Some(hints)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -263,6 +297,10 @@ macro_rules! apply_resources {
                     let (guest, mount) = parse_restore_volume(volume)?;
                     builder = builder.volume(guest, |_| mount);
                 }
+                for spec in &self.mount_disk {
+                    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+                    builder = builder.volume(guest, |_| mount);
+                }
                 for route in &self.vsock {
                     let (host, port, kind) = parse_vsock_route(route)?;
                     builder = match kind {
@@ -274,13 +312,13 @@ macro_rules! apply_resources {
                 }
                 #[cfg(feature = "net")]
                 for port in &self.port {
-                    let (bind, host, guest, udp) = parse_port_mapping(port)?;
-                    #[cfg(feature = "net")]
-                    {
-                        builder = if udp {
-                            builder.port_udp_bind(bind, host, guest)
-                        } else {
-                            builder.port_bind(bind, host, guest)
+                    for port in parse_port_mapping(port)? {
+                        builder = match port.protocol {
+                            microsandbox_network::config::PortProtocol::Udp => builder
+                                .port_udp_bind(port.host_bind, port.host_port, port.guest_port),
+                            microsandbox_network::config::PortProtocol::Tcp => {
+                                builder.port_bind(port.host_bind, port.host_port, port.guest_port)
+                            }
                         };
                     }
                 }
@@ -315,6 +353,44 @@ mod tests {
     }
 
     #[test]
+    fn missing_bindings_refusal_gets_flag_hints() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /data".into()],
+            restore: RestoreKind::Disk,
+        };
+        let full_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["disk /data".into(), "filesystem /work".into()],
+            restore: RestoreKind::Full,
+        };
+        let other = MicrosandboxError::InvalidConfig("invalid volume".into());
+
+        let disk_hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+        let full_hints = missing_bindings_hints(&full_refusal).unwrap().join("\n");
+
+        assert!(disk_hints.contains("-v SOURCE:GUEST"));
+        assert!(disk_hints.contains("--mount-disk SOURCE:GUEST"));
+        assert!(disk_hints.contains("--allow-missing-resources"));
+        assert!(!disk_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("-v SOURCE:GUEST"));
+        assert!(full_hints.contains("-v GUEST"));
+        assert!(full_hints.contains("--allow-missing-resources"));
+        assert!(missing_bindings_hints(&other).is_none());
+    }
+
+    #[test]
+    fn missing_bindings_hint_ignores_guest_paths() {
+        let disk_refusal = MicrosandboxError::MissingRestoreBindings {
+            missing: vec!["mount /captured disk".into()],
+            restore: RestoreKind::Disk,
+        };
+
+        let hints = missing_bindings_hints(&disk_refusal).unwrap().join("\n");
+
+        assert!(hints.contains("-v SOURCE:GUEST"));
+        assert!(!hints.contains("-v GUEST"));
+    }
+
+    #[test]
     fn missing_resource_opt_out_is_independent_of_mapping_policy_and_inheritance() {
         let defaults = TestCli::try_parse_from(["restore", "saved", "--name", "child"]).unwrap();
         assert!(!defaults.args.allow_missing_resources);
@@ -335,6 +411,70 @@ mod tests {
             explicit.args.resources.external_mount_policy.as_deref(),
             Some("strict")
         );
+    }
+
+    #[test]
+    fn restore_attaches_mount_disk_like_create() {
+        let spec = "/images/seed.img:/data2:ro,fstype=ext4";
+        let cli =
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap();
+        assert_eq!(cli.args.resources.mount_disk, [spec]);
+        let (guest, mount) = parse_explicit_disk_mount(&cli.args.resources.mount_disk[0]).unwrap();
+        assert_eq!(guest, "/data2");
+        match mount.build().unwrap() {
+            microsandbox::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mount_disk_reaches_run_builder_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let cli = TestCli::try_parse_from([
+            "restore",
+            missing.to_str().unwrap(),
+            "--name",
+            "restore-disk-binding",
+            "--mount-disk",
+            "/images/seed.img:/:ro,fstype=ext4",
+        ])
+        .unwrap();
+        // A root guest path is rejected by mount validation before the snapshot is
+        // opened, so this fails only if `run` hands the disk to the restore builder.
+        let error = run(cli.args, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot mount a volume at guest root /"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn mount_disk_specs_are_applied_to_the_restore_builder() {
+        let args = |spec: &str| {
+            TestCli::try_parse_from(["restore", "group:snap", "--name", "x", "--mount-disk", spec])
+                .unwrap()
+                .args
+                .resources
+        };
+        let good = args("/images/seed.img:/data2:ro,fstype=ext4");
+        assert!(good.apply_restore(Sandbox::restore("group:snap")).is_ok());
+        let bad = args("/images/seed.img");
+        assert!(bad.apply_restore(Sandbox::restore("group:snap")).is_err());
     }
 
     #[test]

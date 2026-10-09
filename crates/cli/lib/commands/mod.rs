@@ -18,6 +18,7 @@ pub mod exec;
 pub mod image;
 pub mod inspect;
 pub mod install;
+pub mod jobs;
 pub mod list;
 pub mod logs;
 pub mod metrics;

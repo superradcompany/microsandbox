@@ -7,6 +7,7 @@ use std::os::windows::io::AsRawHandle;
 use std::{ptr, thread, time::Duration};
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
@@ -69,8 +70,23 @@ pub(crate) struct WindowsTerminalGuard {
 
 pub(crate) struct WindowsTerminalEventPump {
     stop: OwnedWindowsHandle,
+    cancelled: CancellationToken,
     handle: Option<thread::JoinHandle<()>>,
-    rx: mpsc::UnboundedReceiver<WindowsTerminalEvent>,
+    rx: TerminalEventReceiver,
+}
+
+enum TerminalEventSender {
+    Unbounded(mpsc::UnboundedSender<WindowsTerminalEvent>),
+    Bounded {
+        sender: mpsc::Sender<WindowsTerminalEvent>,
+        runtime: tokio::runtime::Handle,
+        cancelled: CancellationToken,
+    },
+}
+
+enum TerminalEventReceiver {
+    Unbounded(mpsc::UnboundedReceiver<WindowsTerminalEvent>),
+    Bounded(mpsc::Receiver<WindowsTerminalEvent>),
 }
 
 pub(crate) enum WindowsTerminalEvent {
@@ -202,11 +218,42 @@ impl Drop for WindowsTerminalGuard {
 
 impl WindowsTerminalEventPump {
     pub(crate) fn spawn_for_guard(guard: &WindowsTerminalGuard) -> MicrosandboxResult<Self> {
-        Self::spawn(guard.input.raw, guard.output.raw)
+        Self::spawn(guard.input.raw, guard.output.raw, None)
     }
 
-    fn spawn(input: HANDLE, output: HANDLE) -> MicrosandboxResult<Self> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Managed jobs backpressure console reads without changing existing attach/SSH consumers.
+    pub(crate) fn spawn_bounded_for_guard(
+        guard: &WindowsTerminalGuard,
+        capacity: usize,
+    ) -> MicrosandboxResult<Self> {
+        Self::spawn(guard.input.raw, guard.output.raw, Some(capacity))
+    }
+
+    fn spawn(input: HANDLE, output: HANDLE, capacity: Option<usize>) -> MicrosandboxResult<Self> {
+        let cancelled = CancellationToken::new();
+        let (tx, rx) = match capacity {
+            Some(capacity) => {
+                let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+                    MicrosandboxError::Terminal(format!("terminal runtime unavailable: {error}"))
+                })?;
+                let (sender, receiver) = mpsc::channel(capacity);
+                (
+                    TerminalEventSender::Bounded {
+                        sender,
+                        runtime,
+                        cancelled: cancelled.clone(),
+                    },
+                    TerminalEventReceiver::Bounded(receiver),
+                )
+            }
+            None => {
+                let (sender, receiver) = mpsc::unbounded_channel();
+                (
+                    TerminalEventSender::Unbounded(sender),
+                    TerminalEventReceiver::Unbounded(receiver),
+                )
+            }
+        };
         let stop = create_event("terminal stop")?;
         let input_handle = input as isize;
         let output_handle = output as isize;
@@ -296,18 +343,47 @@ impl WindowsTerminalEventPump {
 
         Ok(Self {
             stop,
+            cancelled,
             handle: Some(handle),
             rx,
         })
     }
 
     pub(crate) async fn recv(&mut self) -> Option<WindowsTerminalEvent> {
-        self.rx.recv().await
+        match &mut self.rx {
+            TerminalEventReceiver::Unbounded(receiver) => receiver.recv().await,
+            TerminalEventReceiver::Bounded(receiver) => receiver.recv().await,
+        }
+    }
+}
+
+impl TerminalEventSender {
+    fn send(&self, event: WindowsTerminalEvent) -> Result<(), ()> {
+        match self {
+            Self::Unbounded(sender) => sender.send(event).map_err(|_| ()),
+            Self::Bounded {
+                sender,
+                runtime,
+                cancelled,
+            } => {
+                // This runs on the dedicated console thread, never a Tokio worker. A plain
+                // blocking_send could prevent Drop from joining it when the queue is full.
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.cancelled() => Err(()),
+                        result = sender.send(event) => result.map_err(|_| ()),
+                    }
+                })
+            }
+        }
     }
 }
 
 impl Drop for WindowsTerminalEventPump {
     fn drop(&mut self) {
+        // Wake both kinds of blocking work: console reads and bounded queue admission.
+        self.cancelled.cancel();
         let _ = unsafe { SetEvent(self.stop.0) };
         if let Some(handle) = self.handle.take() {
             // The pump thread may already be blocked in a synchronous
@@ -457,5 +533,45 @@ fn terminal_size_from_output(output: HANDLE) -> Option<(u16, u16)> {
 impl Drop for OwnedWindowsHandle {
     fn drop(&mut self) {
         let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc as std_mpsc;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_console_delivery_cancels_even_when_the_receiver_is_full() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(WindowsTerminalEvent::Input(b"first".to_vec()))
+            .await
+            .unwrap();
+        let cancelled = CancellationToken::new();
+        let pump_sender = TerminalEventSender::Bounded {
+            sender,
+            runtime: tokio::runtime::Handle::current(),
+            cancelled: cancelled.clone(),
+        };
+        let (started, waiting) = std_mpsc::channel();
+        let worker = thread::spawn(move || {
+            started.send(()).unwrap();
+            pump_sender.send(WindowsTerminalEvent::Input(b"pending".to_vec()))
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        cancelled.cancel();
+        // Cancellation must wake the console thread itself, without requiring this async
+        // caller to consume the queued event or drive another Tokio task before joining.
+        assert!(worker.join().unwrap().is_err());
+        assert!(
+            matches!(receiver.recv().await, Some(WindowsTerminalEvent::Input(bytes)) if bytes == b"first")
+        );
+        assert!(receiver.recv().await.is_none());
     }
 }

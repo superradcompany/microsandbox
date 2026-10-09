@@ -47,7 +47,9 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason}
 
 pub use crate::snapshot::{LoadOpts, SaveOpts};
 
-use super::{CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store};
+use super::{
+    CHECKPOINT_DIRECTORY, Snapshot, SnapshotHandle, store, validate_checkpoint_owned_inventory,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -199,6 +201,9 @@ pub(crate) struct ArchiveChildMaterialization {
     pub(crate) checkpoint_restore: Option<microsandbox_runtime::launch::CheckpointRestoreConfig>,
     pub(crate) upper_layers: Vec<microsandbox_runtime::launch::RootfsUpperLayerConfig>,
     pub(crate) disk_mounts: Vec<microsandbox_types::VolumeMount>,
+    /// Guest paths of captured external binds that a disk-only restore of a checkpoint needs
+    /// destination mounts for.
+    pub(crate) required_bind_paths: Vec<String>,
 }
 
 /// Updates a member transport hash as the archive writer consumes the source.
@@ -419,6 +424,7 @@ pub(crate) async fn save_snapshot_expected(
                 &head,
                 &opts,
                 dependencies.as_ref(),
+                local.config().fs_state_limit(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -433,6 +439,7 @@ pub(crate) async fn save_snapshot_expected(
                 &head,
                 &opts,
                 dependencies.as_ref(),
+                local.config().fs_state_limit(),
             ))
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -601,6 +608,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
 ///
 /// The runtime-owned checkpoint closure is read as the archive payload. No installed snapshot
 /// artifact or snapshot-index row is created.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn save_direct_checkpoint_snapshot(
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
@@ -609,6 +617,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
     out: &Path,
     plain_tar: bool,
     force: bool,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     manifest.validate().map_err(|error| {
@@ -643,6 +652,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
                 labels,
                 suggested_name,
                 checkpoint_closure,
+                fs_state_limit,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -656,6 +666,7 @@ pub(super) async fn save_direct_checkpoint_snapshot(
                 labels,
                 suggested_name,
                 checkpoint_closure,
+                fs_state_limit,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -857,6 +868,7 @@ async fn write_direct_checkpoint_archive_entries<W>(
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
     checkpoint_closure: &Path,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -899,6 +911,7 @@ where
         checkpoint_closure,
         &state.checkpoint_root,
         manifest,
+        fs_state_limit,
     )? {
         let written =
             append_artifact_file(builder, &member.source, &member.archive_path, member.kind)
@@ -1163,6 +1176,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: None,
             upper_layers: Vec::new(),
             disk_mounts: Vec::new(),
+            required_bind_paths: Vec::new(),
         });
     };
     let member = inventory
@@ -1209,7 +1223,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         let member_dir = child_stage.join(&member.snapshot_id);
         let extracted_closure = member_dir.join(CHECKPOINT_DIRECTORY);
         let checkpoint = CheckpointClosure::inspect_manifest(&extracted_closure, None)?;
-        super::validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
+        validate_checkpoint_owned_inventory(&manifest, &checkpoint)?;
         if disk_only {
             let materialized = super::materialize_checkpoint_child_disk_state(
                 &extracted_closure,
@@ -1218,6 +1232,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
                 child_stage,
                 &manifest.root_disk,
                 choices,
+                local.config().fs_state_limit(),
             )
             .await?;
             let cache_operation =
@@ -1230,12 +1245,17 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             }
             #[cfg(windows)]
             remove_private_stage_leases(child_stage).await?;
+
+            let required_bind_paths =
+                crate::sandbox::external_bind_guest_paths(&checkpoint.resources)?;
+
             return Ok(ArchiveChildMaterialization {
                 cache_operation,
                 manifest,
                 checkpoint_restore: None,
                 upper_layers: materialized.upper_layers,
                 disk_mounts: materialized.disk_mounts,
+                required_bind_paths,
             });
         }
         let child_closure = child_stage.join(".checkpoint-restore");
@@ -1247,6 +1267,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             child_stage,
             &manifest.root_disk,
             choices,
+            local.config().fs_state_limit(),
         )
         .await?;
         let cache_operation =
@@ -1265,6 +1286,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
             checkpoint_restore: Some(materialized.restore),
             upper_layers: materialized.upper_layers,
             disk_mounts: materialized.disk_mounts,
+            required_bind_paths: Vec::new(),
         });
     }
     let SnapshotState::File(file) = &manifest.state else {
@@ -1333,6 +1355,7 @@ pub(crate) async fn materialize_archive_for_child_with_overrides(
         checkpoint_restore: None,
         upper_layers: materialized.upper_layers,
         disk_mounts: materialized.disk_mounts,
+        required_bind_paths: Vec::new(),
     })
 }
 
@@ -1367,11 +1390,12 @@ async fn write_archive_entries<W>(
     head: &Snapshot,
     opts: &SaveOpts,
     dependencies: Option<&delta::Dependencies>,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    let checkpoint_members = collect_checkpoint_archive_members(snapshots)?;
+    let checkpoint_members = collect_checkpoint_archive_members(snapshots, fs_state_limit)?;
     let mut inventory =
         build_archive_inventory(snapshots, cache_files, head, opts, &checkpoint_members).await?;
     if let Some(dependencies) = dependencies {
@@ -1753,6 +1777,7 @@ fn archive_requires(
 
 fn collect_checkpoint_archive_members(
     snapshots: &[Snapshot],
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<HashMap<String, Vec<CheckpointArchiveMember>>> {
     let mut collected = HashMap::new();
     for snapshot in snapshots {
@@ -1764,6 +1789,7 @@ fn collect_checkpoint_archive_members(
                     &snapshot.path().join(CHECKPOINT_DIRECTORY),
                     &state.checkpoint_root,
                     snapshot.manifest(),
+                    fs_state_limit,
                 )?,
             );
         } else {
@@ -1791,12 +1817,13 @@ fn checkpoint_archive_members(
     closure_root: &Path,
     checkpoint_root: &str,
     manifest: &microsandbox_image::snapshot::Manifest,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<Vec<CheckpointArchiveMember>> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let closure = CheckpointClosure::open_portable(closure_root, Some(&expected))
+    let closure = CheckpointClosure::open_portable(closure_root, Some(&expected), fs_state_limit)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    super::validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
+    validate_checkpoint_owned_inventory(manifest, closure.checkpoint())?;
     let prefix = format!("checkpoints/{snapshot_id}");
     let checkpoint_path = closure_root.join("checkpoint.json");
     let mut members = vec![CheckpointArchiveMember {
@@ -3549,6 +3576,7 @@ async fn materialize_inventory_layers(
 fn validate_inventory_snapshot_bindings(
     inventory: &ArchiveInventory,
     imported: &[Snapshot],
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<()> {
     let snapshots: HashMap<&str, &Snapshot> = imported
         .iter()
@@ -3567,6 +3595,7 @@ fn validate_inventory_snapshot_bindings(
                 &snapshot.1.path().join(CHECKPOINT_DIRECTORY),
                 &state.checkpoint_root,
                 snapshot.1.manifest(),
+                fs_state_limit,
             )? {
                 checkpoint_entries.insert(
                     member.archive_path,
@@ -3771,7 +3800,24 @@ async fn verify_imported_snapshots(
         if !seen.insert(dir.clone()) {
             continue;
         }
-        snapshots.push(store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?);
+        let snapshot = store::open_snapshot_leased(local, dir.to_string_lossy().as_ref()).await?;
+
+        // Checkpoint admission must not depend on the optional archive inventory.
+        if let SnapshotState::Checkpoint(state) = &snapshot.manifest().state {
+            let expected = ObjectId::new(&state.checkpoint_root)
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+            let closure = CheckpointClosure::open_portable(
+                snapshot.path().join(CHECKPOINT_DIRECTORY),
+                Some(&expected),
+                local.config().fs_state_limit(),
+            )
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
+            validate_checkpoint_owned_inventory(snapshot.manifest(), closure.checkpoint())?;
+        }
+
+        snapshots.push(snapshot);
     }
 
     if snapshots.is_empty() {
@@ -4308,9 +4354,9 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use microsandbox_image::checkpoint::{
-        CaptureIntent, CheckpointManifest, ContentRef, DiskGenerationManifest, DiskLayerRef,
-        LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
-        sparse_file_integrity,
+        CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
+        DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+        MemoryManifest, sparse_file_integrity,
     };
     use microsandbox_image::snapshot::{
         CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef,
@@ -5204,6 +5250,8 @@ mod tests {
             .put_bytes(&memory.to_canonical_bytes().unwrap())
             .unwrap();
         let execution_id = store.put_bytes(b"execution").unwrap();
+        let fs_state_bytes = virtio_fs_state(crate::test_support::DEFAULT_FS_STATE_LIMIT + 1);
+        let fs_state = store.put_bytes(&fs_state_bytes).unwrap();
         let layers = source.join("layers");
         std::fs::create_dir(&layers).unwrap();
         let layer_id = "layer_00000000000000000000000000000001";
@@ -5278,7 +5326,11 @@ mod tests {
             execution_state: execution_id,
             memory: memory_id,
             disks: vec![disk_id],
-            devices: Vec::new(),
+            devices: vec![DeviceStateRef {
+                device_type: 26,
+                device_id: "fs0".into(),
+                state: fs_state.clone(),
+            }],
             resources: Vec::new(),
             owned_volumes: Vec::new(),
             requires: Vec::new(),
@@ -5318,6 +5370,30 @@ mod tests {
             extensions: BTreeMap::new(),
             requires: Vec::new(),
         };
+        let error = save_direct_checkpoint_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "checkpoint-archive",
+            &source,
+            &archive,
+            false,
+            false,
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("max_filesystem_state_mib"),
+            "{error}"
+        );
+        assert!(!archive.exists());
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.json"),
+            r#"{"snapshots": {"max_filesystem_state_mib": 8}}"#,
+        )
+        .unwrap();
         let local = crate::test_support::local_backend_builder(&home)
             .build()
             .await
@@ -5331,6 +5407,7 @@ mod tests {
             &archive,
             false,
             false,
+            local.config().fs_state_limit(),
         )
         .await
         .unwrap();
@@ -5403,6 +5480,12 @@ mod tests {
                 .join("checkpoint.json")
                 .is_file()
         );
+        let imported_store =
+            LocalObjectStore::open(loaded.path().join(CHECKPOINT_DIRECTORY)).unwrap();
+        assert_eq!(
+            std::fs::read(imported_store.object_path(&fs_state)).unwrap(),
+            fs_state_bytes
+        );
 
         let resaved = directory.path().join("checkpoint-resaved.tar.zst");
         save_snapshot(
@@ -5425,5 +5508,89 @@ mod tests {
                 .join("checkpoint.json")
                 .is_file()
         );
+
+        // Inventory-free archives must enforce the same admission budget.
+        let without_inventory = directory.path().join("without-inventory.tar");
+        let compressed = tokio::fs::File::open(&archive).await.unwrap();
+        let mut decoder = ZstdDecoder::new(tokio::io::BufReader::new(compressed));
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).await.unwrap();
+        let mut source_tar = tar::Archive::new(decoded.as_slice());
+        let mut builder = tar::Builder::new(std::fs::File::create(&without_inventory).unwrap());
+        for entry in source_tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            if path == Path::new("archive.json") {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes.as_slice())
+                .unwrap();
+        }
+        builder.finish().unwrap();
+        drop(builder);
+
+        let destination = directory.path().join("without-inventory-import");
+        let imported = load_snapshot(&local, &without_inventory, Some(&destination))
+            .await
+            .unwrap();
+        assert_eq!(imported.id(), snapshot_id.as_str());
+
+        let default_home = directory.path().join("default-home");
+        let receiving = crate::test_support::local_backend_builder(&default_home)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            receiving.config().fs_state_limit(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT
+        );
+        for input in [&archive, &without_inventory] {
+            let error = load_snapshot_with_options(
+                &receiving,
+                input,
+                LoadOpts {
+                    group: Some("budget-rejected".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("max_filesystem_state_mib"),
+                "{error}"
+            );
+            assert!(!receiving.snapshots_dir().join("budget-rejected").exists());
+        }
+    }
+
+    /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
+    /// state, in the msb_krun device-state format.
+    fn virtio_fs_state(backend_len: usize) -> Vec<u8> {
+        let mut device_state = b"MSBKFS\0\0".to_vec();
+        device_state.extend_from_slice(&1u16.to_le_bytes());
+        device_state.extend_from_slice(&0u64.to_le_bytes());
+        device_state.extend_from_slice(&u32::try_from(backend_len).unwrap().to_le_bytes());
+        device_state.resize(device_state.len() + backend_len, 0x5a);
+
+        let mut bytes = b"MSBKVIO\0\0".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(b"fs0");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        // Feature, queue and shm selectors, status, config generation, interrupt status, no IRQ
+        // line, acked features and an empty queue list.
+        bytes.extend_from_slice(&[0; 6 * 4 + 8 + 1 + 8 + 4]);
+        bytes.extend_from_slice(&u32::try_from(device_state.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&device_state);
+        bytes
     }
 }

@@ -199,6 +199,7 @@ path = "bin/main.rs"
   3. Sectioned items.
 - Group imports by origin, separated by blank lines: standard library first, external crates second, then `crate::` and `super::` imports.
 - Do not put `use` statements inside sections unless there is a narrow local reason, such as a test module import.
+- Strongly prefer importing types at the top of the file or test module over spelling out full module paths in signatures, patterns, and function bodies. Use an import alias for name collisions; keep qualified paths when they meaningfully clarify an otherwise ambiguous name.
 - Use the exact section delimiter shown below. Do not invent alternate Markdown-style, shorter, or decorative section headers.
 - Include only sections that contain items. Do not add empty sections just to satisfy the full order.
 - Organize Rust files with these section headers, in this order when applicable:
@@ -251,8 +252,15 @@ path = "bin/main.rs"
 - Keep items in dependency order inside a section: public surface first, private helpers later.
 - Keep docs on public types, fields, methods, functions, and modules. This repo uses `#![warn(missing_docs)]` in public crates, so new public items should explain what they are for.
 - Prefer explicit domain types over loosely typed strings, booleans, or tuples when the value crosses an API or subsystem boundary.
+- Separate logical steps with blank lines: setup, early returns, normalization, validation, operations, and final results. Apply the same spacing to test setup, actions, and assertions; do not rely on `cargo fmt` to provide it.
+- Prefer named intermediate values when an expression combines distinct steps, especially fallible lookups, parsing, and validation. Make each failure point easy to identify.
+- Keep iterator chains simple. Prefer a straightforward loop when nested closures or branching make the logic harder to follow; do not add helpers solely to hide that complexity.
+- Keep straightforward logic together. Extract helpers when they clarify a distinct responsibility or remove meaningful duplication, rather than merely shortening a function.
+- Write comments to explain intent, constraints, or non-obvious behavior rather than narrating the code.
+- Name values for what they currently represent. Avoid names that imply an action has already happened when the value describes a requirement or planned action.
 - During refactors, conflict resolution, bug fixes, and feature work, call out any expected behavior, API, or data-format changes and wait for direction when the risk is material.
 - Use `thiserror` or existing local error patterns for typed errors. Include enough context for callers to understand the failing operation.
+- Keep shared library and SDK errors interface-neutral: describe the problem and remedy without CLI flags or command syntax. Add command-specific guidance in the CLI layer.
 - In async code, avoid holding locks across `.await`. Prefer explicit ownership, short critical sections, and existing Tokio patterns in the surrounding module.
 - Keep feature-gated code close to the feature it gates and use existing `#[cfg(feature = "...")]` patterns.
 - Do not add examples under `examples/` unless requested or clearly required. Prefer tests and docs for small usage coverage.

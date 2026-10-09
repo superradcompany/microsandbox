@@ -25,7 +25,7 @@ func TestGuestFlushNeverFallsBackToNameLookupForClosedHandle(t *testing.T) {
 	for _, operation := range []func() error{
 		func() error { return sandbox.PauseWithGuestFlush(context.Background(), "required") },
 		func() error {
-			_, err := sandbox.Branch(context.Background(), "child", false, "required")
+			_, err := sandbox.Branch(context.Background(), "child", false, nil, "required")
 			return err
 		},
 	} {

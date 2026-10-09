@@ -25,7 +25,7 @@ Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque 
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### Fork and ForkMany
 
@@ -34,7 +34,11 @@ Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error)
 ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error)
 ```
 
-`WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback. `ForkOption` configures `ForkOptions`.
+`WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback.
+
+`WithForkVolumes` rebinds a captured disk to a host image consistent with the captured state, for example `WithForkVolumes(map[string]MountConfig{"/data": Mount.Disk("./seed.img", DiskOptions{})})`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
+
+`ForkOptions` and `BranchOptions` have been removed. Replace direct struct use and custom option functions with `WithForkIntegrity`, `WithForkGuestFlush`, and `WithForkVolumes`. Calls already using these functions are unchanged.
 
 ### ForkOutcome
 
@@ -46,7 +50,7 @@ ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome
 
 Close each successful child’s handle with `Close()` after stopping it.
 
-`Branch`, `BranchMany`, `BranchOption`, `BranchOptions`, `BranchOutcome`, `WithBranchIntegrity`, and `WithBranchGuestFlush` remain deprecated aliases.
+`Branch`, `BranchMany`, `BranchOption`, `BranchOutcome`, `WithBranchIntegrity`, and `WithBranchGuestFlush` remain deprecated aliases.
 
 Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
 
@@ -1787,6 +1791,14 @@ Publish ports on explicit host bind addresses, such as `0.0.0.0`. See [`PortBind
     <div className="msb-param-desc">Explicit bind-address port mappings.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithInterceptTLS()</span>
+
+```go
+func WithInterceptTLS() SandboxOption
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved. A later `WithNetwork()` option replaces the network configuration.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithNetwork()</span>
 

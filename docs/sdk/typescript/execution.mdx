@@ -443,6 +443,8 @@ Raw stderr bytes
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ExecTimeoutError` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">recv()</span>
 
 ```typescript
@@ -995,3 +997,30 @@ type RlimitResource =
   | "nproc" | "nofile" | "memlock" | "as" | "locks"
   | "sigpending" | "msgqueue" | "nice" | "rtprio" | "rttime";
 ```
+
+## Managed jobs
+
+```typescript
+const job = await sb.execDetachedWith("cat", e => e.cwd("/tmp"));
+const io = await job.attach();
+await io.writeStdin(Buffer.from("hello\n"));
+await io.detach();
+const found = await sb.getJob(job.id);
+await found.eof();
+const result = await found.wait();
+const output = await found.logs();
+const page = await sb.listJobsWith(b => b.all().limit(50));
+```
+
+`execDetached(cmd, args)` and `execDetachedWith(cmd, configure)` return `Job`. The callback reuses `ExecOptionsBuilder` and starts with retained pipe stdin. `stdinNull()` closes input; `stdinBytes()` provides finite input. `Sandbox` and `SandboxHandle` both provide `getJob`, `listJobs` and `listJobsWith`.
+
+`Job` provides `id`, `inspect`, `wait`, `logs`, `logStream`, `followLogs`, `attach`, `attachWith`, `signal`, `kill` and `eof`. Log options include `tail`, `since`, `until`, `sources`, `fromCursor` and `follow`. Configure attachments with `readOnly()`, `replayRecent(maxBytes)` or `replayAfter(cursor)`. `JobAttachment` provides concurrent `recv`, `writeStdin`, `resize` and `detach`, and implements async iteration/disposal. `JobLogStream` supports async iteration, `next`, `close` and async disposal. Disposing either stream releases the observer or attachment; it never kills the job.
+
+
+Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
+
+A job handle exposes inspection, an output-independent wait, bounded logs, attachment, signal, kill and EOF. Only one attachment owns input; read-only observers may coexist. Dropping or detaching an attachment preserves the job and its stdin. Pipe EOF is permanent; PTYs reject EOF and use terminal control characters. Each input write admits at most 16 KiB. Finite launch input is limited to 64 KiB, followed by EOF; use attachment writes for larger streams.
+
+Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
+
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.

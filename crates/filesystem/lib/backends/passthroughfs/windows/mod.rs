@@ -198,9 +198,21 @@ enum StatStoreBackend {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.cfg.max_state_bytes
+    }
+
     /// Validate an external checkpoint without opening any destination host paths.
+    pub fn validate_external_state_with_limit(bytes: &[u8], limit: usize) -> io::Result<()> {
+        mobility::validate_unavailable(bytes, limit)
+    }
+
+    /// Validate external state with the default filesystem budget.
     pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
-        mobility::validate_unavailable(bytes)
+        Self::validate_external_state_with_limit(
+            bytes,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
     }
 
     /// Validate and translate only the isolated facade's selected host basename.
@@ -208,8 +220,9 @@ impl PassthroughFs {
         bytes: &[u8],
         source: &CStr,
         destination: &CStr,
+        limit: usize,
     ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
-        mobility::prepare_single_file_state(bytes, source, destination)
+        mobility::prepare_single_file_state(bytes, source, destination, limit)
     }
 
     /// Charge the quota for growing from `old_len` to `new_end` bytes.

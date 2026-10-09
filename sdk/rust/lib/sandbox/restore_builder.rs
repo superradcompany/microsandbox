@@ -562,4 +562,29 @@ mod tests {
         assert!(!config(&restore).restore_resources.mapped.contains("/data"));
         assert!(config(&restore).spec.mounts.is_empty());
     }
+
+    #[test]
+    fn restore_disk_volume_adds_one_disk_image_mount() {
+        let restore = Sandbox::restore("saved").volume("/data2", |v| {
+            v.disk("/images/seed.img").fstype("ext4").readonly()
+        });
+        let mounts = &config(&restore).spec.mounts;
+        assert_eq!(mounts.len(), 1);
+        match &mounts[0] {
+            crate::sandbox::VolumeMount::DiskImage {
+                host,
+                guest,
+                fstype,
+                options,
+                ..
+            } => {
+                assert_eq!(host, std::path::Path::new("/images/seed.img"));
+                assert_eq!(guest, "/data2");
+                assert_eq!(fstype.as_deref(), Some("ext4"));
+                assert!(options.readonly);
+            }
+            other => panic!("expected DiskImage, got {other:?}"),
+        }
+        assert!(config(&restore).restore_resources.mapped.contains("/data2"));
+    }
 }

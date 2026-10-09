@@ -99,6 +99,9 @@ static const char *dlerror(void) {
 // ---------------------------------------------------------------------------
 typedef void     (*msb_free_string_fn)(char *ptr);
 typedef void     (*msb_set_sdk_msb_path_fn)(const char *path);
+typedef char *(*msb_jobs_fn)(uint64_t cancel_id, uint64_t sandbox, const char *request, uint8_t *buf, size_t buf_len);
+static msb_jobs_fn ptr_msb_jobs = NULL;
+
 typedef uint64_t (*msb_cancel_alloc_fn)(void);
 typedef void     (*msb_cancel_trigger_fn)(uint64_t id);
 typedef void     (*msb_cancel_unregister_fn)(uint64_t id);
@@ -519,6 +522,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_request_kill);
 	RESOLVE(msb_sandbox_list);
 	RESOLVE(msb_sandbox_remove);
+	RESOLVE_OPTIONAL(msb_jobs);
 	RESOLVE(msb_sandbox_exec);
 	RESOLVE(msb_sandbox_exec_default);
 	RESOLVE(msb_sandbox_exec_stream);
@@ -786,6 +790,10 @@ char *call_msb_sandbox_list(uint64_t cancel_id, const char *filter_json, uint8_t
 }
 char *call_msb_sandbox_remove(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_remove ? ptr_msb_sandbox_remove(cancel_id, name, buf, buf_len) : NULL;
+}
+int has_msb_jobs(void) { return ptr_msb_jobs != NULL; }
+char *call_msb_jobs(uint64_t cancel_id, uint64_t sandbox, const char *request, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_jobs ? ptr_msb_jobs(cancel_id, sandbox, request, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_exec(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_exec ? ptr_msb_sandbox_exec(cancel_id, handle, cmd, opts, buf, buf_len) : NULL;
@@ -2797,18 +2805,18 @@ type BranchOutcome struct {
 	Error   error
 }
 
-func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func (s *Sandbox) BranchMany(ctx context.Context, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	// Zero selects name lookup in the shared native entry point. A closed live handle
 	// must not take that path, including when Close races with this call.
 	handle := s.handle.Load()
 	if handle == 0 {
 		return nil, &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
 	}
-	return BranchManyByName(ctx, handle, s.name, "", names, integrity, policy...)
+	return BranchManyByName(ctx, handle, s.name, "", names, integrity, volumes, policy...)
 }
 
 // BranchManyByName uses one native operation, never a loop of branch captures.
-func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, policy ...string) ([]BranchOutcome, error) {
+func BranchManyByName(ctx context.Context, handle uint64, source, identity string, names []string, integrity bool, volumes map[string]MountSpec, policy ...string) ([]BranchOutcome, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2826,10 +2834,11 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 		names = []string{}
 	}
 	encoded, err := json.Marshal(struct {
-		Names      []string `json:"names"`
-		Identity   string   `json:"source_identity"`
-		GuestFlush string   `json:"guest_flush,omitempty"`
-	}{names, identity, flush})
+		Names      []string             `json:"names"`
+		Identity   string               `json:"source_identity"`
+		GuestFlush string               `json:"guest_flush,omitempty"`
+		Volumes    map[string]MountSpec `json:"volumes,omitempty"`
+	}{names, identity, flush, volumes})
 	if err != nil {
 		return nil, err
 	}
@@ -2870,18 +2879,18 @@ func BranchManyByName(ctx context.Context, handle uint64, source, identity strin
 }
 
 // Branch creates an independent local child through the host runtime.
-func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, policy...)
+func (s *Sandbox) Branch(ctx context.Context, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := s.BranchMany(ctx, []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, uint64(s.h()), s.name, name, recordIntegrity)
 }
 
 // BranchSandboxByName branches execution without an agent connection to the source.
-func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, policy ...string) (*Sandbox, error) {
-	if len(policy) > 0 && policy[0] != "" {
-		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, policy...)
+func BranchSandboxByName(ctx context.Context, source, name string, recordIntegrity bool, volumes map[string]MountSpec, policy ...string) (*Sandbox, error) {
+	if len(volumes) > 0 || (len(policy) > 0 && policy[0] != "") {
+		rows, err := BranchManyByName(ctx, 0, source, "", []string{name}, recordIntegrity, volumes, policy...)
 		return oneBranchOutcome(rows, err)
 	}
 	return branchSandbox(ctx, 0, source, name, recordIntegrity)
@@ -5959,4 +5968,24 @@ func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
 	})
+}
+
+// Jobs invokes the optional managed-job ABI without changing existing library requirements.
+func Jobs(ctx context.Context, sandbox uint64, request any) (json.RawMessage, error) {
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if C.has_msb_jobs() == 0 {
+		return nil, &Error{Kind: "unsupported_feature", Message: "native SDK bundle does not support managed jobs"}
+	}
+	data, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	arg := C.CString(string(data))
+	defer C.free(unsafe.Pointer(arg))
+	raw, err := callBuf(ctx, 4<<20, func(cancelID C.uint64_t, buf *C.uint8_t, length C.size_t) *C.char {
+		return C.call_msb_jobs(cancelID, C.uint64_t(sandbox), arg, buf, length)
+	})
+	return json.RawMessage(raw), err
 }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use microsandbox_db::DbWriteConnection;
 use microsandbox_image::snapshot::Manifest;
 use microsandbox_image::storage_lease::StorageLease;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
 use crate::db::entity::snapshot;
@@ -24,12 +24,41 @@ pub(super) async fn prepare(
     manifest: &Manifest,
 ) -> MicrosandboxResult<()> {
     let key = super::store::canonical_path(path).display().to_string();
-    if let Some(existing) = snapshot::Entity::find_by_id(key).one(db).await? {
-        if existing.digest != digest {
-            return Err(MicrosandboxError::SnapshotIntegrity(
-                "publication conflicts with an indexed snapshot generation".into(),
-            ));
-        }
+    let retained = db
+        .transaction(|txn| {
+            let key = key.clone();
+            let digest = digest.to_owned();
+            let path = path.to_path_buf();
+
+            async move {
+                let Some(existing) = snapshot::Entity::find_by_id(key).one(&txn).await? else {
+                    return Ok((txn, false));
+                };
+                if existing.digest != digest {
+                    return Err(MicrosandboxError::SnapshotIntegrity(
+                        "publication conflicts with an indexed snapshot generation".into(),
+                    ));
+                }
+
+                // A live namespace lease already protects installed files. Keep their
+                // availability if later publication fails, even while readers prevent recovery.
+                match tokio::fs::symlink_metadata(&path).await {
+                    Ok(_) => return Ok((txn, true)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+
+                // Absent files need a reservation against stale-row cleanup after a parent
+                // is recreated. Preserve aliases and ancestry while restoring that copy.
+                let mut existing: snapshot::ActiveModel = existing.into();
+                existing.availability = Set("publishing".into());
+                existing.update(&txn).await?;
+                Ok((txn, true))
+            }
+        })
+        .await?;
+
+    if retained {
         return Ok(());
     }
     // Reserve only the immutable ID, never a user alias whose collision is still to be

@@ -116,6 +116,9 @@ pub enum HostPermissions {
 /// Configuration for the passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
+    /// Maximum serialized filesystem state per device, in bytes.
+    pub max_state_bytes: usize,
+
     /// Seal owned namespace/data and reconstruct private linked or detached objects.
     pub owned_checkpoint: Option<super::OwnedDirectoryCheckpoint>,
     /// Capture external-object identity and apply explicit destination reconciliation.
@@ -276,9 +279,21 @@ pub(crate) struct PassthroughDirEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.cfg.max_state_bytes
+    }
+
     /// Validate external checkpoint structure without resolving or creating host paths.
+    pub fn validate_external_state_with_limit(bytes: &[u8], limit: usize) -> io::Result<()> {
+        mobility::validate_unavailable(bytes, limit)
+    }
+
+    /// Validate external state with the default filesystem budget.
     pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
-        mobility::validate_unavailable(bytes)
+        Self::validate_external_state_with_limit(
+            bytes,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
     }
 
     /// Validate the single-file facade's inner namespace before translating its selected name.
@@ -286,8 +301,9 @@ impl PassthroughFs {
         bytes: &[u8],
         source: &CStr,
         destination: &CStr,
+        limit: usize,
     ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
-        mobility::prepare_single_file_state(bytes, source, destination)
+        mobility::prepare_single_file_state(bytes, source, destination, limit)
     }
     /// Create a builder for constructing a `PassthroughFs` instance.
     pub fn builder() -> builder::PassthroughFsBuilder {
@@ -544,6 +560,7 @@ impl PassthroughConfig {
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
+            max_state_bytes: msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
             owned_checkpoint: None,
             external_checkpoint: None,
             root_dir: PathBuf::new(),

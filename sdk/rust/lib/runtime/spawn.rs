@@ -335,6 +335,7 @@ pub async fn spawn_sandbox(
     #[cfg(feature = "net")]
     launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
     launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
+    launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
     if config.checkpoint_restore.as_ref().is_some_and(|restore| {
         restore
             .external_mounts
@@ -2866,6 +2867,7 @@ fn machine_cli_args(
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
         guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
+        fs_state_limit_bytes: local.config().fs_state_limit_override(),
         memory_cache_dir: Some(local.cache_dir().join("memory")),
         startup: startup_command(config),
         lifecycle: Lifecycle {
