@@ -102,7 +102,7 @@ pub struct ModifyArgs {
     #[arg(long = "secret-rm", value_name = "NAME")]
     pub secret_remove: Vec<String>,
 
-    /// Add or update a published port: `[BIND_ADDR:]HOST:GUEST[/tcp|udp]`.
+    /// Add or update published ports: `[BIND_ADDR:]HOST[-END]:GUEST[-END][/tcp|udp]`.
     #[arg(short = 'p', long = "port", value_name = "MAPPING")]
     pub ports: Vec<String>,
 
@@ -267,32 +267,40 @@ fn apply_port_args(
 ) -> anyhow::Result<SandboxModificationBuilder> {
     #[cfg(feature = "net")]
     for value in &args.ports {
-        let (bind, host, guest, udp) = common::parse_port_mapping(value)?;
-        builder = builder.port_mapping(microsandbox_types::PublishedPortSpec {
-            host_bind: bind.to_string(),
-            host_port: host,
-            guest_port: guest,
-            protocol: if udp {
-                microsandbox_types::PortProtocol::Udp
-            } else {
-                microsandbox_types::PortProtocol::Tcp
-            },
-        });
+        for port in common::parse_port_mapping(value)? {
+            builder = builder.port_mapping(microsandbox_types::PublishedPortSpec {
+                host_bind: port.host_bind.to_string(),
+                host_port: port.host_port,
+                guest_port: port.guest_port,
+                protocol: match port.protocol {
+                    microsandbox_network::config::PortProtocol::Udp => {
+                        microsandbox_types::PortProtocol::Udp
+                    }
+                    microsandbox_network::config::PortProtocol::Tcp => {
+                        microsandbox_types::PortProtocol::Tcp
+                    }
+                },
+            });
+        }
     }
     #[cfg(feature = "net")]
     for value in &args.ports_remove {
         let (endpoint, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
         let mapping = format!("{endpoint}:1/{protocol}");
-        let (bind, host, _, udp) = common::parse_port_mapping(&mapping)?;
-        builder = builder.remove_port(microsandbox::sandbox::PublishedPortKey {
-            host_bind: bind.to_string(),
-            host_port: host,
-            protocol: if udp {
-                microsandbox_types::PortProtocol::Udp
-            } else {
-                microsandbox_types::PortProtocol::Tcp
-            },
-        });
+        for port in common::parse_port_mapping(&mapping)? {
+            builder = builder.remove_port(microsandbox::sandbox::PublishedPortKey {
+                host_bind: port.host_bind.to_string(),
+                host_port: port.host_port,
+                protocol: match port.protocol {
+                    microsandbox_network::config::PortProtocol::Udp => {
+                        microsandbox_types::PortProtocol::Udp
+                    }
+                    microsandbox_network::config::PortProtocol::Tcp => {
+                        microsandbox_types::PortProtocol::Tcp
+                    }
+                },
+            });
+        }
     }
 
     #[cfg(not(feature = "net"))]
