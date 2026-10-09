@@ -150,7 +150,7 @@ If output storage fails, capture stops permanently for that job. Previously save
 
 <Accordion title="Timeouts and interrupted input">
 
-Execution timeouts still apply after you disconnect. Older runtimes and unsupported backends reject job launch before dispatch.
+Execution timeouts still apply after you disconnect. Older runtimes and unsupported backends reject job launch before dispatch. SDK job errors expose stable codes. If launch confirmation is lost, the error includes a job ID; inspect it before retrying to avoid starting the command twice.
 
 While paused, you can inspect or wait for jobs, but waiting does not resume them. Signals take effect after resume. Full input buffers do not block signals or deadlines. Input bytes and EOF remain ordered; a signal may interrupt queued input. Inspect reports signal-delivery failures.
 

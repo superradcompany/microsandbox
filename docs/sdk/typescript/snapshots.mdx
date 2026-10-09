@@ -785,17 +785,42 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `volume()` | Map host volumes or select captured private volumes. A host disk image: `.volume("/data", v => v.disk("./seed.img").fstype("ext4"))`. |
 | `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
 | `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
 | `user(), logLevel()` | Default user for new execs and host runtime log level. |
 | `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
-| `allowMissingResources()` | Allow unavailable external filesystems or additional disks (full restore records warnings). Restore otherwise requires their bindings. |
 | `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
 
 </Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
+
+```typescript
+volume(guestPath: string, configure: (mount: MountBuilder) => MountBuilder): this
+```
+
+Map a host volume to a guest path, or use `v => v.captured()` to select its captured private volume.
+
+<Accordion title="Example">
+
+```typescript
+const child = await Sandbox.restore("api:baseline")
+  .name("api-restored")
+  .volume("/data", v => v.disk("./seed.img").fstype("ext4"))
+  .restore();
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">allowMissingResources()</span>
+
+```typescript
+allowMissingResources(): this
+```
+
+Allow unavailable external filesystems or additional disks. Full restore records warnings; root and owned storage remain required. Disabled by default. This does not relax validation of supplied mappings.
 
 
 <span id="disk-maintenance-and-incremental-export" />

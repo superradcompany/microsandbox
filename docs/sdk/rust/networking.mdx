@@ -1192,6 +1192,11 @@ Set the response body, replacing `{host}` with the blocked hostname. Omission us
 
 ```rust
 fn build(self) -> HttpConfig
+
+pub struct HttpConfig {
+    pub deny_response: bool,
+    pub deny_message: Option<String>,
+}
 ```
 
 Return the HTTP configuration stored in `NetworkConfig.http`. [`network.http()`](#network-http) calls this automatically.

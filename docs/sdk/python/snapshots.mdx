@@ -742,17 +742,51 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `disable_network` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `max_duration, idle_timeout` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `volumes, captured_volumes` | Map host volumes or select captured private volumes. A host disk image: `volumes={"/data": Volume.disk("./seed.img", fstype="ext4")}`. |
 | `ports` | Bind destination TCP or UDP ports. |
 | `vsock` | Bind destination vsock endpoints. |
 | `user, log_level` | Default user for new execs and host runtime log level. |
 | `dangerously_inherit_resources` | Explicitly inherit host resources. Disabled by default. |
-| `allow_missing_resources=True` | Allow unavailable external filesystems or additional disks (full restore records warnings). Restore otherwise requires their bindings. |
 | `external_mount_policy` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy`, not `Network`. `captured_volumes` contains guest paths.
 
 </Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">volumes</span>
+
+```python
+volumes: Mapping[str, MountConfig] | None = None
+```
+
+Keyword option for `Sandbox.restore()` and `restore_with_progress()`. Map host volumes to guest paths.
+
+<Accordion title="Example">
+
+```python
+child = await Sandbox.restore(
+    "api:baseline",
+    name="api-restored",
+    volumes={"/data": Volume.disk("./seed.img", fstype="ext4")},
+)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">captured_volumes</span>
+
+```python
+captured_volumes: Sequence[str] | None = None
+```
+
+Select captured private volumes by guest path. Accepted by both restore methods.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">allow_missing_resources</span>
+
+```python
+allow_missing_resources: bool = False
+```
+
+Allow unavailable external filesystems or additional disks. Full restore records warnings; root and owned storage remain required. Disabled by default. This does not relax validation of supplied mappings. Accepted by both restore methods.
 
 
 <span id="disk-maintenance-and-incremental-export" />
