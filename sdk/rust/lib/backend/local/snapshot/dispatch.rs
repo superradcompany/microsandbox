@@ -385,11 +385,25 @@ mod tests {
         let wire = microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(
             br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"source","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":512,"integrity":null}},"labels":{},"extensions":{},"requires":[]}"#
         ).unwrap();
-        let manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
+        let mut manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
             &wire,
             &wire.digest().unwrap(),
         )
         .unwrap();
+        let mut captured = SandboxConfig::default();
+        captured.spec.runtime.workdir = Some("/captured".into());
+        captured.spec.env = vec![microsandbox_types::EnvVar::new("KEEP", "captured")];
+        captured
+            .spec
+            .runtime
+            .scripts
+            .insert("captured".into(), "#!/bin/sh\nprintf retained".into());
+        manifest
+            .set_restore_defaults(microsandbox_types::snapshot::RestoreDefaults {
+                user: None,
+                config: Some(crate::sandbox::snapshot_metadata::capture(&captured)),
+            })
+            .unwrap();
         std::fs::write(
             source.join(crate::snapshot::DESCRIPTOR_FILENAME),
             manifest.to_canonical_bytes().unwrap(),
@@ -399,7 +413,9 @@ mod tests {
         std::fs::write(&upper, [42; 512]).unwrap();
 
         crate::with_backend(backend.clone(), async {
-            for image_first in [true, false] {
+            for (image_first, concrete) in
+                [(true, false), (false, false), (true, true), (false, true)]
+            {
                 let builder = crate::Sandbox::builder("child");
                 let builder = if image_first {
                     builder
@@ -410,7 +426,18 @@ mod tests {
                         .snapshot_resolved("untrusted-hint", &upper)
                         .image("alpine:latest")
                 };
-                let mut config = builder.build().await.unwrap();
+                let builder = if concrete {
+                    crate::sandbox::SandboxBuilder::from(builder.build().await.unwrap())
+                } else {
+                    builder
+                };
+                let mut config = builder
+                    .env("EXPLICIT", "destination")
+                    .workdir("/destination")
+                    .security(microsandbox_types::SecurityProfile::Restricted)
+                    .build()
+                    .await
+                    .unwrap();
                 let reference = config
                     .snapshot_reference
                     .clone()
@@ -424,6 +451,23 @@ mod tests {
                 .await
                 .unwrap();
                 assert!(config.snapshot_reference.is_none());
+                assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/destination"));
+                assert_eq!(
+                    config.spec.security_profile,
+                    microsandbox_types::SecurityProfile::Restricted
+                );
+                assert!(
+                    config
+                        .spec
+                        .env
+                        .contains(&microsandbox_types::EnvVar::new("EXPLICIT", "destination"))
+                );
+                assert!(
+                    config
+                        .spec
+                        .env
+                        .contains(&microsandbox_types::EnvVar::new("KEEP", "captured"))
+                );
                 assert_eq!(
                     config.manifest_digest.as_deref(),
                     Some(manifest.image.manifest_digest.as_str())
@@ -431,6 +475,74 @@ mod tests {
                 assert_eq!(config.snapshot_root_layer_sources.len(), 1);
                 assert_eq!(config.snapshot_root_layer_sources[0].path, upper);
                 assert_eq!(config.snapshot_root_virtual_size, Some(512));
+            }
+            // A build round trip keeps filled defaults separate from explicit same-value
+            // setters and collection replacement, all before snapshot metadata is available.
+            for (name, explicit, replace_scripts) in [
+                ("unchanged", false, false),
+                ("same-default", true, false),
+                ("replace-scripts", false, true),
+                ("direct-edit", false, false),
+            ] {
+                let mut config = crate::Sandbox::builder(name)
+                    .image("alpine")
+                    .snapshot_resolved("hint", &upper)
+                    .build()
+                    .await
+                    .unwrap();
+                if name == "direct-edit" {
+                    config.spec.runtime.workdir = Some("/edited".into());
+                }
+                let mut builder = crate::sandbox::SandboxBuilder::from(config);
+                if explicit {
+                    builder = builder
+                        .shell("/bin/sh")
+                        .script("extra", "#!/bin/sh\nprintf extra");
+                }
+                if replace_scripts {
+                    builder = builder.overlay(
+                        crate::SandboxConfigPatch::new().spec(
+                            microsandbox_types::SandboxSpecPatch::new().runtime(
+                                microsandbox_types::SandboxRuntimeOptionsPatch::new()
+                                    .replace_scripts(Default::default()),
+                            ),
+                        ),
+                    );
+                }
+                let mut config = builder.build().await.unwrap();
+                let reference = config.snapshot_reference.clone().unwrap();
+                SnapshotBackend::prepare_restore(
+                    local.as_ref(),
+                    backend.clone(),
+                    &mut config,
+                    reference,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    config.spec.runtime.shell.as_deref(),
+                    explicit.then_some("/bin/sh"),
+                    "{name}"
+                );
+                assert_eq!(
+                    config.spec.runtime.workdir.as_deref(),
+                    Some(if name == "direct-edit" {
+                        "/edited"
+                    } else {
+                        "/captured"
+                    }),
+                    "{name}"
+                );
+                assert_eq!(
+                    config.spec.runtime.scripts.contains_key("captured"),
+                    !replace_scripts,
+                    "{name}"
+                );
+                assert_eq!(
+                    config.spec.runtime.scripts.contains_key("extra"),
+                    explicit,
+                    "{name}"
+                );
             }
         })
         .await;

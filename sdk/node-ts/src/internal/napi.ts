@@ -261,6 +261,10 @@ export interface NapiSandboxBuilder extends NapiSandboxBuilderSetters {
 
 /** Restore exposes destination controls, never image or startup-command selection. */
 export interface NapiRestoreBuilderSetters {
+  /** Select PID 1 for cold restore; full execution rejects this override. */
+  init(cmd: string, args?: string[]): this;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  initWith(cmd: string, configure: (b: any) => any): this;
   name(name: string): this;
   /** Full execution restore requires captured CPU and memory geometry. */
   cpus(count: number): this;

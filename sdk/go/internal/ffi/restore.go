@@ -4,6 +4,7 @@ package ffi
 // startup command can cross the restore entry point. Optional pointers retain
 // explicit zero values so the native restore path can validate the user's intent.
 type RestoreOptions struct {
+	Init                        *InitOptions         `json:"init,omitempty"`
 	Snapshot                    string               `json:"snapshot"`
 	SnapshotReferenceKind       string               `json:"snapshot_reference_kind,omitempty"`
 	CPUs                        *uint8               `json:"cpus,omitempty"`

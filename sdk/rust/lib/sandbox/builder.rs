@@ -25,8 +25,8 @@ use super::Sandbox;
 use super::{
     SandboxSpec,
     config::{
-        RestoreOverrideIntent, SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode,
-        sandbox_log_level_from_runtime,
+        RestoreGuestState, RestoreOverrideIntent, SandboxConfig, SandboxConfigPatch,
+        SnapshotRestoreMode, sandbox_log_level_from_runtime,
     },
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
@@ -130,8 +130,18 @@ impl SandboxBuilder {
         }
     }
 
+    fn update_guest_options(&mut self, mut update: impl FnMut(&mut SandboxSpecPatch)) {
+        update(&mut self.config.spec);
+        if let Some(RestoreGuestState::Pending { overrides, .. }) = &mut self.config.restore_guest {
+            update(overrides);
+        }
+    }
+
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
     pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
+        if let Some(RestoreGuestState::Pending { overrides, .. }) = &mut self.config.restore_guest {
+            overrides.overlay_mut(patch.spec.clone());
+        }
         self.config.overlay_mut(patch);
         self
     }
@@ -369,7 +379,7 @@ impl SandboxBuilder {
     /// request them. `Always` can improve large anonymous-memory workloads at
     /// the cost of coarser memory allocation, while `Never` disables THP.
     pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
-        self.config.spec.resources.thp = Some(policy);
+        self.update_guest_options(|patch| patch.resources.thp = Some(policy));
         self
     }
 
@@ -431,14 +441,16 @@ impl SandboxBuilder {
     /// [`shell`](super::Sandbox::shell), and [`attach`](super::Sandbox::attach)
     /// unless overridden per-command.
     pub fn workdir(mut self, path: impl Into<String>) -> Self {
-        self.config.spec.runtime.workdir = Some(Some(path.into()));
+        let value = path.into();
+        self.update_guest_options(|patch| patch.runtime.workdir = Some(Some(value.clone())));
         self
     }
 
     /// Shell used by [`shell()`](super::Sandbox::shell) to interpret
     /// commands (default: `/bin/sh`).
     pub fn shell(mut self, shell: impl Into<String>) -> Self {
-        self.config.spec.runtime.shell = Some(Some(shell.into()));
+        let value = shell.into();
+        self.update_guest_options(|patch| patch.runtime.shell = Some(Some(value.clone())));
         self
     }
 
@@ -518,7 +530,8 @@ impl SandboxBuilder {
 
     /// Override the OCI image entrypoint.
     pub fn entrypoint(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config.spec.runtime.entrypoint = Some(cmd.into_iter().map(Into::into).collect());
+        let command: Vec<String> = cmd.into_iter().map(Into::into).collect();
+        self.update_guest_options(|patch| patch.runtime.entrypoint = Some(command.clone()));
         self
     }
 
@@ -527,7 +540,8 @@ impl SandboxBuilder {
     /// An empty array clears the image CMD. This describes durable configuration and does not
     /// execute the command during sandbox creation.
     pub fn cmd(mut self, cmd: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config.spec.runtime.cmd = Some(cmd.into_iter().map(Into::into).collect());
+        let command: Vec<String> = cmd.into_iter().map(Into::into).collect();
+        self.update_guest_options(|patch| patch.runtime.cmd = Some(command.clone()));
         self
     }
 
@@ -575,13 +589,8 @@ impl SandboxBuilder {
     /// `init` and `entrypoint` are orthogonal: `init` is the guest's
     /// PID 1; `entrypoint` is the user workload that agentd exec's
     /// per request. They can be combined freely.
-    pub fn init(mut self, cmd: impl Into<String>) -> Self {
-        self.config.spec.init = Some(HandoffInit {
-            cmd: cmd.into(),
-            args: Vec::new(),
-            env: Vec::new(),
-        });
-        self
+    pub fn init(self, cmd: impl Into<String>) -> Self {
+        self.init_with(cmd, |init| init)
     }
 
     /// Hand off PID 1 with a closure-builder for argv and env. Use this
@@ -604,18 +613,26 @@ impl SandboxBuilder {
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
         let (args, env) = f(InitOptionsBuilder::default()).build();
-        self.config.spec.init = Some(HandoffInit {
+        let init = HandoffInit {
             cmd: cmd.into(),
             args,
             env,
-        });
+        };
+        self.update_guest_options(|patch| patch.init = Some(init.clone()));
+
+        self.config
+            .restore_boot_overrides
+            .get_or_insert_with(Default::default)
+            .init = true;
+
         self
     }
 
     /// Set the guest hostname. Limited to 64 UTF-8 bytes (the Linux UTS
     /// limit). Defaults to a sandbox-name-derived form when unset.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
-        self.config.spec.runtime.hostname = Some(hostname.into());
+        let value = hostname.into();
+        self.update_guest_options(|patch| patch.runtime.hostname = Some(value.clone()));
         self
     }
 
@@ -994,7 +1011,8 @@ impl SandboxBuilder {
             }
             return self;
         }
-        self.config.spec.get_env_mut().push(EnvVar::new(key, value));
+        let env = EnvVar::new(key, value);
+        self.update_guest_options(|patch| patch.get_env_mut().push(env.clone()));
         self
     }
 
@@ -1034,30 +1052,19 @@ impl SandboxBuilder {
     /// This is applied during agentd PID 1 startup, so bootstrap scripts and
     /// long-lived daemons inherit the raised baseline without needing explicit
     /// per-exec rlimits.
-    pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
-        self.config
-            .spec
-            .rlimits
-            .get_or_insert_default()
-            .push(Rlimit {
-                resource,
-                soft: limit,
-                hard: limit,
-            });
-        self
+    pub fn rlimit(self, resource: RlimitResource, limit: u64) -> Self {
+        self.rlimit_range(resource, limit, limit)
     }
 
     /// Set a sandbox-wide resource limit with different soft/hard values.
     pub fn rlimit_range(mut self, resource: RlimitResource, soft: u64, hard: u64) -> Self {
-        self.config
-            .spec
-            .rlimits
-            .get_or_insert_default()
-            .push(Rlimit {
+        self.update_guest_options(|patch| {
+            patch.rlimits.get_or_insert_default().push(Rlimit {
                 resource,
                 soft,
                 hard,
             });
+        });
         self
     }
 
@@ -1067,11 +1074,13 @@ impl SandboxBuilder {
     pub fn script(mut self, name: impl Into<String>, content: impl Into<String>) -> Self {
         let name = name.into();
         self.config_scripts.remove(&name);
-        self.config
-            .spec
-            .runtime
-            .get_scripts_mut()
-            .insert(name, content.into());
+        let content = content.into();
+        self.update_guest_options(|patch| {
+            patch
+                .runtime
+                .get_scripts_mut()
+                .insert(name.clone(), content.clone());
+        });
         self
     }
 
@@ -1081,13 +1090,7 @@ impl SandboxBuilder {
         scripts: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
         for (name, content) in scripts {
-            let name = name.into();
-            self.config_scripts.remove(&name);
-            self.config
-                .spec
-                .runtime
-                .get_scripts_mut()
-                .insert(name, content.into());
+            self = self.script(name, content);
         }
         self
     }
@@ -1123,7 +1126,12 @@ impl SandboxBuilder {
 
     /// Set the in-guest security profile.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
-        self.config.spec.security_profile = Some(profile);
+        self.update_guest_options(|patch| patch.security_profile = Some(profile));
+        self.config
+            .restore_boot_overrides
+            .get_or_insert_with(Default::default)
+            .security = true;
+
         self
     }
 
@@ -1288,6 +1296,16 @@ impl SandboxBuilder {
             .resumed_from_full_snapshot
             .unwrap_or_default()
             .then(|| self.config.spec.resources.clone().into_config());
+
+        #[cfg(feature = "local")]
+        let captured_guest = captured_resources.as_ref().and_then(|_| {
+            self.config
+                .restore_guest
+                .as_ref()
+                .and_then(RestoreGuestState::retained)
+                .cloned()
+        });
+
         let captured_root = self
             .config
             .snapshot_parent
@@ -1332,6 +1350,20 @@ impl SandboxBuilder {
         sandbox.restore_overrides = restore_overrides;
         self.materialize_config_scripts(&mut sandbox);
         self.validate(&mut sandbox)?;
+
+        #[cfg(feature = "local")]
+        if let Some(captured) = captured_guest
+            && captured != super::snapshot_metadata::capture(&sandbox)
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "destination settings conflict with the snapshot's captured guest configuration"
+                    .into(),
+            ));
+        }
+
+        #[cfg(feature = "local")]
+        super::snapshot_metadata::refresh_pending(&mut sandbox);
+
         Ok(sandbox)
     }
 
@@ -1370,11 +1402,14 @@ impl SandboxBuilder {
                 }
                 continue;
             }
-            sandbox
-                .spec
-                .runtime
-                .scripts
-                .insert(name, wrap_config_script(shell, &body));
+            let script = wrap_config_script(shell, &body);
+            if let RestoreGuestState::Pending { overrides, .. } = &mut sandbox.restore_guest {
+                overrides
+                    .runtime
+                    .get_scripts_mut()
+                    .insert(name.clone(), script.clone());
+            }
+            sandbox.spec.runtime.scripts.insert(name, script);
         }
     }
 
@@ -1389,6 +1424,19 @@ impl SandboxBuilder {
         }
         for name in self.config_scripts.keys() {
             validate_config_script_name(name).map_err(MicrosandboxError::InvalidConfig)?;
+        }
+        #[cfg(feature = "local")]
+        if matches!(
+            self.config.restore_guest,
+            None | Some(RestoreGuestState::Unresolved)
+        ) && (self.pending_snapshot.is_some()
+            || self.config.snapshot_reference.is_some()
+            || self.config.snapshot_archive_source.is_some())
+        {
+            self.config.restore_guest = Some(RestoreGuestState::Pending {
+                overrides: Box::new(self.config.spec.clone()),
+                built: None,
+            });
         }
         self.resolve_pending(backend).await?;
         Ok(&mut self.config)
@@ -1433,7 +1481,23 @@ impl SandboxBuilder {
             .snapshots()
             .prepare_restore(backend.clone(), &mut config, snapshot_ref)
             .await?;
+        let workdir = config
+            .restore_guest
+            .retained()
+            .is_some()
+            .then(|| config.spec.runtime.workdir.clone());
+        let shell = config
+            .restore_guest
+            .retained()
+            .is_some()
+            .then(|| config.spec.runtime.shell.clone());
         self.config = SandboxConfigPatch::from_present_fields(config);
+        if let Some(workdir) = workdir {
+            self.config.spec.runtime.workdir = Some(workdir);
+        }
+        if let Some(shell) = shell {
+            self.config.spec.runtime.shell = Some(shell);
+        }
         Ok(())
     }
 
@@ -1706,6 +1770,13 @@ impl SandboxBuilder {
             _ => {}
         }
         #[cfg(feature = "local")]
+        if sandbox.resumed_from_full_snapshot {
+            sandbox.restore_boot_overrides.validate_scope(
+                crate::snapshot::SnapshotScope::Full,
+                sandbox.snapshot_restore_mode,
+            )?;
+        }
+        #[cfg(feature = "local")]
         if sandbox.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly
             && sandbox.snapshot_archive_source.is_none()
             && sandbox.checkpoint_restore.is_none()
@@ -1965,14 +2036,9 @@ pub(crate) fn prepare_local_snapshot_restore(
     config: &mut SandboxConfig,
     snap: &crate::snapshot::Snapshot,
 ) -> MicrosandboxResult<()> {
-    // A security profile is a boot-time guest policy, not a host-side restore override.
-    // Validate the caller's explicit intent before preparing any snapshot resources.
-    config
-        .restore_boot_overrides
-        .validate_scope(snap.manifest().scope, config.snapshot_restore_mode)?;
-    if config.spec.runtime.user.is_none() {
-        config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
-    }
+    // Validate explicit boot-policy intent before preparing snapshot resources, then retain
+    // guest defaults independently of destination host policy and resource authorization.
+    super::snapshot_metadata::apply(config, snap.manifest())?;
     config.snapshot_parent = Some(snap.id().to_string());
     let unsupported = snap.manifest().unsupported_requires();
     if !unsupported.is_empty() {
@@ -2335,7 +2401,15 @@ impl From<SandboxConfig> for SandboxBuilder {
         let log_level = config.spec.runtime.log_level.take();
         let metrics_sample_interval_ms = config.spec.runtime.metrics_sample_interval_ms.take();
 
+        let workdir = config
+            .restore_guest
+            .retained()
+            .is_some()
+            .then(|| config.spec.runtime.workdir.clone());
         let mut patch = SandboxConfigPatch::from_present_fields(config);
+        if let Some(workdir) = workdir {
+            patch.spec.runtime.workdir = Some(workdir);
+        }
         patch.spec.replace_env_mut(env);
         patch.spec.runtime.shell = Some(shell);
         patch.spec.runtime.log_level = Some(log_level);
@@ -2359,8 +2433,8 @@ impl From<SandboxConfig> for SandboxBuilder {
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::{
-        BackendConfig, SandboxBuilder, SandboxConfigPatch, apply_checkpoint_resources,
-        checkpoint_network_override_conflicts,
+        BackendConfig, RestoreGuestState, SandboxBuilder, SandboxConfigPatch,
+        apply_checkpoint_resources, checkpoint_network_override_conflicts,
     };
     use crate::LogLevel;
     use crate::config::GlobalConfigPatch;
@@ -2964,6 +3038,58 @@ mod tests {
                 .max_cpus,
             10
         );
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn full_restore_rejects_managed_guest_changes_but_cold_restore_obeys_policy() {
+        let defaults =
+            serde_json::from_str(r#"{"sandbox_defaults":{"workdir":"/destination"}}"#).unwrap();
+        let managed =
+            serde_json::from_str(r#"{"sandbox_defaults":{"shell":"/bin/bash"}}"#).unwrap();
+        let policy = BackendConfig::new(defaults, managed);
+        let mut config = SandboxBuilder::new("child")
+            .image("alpine")
+            .shell("/bin/ash")
+            .finish(None, None)
+            .unwrap();
+        config.spec.runtime.workdir = None;
+        config.restore_guest = RestoreGuestState::Retained(Box::new(
+            super::super::snapshot_metadata::capture(&config),
+        ));
+        config.resumed_from_full_snapshot = true;
+        let unchanged = SandboxBuilder::from(config.clone())
+            .finish(None, None)
+            .unwrap();
+        assert_eq!(unchanged.spec.runtime.workdir, None);
+        assert_eq!(unchanged.spec.runtime.shell.as_deref(), Some("/bin/ash"));
+        for builder in [
+            SandboxBuilder::from(config.clone()).init("auto"),
+            SandboxBuilder::from(config.clone()).init_with("auto", |init| init),
+        ] {
+            assert!(
+                builder
+                    .finish(None, None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("init overrides require")
+            );
+        }
+        let error = SandboxBuilder::from(config.clone())
+            .workdir("/mutated-after-build")
+            .finish(None, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("captured guest configuration"));
+        let error = SandboxBuilder::from(config.clone())
+            .finish(Some(&policy), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("captured guest configuration"));
+        config.resumed_from_full_snapshot = false;
+        let cold = SandboxBuilder::from(config)
+            .finish(Some(&policy), None)
+            .unwrap();
+        assert_eq!(cold.spec.runtime.shell.as_deref(), Some("/bin/bash"));
+        assert_eq!(cold.spec.runtime.workdir, None);
     }
 
     #[test]

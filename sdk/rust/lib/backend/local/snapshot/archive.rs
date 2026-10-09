@@ -4968,7 +4968,10 @@ mod tests {
             false,
             None,
             &Default::default(),
-            crate::sandbox::RestoreBootOverrides { security: true },
+            crate::sandbox::RestoreBootOverrides {
+                security: true,
+                ..Default::default()
+            },
         )
         .await
         .err()
@@ -4995,7 +4998,10 @@ mod tests {
             true,
             None,
             &Default::default(),
-            crate::sandbox::RestoreBootOverrides { security: true },
+            crate::sandbox::RestoreBootOverrides {
+                security: true,
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

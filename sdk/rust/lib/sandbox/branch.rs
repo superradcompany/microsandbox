@@ -324,13 +324,17 @@ pub(super) async fn prepare_branch(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
-    // Owned declarations contain no source host path. Retain them as the required inventory
-    // until capture proves that every one has independent child backing; clear external mounts.
+    // Preserve an independent guest baseline before applying destination resource choices.
+    let captured = super::snapshot_metadata::capture(&config);
+    // Owned declarations contain no source host path. Retain their required inventory;
+    // restore tmpfs declarations separately so identical caller mappings cannot duplicate them.
     config
         .spec
         .mounts
         .retain(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
     config.spec.mounts.extend(options.spec.mounts);
+    super::snapshot_metadata::apply_tmpfs(&mut config.spec.mounts, &captured.tmpfs, true)?;
+    config.restore_guest = super::config::RestoreGuestState::Retained(Box::new(captured));
     if !options.restore_resources.inherit || !options.spec.network.ports.is_empty() {
         config.spec.network.ports = options.spec.network.ports;
     }

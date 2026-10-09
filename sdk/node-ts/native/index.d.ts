@@ -735,6 +735,13 @@ export declare class RestoreBuilder {
   constructor(snapshot: string, referenceKind?: string | undefined | null)
   /** Choose the destination sandbox name. */
   name(name: string): this
+  /** Select cold-restore PID 1. Full execution restore rejects this override. */
+  init(cmd: string, args?: Array<string> | undefined | null): this
+  /**
+   * Select cold-restore PID 1 with supplemental arguments and environment.
+   * Full execution restore rejects this override.
+   */
+  initWith(cmd: string, configure: (arg: InitOptionsBuilder) => InitOptionsBuilder): this
   /** Set destination CPUs; full execution restore requires the captured count. */
   cpus(count: number): this
   /** Set destination memory in MiB; full execution restore requires captured geometry. */
@@ -757,10 +764,10 @@ export declare class RestoreBuilder {
   maxDuration(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
   idleTimeout(secs: number): this
-  /** Explicitly reuse locally validated source resource bindings. */
-  dangerouslyInheritResources(): this
   /** Accept missing restore resources without inheriting host resources. */
   allowMissingResources(): this
+  /** Explicitly reuse locally validated source resource bindings. */
+  dangerouslyInheritResources(): this
   /** Supply the base for omitted disk layers and RAM objects in a snapshot archive. */
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */

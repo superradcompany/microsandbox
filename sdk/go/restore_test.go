@@ -3,6 +3,7 @@ package microsandbox
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ func TestRestoreDestinationControlsPreserveExplicitValues(t *testing.T) {
 		WithRestoreNetworkPolicy(NetworkPolicy.FromProfiles(NetworkProfilePublic)),
 		WithRestoreMaxConnections(0), WithRestoreDisableNetwork(),
 		WithRestoreSecurityProfile(SecurityProfileDefault),
+		WithRestoreInit(InitConfig{Cmd: "auto", Args: []string{"--unit=multi-user.target"}, Env: map[string]string{"container": "microsandbox"}}),
 		WithRestoreMaxDuration(0), WithRestoreIdleTimeout(1500 * time.Millisecond),
 	} {
 		option(&config)
@@ -38,6 +40,12 @@ func TestRestoreDestinationControlsPreserveExplicitValues(t *testing.T) {
 		if got[field] != want {
 			t.Errorf("%s = %#v, want %#v", field, got[field], want)
 		}
+	}
+	if !reflect.DeepEqual(got["init"], map[string]any{
+		"cmd": "auto", "args": []any{"--unit=multi-user.target"},
+		"env": []any{[]any{"container", "microsandbox"}},
+	}) {
+		t.Fatalf("init configuration lost: %#v", got["init"])
 	}
 	policy := got["network_policy"].(map[string]any)
 	if policy["default_egress"] != "deny" || len(policy["rules"].([]any)) == 0 {

@@ -206,6 +206,7 @@ pub(crate) fn restore_builder_from_args(
             "max_udp_connections",
             "disable_network",
             "security",
+            "init",
             "max_duration",
             "idle_timeout",
             "forked",
@@ -227,6 +228,10 @@ pub(crate) fn restore_builder_from_args(
                 "unexpected restore option: {key}"
             )));
         }
+    }
+    if let Some(init) = kwargs.get_item("init")?.filter(|value| !value.is_none()) {
+        let (cmd, args, env) = parse_init_kwarg(&init)?;
+        builder = builder.init_with(cmd, |init| init.args(args).envs(env));
     }
     if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
         builder = builder.cpus(cpus);

@@ -31,6 +31,7 @@ struct RestoreOptions {
     #[serde(default)]
     disable_network: bool,
     security_profile: Option<String>,
+    init: Option<super::InitOpts>,
     max_duration_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
     creation_progress: Option<u64>,
@@ -94,6 +95,11 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
         opts.snapshot_reference_kind.as_deref().unwrap_or(""),
     )?;
     let mut builder = Sandbox::restore_ref(reference).name(name);
+    if let Some(init) = &opts.init {
+        builder = builder.init_with(&init.cmd, |i| {
+            i.args(init.args.clone()).envs(init.env.clone())
+        });
+    }
     if let Some(cpus) = opts.cpus {
         builder = builder.cpus(cpus);
     }

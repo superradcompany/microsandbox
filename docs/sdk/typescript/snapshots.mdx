@@ -930,6 +930,8 @@ const child = await Sandbox.restore("api:baseline")
 | `restore()` | Return the restored sandbox. |
 | `restoreWithProgress()` | Return progress events; await `awaitSandbox()` for the sandbox. |
 
+Local snapshots retain [guest settings](/sandboxes/snapshots#retained-guest-settings), including init and scripts, through restore and later restart. `init(cmd), initWith(cmd, configure)` replaces PID 1 configuration for cold restore, including recovery of older snapshots without init metadata. Full execution restore rejects an init override.
+
 Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
 Full restore rejects missing external filesystems and additional disks by default. Use `allowMissingResources()` to resume with unavailable devices and warnings. This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.

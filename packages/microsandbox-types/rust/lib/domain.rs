@@ -771,7 +771,7 @@ pub enum VsockSocketType {
 //--------------------------------------------------------------------------------------------------
 
 /// Fully-assembled handoff-init specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HandoffInit {

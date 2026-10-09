@@ -81,6 +81,15 @@ pub struct RestoreControlArgs {
     /// Guest security profile for disk boot; rejected for full execution restore.
     #[arg(long, value_parser = ["default", "restricted"])]
     pub security: Option<String>,
+    /// PID 1 init for a cold disk restore (auto or an absolute guest path).
+    #[arg(long)]
+    pub init: Option<String>,
+    /// Supplemental PID 1 argument (repeatable); requires --init.
+    #[arg(long, requires = "init", allow_hyphen_values = true)]
+    pub init_arg: Vec<String>,
+    /// Supplemental PID 1 environment KEY=VALUE (repeatable); requires --init.
+    #[arg(long, requires = "init")]
+    pub init_env: Vec<String>,
     /// Maximum lifetime of the destination sandbox (e.g. 30s, 5m, 1h).
     #[arg(long, value_name = "DURATION")]
     pub max_duration: Option<String>,
@@ -135,6 +144,21 @@ impl RestoreControlArgs {
             };
             builder = builder.security(profile);
         }
+
+        if let Some(init) = &self.init {
+            let env = self
+                .init_env
+                .iter()
+                .map(|value| {
+                    let (key, value) = value
+                        .split_once('=')
+                        .ok_or_else(|| anyhow::anyhow!("--init-env requires KEY=VALUE"))?;
+                    Ok((key.to_owned(), value.to_owned()))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            builder = builder.init_with(init, |init| init.args(self.init_arg.clone()).envs(env));
+        }
+
         if let Some(duration) = &self.max_duration {
             builder = builder.max_duration(super::common::parse_duration_secs(duration)?);
         }

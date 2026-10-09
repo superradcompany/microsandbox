@@ -317,7 +317,15 @@ def test_sandbox_create_treats_explicit_none_as_omitted() -> None:
 @pytest.mark.asyncio
 async def test_missing_local_snapshot_is_reported_when_restore_is_awaited() -> None:
     with pytest.raises(FileNotFoundError, match="snapshot not found"):
-        await Sandbox.restore("definitely-missing-snapshot", name="missing-local-snapshot")
+        await Sandbox.restore(
+            "definitely-missing-snapshot",
+            name="missing-local-snapshot",
+            init={
+                "cmd": "auto",
+                "args": ["--unit=multi-user.target"],
+                "env": {"container": "microsandbox"},
+            },
+        )
 
 
 @pytest.mark.asyncio

@@ -29,10 +29,11 @@ pub struct RestoreBuilder {
 }
 
 /// Explicit boot-policy requests must survive deferred source resolution, even when their
-/// values equal defaults. Captured execution cannot acquire a different guest security setup.
+/// values equal defaults. Captured execution cannot acquire different security or PID 1 setup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RestoreBootOverrides {
     pub(crate) security: bool,
+    pub(crate) init: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -48,6 +49,9 @@ impl RestoreBootOverrides {
     ) -> MicrosandboxResult<()> {
         if scope != crate::snapshot::SnapshotScope::Full || mode == SnapshotRestoreMode::DiskOnly {
             return Ok(());
+        }
+        if self.init {
+            return Err(MicrosandboxError::InvalidConfig("init overrides require a disk snapshot or disk-only restore; full restore resumes the captured PID 1".into()));
         }
         if self.security {
             return Err(MicrosandboxError::unsupported(
@@ -170,11 +174,23 @@ impl RestoreBuilder {
     /// Captured processes cannot be retroactively confined, so full restore rejects this setter.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
         self.inner = self.inner.security(profile);
-        self.inner
-            .config
-            .restore_boot_overrides
-            .get_or_insert_with(Default::default)
-            .security = true;
+        self
+    }
+
+    /// Select PID 1 for a cold disk restore, including snapshots created without init metadata.
+    /// Full execution restore rejects this override.
+    pub fn init(self, cmd: impl Into<String>) -> Self {
+        self.init_with(cmd, |init| init)
+    }
+
+    /// Select cold-restore PID 1 with supplemental arguments and environment.
+    /// Replaces the captured init specification; full execution restore rejects it.
+    pub fn init_with(
+        mut self,
+        cmd: impl Into<String>,
+        configure: impl FnOnce(super::init::InitOptionsBuilder) -> super::init::InitOptionsBuilder,
+    ) -> Self {
+        self.inner = self.inner.init_with(cmd, configure);
         self
     }
 
@@ -374,11 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn only_explicit_guest_security_changes_are_refused_for_full_execution() {
+    fn explicit_guest_boot_changes_are_refused_for_full_execution() {
         use crate::snapshot::SnapshotScope;
 
-        for security in [false, true] {
-            let overrides = RestoreBootOverrides { security };
+        for (security, init) in [(false, false), (true, false), (false, true), (true, true)] {
+            let overrides = RestoreBootOverrides { security, init };
             assert!(
                 overrides
                     .validate_scope(SnapshotScope::Disk, SnapshotRestoreMode::Full)
@@ -393,7 +409,7 @@ mod tests {
                 overrides
                     .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::Full)
                     .is_err(),
-                security
+                security || init
             );
         }
     }

@@ -29,6 +29,8 @@ type RestoreConfig struct {
 	DisableNetwork    bool
 	// Explicit guest security requires disk scope or SnapshotDiskOnly.
 	SecurityProfile SecurityProfile
+	// Init selects PID 1 for a cold disk restore; full restore rejects it.
+	Init *InitConfig
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
 	MaxDuration                 *time.Duration
 	IdleTimeout                 *time.Duration
@@ -111,6 +113,11 @@ func WithRestoreSecurityProfile(profile SecurityProfile) RestoreOption {
 	return func(o *RestoreConfig) { o.SecurityProfile = profile }
 }
 
+// WithRestoreInit selects PID 1 for cold disk restore, replacing captured init settings.
+func WithRestoreInit(init InitConfig) RestoreOption {
+	return func(o *RestoreConfig) { o.Init = &init }
+}
+
 // WithRestoreMaxDuration sets the destination runtime limit. Zero requests immediate expiry.
 func WithRestoreMaxDuration(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxDuration = &duration }
@@ -155,9 +162,9 @@ func WithAllowMissingResources() RestoreOption {
 }
 
 func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ffi.RestoreOptions {
-	// Reuse mount/route serialization only. Never pass a creation config to the
+	// Reuse mount and init serialization only. Never pass a creation config to the
 	// native restore operation or copy global creation defaults into it.
-	resources := buildFFICreateOptions(SandboxConfig{Volumes: config.Volumes})
+	resources := buildFFICreateOptions(SandboxConfig{Volumes: config.Volumes, Init: config.Init})
 	// Preserve a cloud ID versus a host-volume path instead of guessing from its spelling.
 	var reference, referenceKind string
 	switch value := any(snapshot).(type) {
@@ -191,7 +198,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		CPUs: config.CPUs, MemoryMiB: config.MemoryMiB, NetworkPolicy: policy,
 		MaxConnections: config.MaxConnections, MaxTCPConnections: config.MaxTCPConnections,
 		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
-		SecurityProfile: string(config.SecurityProfile),
+		SecurityProfile: string(config.SecurityProfile), Init: resources.Init,
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
 		Forked: config.Forked, DiskOnly: config.SnapshotDiskOnly,
 		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),

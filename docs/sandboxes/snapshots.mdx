@@ -17,6 +17,57 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 | **Disk** | Files and owned volumes | Boots a new VM |
 | **Full** | Disk, memory, and running processes | Resumes execution |
 
+## Retained guest settings
+
+Local snapshots retain the effective guest environment, working directory, shell,
+registered scripts, command defaults, explicit hostname, PID 1 init, resource
+limits, security profile, transparent huge-page policy, and tmpfs declarations.
+These settings travel with exported archives and remain on the restored sandbox
+for later stop/start cycles. Live capture uses the running configuration;
+stopped capture uses the saved configuration.
+
+Exported metadata includes environment values and script bodies in readable form.
+Use [secret injection](/sandboxes/secrets) for credentials that should stay out of
+retained guest settings.
+
+When creating from a disk snapshot, explicit guest settings override captured
+defaults; environment variables and scripts follow their usual merge or replace
+rules. Full restores reject conflicting guest settings because execution resumes
+with the captured state.
+
+A full restore resumes captured execution without rerunning the command defaults.
+A disk restore boots fresh. Tmpfs contents survive only a full resume; cold boot
+recreates the declared mounts empty. Direct branches also retain these declarations
+for later cold starts. Full restore and branching reject added or changed tmpfs
+mounts because the running guest cannot apply them. The existing default-user
+retention and owned-storage capture still apply.
+
+Host bindings, published ports, vsock routes, network policy, host placement,
+labels, and lifetime limits remain destination choices. CPU and memory defaults
+remain destination choices for disk boot; full restore requires captured geometry.
+Managed settings still take precedence, and conflicting guest settings are
+rejected before full execution resumes.
+
+The complete snapshot metadata, including retained scripts and environment
+variables, must fit within 1 MiB. Disk and memory contents do not count toward
+this limit. Retained settings have no separate size cap.
+
+These settings are stored in the existing `microsandbox.restore-defaults`
+extension alongside the default user. Snapshots containing the expanded payload
+require a supporting reader; older readers reject the additional `config` field
+instead of silently dropping guest settings. Older user-only snapshots remain
+readable, but missing settings cannot be reconstructed. For an older systemd disk
+snapshot, select init explicitly:
+
+```bash
+msb snapshot restore baseline:ready --name worker --init auto
+```
+
+`--init-arg` and `--init-env KEY=VALUE` supply additional init arguments and
+environment. Init overrides require a cold disk restore; for a full snapshot,
+add `--disk-only`. Local guest-configuration retention does not change the cloud
+service's snapshot contract.
+
 ## Disk snapshots
 
 Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how pending writes are handled.

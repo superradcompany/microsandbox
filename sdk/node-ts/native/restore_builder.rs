@@ -4,6 +4,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use crate::error::to_napi_error;
+use crate::init_options_builder::JsInitOptionsBuilder;
 use crate::mount_builder::JsMountBuilder;
 use crate::network_policy_builder::JsNetworkPolicyBuilder;
 use crate::pull_progress::JsPullProgressStream;
@@ -50,6 +51,37 @@ impl JsRestoreBuilder {
     pub fn name(&mut self, name: String) -> Result<&Self> {
         let inner = self.take_inner()?;
         self.inner = Some(inner.name(name));
+        Ok(self)
+    }
+
+    /// Select cold-restore PID 1. Full execution restore rejects this override.
+    #[napi]
+    pub fn init(&mut self, cmd: String, args: Option<Vec<String>>) -> Result<&Self> {
+        let prev = self.take_inner()?;
+        self.inner = Some(match args {
+            Some(args) if !args.is_empty() => prev.init_with(cmd, |i| i.args(args)),
+            _ => prev.init(cmd),
+        });
+        Ok(self)
+    }
+
+    /// Select cold-restore PID 1 with supplemental arguments and environment.
+    /// Full execution restore rejects this override.
+    #[napi(js_name = "initWith")]
+    pub fn init_with(
+        &mut self,
+        env: &Env,
+        cmd: String,
+        configure: Function<
+            ClassInstance<JsInitOptionsBuilder>,
+            ClassInstance<JsInitOptionsBuilder>,
+        >,
+    ) -> Result<&Self> {
+        let initial = JsInitOptionsBuilder::new().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let init_builder = returned.take_inner_builder()?;
+        let prev = self.take_inner()?;
+        self.inner = Some(prev.init_with(cmd, |_default| init_builder));
         Ok(self)
     }
 

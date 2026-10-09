@@ -498,6 +498,11 @@ impl Manifest {
             .map_err(|error| descriptor_error_value(format!("serialize failed: {error}")))?;
         let mut output = Vec::new();
         write_canonical_json(&value, &mut output)?;
+
+        if output.len() > MAX_DESCRIPTOR_BYTES {
+            return descriptor_error(format!("descriptor exceeds {MAX_DESCRIPTOR_BYTES} bytes"));
+        }
+
         Ok(output)
     }
 
@@ -884,6 +889,106 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_metadata_requires_support_and_rejects_unsafe_metadata() {
+        use super::super::{RESTORE_DEFAULTS_EXTENSION, RestoreDefaults};
+
+        let mut manifest = descriptor();
+        assert!(manifest.restore_defaults().unwrap().config.is_none());
+        let guest = serde_json::json!({
+            "env": [{"key":"KEEP", "value":"value"}], "workdir":"/tmp", "shell":"/bin/sh",
+            "scripts":{"hello":"x".repeat(600 * 1024), "build:prod":"#!/bin/sh\nprintf build\n", r"a\b":"#!/bin/sh\nprintf retained\n"}, "entrypoint":null, "cmd":null,
+            "hostname":null, "init":{"cmd":"auto", "args":[], "env":[]},
+            "rlimits":[{"resource":"Nofile", "soft":"256", "hard":"18446744073709551615"}],
+            "security":"restricted", "thp":"never", "tmpfs":[{"guest":"/ram", "size_mib":16, "options":{}}]
+        });
+        manifest
+            .set_restore_defaults(RestoreDefaults {
+                user: Some("1000".into()),
+                config: Some(serde_json::from_value(guest.clone()).unwrap()),
+            })
+            .unwrap();
+        assert!(
+            manifest
+                .extensions
+                .contains_key(super::super::RESTORE_DEFAULTS_EXTENSION),
+            "retained configuration must use the existing restore-defaults extension"
+        );
+        let reopened = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert!(reopened.unsupported_requires().is_empty());
+        assert_eq!(
+            reopened.restore_defaults().unwrap().config.unwrap().rlimits[0].hard,
+            u64::MAX
+        );
+        assert!(
+            reopened
+                .requires
+                .iter()
+                .any(|key| key == RESTORE_DEFAULTS_EXTENSION)
+        );
+        assert_eq!(reopened.extensions.len(), 1);
+        assert_eq!(
+            reopened.restore_defaults().unwrap().user.as_deref(),
+            Some("1000")
+        );
+        // Guest settings may exceed 512 KiB when the complete descriptor fits within 1 MiB.
+        assert_eq!(
+            reopened.restore_defaults().unwrap().config.unwrap().scripts["hello"],
+            "x".repeat(600 * 1024)
+        );
+        let mut oversized = reopened.clone();
+        oversized
+            .extensions
+            .get_mut(RESTORE_DEFAULTS_EXTENSION)
+            .unwrap()["config"]["scripts"]["hello"] =
+            serde_json::json!("x".repeat(MAX_DESCRIPTOR_BYTES));
+        assert!(
+            oversized
+                .to_canonical_bytes()
+                .unwrap_err()
+                .to_string()
+                .contains("descriptor exceeds")
+        );
+        assert!(
+            Manifest::from_bytes(&serde_json::to_vec(&oversized).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("descriptor exceeds")
+        );
+        // Missing admission, host-resource fields, traversal, invalid env, and lossy integers
+        // are rejected at the portable descriptor boundary, before any guest or host writes.
+        let mut missing_requirement = reopened.clone();
+        missing_requirement.requires.clear();
+        assert!(missing_requirement.validate().is_err());
+        for (pointer, value) in [
+            ("/host", serde_json::json!("/private")),
+            ("/scripts", serde_json::json!({"../outside":"payload"})),
+            ("/env/0/key", serde_json::json!("BAD=NAME")),
+            ("/env/0/value", serde_json::json!("bad\0value")),
+            ("/tmpfs/0/guest", serde_json::json!("/ram/../etc")),
+            (
+                "/rlimits/0/hard",
+                serde_json::json!(18446744073709551615_u64),
+            ),
+            (
+                "/rlimits/0/soft",
+                serde_json::json!("99999999999999999999999999999"),
+            ),
+        ] {
+            let mut invalid = guest.clone();
+            if pointer == "/host" {
+                invalid["host"] = value;
+            } else {
+                *invalid.pointer_mut(pointer).unwrap() = value;
+            }
+            manifest.extensions.insert(
+                RESTORE_DEFAULTS_EXTENSION.into(),
+                serde_json::json!({"user":"1000", "config":invalid}),
+            );
+            assert!(manifest.validate().is_err(), "accepted {pointer}");
+        }
+    }
+
+    #[test]
     fn restore_defaults_are_required_bounded_and_round_trip() {
         let mut manifest = descriptor();
         let original = manifest.to_canonical_bytes().unwrap();
@@ -893,7 +998,15 @@ mod tests {
         assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
         let defaults = super::super::RestoreDefaults {
             user: Some("0:0".into()),
+            config: None,
         };
+        // Exact released payload: adding guest settings must not rewrite a user-only record.
+        let released = br#"{"user":"0:0"}"#;
+        assert_eq!(serde_json::to_vec(&defaults).unwrap(), released);
+        assert_eq!(
+            serde_json::from_slice::<super::super::RestoreDefaults>(released).unwrap(),
+            defaults
+        );
         manifest.set_restore_defaults(defaults.clone()).unwrap();
         assert!(
             manifest
@@ -976,6 +1089,31 @@ mod tests {
                 .unwrap()
                 .starts_with("{\"capture\":")
         );
+    }
+
+    #[test]
+    fn canonical_descriptor_writer_enforces_reader_size_limit() {
+        let mut manifest = descriptor();
+        manifest
+            .extensions
+            .insert("example.padding".into(), serde_json::json!(""));
+        let overhead = manifest.to_canonical_bytes().unwrap().len();
+        manifest.extensions.insert(
+            "example.padding".into(),
+            serde_json::json!("x".repeat(MAX_DESCRIPTOR_BYTES - overhead)),
+        );
+        let bytes = manifest.to_canonical_bytes().unwrap();
+        assert_eq!(bytes.len(), MAX_DESCRIPTOR_BYTES);
+        Manifest::from_bytes(&bytes).unwrap();
+        manifest.extensions.insert(
+            "example.padding".into(),
+            serde_json::json!("x".repeat(MAX_DESCRIPTOR_BYTES - overhead + 1)),
+        );
+        let error = manifest
+            .to_canonical_bytes()
+            .err()
+            .expect("oversized descriptor must fail before publication");
+        assert!(error.to_string().contains("descriptor exceeds"));
     }
 
     #[test]

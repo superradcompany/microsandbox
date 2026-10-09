@@ -131,6 +131,23 @@ pub(crate) struct RestoreOverrideIntent {
     pub(crate) max_memory: bool,
 }
 
+/// Construction state for guest settings. Filled-in defaults are never caller intent.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum RestoreGuestState {
+    /// No guest metadata or deferred guest options are retained by this operation.
+    #[default]
+    Unresolved,
+    /// Metadata is deferred (for example, an archive decoded during creation).
+    Pending {
+        /// Original sparse options, including collection merge/replace intent.
+        overrides: Box<SandboxSpecPatch>,
+        /// Effective options at the last build, used to detect later concrete-config edits.
+        built: Option<Box<microsandbox_types::snapshot::SnapshotMetadataV1>>,
+    },
+    /// Admitted guest settings, immutable through later full-restore validation.
+    Retained(Box<microsandbox_types::snapshot::SnapshotMetadataV1>),
+}
+
 /// Configuration for a sandbox.
 ///
 /// The durable task description lives in [`SandboxSpec`]. This type keeps
@@ -146,6 +163,10 @@ pub struct SandboxConfig {
     #[serde(flatten)]
     #[config_patch(nested)]
     pub spec: SandboxSpec,
+
+    /// Pending caller options or an admitted guest baseline; never persisted.
+    #[serde(skip)]
+    pub(crate) restore_guest: RestoreGuestState,
 
     /// Registry authentication for private OCI registries.
     ///
@@ -326,6 +347,16 @@ pub struct SandboxConfig {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RestoreGuestState {
+    /// Borrow the admitted baseline only after snapshot metadata has been applied.
+    pub(crate) fn retained(&self) -> Option<&microsandbox_types::snapshot::SnapshotMetadataV1> {
+        match self {
+            Self::Retained(metadata) => Some(metadata),
+            Self::Unresolved | Self::Pending { .. } => None,
+        }
+    }
+}
 
 impl SandboxConfigPatch {
     /// Convert ordinary backend defaults; host deployment policy is applied during local creation.
@@ -624,6 +655,7 @@ impl SandboxConfig {
         }
         config.restore_overrides = RestoreOverrideIntent::default();
         config.restore_boot_overrides = Default::default();
+        config.restore_guest = RestoreGuestState::Unresolved;
         config.launch_intent = LaunchIntent::None;
         config.launch_cmd_before_override = None;
         config.init_owns_workload = false;
@@ -701,6 +733,15 @@ impl SandboxConfig {
     /// - `init`: an `auto` init may resolve from a known init at the start of the image entrypoint and inherit the effective entrypoint env.
     #[cfg(feature = "local")]
     pub fn merge_image_defaults(&mut self, image: &ImageConfig) {
+        if self.restore_guest.retained().is_some() {
+            self.spec.labels = merge_image_labels(&image.labels, &self.spec.labels);
+            if self.restore_boot_overrides.init {
+                // An explicit cold-restore init still uses image-directed detection.
+                // Captured command defaults remain authoritative, including absence.
+                self.resolve_auto_init_from_image_entrypoint(image.entrypoint.as_deref(), false);
+            }
+            return;
+        }
         self.spec.env = merge_env(&image.env, &self.spec.env);
         self.spec.labels = merge_image_labels(&image.labels, &self.spec.labels);
 
@@ -888,6 +929,10 @@ impl SandboxConfig {
     /// deliberately RAM-backed root receives the historical bounded tmpfs.
     /// Explicit mounts, including tmpfs stored by older versions, are retained.
     pub(crate) fn apply_runtime_defaults(&mut self) {
+        // Effective captured settings already include runtime defaults, including their absence.
+        if self.restore_guest.retained().is_some() {
+            return;
+        }
         if !matches!(
             self.spec.image.oci_root_disk(),
             Some(RootDisk::Tmpfs { .. })
@@ -1108,6 +1153,7 @@ impl Default for SandboxConfig {
             registry_auth: None,
             #[cfg(feature = "local")]
             creation_progress: None,
+            restore_guest: RestoreGuestState::Unresolved,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -1157,7 +1203,9 @@ mod tests {
 
     use microsandbox_runtime::launch::CheckpointRestoreConfig;
 
-    use super::{SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode, merge_env};
+    use super::{
+        RestoreGuestState, SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode, merge_env,
+    };
     use crate::sandbox::{
         HandoffInit, MountOptions, NamedVolumeMode, RootDisk, RootfsSource, StatVirtualization,
         VolumeMount,
@@ -1589,6 +1637,7 @@ mod tests {
         let config = SandboxConfig {
             restore_boot_overrides: super::super::restore_builder::RestoreBootOverrides {
                 security: true,
+                init: true,
             },
             ..Default::default()
         };
@@ -1663,6 +1712,50 @@ mod tests {
                 assert!(create.is_none());
             }
             other => panic!("expected named mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retained_snapshot_metadata_resolves_only_explicit_auto_init_override() {
+        let image = ImageConfig {
+            entrypoint: Some(vec!["/init".into()]),
+            cmd: Some(vec!["/image-command".into()]),
+            working_dir: Some("/image-workdir".into()),
+            env: vec!["IMAGE_ONLY=ignored".into()],
+            ..Default::default()
+        };
+        for explicit_override in [false, true] {
+            for entrypoint in [None, Some(vec!["/captured-command".into()])] {
+                let mut config = SandboxConfig {
+                    spec: SandboxSpec {
+                        env: vec![EnvVar::new("CAPTURED", "value")],
+                        runtime: SandboxRuntimeOptions {
+                            entrypoint: entrypoint.clone(),
+                            ..Default::default()
+                        },
+                        init: Some(HandoffInit {
+                            cmd: "auto".into(),
+                            args: vec!["--custom".into()],
+                            env: Vec::new(),
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                config.restore_guest = RestoreGuestState::Retained(Box::new(
+                    super::super::snapshot_metadata::capture(&config),
+                ));
+                config.restore_boot_overrides.init = explicit_override;
+                config.merge_image_defaults(&image);
+                let init = config.spec.init.as_ref().unwrap();
+                assert_eq!(init.cmd, if explicit_override { "/init" } else { "auto" });
+                assert_eq!(init.args, ["--custom"]);
+                assert_eq!(config.spec.runtime.entrypoint, entrypoint);
+                assert_eq!(config.spec.runtime.cmd, None);
+                assert_eq!(config.spec.runtime.workdir, None);
+                assert_eq!(config.spec.env, [EnvVar::new("CAPTURED", "value")]);
+                assert!(!config.init_owns_boot_workload());
+            }
         }
     }
 

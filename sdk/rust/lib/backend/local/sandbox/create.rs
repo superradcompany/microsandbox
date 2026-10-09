@@ -227,7 +227,9 @@ impl LocalBackend {
         let mut pinned_manifest_digest: Option<String> = None;
         let mut pinned_reference: Option<String> = None;
 
-        config.apply_runtime_defaults();
+        if config.snapshot_archive_source.is_none() {
+            config.apply_runtime_defaults();
+        }
         validate_hostname(config.spec.runtime.hostname.as_deref())?;
         self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         Self::validate_rootfs_source(&config.spec.image)?;
@@ -256,7 +258,7 @@ impl LocalBackend {
         // Archive metadata supplies effective runtime requirements; validating the
         // builder alone misses those. Publication below is a rename, not another copy.
         let mut archive_stage = None;
-        if let Some(archive) = config.snapshot_archive_source.take() {
+        if let Some(archive) = config.snapshot_archive_source.clone() {
             tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
             let stage = tempfile::Builder::new()
                 .prefix(".archive-restore-")
@@ -275,10 +277,8 @@ impl LocalBackend {
                 config.restore_boot_overrides,
             ))
             .await?;
+            crate::sandbox::snapshot_metadata::apply(&mut config, &materialized.manifest)?;
             config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
-            if config.spec.runtime.user.is_none() {
-                config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
-            }
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
@@ -331,11 +331,16 @@ impl LocalBackend {
                         }
                     }));
             }
+            config.apply_runtime_defaults();
             // Archive metadata is now available. Check policy against captured state
             // before admitting it or touching the replacement target.
             config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
             // Keep launch-time restore intent in this check, not just cold-start state.
             launch_contract::validate_runtime_config(&config, self.config()).await?;
+            // The request is consumed only after its materialized state passes validation.
+            // Keep disk-only intent intact; it must never masquerade as a full resume.
+            config.snapshot_archive_source = None;
+            config.snapshot_base = None;
             archive_stage = Some(stage);
         }
 

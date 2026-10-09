@@ -253,6 +253,7 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `-c`, `--cpus` | CPU count for disk boot; full restore requires the captured count |
 | `-m`, `--memory` | Memory for disk boot, e.g. `2G`; full restore requires the captured size |
 | `--security` | `default` or `restricted`, applied at disk boot; rejected for full execution restore |
+| `--init`, `--init-arg`, `--init-env` | Replace PID 1 configuration for cold disk restore; arguments and environment require `--init` |
 | `--no-net` | Deny traffic in both directions by default; keeps the captured device and accepts explicit allow rules |
 | `--net-default` | Set both traffic defaults to `allow` or `deny` |
 | `--net-rule` | Repeatable host-policy rule; requires `--net-default` or `--no-net` |
@@ -268,6 +269,8 @@ Progress is shown by default. Memory preparation has no fixed timeout and does n
 Full restore must keep captured CPU and memory settings and cannot apply a guest security profile. Use `--disk-only` to change them.
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
+
+Local snapshot restore retains [guest settings](/sandboxes/snapshots#retained-guest-settings), including init, scripts, limits, and guest security, for later restarts.
 
 Restore and branch do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Full restore refuses missing external filesystems and additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. Warnings remain visible with `--quiet`. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct branching retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
 
