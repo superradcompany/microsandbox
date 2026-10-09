@@ -1047,7 +1047,14 @@ mod tests {
                 Ok(()) => Ok(()),
                 // Fail-closed relay outcomes may drop the upstream socket before
                 // the fixture can send its TLS close notification.
-                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         });

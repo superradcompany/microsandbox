@@ -39,8 +39,12 @@ def fixture_environment(home, binary, agent, firmware):
     return env
 
 
-def test_command(archive, workspace, test):
-    return ["cargo-nextest", "nextest", "run", "--archive-file", str(archive),
+def test_command(extracted, workspace, test):
+    target = extracted / "target"
+    return ["cargo-nextest", "nextest", "run",
+            "--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
+            "--binaries-metadata", str(target / "nextest/binaries-metadata.json"),
+            "--target-dir-remap", str(target),
             "--workspace-remap", str(workspace), "--run-ignored=only",
             "--test-threads", "1", "--no-tests", "fail",
             "-E", f"binary(=jobs) & test(={test})"]
@@ -116,8 +120,21 @@ class Suite:
             raise RuntimeError(f"managed-job fixture cleanup failed: {errors}; remaining={remaining}")
 
     def execute(self):
+        # Nextest otherwise extracts the entire archive for every case. Own one
+        # extraction for this suite, including cleanup after failure or cancellation.
+        with tempfile.TemporaryDirectory(prefix="msb-managed-tests-") as directory:
+            extracted = Path(directory)
+            if not self.args.python_only:
+                self.run("extract-tests", ["cargo-nextest", "nextest", "list",
+                         "--archive-file", str(self.args.archive),
+                         "--extract-to", str(extracted),
+                         "--workspace-remap", str(self.args.workspace),
+                         "--list-type", "binaries-only"])
+            self.execute_cases(extracted)
+
+    def execute_cases(self, extracted):
         cases = [] if self.args.python_only else [
-            (name, test_command(self.args.archive, self.args.workspace, name)) for name in CASES]
+            (name, test_command(extracted, self.args.workspace, name)) for name in CASES]
         # managed-jobs.py invokes the real-terminal harness as well as CLI lifecycle
         # checks. Each CLI script gets a fresh VM, just like each Rust integration test.
         if not self.args.python_only:

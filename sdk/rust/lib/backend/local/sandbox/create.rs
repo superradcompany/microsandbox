@@ -1043,7 +1043,7 @@ impl LocalBackend {
     ) -> MicrosandboxResult<()> {
         // A timeout is not evidence of process exit. Keep the runtime ownership guard through
         // database reconciliation and volume rollback; no live owner may lose its storage.
-        let Some(_runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+        let Some(runtime_guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
             &self.config().run_dir(),
             sandbox_name,
         )?
@@ -1052,6 +1052,22 @@ impl LocalBackend {
                 "startup cleanup pending: runtime still owns sandbox {sandbox_name:?}",
             )));
         };
+        self.rollback_failed_startup_guarded(
+            write_db,
+            sandbox_id,
+            created_named_volumes,
+            &runtime_guard,
+        )
+        .await
+    }
+
+    async fn rollback_failed_startup_guarded(
+        &self,
+        write_db: &DbWriteConnection,
+        sandbox_id: i32,
+        created_named_volumes: &EnsuredNamedVolumes,
+        _runtime_guard: &microsandbox_runtime::ipc::SandboxLifecycleGuard,
+    ) -> MicrosandboxResult<()> {
         run_entity::Entity::update_many()
             .col_expr(
                 run_entity::Column::Status,
@@ -1070,16 +1086,16 @@ impl LocalBackend {
             .exec(write_db)
             .await?;
         if created_named_volumes.is_empty() {
-            let _ = Self::compare_and_set_sandbox_status(
+            Self::compare_and_set_sandbox_status(
                 write_db,
                 sandbox_id,
                 &[SandboxStatus::Starting, SandboxStatus::Running],
                 SandboxStatus::Stopped,
             )
-            .await;
+            .await?;
         } else {
             rollback_created_named_volumes(self, created_named_volumes).await;
-            let _ = Self::delete_sandbox_record(write_db, sandbox_id).await;
+            Self::delete_sandbox_record(write_db, sandbox_id).await?;
         }
         Ok(())
     }

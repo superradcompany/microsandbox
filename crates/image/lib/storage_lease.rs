@@ -221,12 +221,12 @@ fn open(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     #[test]
     fn descriptor_pins_allow_reads_and_exclude_retirement() {
-        use std::time::{Duration, Instant};
-
         let directory = tempfile::tempdir().unwrap();
         let descriptor = directory.path().join("snapshot.json");
         std::fs::write(&descriptor, b"descriptor").unwrap();
@@ -275,7 +275,15 @@ mod tests {
         drop(reader);
         assert!(StorageLease::try_exclusive(&a).unwrap().is_none());
         drop(clone);
-        assert!(StorageLease::try_exclusive(&a).unwrap().is_some());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if StorageLease::try_exclusive(&a).unwrap().is_some() {
+                break;
+            }
+            // A concurrent fork can retain the last descriptor until exec closes it.
+            assert!(Instant::now() < deadline, "reader lease remained busy");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]

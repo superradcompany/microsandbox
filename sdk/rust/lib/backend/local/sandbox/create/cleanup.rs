@@ -115,12 +115,11 @@ impl CleanupState {
             // A WAL reader could otherwise observe "no row" before that commit completes.
             .one(pools.write())
             .await?;
-        // The retained transition excludes a new create/start/remove throughout the query
-        // and rollback. Release only the lifecycle probe so the existing rollback can own it.
-        drop(guard);
+        // Keep the same lifecycle guard through reconciliation. Dropping and reopening
+        // it can race a fork that briefly retains the original open file description.
         if let Some(model) = model {
             local
-                .rollback_failed_startup(pools.write(), model.id, &self.name, &self.volumes)
+                .rollback_failed_startup_guarded(pools.write(), model.id, &self.volumes, &guard)
                 .await?;
         } else {
             crate::runtime::rollback_created_named_volumes(local, &self.volumes).await;
@@ -129,12 +128,6 @@ impl CleanupState {
             // Rollback can retain a recoverable stopped row, or remove the row when
             // one-shot named volumes were created. Prove which outcome committed before
             // deleting anything, while still excluding both runtimes and replacements.
-            let _guard = crate::runtime::acquire_sandbox_lifecycle_guard(
-                &local.config().run_dir(),
-                &self.name,
-                Duration::from_secs(10),
-            )
-            .await?;
             let retained = sandbox_entity::Entity::find()
                 .filter(sandbox_entity::Column::Name.eq(&self.name))
                 .one(pools.write())
@@ -437,9 +430,9 @@ mod tests {
 
     #[tokio::test]
     async fn owned_cleanup_preserves_backing_whenever_catalog_row_survives() {
-        for refuse_delete in [false, true] {
+        for refused_operation in [None, Some("DELETE"), Some("UPDATE")] {
             let mut fixture = OwnedFixture::new("owned-retained-row").await;
-            if refuse_delete {
+            if refused_operation == Some("DELETE") {
                 fixture.config.spec.mounts.push(
                     MountBuilder::new("/created")
                         .named_with("created", |volume| volume.ensure_exists())
@@ -453,19 +446,25 @@ mod tests {
                 LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
                     .await
                     .unwrap();
-            if refuse_delete {
-                pools.write().execute_unprepared(
-                    "CREATE TRIGGER retain_sandbox BEFORE DELETE ON sandbox BEGIN SELECT RAISE(ABORT, 'retained'); END;",
-                ).await.unwrap();
+            if let Some(operation) = refused_operation {
+                pools.write().execute_unprepared(&format!(
+                    "CREATE TRIGGER retain_sandbox BEFORE {operation} ON sandbox BEGIN SELECT RAISE(ABORT, 'retained'); END;",
+                )).await.unwrap();
             }
             let error = finish_test_owned_failure(&mut cleanup).await;
-            assert_eq!(error.to_string(), "startup failed");
+            if refused_operation.is_some() {
+                let message = error.to_string();
+                assert!(message.contains("startup failed"), "{message}");
+                assert!(message.contains("retained"), "{message}");
+            } else {
+                assert_eq!(error.to_string(), "startup failed");
+            }
             let row = sandbox_entity::Entity::find_by_id(id)
                 .one(pools.write())
                 .await
                 .unwrap()
                 .unwrap();
-            if !refuse_delete {
+            if refused_operation.is_none() {
                 assert_eq!(row.status, SandboxStatus::Stopped);
             }
             assert_eq!(

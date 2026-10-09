@@ -49,17 +49,30 @@ job = (
 )
 print("created", job, flush=True)
 assert job.startswith("job_")
-time.sleep(0.4)
-before = run("logs", sandbox, "--job", job).stdout
-assert before.strip(), before
+deadline = time.monotonic() + 5
+while not run("logs", sandbox, "--job", job).stdout.strip():
+    assert time.monotonic() < deadline, "job did not produce initial output"
+    time.sleep(0.05)
 run("pause", sandbox)
+# Pausing stops guest execution, but output already received by the host can
+# still reach the job log. Require a quiet window after that backlog drains.
 paused = run("logs", sandbox, "--job", job).stdout
-time.sleep(0.4)
-assert run("logs", sandbox, "--job", job).stdout == paused
+deadline = time.monotonic() + 5
+while True:
+    time.sleep(0.4)
+    current = run("logs", sandbox, "--job", job).stdout
+    if current == paused:
+        break
+    assert time.monotonic() < deadline, ("output kept growing while paused", paused, current)
+    paused = current
 run("resume", sandbox)
-time.sleep(0.4)
-after = run("logs", sandbox, "--job", job).stdout
-assert len(after) > len(paused), (paused, after)
+deadline = time.monotonic() + 5
+while True:
+    after = run("logs", sandbox, "--job", job).stdout
+    if len(after) > len(paused):
+        break
+    assert time.monotonic() < deadline, ("output did not resume", paused, after)
+    time.sleep(0.05)
 run("kill", sandbox, "--job", job)
 info = json.loads(run("inspect", sandbox, "--job", job, "--format", "json").stdout)
 wait = run("wait", sandbox, "--job", job, check=False)

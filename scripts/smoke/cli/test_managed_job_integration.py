@@ -58,15 +58,23 @@ class ManagedJobIntegrationTests(unittest.TestCase):
     def test_failure_is_reported_but_remaining_cases_get_fresh_fixtures(self):
         suite = self.suite()
 
+        extractions = []
+
         def run(label, command, **kwargs):
+            if label == "extract-tests":
+                extracted = Path(command[command.index("--extract-to") + 1])
+                (extracted / "partial-archive").write_text("owned by this suite")
+                extractions.append(extracted)
             if label == HARNESS.CASES[0]:
                 raise subprocess.CalledProcessError(1, command)
 
         suite.run = unittest.mock.Mock(side_effect=run)
         with self.assertRaisesRegex(RuntimeError, "managed-job fixture cases failed"):
             suite.execute()
+        self.assertEqual(len(extractions), 1)
+        self.assertFalse(extractions[0].exists(), "failed suites must remove extracted binaries")
         cases = [call for call in suite.run.call_args_list
-                 if not call.args[0].endswith("-create")]
+                 if not call.args[0].endswith("-create") and call.args[0] != "extract-tests"]
         self.assertEqual(len(cases), len(HARNESS.CASES) + 2)
         self.assertEqual(len({call.kwargs["env"]["MSB_JOB_TEST_SANDBOX"] for call in cases}), len(cases))
         self.assertEqual(suite.cleanup.call_count, len(cases) + 1)
@@ -80,7 +88,7 @@ class ManagedJobIntegrationTests(unittest.TestCase):
         suite.cleanup.side_effect = RuntimeError("cleanup failed")
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             suite.execute()
-        self.assertEqual(suite.run.call_count, 2)
+        self.assertEqual(suite.run.call_count, 3)
 
     def test_python_regression_gets_an_explicit_disposable_sandbox(self):
         suite = self.suite()
