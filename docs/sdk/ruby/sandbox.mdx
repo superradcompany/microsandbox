@@ -1043,6 +1043,14 @@ Guest user.
   </div>
 </div>
 
+#### <span className="msb-recv">builder.</span><span className="msb-hn">intercept_tls()</span>
+
+```ruby
+builder.intercept_tls # => SandboxBuilder
+```
+
+Enable [TLS interception](/networking/tls) while preserving existing network settings. `Sandbox.create` also accepts `intercept_tls: true`.
+
 #### <span className="msb-recv">builder.</span><span className="msb-hn">detached()</span>
 
 ```ruby
@@ -2005,3 +2013,34 @@ Microsandbox.install unless Microsandbox.installed?
 ```
 
 </Accordion>
+
+## Managed jobs
+
+<Accordion title="Example">
+
+```ruby
+job = sb.exec_detached("cat", cwd: "/tmp")
+io = job.attach
+io.write_stdin("hello\n")
+io.detach
+found = sb.get_job(job.id)
+found.eof
+result = found.wait
+output = found.logs
+page = sb.list_jobs(all: true, limit: 50)
+```
+
+</Accordion>
+
+`exec_detached` reuses the `exec` keyword options, with retained pipe input by default. Use `stdin: :null` for EOF, `stdin: "bytes"` for finite input or `tty: true` for a PTY. `SandboxHandle` also supports `get_job` and `list_jobs`.
+
+`Job` exposes `id`, `inspect`, `wait`, `logs`, `log_stream`, `follow_logs`, `attach`, `signal`, `kill` and `eof`. Log methods accept `tail`, `since`, `until`, `sources` and `from_cursor`; `log_stream` accepts `follow`. Attach accepts `read_only`, `replay_bytes` or `cursor`. `JobAttachment` has `recv`, `write_stdin`, `resize`, `detach` and `close`. Attachments and job log streams implement `Enumerable`; leaving iteration detaches or closes the observer. Blocking operations release the Ruby GVL, allowing input and output on separate Ruby threads.
+
+
+Managed jobs are sandbox-scoped and require a supporting local runtime. Detached launch confirms guest startup, defaults to pipes with stdin retained, and never owns the sandbox lifecycle. Existing exec and attach methods keep their current meaning. A sandbox context that stops the VM also stops its jobs.
+
+A job handle exposes inspection, an output-independent wait, bounded logs, attachment, signal, kill and EOF. Only one attachment owns input; read-only observers may coexist. Dropping or detaching an attachment preserves the job and its stdin. Pipe EOF is permanent; PTYs reject EOF and use terminal control characters. Each input write admits at most 16 KiB. Finite launch input is limited to 64 KiB, followed by EOF; use attachment writes for larger streams.
+
+Output entries contain original bytes, capture timestamps in Unix milliseconds, sources and opaque job-scoped cursors. Attach replay can select recent bytes or resume after a cursor. Retention gaps are explicit. Job metadata and output survive client disconnects; sandbox restart reports unconfirmed jobs as lost and never reruns them. Active jobs block full snapshots and forks; resident pause/resume is supported. Job failures expose stable codes, and uncertain launch errors retain a job ID for inspection before retrying.
+
+If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.

@@ -409,6 +409,8 @@
             "group": "Releases",
             "icon": "tag",
             "pages": [
+              "changelog/v0.7.8",
+              "changelog/v0.7.7",
               "changelog/v0.7.6",
               "changelog/v0.7.5",
               "changelog/v0.7.4",

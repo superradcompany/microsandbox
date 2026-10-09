@@ -1,0 +1,39 @@
+---
+title: "v0.7.8"
+sidebarTitle: "v0.7.8"
+description: "Keep commands running after disconnecting, narrow secret substitution, and restore snapshots with explicit storage bindings."
+icon: "bolt"
+---
+
+October 9, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.8) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.7...v0.7.8)
+
+## New features
+
+**Leave a command running and return later.** Detached jobs belong to the local sandbox runtime, so closing the launching terminal does not stop them. Inspect their status, follow logs, attach, or wait from another client. The SDKs expose the same job controls.
+
+```bash
+msb create alpine --name worker
+job=$(msb exec -d --no-stdin worker -- sh -c 'echo started; sleep 60; echo done')
+msb logs worker --job "$job" --follow
+msb wait worker --job "$job"
+```
+
+Stopping the sandbox still stops its jobs. A restart does not rerun them. [Managed jobs](/cli/sandbox-commands#managed-exec-jobs)
+
+**Send secrets only in intended headers.** Restrict substitution with `headers=[authorization]` on the CLI or `substitution.header_fields` in configuration. This reduces the risk of an allowed endpoint echoing a credential from an unrelated header. Existing policies still substitute in all headers unless narrowed. [Secret policies](/sandboxes/secrets)
+
+**Configure application certificate trust.** The optional `msb-trust.sh` helper configures supported applications to trust the sandbox's TLS interception CA. Run it explicitly after boot. [Application trust](/networking/tls#application-trust)
+
+**Publish port ranges and rebind disks.** Equal-length ranges such as `-p 8000-8002:80-82` expand into individual listeners. Restore and fork accept `--mount-disk` to rebind captured disks. Full restores and forks cannot add a new disk device. [Ports](/cli/sandbox-commands#published-ports) · [Snapshot mounts](/sandboxes/snapshots#external-mounts)
+
+**Capture larger filesystem state.** `snapshots.max_filesystem_state_mib` sets the per-device budget for full snapshots and forks, defaulting to 4 MiB. [Configuration](/configuration#snapshots)
+
+## Before upgrading
+
+- **Map external mounts on disk restores.** Restores now reject missing recorded host mounts. Supply bindings or explicitly accept missing resources with `--allow-missing-resources`. Older disk snapshots without mount records behave as before.
+- **Finish active jobs before full snapshots or forks.** Resident pause/resume remains supported.
+- **Update the runtime for new capabilities.** Scoped secret headers and non-default filesystem budgets require support. Snapshot readers need sufficient budgets; older releases may reject larger state. See [upgrade notes](/migrations/v0.7#later-v07-releases).
+
+## Fixes
+
+Disk-only restores work directly from archives. Cleanup and snapshot recovery are more reliable, including on Windows, where directory renames also keep cached paths current. Linux catalog checks preserve SQLite locks, memory metrics follow live resizing, malformed HTTP/2 headers are rejected safely, and client disconnects no longer stop the shared relay.

@@ -94,6 +94,14 @@ msb exec worker -- python -c "print('hello')"
 ```
 </CodeGroup>
 
+## Managed jobs
+
+Use `msb exec -d` to launch a command that keeps running after its client disconnects. The local sandbox must already be running. Follow output with `msb logs --job`, reconnect with `msb attach --job`, and confirm completion with `msb wait --job`.
+
+Jobs belong to the sandbox runtime. Stopping the sandbox terminates them, and restarting does not rerun them. Finish active jobs before taking a full snapshot or forking; resident pause/resume remains supported. Use `--no-stdin` for a command that should receive EOF instead of retaining input for a later attachment.
+
+See [CLI job controls](/cli/sandbox-commands#managed-exec-jobs) and the managed-job sections in the [TypeScript](/sdk/typescript/execution#managed-jobs), [Rust](/sdk/rust/execution#managed-jobs), [Python](/sdk/python/execution#managed-jobs), [Go](/sdk/go/execution#managed-jobs), and [Ruby](/sdk/ruby/sandbox#managed-jobs) references.
+
 ## Execution options
 
 These options apply to a single execution and don't change the sandbox's defaults.

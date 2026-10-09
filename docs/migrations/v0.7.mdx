@@ -42,6 +42,26 @@ python -m pip install --upgrade 'microsandbox>=0.7.3,<0.8'
 
 Use your package manager for other SDKs. For an installed runtime, [`msb self update`](/cli/management#msb-self) installs the latest release; it cannot select a specific version.
 
+## Later v0.7 releases
+
+If upgrading from an earlier v0.7 release, check these changes as well. Updating SDK packages does not replace the runtime inside an already-running sandbox. Restart it to use new runtime capabilities.
+
+### v0.7.7
+
+- **Ruby:** requires Ruby 3.3 or newer.
+- **Go:** update the native SDK library for configured-shell execution and lossless binary output. An older library rejects configured-shell operations.
+- **Guest clock:** `--guest-clock off` requires a supporting local runtime. Full snapshots retain the policy; older tools reject those snapshots. Database downgrade is blocked while any saved or active sandbox policy is `off`; stopping alone does not clear a saved policy. See [guest clock](/sandboxes/snapshots#keep-the-guest-clock).
+- **Windows snapshots:** full snapshots now preserve all tracked bind-mount hardlink names. Restore them with an updated runtime; disk-only compatibility is unchanged.
+
+### v0.7.8
+
+- **Disk restores:** supply mappings for every recorded external host mount. `--allow-missing-resources` explicitly permits starting without them. Older disk snapshots without mount records retain their previous behavior. Full restore also requires captured additional disks. See [external mounts](/sandboxes/snapshots#external-mounts).
+- **Detached jobs:** require a supporting local runtime. Wait for or terminate active jobs before a full snapshot or fork. Pausing remains supported; stopping the sandbox terminates its processes, and restarting does not rerun jobs. See [job controls](/cli/sandbox-commands#managed-exec-jobs).
+- **Secret header restrictions:** non-empty `substitution.header_fields` needs a runtime that enforces it. Older runtimes are rejected rather than silently broadening substitution. Downgrade checks also reject policies the target cannot preserve; do not remove restrictions merely to bypass that check.
+- **Filesystem state:** changing `snapshots.max_filesystem_state_mib` affects snapshot admission immediately, while running sandboxes retain their startup budget. Restart them after changing it and configure sufficient budgets on every reader. Older readers may reject larger snapshots. See [snapshot limits](/configuration#snapshots).
+
+For features and fixes, see [v0.7.7](/changelog/v0.7.7) and [v0.7.8](/changelog/v0.7.8).
+
 ## Review secret policies
 
 Saved policies migrate automatically. Update code and configuration files using these previous settings:
@@ -56,7 +76,7 @@ Saved policies migrate automatically. Update code and configuration files using 
 Review these behavior changes when using a v0.7 runtime:
 
 - **Basic Auth shares the header switch.** An old Basic-Auth-only policy now also permits substitution in other headers.
-- **Disabled locations no longer imply passthrough.** A body placeholder is blocked when body substitution is disabled, unless its destination has explicit passthrough permission. Enable body substitution to send the credential; allow passthrough to send the placeholder unchanged. Passthrough applies to the destination, not only the body.
+- **Disabled locations are version-dependent.** v0.7.0 through v0.7.4 block a placeholder in a disabled location unless its destination has explicit passthrough permission. From v0.7.5, a destination that passes the secret's host and TLS checks may receive that placeholder unchanged. Other destinations still need explicit passthrough permission or follow the violation policy. Enable substitution to send the credential itself.
 - **At least one substitution location must be enabled.** All-disabled policies migrate, but cannot launch until you enable a location or remove the policy.
 - **Explicit global passthrough defaults are preserved**, including for future secrets. Per-secret blocking actions override them.
 
@@ -88,7 +108,7 @@ This applies to installed group members; direct archive output can still be over
 
 ### Restore external resources
 
-For restore and branch, supply host mounts, published ports, and custom vsock routes explicitly. Snapshots do not copy host files or restore external connections. Full snapshots require compatible runtime and firmware versions.
+For restore and fork (formerly called branch), supply host mounts, published ports, and custom vsock routes explicitly. Snapshots do not copy host files or restore external connections. Full snapshots require compatible runtime and firmware versions.
 
 ### Check flush behavior
 
