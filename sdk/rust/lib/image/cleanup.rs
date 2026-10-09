@@ -383,6 +383,9 @@ fn admit(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::process::Command;
+
     use super::*;
     use crate::Image;
     use microsandbox_image::{CachedImageMetadata, CachedLayerMetadata, ImageConfig};
@@ -506,6 +509,27 @@ mod tests {
 
     #[tokio::test]
     async fn busy_image_does_not_block_unrelated_pruning_or_lose_shared_layer() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_BUSY_IMAGE_PRUNE").is_none() {
+            // Parallel tests can fork with our lease descriptors open and retain their
+            // locks until exec, even after drop(operation). Create the leases in an
+            // isolated process so the final prune can assert immediate reclamation.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "image::cleanup::tests::busy_image_does_not_block_unrelated_pruning_or_lose_shared_layer",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_BUSY_IMAGE_PRUNE", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated image prune test failed: {status}"
+            );
+            return;
+        }
+
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let a = "example.com/a:latest";
