@@ -4,9 +4,7 @@ description: Execute commands, stream output, and interact with sandboxes
 icon: "terminal"
 ---
 
-Command execution doesn't use SSH or the network. There's a dedicated channel between the host and a guest agent running inside the VM, completely separate from the sandbox's network stack. The agent spawns processes, streams output back, and reports exit codes.
-
-One nice consequence: `exec` works even when a sandbox has networking fully disabled.
+Run commands, read their output, and check exit codes without SSH. Execution uses a dedicated host-to-guest channel, so it works even with networking disabled.
 
 ## Run the image default workload
 
@@ -94,13 +92,75 @@ msb exec worker -- python -c "print('hello')"
 ```
 </CodeGroup>
 
-## Managed jobs
+<span id="managed-jobs" />
 
-Use `msb exec -d` to launch a command that keeps running after its client disconnects. The local sandbox must already be running. Follow output with `msb logs --job`, reconnect with `msb attach --job`, and confirm completion with `msb wait --job`.
+## Background jobs
 
-Jobs belong to the sandbox runtime. Stopping the sandbox terminates them, and restarting does not rerun them. Finish active jobs before taking a full snapshot or forking; resident pause/resume remains supported. Use `--no-stdin` for a command that should receive EOF instead of retaining input for a later attachment.
+Use a background job for a command that should keep running after you disconnect. The local sandbox must already be running. Starting the job returns an ID you can use to check its progress or reconnect.
 
-See [CLI job controls](/cli/sandbox-commands#managed-exec-jobs) and the managed-job sections in the [Rust](/sdk/rust/execution#managed-jobs), [Python](/sdk/python/execution#managed-jobs), [Go](/sdk/go/execution#managed-jobs), and [Ruby](/sdk/ruby/sandbox#managed-jobs) references.
+```bash
+msb create alpine --name worker
+job=$(msb exec -d --no-stdin worker -- sh -c 'echo started; sleep 60; echo done')
+msb logs worker --job "$job" --follow
+msb wait worker --job "$job"
+```
+
+Stopping the sandbox stops its jobs. Restarting never reruns them. Finish active jobs before taking a full snapshot or forking; pause and resume remain supported.
+
+| Command | Purpose |
+| --- | --- |
+| `msb jobs <sandbox>` | List active jobs; `--all` includes retained history |
+| `msb logs <sandbox> --job ID` | Read output; add `--follow` to stream it |
+| `msb inspect <sandbox> --job ID` | Show command, state, input mode, and exit result |
+| `msb attach <sandbox> --job ID` | Reconnect; Ctrl-] detaches without stopping the job |
+| `msb wait <sandbox> --job ID` | Wait for exit; `--timeout 30s` limits the wait, not the job |
+| `msb signal <sandbox> --job ID --signal TERM` | Send a Linux signal to the process group |
+| `msb kill <sandbox> --job ID` | Request SIGKILL; use `wait` to confirm exit |
+| `msb eof <sandbox> --job ID` | Close pipe input permanently; use Ctrl-D for a terminal |
+
+Job IDs belong to one sandbox and are separate from process IDs. Without `--job`, `logs`, `inspect`, and `wait` refer to the sandbox itself. All commands also support the `msb sandbox ...` form.
+
+<Accordion title="Input and interactive shells">
+
+`--no-stdin` sends EOF and disables automatic terminal allocation. Otherwise, input stays open for a later attachment. `--tty` forces a terminal; `--no-tty` uses pipes. Detached launch never reads your terminal's input and cannot be combined with `--stream`.
+
+```bash
+shell_job=$(msb exec -d --tty worker -- sh)
+msb attach worker --job "$shell_job"
+# Press Ctrl-] to detach, then attach again with the same job ID.
+```
+
+One attachment can write at a time; others can use `--read-only`. Detaching or reaching local input EOF leaves guest input open. An abrupt disconnect releases input ownership within 30 seconds. Terminal output combines stdout and stderr as `output`; pipes keep them separate.
+
+</Accordion>
+
+<Accordion title="History and limits">
+
+Job metadata and captured output remain available after disconnect or sandbox shutdown. After a runtime restart, a job without a confirmed exit is marked `lost`.
+
+- Up to 32 active jobs and 256 retained histories per sandbox.
+- Two 512 KiB output segments per job. Reading pruned output reports a cursor-gap error.
+- After 65,536 job admissions, restart the sandbox to launch more.
+
+Use `--limit N` and `--cursor ID` to page through `jobs`. `jobs`, `inspect`, and `wait` accept `--format json`. Logs retain their usual tail, time, source, and format options.
+
+If output storage fails, capture stops permanently for that job. Previously saved output stays readable, and the process and live attachments continue. Inspect the job for the cutoff. If metadata storage also fails, its diagnostic stays in memory until a later update can save it.
+
+</Accordion>
+
+<Accordion title="Timeouts and interrupted input">
+
+Execution timeouts still apply after you disconnect. Older runtimes and unsupported backends reject job launch before dispatch.
+
+While paused, you can inspect or wait for jobs, but waiting does not resume them. Signals take effect after resume. Full input buffers do not block signals or deadlines. Input bytes and EOF remain ordered; a signal may interrupt queued input. Inspect reports signal-delivery failures.
+
+Ctrl-] remains available while input is blocked, with up to 1 MiB of buffered lookahead. Detaching waits up to two seconds for earlier input to be accepted. Overflow discards further input but keeps the attachment open until you detach, reach local EOF, or the job finishes.
+
+`input_not_flushed` means some input was dropped or could not be confirmed. Do not resend it automatically: the job may already have received it. Detaching restores your terminal without stopping the job or closing its input.
+
+A graceful sandbox stop interrupts queued command input while preserving filesystem ordering. If stop times out, it reports failure without forcing termination.
+
+</Accordion>
 
 ## Execution options
 

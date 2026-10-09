@@ -138,16 +138,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
 | `uptime` | `s` | Sandbox uptime. |
 
-Unavailable memory usage is omitted from OTLP and displayed as `N/A` in stdout output. The memory limit is still reported. Immediately after a resize, usage can be inaccurate until guest memory statistics catch up.
+During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
 
-Disk and network totals are gauges containing absolute cumulative values. Use
-`rate()` in PromQL for throughput.
-
-During a memory resize, `memory.limit` tracks plugged memory and converges to the
-accepted target as the guest plugs or releases memory. Right after a resize,
-`memory.usage` can briefly be off or missing until the guest's memory statistics
-catch up. Sandboxes started by an older runtime keep reporting their boot
-allocation until they are restarted.
+Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
 
 ### Attributes
 

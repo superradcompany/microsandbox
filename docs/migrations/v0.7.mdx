@@ -56,7 +56,7 @@ If upgrading from an earlier v0.7 release, check these changes as well. Updating
 ### v0.7.8
 
 - **Disk restores:** supply mappings for every recorded external host mount. `--allow-missing-resources` explicitly permits starting without them. Older disk snapshots without mount records retain their previous behavior. Full restore also requires captured additional disks. See [external mounts](/sandboxes/snapshots#external-mounts).
-- **Detached jobs:** require a supporting local runtime. Wait for or terminate active jobs before a full snapshot or fork. Pausing remains supported; stopping the sandbox terminates its processes, and restarting does not rerun jobs. See [job controls](/cli/sandbox-commands#managed-exec-jobs).
+- **Detached jobs:** require a supporting local runtime. Wait for or terminate active jobs before a full snapshot or fork. Pausing remains supported; stopping the sandbox terminates its processes, and restarting does not rerun jobs. See [job controls](/sandboxes/commands#managed-jobs).
 - **Secret header restrictions:** non-empty `substitution.header_fields` needs a runtime that enforces it. Older runtimes are rejected rather than silently broadening substitution. Downgrade checks also reject policies the target cannot preserve; do not remove restrictions merely to bypass that check.
 - **Filesystem state:** changing `snapshots.max_filesystem_state_mib` affects snapshot admission immediately, while running sandboxes retain their startup budget. Restart them after changing it and configure sufficient budgets on every reader. Older readers may reject larger snapshots. See [snapshot limits](/configuration#snapshots).
 

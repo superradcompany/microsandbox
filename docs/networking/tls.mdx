@@ -24,10 +24,7 @@ For new local sandboxes, relative paths to upstream CA certificates and intercep
 
 ## Enabling interception
 
-Use `.interceptTls()` to enable TLS interception with the default settings.
-To configure bypass hosts, custom CAs, or other TLS options, use
-`.network(n => n.tls(...))`. Calling `.tls(...)` enables interception too,
-so you don't need both. The examples below show the shortcut in each SDK and the CLI.
+Enable interception with the default settings as shown below. Configuring TLS options also enables it, so no separate shortcut is needed when setting bypass hosts or custom certificates.
 
 <CodeGroup>
 ```typescript TypeScript

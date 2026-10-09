@@ -8,6 +8,8 @@ icon: "cube"
 
 Use the short form, such as `msb run`. `msb sandbox run` and `msb sbx run` accept the same arguments.
 
+<span id="cli-management" />
+
 Aliases include `ls`, `ps`, `rm`, `cp`, and `mod`. See [SSH](/cli/ssh-commands), [Snapshots](/cli/snapshot-commands), and [CLI management](/cli/management) for other commands.
 
 <span id="msb-sandbox-run" />
@@ -309,7 +311,21 @@ Full restore must keep captured CPU and memory settings and cannot apply a guest
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 
-Restore and fork do not reuse host resources by default. Map directories with `-v /host/path:/guest/path`, select a private captured disk with `-v /guest/path`, and publish new listeners with `-p HOST:GUEST`. Restore refuses missing external filesystems and, for full restore, additional disks unless `--allow-missing-resources` is explicit. Opting out leaves those devices unavailable: backend I/O returns errors, although data cached in guest RAM may remain readable. Disk errors can abort a guest filesystem journal or make it read-only. A full restore prints warnings for unavailable resources, visible with `--quiet`; a disk restore with `--allow-missing-resources` starts without the unmapped mounts and prints no warning. `--external-mount-policy relaxed` permits supported stale-object mismatches; it does not waive missing backing. `--dangerously-inherit-resources` authorizes validated source-local bindings, not missing ones. Direct forking retains its existing unavailable-resource behavior. Root and owned storage are always reconstructed; the opt-out cannot waive corrupt or missing snapshot data. Custom vsock routes are not inherited; use `--vsock HOST_PATH:PORT` to authorize a service for clients to reconnect to.
+Supply host resources explicitly when restoring or forking:
+
+- `-v /host/path:/guest/path` maps a host directory; `-v /guest/path` selects a private captured disk.
+- `-p HOST:GUEST` publishes a new listener.
+- `--vsock HOST_PATH:PORT` exposes a host service for clients to reconnect to.
+
+Restore requires recorded external filesystems and, for full restores, additional disks. `--allow-missing-resources` permits unavailable resources, but access can fail or make a guest filesystem read-only. Root and owned snapshot storage must still be complete.
+
+<Accordion title="Missing resources and validation">
+
+Full restores warn about unavailable resources even with `--quiet`; disk restores omit unmapped mounts without warnings. Cached guest memory may remain readable, but device I/O fails and can abort filesystem journals.
+
+`--external-mount-policy relaxed` tolerates supported stale-object mismatches; it does not allow missing backing. `--dangerously-inherit-resources` reuses validated source-local bindings. Direct forks retain their existing unavailable-resource behavior. See [external mounts](/sandboxes/snapshots#external-mounts).
+
+</Accordion>
 
 ```bash
 msb snap restore saved.msb --name worker -v /srv/project:/work -v /data
@@ -585,8 +601,13 @@ msb exec devbox -- python -c "print('hello')"
 msb exec devbox -- ls -la /app
 ```
 
+<span id="managed-exec-jobs" />
+
+Use `--detach` to keep a command running after you disconnect. It requires a running local sandbox and prints a job ID after startup is confirmed. See [background jobs](/sandboxes/commands#managed-jobs) for logs, reattachment, and lifecycle details.
+
 | Flag | Description |
 |------|-------------|
+| `-d`, `--detach` | Run as a background job; requires a running local sandbox and conflicts with `--stream` |
 | `-t`, `--tty` | Allocate a pseudo-terminal (enables colors, line editing) |
 | `--no-tty` | Disable PTY allocation and run non-interactively |
 | `--no-stdin` | Leave host input untouched and give the command EOF; disables automatic terminal mode and conflicts with `--tty` |
@@ -838,10 +859,6 @@ msb rm --force --label app=engine  # Remove every sandbox labeled app=engine
 | `-f`, `--force` | Stop the sandbox if running, then remove it |
 | `-q`, `--quiet` | Suppress progress output |
 
-## CLI management
-
-See [CLI management](/cli/management) for CLI updates, diagnostics, and removal.
-
 <span id="msb-self" />
 
 ## msb install
@@ -895,71 +912,3 @@ Remove an installed sandbox command.
 msb uninstall nodebox
 msb uninstall ubuntu alpine   # Remove multiple
 ```
-
-## Managed exec jobs
-
-`msb exec -d` starts a command owned by the sandbox runtime and prints its job ID after the guest confirms startup. The sandbox must already be running. Closing the launching terminal or dropping an SDK job handle does not terminate the command. Stopping or destroying the sandbox still terminates its processes.
-
-This self-contained walkthrough needs no script or counter file:
-
-```bash
-msb create alpine --name pause-walkthrough
-
-counter=$(msb exec -d --no-tty pause-walkthrough -- sh -c '
-  n=0
-  while true; do
-    n=$((n + 1))
-    echo "$n"
-    sleep 1
-  done
-')
-
-msb logs pause-walkthrough --job "$counter" --follow
-# Press Ctrl-C to stop following logs. The counter keeps running.
-
-msb pause pause-walkthrough
-msb logs pause-walkthrough --job "$counter" --tail 5
-# Wait a few seconds: the counter stays at the same value while paused.
-msb resume pause-walkthrough
-msb logs pause-walkthrough --job "$counter" --follow
-# Press Ctrl-C, then finish the demonstration:
-msb kill pause-walkthrough --job "$counter"
-msb inspect pause-walkthrough --job "$counter"
-```
-
-Detached execution uses the existing terminal detection. `--tty` forces a PTY and `--no-tty` forces pipes. Neither `--no-tty` nor detaching closes guest stdin: the runtime retains it for later attachment. `--no-stdin` explicitly gives the command EOF and disables automatic TTY allocation. Detached launch never reads the launching terminal's stdin; `--detach` conflicts with `--stream`.
-
-| Command | Behavior |
-| --- | --- |
-| `msb jobs <sandbox> [--all] [--limit N] [--cursor ID] [--format json]` | List active jobs, or retained history with `-a` / `--all`; no job selector applies to this listing |
-| `msb logs <sandbox> --job ID` | Read job output; existing `--follow`, `--tail`, time, source and output-format options apply |
-| `msb inspect <sandbox> --job ID [--format json]` | Inspect identity, command, state, PTY/input mode and exit result |
-| `msb attach <sandbox> --job ID [--read-only]` | Attach to the existing process; Ctrl-] detaches a terminal |
-| `msb wait <sandbox> --job ID [--timeout 30s] [--format json]` | Wait for a confirmed exit; a wait timeout leaves the process running |
-| `msb signal <sandbox> --job ID --signal TERM` | Send a Linux guest signal to the process group |
-| `msb kill <sandbox> --job ID` | Request SIGKILL; use wait or inspect to confirm completion |
-| `msb eof <sandbox> --job ID` | Permanently close pipe input after queued bytes; PTYs use terminal Ctrl-D instead |
-
-Each command also has its full `msb sandbox ...` form. Without `--job`, `logs`, `inspect` and `wait` keep their existing sandbox meaning.
-
-For a reattachable shell:
-
-```bash
-shell_job=$(msb exec -d --tty pause-walkthrough -- sh)
-msb attach pause-walkthrough --job "$shell_job"
-# Ctrl-] returns to the host. Attach again using the same ID.
-```
-
-Only one attachment owns input at a time. Other clients can attach with `--read-only` or follow logs. Detach and host input EOF do not implicitly close guest stdin. Input ownership expires within 30 seconds after an abruptly disconnected client; explicit detach releases it immediately. PTY output is merged under source `output`; pipe mode preserves `stdout` and `stderr` separately.
-
-Job IDs are opaque, sandbox-scoped identities independent of guest PIDs and ordinary exec correlation IDs. Metadata and bounded output survive CLI disconnects and remain inspectable after sandbox shutdown. A runtime restart never reruns jobs: an unconfirmed former process is reported as `lost`. Up to 32 jobs can run per sandbox, with at most 256 retained histories and two 512 KiB output segments per job. Pruned history produces an explicit cursor-gap error rather than silently pretending the missing bytes were delivered. The runtime also bounds launch deduplication history; after 65,536 admissions, restart the sandbox before admitting more jobs.
-
-If saving job output fails, disk capture stops for that job. Previously retained complete records remain readable, and the process and live attachments continue. Inspect the job for the capture cutoff; capture does not resume after storage recovers. If metadata cannot be saved either, the runtime keeps the diagnostic in memory and retries saving it on later state updates.
-
-Execution `--timeout` remains enforced by the runtime after launch returns. Full snapshots and forks are rejected while managed jobs are active, because their host-side I/O ownership cannot yet be restored. Resident pause/resume remains supported. Older runtimes and unsupported backends reject job launch before dispatch; existing exec and sandbox APIs remain available.
-
-While resident-paused, job inspection and waits remain available. Waiting does not resume the sandbox; resume allows an active job to finish. Snapshot and fork refusals explain that you must wait for or terminate the active jobs first.
-
-Terminal attachment keeps reading Ctrl-] while guest input is blocked, using up to 1 MiB of lookahead beyond its bounded writer queue. After reading Ctrl-], it drains preceding input to runtime admission for at most two seconds, then detaches. Exceeding the lookahead limit reports `input_not_flushed` immediately and discards further input while keeping the attachment open, so an unfinished guest paste is not automatically handed to the host shell. Press Ctrl-] to detach; host EOF or process completion also ends the attachment. Overflow or a failed or timed-out drain returns `input_not_flushed` in the final result: some input was discarded or not confirmed. Detach releases the attachment and restores the terminal without closing guest stdin or terminating the job. Do not automatically resend unconfirmed input, since it may already have been accepted.
-
-Signals and runtime deadlines remain deliverable when job stdin is full. Signals can interrupt queued input; stdin bytes and EOF otherwise keep their order. Pause delays physical signal delivery until resume. `kill` acknowledges the request; `wait` confirms process exit, and `inspect` reports delivery failures. Graceful sandbox stop interrupts queued exec input while preserving filesystem ordering. A stop timeout reports failure without forcing termination.

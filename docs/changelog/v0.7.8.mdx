@@ -18,7 +18,7 @@ msb logs worker --job "$job" --follow
 msb wait worker --job "$job"
 ```
 
-Stopping the sandbox still stops its jobs. A restart does not rerun them. [Managed jobs](/cli/sandbox-commands#managed-exec-jobs)
+Stopping the sandbox still stops its jobs. A restart does not rerun them. [Managed jobs](/sandboxes/commands#managed-jobs)
 
 **Send secrets only in intended headers.** Restrict substitution with `headers=[authorization]` on the CLI or `substitution.header_fields` in configuration. This reduces the risk of an allowed endpoint echoing a credential from an unrelated header. Existing policies still substitute in all headers unless narrowed. [Secret policies](/sandboxes/secrets)
 
