@@ -642,6 +642,8 @@ jobs:
           foreach ($filter in @(
             'image::cleanup::tests',
             'backend::local::snapshot::store::tests',
+            'external_import_alias_has_one_row_and_preserves_distinct_copies',
+            'import_requires_durable_ownership_and_recovers_failed_completion',
             'storage::usage::local_usage::tests',
             'stopped_memory_sweep_registration_clears_on_runtime_shutdown'
           )) {

@@ -253,6 +253,7 @@ pub(super) async fn index_write(
         .unwrap_or_else(|_| Utc::now().naive_utc());
     let indexed_at = Utc::now().naive_utc();
 
+    let requested_path = artifact_path.display().to_string();
     let artifact_path = canonical_path(artifact_path);
     let artifact_path_str = artifact_path.display().to_string();
     let group_path = super::group::group_path(&artifact_path);
@@ -272,7 +273,10 @@ pub(super) async fn index_write(
     // Portable identities may occur in multiple groups. Replace only this local address,
     // never another copy that happens to share descriptor bytes, identity, or member name.
     let mut supersede = sea_orm::Condition::any()
-        .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()));
+        .add(snapshot_entity::Column::ArtifactPath.eq(artifact_path_str.clone()))
+        // Recovery can arrive through an older noncanonical reservation. Replace that
+        // exact address in the same transaction as its canonical row, never by digest.
+        .add(snapshot_entity::Column::ArtifactPath.eq(requested_path));
     if let (Some(group), Some(name)) = (&group_path, &artifact_name)
         && availability == "ready"
     {

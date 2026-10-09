@@ -241,17 +241,19 @@ pub(super) async fn load(
         }
     }
     let group_dir = super::super::group::ensure(&snapshots_dir, opts.group.as_deref()).await?;
+    // The member does not exist yet. Resolve its existing parent once so reservation,
+    // publication, and completion retain the same catalog address across path aliases.
+    let destination = group_dir.canonicalize()?;
     let mut publication_leases = Vec::new();
     for id in identities.keys() {
         publication_leases.push(
             microsandbox_image::storage_lease::StorageLease::shared_async(
-                group_dir.join(id.as_str()),
+                destination.join(id.as_str()),
             )
             .await?,
         );
     }
     let db = local.db().await?.write().clone();
-    let destination = group_dir.clone();
     let publish_candidates = candidates.clone();
     let set_head = opts.set_head;
     let update = tokio::spawn(async move {

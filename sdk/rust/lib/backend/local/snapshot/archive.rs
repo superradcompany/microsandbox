@@ -4368,7 +4368,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_requires_durable_ownership_and_recovers_failed_completion() {
-        use sea_orm::{ConnectionTrait, EntityTrait};
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, EntityTrait};
         let root = tempfile::tempdir().unwrap();
         let source = crate::test_support::local_backend_builder(root.path().join("source"))
             .build()
@@ -4422,16 +4422,114 @@ mod tests {
                         .exists()
                 );
             }
+            if !block_prepare {
+                // Reproduce the noncanonical reservation left by older imports.
+                let path = Path::new(&rows[0].artifact_path);
+                #[cfg(unix)]
+                let alias = {
+                    let alias = root.path().join("recovery-alias");
+                    std::os::unix::fs::symlink(path.parent().unwrap(), &alias).unwrap();
+                    alias.join(path.file_name().unwrap())
+                };
+                #[cfg(windows)]
+                let alias = PathBuf::from(rows[0].artifact_path.trim_start_matches(r"\\?\"));
+                assert_ne!(alias, path);
+
+                let mut legacy: crate::db::entity::snapshot::ActiveModel = rows[0].clone().into();
+                legacy.artifact_path = Set(alias.display().to_string());
+                legacy.group_path = Set(Some(alias.parent().unwrap().display().to_string()));
+                legacy.insert(db.write()).await.unwrap();
+            }
             db.write()
                 .execute_unprepared("DROP TRIGGER fail_publication")
                 .await
                 .unwrap();
             let repaired = store::list_indexed(&destination).await.unwrap();
             assert_eq!(repaired.len(), usize::from(!block_prepare));
+            let rows = crate::db::entity::snapshot::Entity::find()
+                .all(db.read())
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), repaired.len(), "recovery retained an alias row");
             if let Some(snapshot) = repaired.first() {
                 assert_eq!(snapshot.availability, "ready");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn external_import_alias_has_one_row_and_preserves_distinct_copies() {
+        use sea_orm::EntityTrait;
+
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let manifest = grouped_archive_manifest(992, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &manifest);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &local,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+        let external = root.path().join("external");
+        #[cfg(unix)]
+        {
+            let target = root.path().join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::os::unix::fs::symlink(&target, &external).unwrap();
+        }
+        let opts = LoadOpts {
+            dest: Some(external.join("snapshots")),
+            group: Some("imported".into()),
+            ..Default::default()
+        };
+
+        let mut imported = None;
+        for _ in 0..2 {
+            imported = Some(
+                load_snapshot_with_options(&local, &archive, opts.clone())
+                    .await
+                    .unwrap(),
+            );
+            let rows = crate::db::entity::snapshot::Entity::find()
+                .all(local.db().await.unwrap().read())
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "import left a second catalog address");
+            assert_eq!(rows[0].availability, "ready");
+            assert_eq!(
+                Path::new(&rows[0].artifact_path),
+                imported.as_ref().unwrap().path().canonicalize().unwrap()
+            );
+        }
+
+        let other = load_snapshot_with_options(
+            &local,
+            &archive,
+            LoadOpts {
+                dest: Some(root.path().join("other")),
+                group: Some("imported".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(store::list_indexed(&local).await.unwrap().len(), 2);
+
+        store::remove_snapshot(&local, imported.unwrap().path().to_str().unwrap(), false)
+            .await
+            .unwrap();
+        let remaining = store::list_indexed(&local).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].path(), other.path().canonicalize().unwrap());
+        assert!(other.path().join(DESCRIPTOR_FILENAME).exists());
     }
 
     #[tokio::test]
