@@ -71,6 +71,7 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 
 use self::input_stall::{INPUT_STALL_TIMEOUT, InputStall};
 use super::exec_control::{ExecControlConnection, ExecControlLease, ExecControlRegistry};
+use super::finished_ids::FinishedIds;
 use super::workload_control::{WORKLOAD_CONTROL_ID, WorkloadControl};
 use crate::boot_error::BootError;
 use crate::checkpoint::RestoredAgentState;
@@ -457,7 +458,7 @@ struct GuestMergeFlow {
 struct GuestFrameMerger {
     flows: HashMap<(ClientIncarnation, u32), GuestMergeFlow>,
     /// Compact owner-local bitmaps remember retired IDs without one allocation per operation.
-    retired: HashMap<ClientIncarnation, Vec<u64>>,
+    retired: HashMap<ClientIncarnation, FinishedIds>,
 }
 
 /// The agent relay running in the sandbox process.
@@ -3212,7 +3213,7 @@ async fn bulk_ring_writer_task(
     };
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
-    let mut retired = HashMap::<ClientIncarnation, Vec<u64>>::new();
+    let mut retired = HashMap::<ClientIncarnation, FinishedIds>::new();
 
     loop {
         let changed = workload.changed.notified();
@@ -3328,7 +3329,7 @@ fn apply_bulk_writer_command(
     command: BulkWriterCommand,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &mut HashMap<ClientIncarnation, FinishedIds>,
 ) -> RuntimeResult<()> {
     match command {
         BulkWriterCommand::Write(write) => enqueue_bulk_write(write, flows, active, retired),
@@ -3361,7 +3362,7 @@ fn enqueue_bulk_write(
     write: BulkWrite,
     flows: &mut HashMap<(ClientIncarnation, u32), BulkWriteFlow>,
     active: &mut VecDeque<(ClientIncarnation, u32)>,
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &HashMap<ClientIncarnation, FinishedIds>,
 ) -> RuntimeResult<()> {
     let flow = write.flow;
     let payload_len = write.payload_len;
@@ -3886,7 +3887,7 @@ async fn route_guest_lane_frame(
         {
             if let Some(connection) = client.exec_control.as_ref() {
                 if is_terminal {
-                    connection.retire(frame.id);
+                    connection.mark_finished(frame.id);
                 } else if frame.flags != FLAG_BULK
                     && connection.pending(frame.id)
                     && decode_frame(frame.data.as_ref())
@@ -5309,46 +5310,37 @@ fn is_client_frame_allowed(id: u32, flags: u8, id_start: u32, id_end_exclusive: 
     is_shutdown_control || (id >= id_start && id < id_end_exclusive)
 }
 
-/// Locate one correlation in an owner-local retirement bitmap.
-fn relay_retired_bit(id: u32) -> Option<(usize, u64)> {
-    let slot = relay_client_slot(id)?;
-    let (id_start, _) = relay_client_id_range(slot)?;
-    let local = usize::try_from(id.checked_sub(id_start)?).ok()?;
-    Some((
-        local / u64::BITS as usize,
-        1u64 << (local % u64::BITS as usize),
-    ))
-}
-
-/// Test an owner-local retirement bitmap without allocating on a read.
+/// Check whether an operation has finished on its owning connection.
 fn relay_correlation_is_retired(
-    retired: &HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &HashMap<ClientIncarnation, FinishedIds>,
     incarnation: ClientIncarnation,
     id: u32,
 ) -> bool {
-    let Some((word, mask)) = relay_retired_bit(id) else {
-        return false;
-    };
     retired
         .get(&incarnation)
-        .and_then(|bitmap| bitmap.get(word))
-        .is_some_and(|bits| bits & mask != 0)
+        .is_some_and(|finished| finished.is_finished(id))
 }
 
-/// Retire one ID in a compact bitmap bounded by the canonical per-client range size.
+/// Remember a finished operation within its owner's assigned ID range.
 fn retire_relay_correlation(
-    retired: &mut HashMap<ClientIncarnation, Vec<u64>>,
+    retired: &mut HashMap<ClientIncarnation, FinishedIds>,
     incarnation: ClientIncarnation,
     id: u32,
 ) -> RuntimeResult<()> {
-    let (word, mask) = relay_retired_bit(id).ok_or_else(|| {
-        RuntimeError::Custom(format!("cannot retire unassigned correlation {id}"))
-    })?;
-    let bitmap = retired.entry(incarnation).or_default();
-    if bitmap.len() <= word {
-        bitmap.resize(word + 1, 0);
+    let (start, end) = relay_client_slot(id)
+        .and_then(relay_client_id_range)
+        .ok_or_else(|| {
+            RuntimeError::Custom(format!("cannot retire unassigned correlation {id}"))
+        })?;
+
+    let finished = retired
+        .entry(incarnation)
+        .or_insert_with(|| FinishedIds::new(start..end));
+    if !finished.mark_finished(id) {
+        return Err(RuntimeError::Custom(format!(
+            "correlation {id} is outside its owning connection's range"
+        )));
     }
-    bitmap[word] |= mask;
     Ok(())
 }
 
@@ -5453,6 +5445,91 @@ mod tests {
         assert!(task.await.unwrap().delivered);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn exec_control_rejects_signals_after_completion_without_waiting() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+
+        let (tx, mut rx) = ControlWriter::new();
+        let owner = tx.exec_controls.connect(100, 200);
+        // Include failed starts and exits, with out-of-order IDs across the assigned range.
+        for (id, started) in [(199, true), (100, false), (164, true), (163, false)] {
+            owner.register(id);
+            if started {
+                owner.started(id);
+            }
+            owner.mark_finished(id);
+        }
+
+        for id in [100, 163, 164, 199] {
+            let before = tokio::time::Instant::now();
+            let response = tx
+                .exec_controls
+                .signal(
+                    &tx,
+                    ExecControlRequest {
+                        version: 1,
+                        connection: owner.token(),
+                        id,
+                        signal: 9,
+                    },
+                )
+                .await;
+            assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+            assert_eq!(response.error.as_deref(), Some("execution has ended"));
+            assert_eq!(tokio::time::Instant::now(), before);
+            assert!(!response.delivered);
+        }
+        assert!(rx.try_recv().is_err());
+
+        // A lower unused ID must still wait for registration, even after higher IDs finished.
+        let task = tokio::spawn({
+            let tx = tx.clone();
+            let token = owner.token();
+            async move {
+                tx.exec_controls
+                    .signal(
+                        &tx,
+                        ExecControlRequest {
+                            version: 1,
+                            connection: token,
+                            id: 101,
+                            signal: 9,
+                        },
+                    )
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        let before = tokio::time::Instant::now();
+        owner.register(101);
+        // Finish before the waiting signal task can observe the lease at all.
+        owner.mark_finished(101);
+        let response = task.await.unwrap();
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert!(rx.try_recv().is_err());
+
+        // A stale handle must not regain authority if its finished ID is submitted again.
+        owner.register(101);
+        owner.started(101);
+        let response = tx
+            .exec_controls
+            .signal(
+                &tx,
+                ExecControlRequest {
+                    version: 1,
+                    connection: owner.token(),
+                    id: 101,
+                    signal: 9,
+                },
+            )
+            .await;
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn exec_control_revokes_queued_signals_and_rejects_reused_slots() {
         use microsandbox_protocol::exec_control::ExecControlRequest;
@@ -5478,7 +5555,7 @@ mod tests {
             }
         });
         let write = rx.recv().await.unwrap();
-        owner.retire(101);
+        owner.mark_finished(101);
         let shared = workload_test_shared(4096, false);
         let mut pending = VecDeque::from([write]);
         assert!(

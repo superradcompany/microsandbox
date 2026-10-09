@@ -236,6 +236,12 @@ for {
 
 </CodeGroup>
 
+With the local runtime's dedicated signal channel, calling `kill()` or sending a
+signal after an execution has ended returns an immediate `execution_closed`
+error. Cleanup code can skip the call once it has received an exit or failed-start
+event. A successful signal call confirms delivery, not process exit; keep reading
+events or wait for completion to confirm termination.
+
 ## Interactive attach
 
 Bridges your terminal directly to a process inside the sandbox for a fully interactive PTY session. Useful for debugging, running REPLs, or anything that expects a real terminal.

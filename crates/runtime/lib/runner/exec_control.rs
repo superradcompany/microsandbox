@@ -17,6 +17,7 @@ use microsandbox_protocol::{
 use rand::RngExt as _;
 use tokio::sync::{Notify, oneshot};
 
+use super::finished_ids::FinishedIds;
 use super::relay::{ControlWrite, ControlWriter};
 
 //--------------------------------------------------------------------------------------------------
@@ -43,7 +44,12 @@ struct Owner {
     end: u32,
     live: AtomicBool,
     changed: Notify,
-    executions: Mutex<HashMap<u32, Arc<ExecControlLease>>>,
+    executions: Mutex<Executions>,
+}
+
+struct Executions {
+    active: HashMap<u32, Arc<ExecControlLease>>,
+    finished: FinishedIds,
 }
 
 /// Dropping the primary connection revokes its sideband authority before slot reuse.
@@ -70,7 +76,10 @@ impl ExecControlRegistry {
             end,
             live: AtomicBool::new(true),
             changed: Notify::new(),
-            executions: Mutex::new(HashMap::new()),
+            executions: Mutex::new(Executions {
+                active: HashMap::new(),
+                finished: FinishedIds::new(start..end),
+            }),
         });
         let mut clients = self.clients.lock().unwrap();
         let token = loop {
@@ -119,6 +128,7 @@ impl ExecControlRegistry {
             }
             Arc::clone(owner)
         };
+
         let delivered = async {
             // The separate sockets can race, including an immediate kill after exec() returns.
             // Wait for this owner's actual ExecStarted rather than overtaking process creation.
@@ -128,15 +138,31 @@ impl ExecControlRegistry {
                 let changed = owner.changed.notified();
                 tokio::pin!(changed);
                 changed.as_mut().enable();
+
                 if !owner.live.load(Ordering::Acquire) {
-                    return Err("the owning agent connection has ended".to_string());
+                    return Err(ExecControlResponse::error(
+                        "execution_closed",
+                        "the owning agent connection has ended",
+                    ));
                 }
+
                 if lease.is_none() {
-                    lease = owner.executions.lock().unwrap().get(&request.id).cloned();
+                    let executions = owner.executions.lock().unwrap();
+                    if executions.is_finished(request.id) {
+                        return Err(ExecControlResponse::error(
+                            "execution_closed",
+                            "execution has ended",
+                        ));
+                    }
+                    lease = executions.active.get(&request.id).cloned();
                 }
+
                 if let Some(lease) = lease.as_ref() {
                     if !lease.live() {
-                        return Err("execution has ended".to_string());
+                        return Err(ExecControlResponse::error(
+                            "execution_closed",
+                            "execution has ended",
+                        ));
                     }
                     if lease.started.load(Ordering::Acquire) {
                         break Arc::clone(lease);
@@ -144,6 +170,7 @@ impl ExecControlRegistry {
                 }
                 changed.await;
             };
+
             let message = Message::with_payload(
                 MessageType::ExecSignal,
                 request.id,
@@ -151,26 +178,52 @@ impl ExecControlRegistry {
                     signal: request.signal,
                 },
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                ExecControlResponse::error("delivery_unconfirmed", error.to_string())
+            })?;
+
             let mut data = Vec::new();
-            codec::encode_to_buf(&message, &mut data).map_err(|error| error.to_string())?;
+            codec::encode_to_buf(&message, &mut data).map_err(|error| {
+                ExecControlResponse::error("delivery_unconfirmed", error.to_string())
+            })?;
+
             let (completion, completed) = oneshot::channel();
             let write = ControlWrite::exec_signal(Bytes::from(data), request.id, lease, completion);
-            writer
-                .send(write)
-                .await
-                .map_err(|_| "exec control transport is closed".to_string())?;
+            writer.send(write).await.map_err(|_| {
+                ExecControlResponse::error(
+                    "delivery_unconfirmed",
+                    "exec control transport is closed",
+                )
+            })?;
+
             completed.await.map_err(|_| {
-                "execution ended or its transport closed before delivery confirmation".to_string()
+                ExecControlResponse::error(
+                    "delivery_unconfirmed",
+                    "execution ended or its transport closed before delivery confirmation",
+                )
             })
         };
         match tokio::time::timeout(DELIVERY_DEADLINE, delivered).await {
             Ok(Ok(())) => ExecControlResponse::delivered(),
-            Ok(Err(error)) => ExecControlResponse::error("delivery_unconfirmed", error),
+            Ok(Err(response)) => response,
             Err(_) => ExecControlResponse::error(
                 "delivery_unconfirmed",
                 "signal delivery deadline expired; an admitted request may still be delivered",
             ),
+        }
+    }
+}
+
+impl Executions {
+    fn is_finished(&self, id: u32) -> bool {
+        self.finished.is_finished(id)
+    }
+
+    fn mark_finished(&mut self, id: u32) {
+        if let Some(lease) = self.active.remove(&id) {
+            lease.live.store(false, Ordering::Release);
+            let marked = self.finished.mark_finished(id);
+            debug_assert!(marked, "registered execution belongs to the owner's range");
         }
     }
 }
@@ -181,9 +234,16 @@ impl ExecControlConnection {
     }
 
     pub(crate) fn register(&self, id: u32) {
+        if !(self.owner.start..self.owner.end).contains(&id) {
+            return;
+        }
         let mut executions = self.owner.executions.lock().unwrap();
-        // Never replace a live identity if a malformed client reuses a correlation.
-        executions.entry(id).or_insert_with(|| {
+        // Never replace an identity, live or finished, if a malformed client reuses a correlation.
+        if executions.is_finished(id) {
+            return;
+        }
+
+        executions.active.entry(id).or_insert_with(|| {
             Arc::new(ExecControlLease {
                 live: AtomicBool::new(true),
                 started: AtomicBool::new(false),
@@ -198,21 +258,20 @@ impl ExecControlConnection {
             .executions
             .lock()
             .unwrap()
+            .active
             .get(&id)
             .is_some_and(|lease| !lease.started.load(Ordering::Acquire))
     }
 
     pub(crate) fn started(&self, id: u32) {
-        if let Some(lease) = self.owner.executions.lock().unwrap().get(&id) {
+        if let Some(lease) = self.owner.executions.lock().unwrap().active.get(&id) {
             lease.started.store(true, Ordering::Release);
         }
         self.owner.changed.notify_waiters();
     }
 
-    pub(crate) fn retire(&self, id: u32) {
-        if let Some(lease) = self.owner.executions.lock().unwrap().remove(&id) {
-            lease.live.store(false, Ordering::Release);
-        }
+    pub(crate) fn mark_finished(&self, id: u32) {
+        self.owner.executions.lock().unwrap().mark_finished(id);
         self.owner.changed.notify_waiters();
     }
 }
@@ -234,7 +293,7 @@ impl Drop for ExecControlConnection {
             registry.clients.lock().unwrap().remove(&self.token);
         }
         self.owner.live.store(false, Ordering::Release);
-        for lease in self.owner.executions.lock().unwrap().values() {
+        for lease in self.owner.executions.lock().unwrap().active.values() {
             lease.live.store(false, Ordering::Release);
         }
         self.owner.changed.notify_waiters();
