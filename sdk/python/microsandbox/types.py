@@ -252,6 +252,7 @@ class DiskImageFormat(StrEnum):
     RAW = "raw"
     VMDK = "vmdk"
 
+
 class VolumeKind(StrEnum):
     DIRECTORY = "dir"
     DISK = "disk"
@@ -328,6 +329,7 @@ class GuestFlush(StrEnum):
 class SnapshotScope(StrEnum):
     DISK = "disk"
     FULL = "full"
+
 
 class RlimitResource(StrEnum):
     CPU = "cpu"
@@ -697,6 +699,8 @@ class MountConfig:
     #: Must be set together with ``override_gid``. BIND/NAMED mounts only.
     override_uid: int | None = None
     override_gid: int | None = None
+    #: Host-side deny-list of gitignore-style patterns (BIND mounts only).
+    deny: list[str] | None = None
     #: Backing kind for storage allocated and removed with the sandbox.
     owned_kind: VolumeKind | None = None
 
@@ -760,6 +764,8 @@ class MountConfig:
             d["bind"] = self.bind
             if self.quota_mib is not None:
                 d["quota_mib"] = self.quota_mib
+            if self.deny:
+                d["deny"] = list(self.deny)
         elif self.kind == MountKind.NAMED:
             if self.named is None:
                 raise ValueError("MountConfig kind=NAMED requires named=...")
@@ -773,10 +779,18 @@ class MountConfig:
             if self.quota_mib is not None:
                 d["quota_mib"] = self.quota_mib
         elif self.kind == MountKind.OWNED:
-            if any(value is not None for value in (
-                self.bind, self.named, self.named_mode, self.named_kind,
-                self.disk, self.format, self.fstype,
-            )):
+            if any(
+                value is not None
+                for value in (
+                    self.bind,
+                    self.named,
+                    self.named_mode,
+                    self.named_kind,
+                    self.disk,
+                    self.format,
+                    self.fstype,
+                )
+            ):
                 raise ValueError(
                     "OWNED mounts cannot specify a source, name, mode, format or fstype"
                 )
@@ -792,10 +806,15 @@ class MountConfig:
                     raise ValueError("disk-backed OWNED mounts require positive size_mib")
                 if self.quota_mib is not None:
                     raise ValueError("quota_mib is only valid for directory-backed OWNED mounts")
-                if any(value is not None for value in (
-                    self.stat_virtualization, self.host_permissions,
-                    self.override_uid, self.override_gid,
-                )):
+                if any(
+                    value is not None
+                    for value in (
+                        self.stat_virtualization,
+                        self.host_permissions,
+                        self.override_uid,
+                        self.override_gid,
+                    )
+                ):
                     raise ValueError(
                         "metadata policies are not supported for disk-backed OWNED mounts"
                     )
@@ -825,16 +844,12 @@ class MountConfig:
             if host_permissions is not None:
                 d["host_permissions"] = host_permissions
             if (self.override_uid is None) != (self.override_gid is None):
-                raise ValueError(
-                    "MountConfig.override_uid and override_gid must be set together"
-                )
+                raise ValueError("MountConfig.override_uid and override_gid must be set together")
             if self.override_uid is not None:
                 uid = _mount_owner_id(self.override_uid, "MountConfig.override_uid")
                 gid = _mount_owner_id(self.override_gid, "MountConfig.override_gid")
                 if stat_virtualization == StatVirtualization.OFF.value:
-                    raise ValueError(
-                        "mount owner cannot be combined with stat_virtualization=OFF"
-                    )
+                    raise ValueError("mount owner cannot be combined with stat_virtualization=OFF")
                 if self.kind == MountKind.NAMED and named_kind == VolumeKind.DISK.value:
                     raise ValueError("mount owner is not supported for disk-backed named volumes")
                 d["override_uid"] = uid
@@ -850,6 +865,9 @@ class MountConfig:
                 "valid for BIND/NAMED or directory-backed OWNED mounts "
                 f"(got kind={self.kind.value})"
             )
+
+        if self.deny and self.kind != MountKind.BIND:
+            raise ValueError(f"deny is only valid for BIND mounts (got kind={self.kind.value})")
         return d
 
 
@@ -937,7 +955,6 @@ class RootDisk:
         derived from the file extension unless given (vmdk is not supported)."""
         return RootDiskConfig(kind=RootDiskKind.DISK_IMAGE, path=path, format=format, fstype=fstype)
 
-
     @staticmethod
     def flat(
         size_mib: int | None = None,
@@ -952,6 +969,7 @@ class RootDisk:
             fstype=fstype,
             clone=clone,
         )
+
 
 @dataclass(frozen=True, slots=True)
 class ImageSource:
@@ -1182,9 +1200,7 @@ class SecretSubstitution:
 
     def _to_dict(self) -> dict:
         if self.header_fields and not self.headers:
-            raise ValueError(
-                "SecretSubstitution.header_fields requires headers to be enabled"
-            )
+            raise ValueError("SecretSubstitution.header_fields requires headers to be enabled")
         d: dict = {}
         if not self.headers:
             d["headers"] = False
@@ -1692,6 +1708,7 @@ class TokenBucket:
     ``refill_time_ms``. ``one_time_burst`` grants extra startup tokens that
     are spent before the regular budget and never refill.
     """
+
     size: int
     """Bucket capacity in tokens: bytes for bandwidth, frames for ops."""
     refill_time_ms: int
@@ -1713,6 +1730,7 @@ class RateLimiter:
     Caps bandwidth (bytes) and packet rate (frames) independently; a
     missing bucket leaves that dimension unlimited.
     """
+
     bandwidth: TokenBucket | None = None
     """Bandwidth bucket. One token is one byte of frame data."""
     ops: TokenBucket | None = None

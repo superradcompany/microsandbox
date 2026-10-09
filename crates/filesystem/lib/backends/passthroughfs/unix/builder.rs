@@ -10,26 +10,12 @@
 //!     .build()?
 //! ```
 
-use std::{
-    collections::BTreeMap,
-    io,
-    os::fd::AsRawFd,
-    path::PathBuf,
-    sync::{
-        RwLock,
-        atomic::{AtomicBool, AtomicU64},
-    },
-    time::Duration,
-};
-#[cfg(target_os = "linux")]
-use std::{fs::File, os::fd::FromRawFd};
+use std::{io, path::PathBuf, time::Duration};
 
 use super::{
-    BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughFs, StatVirtualization,
+    BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughConfig, PassthroughFs,
+    StatVirtualization,
 };
-#[cfg(target_os = "linux")]
-use crate::backends::shared::platform;
-use crate::backends::shared::{init_binary, inode_table::MultikeyBTreeMap};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -49,6 +35,7 @@ pub struct PassthroughFsBuilder {
     inject_init: bool,
     bind_identity_map: Option<BindIdentityMapHandle>,
     quota_bytes: Option<u64>,
+    deny: Vec<String>,
     max_state_bytes: usize,
 }
 
@@ -72,6 +59,7 @@ impl PassthroughFsBuilder {
             inject_init: true,
             bind_identity_map: None,
             quota_bytes: None,
+            deny: Vec::new(),
             max_state_bytes: msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
         }
     }
@@ -153,6 +141,12 @@ impl PassthroughFsBuilder {
         self
     }
 
+    /// Deny-list of gitignore-style patterns to hide from the guest.
+    pub fn deny(mut self, patterns: impl IntoIterator<Item = String>) -> Self {
+        self.deny.extend(patterns);
+        self
+    }
+
     /// Set the largest serialized filesystem state, in bytes, this mount captures or restores.
     pub fn with_state_limit(mut self, bytes: usize) -> Self {
         self.max_state_bytes = bytes;
@@ -173,11 +167,11 @@ impl PassthroughFsBuilder {
             ));
         }
 
-        let cfg_probe = super::PassthroughConfig {
+        let cfg = PassthroughConfig {
             max_state_bytes: self.max_state_bytes,
             owned_checkpoint: None,
             external_checkpoint: None,
-            root_dir: root_dir.clone(),
+            root_dir,
             no_symlink_root: self.no_symlink_root,
             stat_virtualization: self.stat_virtualization,
             host_permissions: self.host_permissions,
@@ -190,63 +184,9 @@ impl PassthroughFsBuilder {
             bind_identity_map: self.bind_identity_map,
             quota_bytes: self.quota_bytes,
             quota_root: None,
+            deny: self.deny,
         };
 
-        // Open the root directory, contained beneath the anchor when one is set.
-        let root_fd = super::open_root(&cfg_probe)?;
-
-        super::probe_strict_xattr_support(&cfg_probe, root_fd.as_raw_fd())?;
-
-        // Create the init binary file. Mounts that do not inject the virtual
-        // init binary use an empty file and never touch the Agentd payload.
-        let init_file = if cfg_probe.inject_init {
-            init_binary::create_init_file()?
-        } else {
-            init_binary::create_empty_init_file()?
-        };
-
-        // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
-        #[cfg(target_os = "linux")]
-        let has_openat2 = AtomicBool::new(platform::probe_openat2());
-
-        // Open /proc/self/fd on Linux for efficient path resolution.
-        #[cfg(target_os = "linux")]
-        let proc_self_fd = {
-            let path = std::ffi::CString::new("/proc/self/fd").unwrap();
-            let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-            if fd < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            unsafe { File::from_raw_fd(fd) }
-        };
-
-        let cfg = cfg_probe;
-
-        let quota = cfg.quota_bytes.map(|limit| {
-            super::super::quota::DirQuota::new(
-                cfg.quota_root
-                    .clone()
-                    .unwrap_or_else(|| cfg.root_dir.clone()),
-                limit,
-            )
-        });
-
-        Ok(PassthroughFs {
-            invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
-            cfg,
-            root_fd,
-            inodes: RwLock::new(MultikeyBTreeMap::new()),
-            next_inode: AtomicU64::new(3), // 1=root, 2=init
-            handles: RwLock::new(BTreeMap::new()),
-            dir_handles: RwLock::new(BTreeMap::new()),
-            next_handle: AtomicU64::new(1), // 0=init handle
-            writeback: AtomicBool::new(false),
-            init_file,
-            #[cfg(target_os = "linux")]
-            has_openat2,
-            #[cfg(target_os = "linux")]
-            proc_self_fd,
-            quota,
-        })
+        PassthroughFs::new(cfg)
     }
 }

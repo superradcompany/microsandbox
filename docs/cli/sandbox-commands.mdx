@@ -72,7 +72,7 @@ Common flags:
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |
 | `-v`, `--volume` | Mount a host path or named volume, such as `./src:/app:ro` |
 | `--mount-owned` | Private storage removed with this sandbox: `/data` for a directory, or `/var/lib/docker:kind=disk,size=10G` for an ext4 disk. Local-only |
-| `--mount-dir` | Mount a host directory: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
+| `--mount-dir` | Mount a host directory: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid`; also accepts `deny=<pattern>` (repeatable) to hide matching host paths from the guest |
 | `--mount-file` | Mount a host file: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
 | `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]` |
 | `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |

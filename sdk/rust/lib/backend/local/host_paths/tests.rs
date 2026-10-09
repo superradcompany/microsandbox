@@ -24,6 +24,7 @@ fn bind(host: PathBuf, guest: &str) -> VolumeMount {
         host_permissions: HostPermissions::Private,
         follow_root_symlinks: false,
         quota_mib: Some(128),
+        deny: Vec::new(),
     }
 }
 

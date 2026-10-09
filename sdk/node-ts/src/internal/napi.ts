@@ -1331,6 +1331,7 @@ export interface NapiMountBuilder {
   nosuid(): this;
   nodev(): this;
   size(mib: number): this;
+  deny(patterns: string[]): this;
   quota(mib: number): this;
   statVirtualization(policy: string): this;
   hostPermissions(policy: string): this;
@@ -1352,6 +1353,7 @@ export interface NapiVolumeMount {
   readonly ownedKind?: "dir" | "disk";
   readonly sizeMib?: number;
   readonly quotaMib?: number;
+  readonly deny?: string[];
   readonly format?: string;
   readonly fstype?: string;
   readonly statVirtualization?: string;

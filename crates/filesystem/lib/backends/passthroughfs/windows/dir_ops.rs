@@ -97,6 +97,15 @@ impl PassthroughFs {
                 .map_err(|_| linux_error(LINUX_EINVAL))?;
             validate_component(name)?;
 
+            let deny_is_dir = if self.deny.has_dir_only_patterns() {
+                entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            } else {
+                false
+            };
+            if self.deny_matches_name(inode, name, deny_is_dir) {
+                continue;
+            }
+
             let path = entry.path();
             let metadata = self.safe_metadata(&path)?;
             let child = self.intern_path(path)?;
