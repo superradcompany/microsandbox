@@ -53,6 +53,7 @@ pub(crate) async fn materialize_checkpoint_for_child(
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     // Validate once after obtaining child-owned files. Validating the source first neither
     // protects against a later source mutation nor substitutes for validation of the child.
@@ -75,6 +76,7 @@ pub(crate) async fn materialize_checkpoint_for_child(
         child_stage,
         root_disk,
         choices,
+        fs_state_limit,
     )
     .await
 }
@@ -88,11 +90,13 @@ pub(crate) async fn materialize_checkpoint_disk_for_child(
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(&source.checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let source_closure = CheckpointClosure::open_portable(&source.closure, Some(&expected))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let source_closure =
+        CheckpointClosure::open_portable(&source.closure, Some(&expected), fs_state_limit)
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&source_closure, &source.checkpoint_id)?;
     validate_root_disk_closure(&source_closure, root_disk, true)?;
     tokio::fs::create_dir_all(child_stage).await?;
@@ -118,11 +122,13 @@ pub(crate) async fn materialize_checkpoint_child_state(
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let child_closure = CheckpointClosure::open(closure_destination, Some(&expected))
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let child_closure =
+        CheckpointClosure::open(closure_destination, Some(&expected), fs_state_limit)
+            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, false)?;
     let upper_layers =
@@ -159,10 +165,11 @@ pub(crate) async fn materialize_checkpoint_child_disk_state(
     child_stage: &Path,
     root_disk: &SnapshotRootDisk,
     choices: &crate::sandbox::restore_resources::RestoreResources,
+    fs_state_limit: usize,
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let child_closure = CheckpointClosure::open_portable(closure, Some(&expected))
+    let child_closure = CheckpointClosure::open_portable(closure, Some(&expected), fs_state_limit)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, true)?;
@@ -733,6 +740,7 @@ mod tests {
             &disk_child,
             &SnapshotRootDisk::Flat,
             &Default::default(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
         )
         .await
         .unwrap();
@@ -759,6 +767,7 @@ mod tests {
             &child,
             &SnapshotRootDisk::Flat,
             &Default::default(),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
         )
         .await
         .unwrap();
@@ -769,8 +778,12 @@ mod tests {
         assert_eq!(materialized.upper_layers[1].format, "qcow2");
         assert!(materialized.upper_layers[0].path.exists());
         assert!(materialized.upper_layers[1].path.exists());
-        let reopened =
-            CheckpointClosure::open(&materialized.restore.closure, Some(&checkpoint_root)).unwrap();
+        let reopened = CheckpointClosure::open(
+            &materialized.restore.closure,
+            Some(&checkpoint_root),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .unwrap();
         assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
     }
 }

@@ -201,6 +201,7 @@ async fn checkpoint_archive(root: &Path) -> PathBuf {
         &out,
         false,
         false,
+        crate::test_support::DEFAULT_FS_STATE_LIMIT,
     )
     .await
     .unwrap();

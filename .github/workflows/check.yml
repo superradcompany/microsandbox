@@ -633,6 +633,22 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} runtime::spawn::tests::windows_
 
+      - name: Test storage cleanup and recovery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          foreach ($filter in @(
+            'image::cleanup::tests',
+            'backend::local::snapshot::store::tests',
+            'storage::usage::local_usage::tests',
+            'stopped_memory_sweep_registration_clears_on_runtime_shutdown'
+          )) {
+            cargo +stable test --no-default-features --features local,net -p microsandbox --lib --target ${{ matrix.rust_target }} $filter
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: Test Windows DNS resolver
         shell: pwsh
         run: |

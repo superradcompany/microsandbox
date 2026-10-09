@@ -24,7 +24,7 @@ pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectio
 pub use manifest::{
     CaptureIntent, CheckpointGeometry, CheckpointManifest, ContentRef, DeviceStateRef,
     DiskGenerationManifest, DiskLayerRef, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
-    MemoryManifest, ResourceDescriptor, ResourceTreatment,
+    MemoryManifest, ResourceDescriptor, ResourceTreatment, fs_state_budget_error,
 };
 pub use qcow::{
     create_qcow2_overlay, qcow2_backing_basename, relocate_qcow2_backing, relocated_qcow2_header,

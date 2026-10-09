@@ -40,6 +40,7 @@ struct CapturedFullSnapshot {
     checkpoint_root: ObjectId,
     manifest: Manifest,
     labels: BTreeMap<String, String>,
+    fs_state_limit: usize,
     source_recovery: Option<SnapshotSourceRecoveryError>,
 }
 
@@ -525,8 +526,12 @@ async fn stage_full_snapshot(
         }
         let materialize_us = materialize_started.elapsed().as_micros();
         let closure_verify_started = Instant::now();
-        CheckpointClosure::open(&checkpoint_destination, Some(&captured.checkpoint_root))
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        CheckpointClosure::open(
+            &checkpoint_destination,
+            Some(&captured.checkpoint_root),
+            captured.fs_state_limit,
+        )
+        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let closure_verify_us = closure_verify_started.elapsed().as_micros();
         let metadata_started = Instant::now();
         super::metadata::write(&staging_dir, &captured.labels).await?;
@@ -832,6 +837,7 @@ async fn publish_full_archive(
                 &owned_out,
                 plain_tar,
                 force,
+                captured.fs_state_limit,
             )
             .await?;
             lineage.commit(&captured.manifest.snapshot_id).await?;
@@ -904,6 +910,7 @@ async fn capture_full_snapshot(
     )
     .await?;
     let checkpoint = outcome.checkpoint;
+    let fs_state_limit = local.config().fs_state_limit();
     let validated = (|| {
         if checkpoint.checkpoint_id != checkpoint_id {
             return Err(MicrosandboxError::SnapshotIntegrity(
@@ -912,8 +919,9 @@ async fn capture_full_snapshot(
         }
         let checkpoint_root = ObjectId::new(&checkpoint.checkpoint_root)
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-        let closure = CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root))
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+        let closure =
+            CheckpointClosure::open(&checkpoint.path, Some(&checkpoint_root), fs_state_limit)
+                .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         if closure.checkpoint().checkpoint_id != checkpoint_id {
             return Err(MicrosandboxError::SnapshotIntegrity(
                 "runtime checkpoint closure has another capture identity".into(),
@@ -1007,6 +1015,7 @@ async fn capture_full_snapshot(
             checkpoint_root,
             manifest,
             labels: labels.into_iter().collect(),
+            fs_state_limit,
         })
     })();
     validated.map_err(|error| capture_validation_failure(error, outcome.recovery_error.as_deref()))
@@ -2385,7 +2394,12 @@ mod tests {
         let bytes = checkpoint.to_canonical_bytes().unwrap();
         let checkpoint_root = ObjectId::from_bytes(&bytes).unwrap();
         std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
-        CheckpointClosure::open(root, Some(&checkpoint_root)).unwrap();
+        CheckpointClosure::open(
+            root,
+            Some(&checkpoint_root),
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .unwrap();
         let manifest = Manifest {
             schema: SCHEMA.into(),
             snapshot_id: SnapshotId::new("snap_00000000000000000000000000000001").unwrap(),
@@ -2426,6 +2440,7 @@ mod tests {
             checkpoint_root,
             manifest,
             labels: BTreeMap::new(),
+            fs_state_limit: crate::test_support::DEFAULT_FS_STATE_LIMIT,
         }
     }
 
@@ -2520,8 +2535,18 @@ mod tests {
                 std::fs::read(destination.join(DESCRIPTOR_FILENAME)).unwrap(),
                 canonical
             );
-            CheckpointClosure::open(destination.join(CHECKPOINT_DIRECTORY), Some(&root)).unwrap();
-            CheckpointClosure::open(&failure.checkpoint_path, Some(&root)).unwrap();
+            CheckpointClosure::open(
+                destination.join(CHECKPOINT_DIRECTORY),
+                Some(&root),
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
+            CheckpointClosure::open(
+                &failure.checkpoint_path,
+                Some(&root),
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
             let reopened =
                 super::super::store::open_snapshot(&local, destination.to_str().unwrap())
                     .await
@@ -2637,7 +2662,12 @@ mod tests {
                     .contains("already exists")
             );
             assert_eq!(std::fs::read(destination).unwrap(), b"previous artifact");
-            CheckpointClosure::open(&failure.checkpoint_path, None).unwrap();
+            CheckpointClosure::open(
+                &failure.checkpoint_path,
+                None,
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
         }
     }
 
@@ -3243,7 +3273,10 @@ mod tests {
                         super::super::store::open_snapshot(&local, loaded.path().to_str().unwrap())
                             .await
                             .unwrap();
-                    loaded.verify().await.unwrap();
+                    loaded
+                        .verify(crate::test_support::DEFAULT_FS_STATE_LIMIT)
+                        .await
+                        .unwrap();
                     let file = loaded.manifest().state.as_file().unwrap();
                     assert_eq!(file.layers, head_file.layers);
                     for (layer, expected) in file.layers.iter().zip(&source_bytes) {

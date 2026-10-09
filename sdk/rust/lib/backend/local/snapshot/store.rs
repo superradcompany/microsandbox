@@ -1177,7 +1177,8 @@ mod tests {
                 );
                 let journal = local
                     .snapshots_dir()
-                    .join(".snapshot-deletions/delete-interrupted");
+                    .join(".snapshot-deletions")
+                    .join("delete-interrupted");
                 std::fs::create_dir_all(&journal).unwrap();
                 std::fs::write(journal.join(record_name), record).unwrap();
                 if quarantined {

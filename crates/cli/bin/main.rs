@@ -304,6 +304,7 @@ fn main() {
                     http_deny_message: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
                     guest_clock: true,
+                    fs_state_limit: true,
                 })
                 .expect("serialize capabilities")
             );

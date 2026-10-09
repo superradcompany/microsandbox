@@ -1,6 +1,7 @@
 //! Local backend: Archive-level fixtures exercise transport and staging, not hypervisor execution codecs.
 
 use super::*;
+use crate::test_support::DEFAULT_FS_STATE_LIMIT;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
     LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryManifest, sparse_file_integrity,
@@ -69,7 +70,9 @@ async fn fixture(
         std::fs::create_dir_all(root.join("layers")).unwrap();
         let mut layers = Vec::new();
         if let Some(previous) = previous {
-            for old in physical_layers(previous.manifest(), previous.path()).unwrap() {
+            for old in physical_layers(previous.manifest(), previous.path(), DEFAULT_FS_STATE_LIMIT)
+                .unwrap()
+            {
                 let LayerIdentity::Checkpoint(layer) = old.required.identity else {
                     unreachable!()
                 };
@@ -197,7 +200,12 @@ async fn fixture(
 }
 
 fn assert_ram(path: &Path, generation: u64) {
-    let closure = CheckpointClosure::open_portable(path.join(CHECKPOINT_DIRECTORY), None).unwrap();
+    let closure = CheckpointClosure::open_portable(
+        path.join(CHECKPOINT_DIRECTORY),
+        None,
+        DEFAULT_FS_STATE_LIMIT,
+    )
+    .unwrap();
     closure.verify_memory_objects().unwrap();
     let mut ram = Vec::new();
     for extent in &closure.memory().extents {
@@ -239,7 +247,7 @@ async fn with_owned_volumes(local: &LocalBackend, snapshot: Snapshot, generation
     };
     use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
     let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
-    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let closure = CheckpointClosure::open_portable(&root, None, DEFAULT_FS_STATE_LIMIT).unwrap();
     let mut checkpoint = closure.checkpoint().clone();
     let store = LocalObjectStore::open(&root).unwrap();
     let source = tempfile::tempdir().unwrap();
@@ -388,7 +396,7 @@ async fn with_owned_disk_chain(
     use microsandbox_image::snapshot::OwnedVolumeData;
 
     let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
-    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let closure = CheckpointClosure::open_portable(&root, None, DEFAULT_FS_STATE_LIMIT).unwrap();
     let mut checkpoint = closure.checkpoint().clone();
     let store = LocalObjectStore::open(&root).unwrap();
     let volume = checkpoint
@@ -617,7 +625,7 @@ async fn owned_qcow2_file_delta_and_direct_archive_preserve_physical_identity() 
             .await
             .unwrap();
         assert_eq!(snapshot.manifest().owned_volumes().unwrap(), expected);
-        snapshot.verify().await.unwrap();
+        snapshot.verify(DEFAULT_FS_STATE_LIMIT).await.unwrap();
     }
 }
 
@@ -754,7 +762,7 @@ async fn owned_qcow2_delta_borrows_exact_prefix_and_survives_source_deletion() {
         .await
         .unwrap();
     let root = loaded.path().join(CHECKPOINT_DIRECTORY);
-    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let closure = CheckpointClosure::open_portable(&root, None, DEFAULT_FS_STATE_LIMIT).unwrap();
     let disk = closure
         .disks()
         .iter()
@@ -1072,7 +1080,7 @@ async fn owned_delta_reuses_bytes_and_restores_private_renamed_namespace_after_s
         .join(volumes[0].directory_path())
         .join("directory.bin");
     std::fs::remove_file(missing).unwrap();
-    assert!(CheckpointClosure::open_portable(&source, None).is_err());
+    assert!(CheckpointClosure::open_portable(&source, None, DEFAULT_FS_STATE_LIMIT).is_err());
 }
 
 #[tokio::test]
@@ -1226,7 +1234,7 @@ async fn owned_file_archives_restore_all_backing_without_source_or_inheritance()
         loaded.manifest().owned_volumes().unwrap(),
         manifest.owned_volumes().unwrap()
     );
-    super::super::super::verify::verify_snapshot(&loaded)
+    super::super::super::verify::verify_snapshot(&loaded, DEFAULT_FS_STATE_LIMIT)
         .await
         .unwrap();
 }
@@ -1237,7 +1245,7 @@ async fn with_additional_disks(
     generation: u64,
 ) -> Snapshot {
     let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
-    let closure = CheckpointClosure::open_portable(&root, None).unwrap();
+    let closure = CheckpointClosure::open_portable(&root, None, DEFAULT_FS_STATE_LIMIT).unwrap();
     let mut checkpoint = closure.checkpoint().clone();
     let store = LocalObjectStore::open(&root).unwrap();
     for number in 1..=2 {
@@ -1364,9 +1372,12 @@ async fn incremental_selectors_only_count_root_layers_and_include_each_additiona
             load_snapshot_with_base(&local, &archive, None, Some(base.path().to_str().unwrap()))
                 .await
                 .unwrap();
-        let closure =
-            CheckpointClosure::open_portable(loaded.path().join(CHECKPOINT_DIRECTORY), None)
-                .unwrap();
+        let closure = CheckpointClosure::open_portable(
+            loaded.path().join(CHECKPOINT_DIRECTORY),
+            None,
+            DEFAULT_FS_STATE_LIMIT,
+        )
+        .unwrap();
         assert_eq!(closure.disks().len(), 3);
         for number in 1..=2 {
             let disk = closure
@@ -1434,9 +1445,12 @@ async fn chain(disk: bool) {
                         .exists()
                 );
             }
-            let closure =
-                CheckpointClosure::open_portable(source.path().join(CHECKPOINT_DIRECTORY), None)
-                    .unwrap();
+            let closure = CheckpointClosure::open_portable(
+                source.path().join(CHECKPOINT_DIRECTORY),
+                None,
+                DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
             for id in [
                 &closure.checkpoint().memory,
                 &closure.checkpoint().execution_state,
@@ -1467,8 +1481,12 @@ async fn chain(disk: bool) {
             .await
             .unwrap();
             assert!(result.checkpoint_restore.is_some());
-            let closure =
-                CheckpointClosure::open_portable(child.join(".checkpoint-restore"), None).unwrap();
+            let closure = CheckpointClosure::open_portable(
+                child.join(".checkpoint-restore"),
+                None,
+                DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
             closure.verify_memory_objects().unwrap();
             assert!(!local.snapshots_dir().join(source.id().as_str()).exists());
         }
@@ -1679,9 +1697,9 @@ async fn missing_or_corrupt_borrowed_ram_never_publishes_target() {
     let installed = load_snapshot_with_options(&local, &baseline, opts.clone())
         .await
         .unwrap();
-    let id = memory_objects(&base)
+    let id = memory_objects(&base, DEFAULT_FS_STATE_LIMIT)
         .unwrap()
-        .intersection(&memory_objects(&target).unwrap())
+        .intersection(&memory_objects(&target, DEFAULT_FS_STATE_LIMIT).unwrap())
         .next()
         .unwrap()
         .clone();
@@ -1764,7 +1782,7 @@ async fn last_layers_keeps_ram_complete_and_wrong_ram_base_fails() {
     )
     .await
     .unwrap();
-    let ids = memory_objects(&base).unwrap();
+    let ids = memory_objects(&base, DEFAULT_FS_STATE_LIMIT).unwrap();
     let missing = checkpoint_object_path(
         &base.path().join(CHECKPOINT_DIRECTORY),
         ids.first().unwrap(),
@@ -1869,9 +1887,9 @@ async fn memory_dependency_validation_rejects_incomplete_and_misbound_inventorie
     // An inventory can describe an existing base object that the target does not reference.
     // Structural inventory validation alone is insufficient: resolve must check the target map.
     let mut unreferenced = clone();
-    let extra = memory_objects(&base)
+    let extra = memory_objects(&base, DEFAULT_FS_STATE_LIMIT)
         .unwrap()
-        .difference(&memory_objects(&target).unwrap())
+        .difference(&memory_objects(&target, DEFAULT_FS_STATE_LIMIT).unwrap())
         .next()
         .unwrap()
         .clone();

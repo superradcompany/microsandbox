@@ -37,7 +37,7 @@ const LINUX_ENOENT: i32 = 2;
 const LINUX_ENOTDIR: i32 = 20;
 const LINUX_EISDIR: i32 = 21;
 const MOBILITY_STATE_VERSION: u16 = 1;
-const MAX_MOBILITY_STATE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MOBILITY_STATE_BYTES: usize = msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -46,6 +46,7 @@ const MAX_MOBILITY_STATE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) struct AgentBootstrapFs {
     init_file: Mutex<File>,
     dirs: Mutex<DirState>,
+    max_state_bytes: usize,
 }
 
 #[derive(Default)]
@@ -80,13 +81,19 @@ impl AgentBootstrapFs {
         Ok(Self {
             init_file: Mutex::new(init_file),
             dirs: Mutex::new(DirState::new()),
+            max_state_bytes: MAX_MOBILITY_STATE_BYTES,
         })
     }
 
-    fn decode_mobility_state(bytes: &[u8]) -> io::Result<DirState> {
-        if bytes.len() > MAX_MOBILITY_STATE_BYTES {
+    pub(crate) fn with_state_limit(mut self, bytes: usize) -> Self {
+        self.max_state_bytes = bytes;
+        self
+    }
+
+    fn decode_mobility_state(bytes: &[u8], limit: usize) -> io::Result<DirState> {
+        if bytes.len() > limit {
             return Err(invalid_state(
-                "agent bootstrap filesystem state exceeds 4 MiB",
+                "agent bootstrap filesystem state exceeds its configured limit",
             ));
         }
         let state: BootstrapMobilityState = serde_json::from_slice(bytes)
@@ -256,6 +263,7 @@ impl DirState {
 
 impl DynFileSystem for AgentBootstrapFs {
     fn capture_state(&self) -> io::Result<Vec<u8>> {
+        let limit = self.max_state_bytes;
         let dirs = self.dirs.lock().unwrap();
         let state = BootstrapMobilityState {
             version: MOBILITY_STATE_VERSION,
@@ -272,20 +280,20 @@ impl DynFileSystem for AgentBootstrapFs {
                 .collect(),
         };
         let bytes = serde_json::to_vec(&state).map_err(io::Error::other)?;
-        if bytes.len() > MAX_MOBILITY_STATE_BYTES {
+        if bytes.len() > limit {
             return Err(invalid_state(
-                "agent bootstrap filesystem state exceeds 4 MiB",
+                "agent bootstrap filesystem state exceeds its configured limit",
             ));
         }
         Ok(bytes)
     }
 
     fn validate_state(&self, bytes: &[u8]) -> io::Result<()> {
-        Self::decode_mobility_state(bytes).map(drop)
+        Self::decode_mobility_state(bytes, self.max_state_bytes).map(drop)
     }
 
     fn restore_state(&self, bytes: &[u8]) -> io::Result<()> {
-        let restored = Self::decode_mobility_state(bytes)?;
+        let restored = Self::decode_mobility_state(bytes, self.max_state_bytes)?;
         *self.dirs.lock().unwrap() = restored;
         Ok(())
     }
