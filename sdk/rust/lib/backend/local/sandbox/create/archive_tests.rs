@@ -2,17 +2,29 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use microsandbox_image::checkpoint::{
+    CaptureIntent, CheckpointGeometry, CheckpointManifest, ContentRef, DiskGenerationManifest,
+    DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+    MemoryManifest, ObjectId,
+};
 use microsandbox_image::snapshot::{
-    DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest,
-    SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk,
-    SnapshotScope, SnapshotState,
+    CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind,
+    LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat,
+    SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
 };
 use sea_orm::EntityTrait;
 
 use crate::backend::local::database;
+use crate::backend::local::snapshot::archive::{
+    save_direct_checkpoint_snapshot, save_direct_file_snapshot,
+};
+use crate::config::{GlobalConfig, PathsConfig};
+use crate::sandbox::SandboxBuilder;
+use crate::snapshot::SnapshotReference;
+use crate::test_support::local_backend;
 
 use super::{LocalBackend, RootfsSource, SandboxConfig, SandboxStatus, SpawnMode, sandbox_entity};
 
@@ -20,7 +32,7 @@ use super::{LocalBackend, RootfsSource, SandboxConfig, SandboxStatus, SpawnMode,
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-async fn archive(root: &Path, flat: bool, plain: bool) -> std::path::PathBuf {
+async fn archive(root: &Path, flat: bool, plain: bool) -> PathBuf {
     let source = root.join("source.raw");
     std::fs::write(&source, vec![0u8; 4096]).unwrap();
     let layer_id = DiskLayerId::new("layer_00000000000000000000000000000001").unwrap();
@@ -64,7 +76,7 @@ async fn archive(root: &Path, flat: bool, plain: bool) -> std::path::PathBuf {
         requires: Vec::new(),
     };
     let out = root.join("source.msnap");
-    crate::backend::local::snapshot::archive::save_direct_file_snapshot(
+    save_direct_file_snapshot(
         &manifest,
         &BTreeMap::new(),
         "saved",
@@ -73,6 +85,123 @@ async fn archive(root: &Path, flat: bool, plain: bool) -> std::path::PathBuf {
         &out,
         plain,
         false,
+    )
+    .await
+    .unwrap();
+    out
+}
+
+/// Write a minimal full-snapshot archive whose checkpoint is never resumed.
+async fn checkpoint_archive(root: &Path) -> PathBuf {
+    let source = root.join("checkpoint-source");
+    let store = LocalObjectStore::open(&source).unwrap();
+    let memory_bytes = b"checkpoint-memory";
+    let memory_object = store.put_bytes(memory_bytes).unwrap();
+    let memory = MemoryManifest {
+        schema: "microsandbox.memory/1".into(),
+        architecture: std::env::consts::ARCH.into(),
+        guest_page_size: 4096,
+        topology_generation: 1,
+        generation: 1,
+        capture_mode: MemoryCaptureMode::Full,
+        pause_generation: 1,
+        extents: vec![MemoryExtent {
+            start: 0,
+            length: memory_bytes.len() as u64,
+            content: MemoryExtentContent::Object(ContentRef {
+                object: memory_object,
+                object_offset: 0,
+            }),
+        }],
+    };
+    let memory_id = store
+        .put_bytes(&memory.to_canonical_bytes().unwrap())
+        .unwrap();
+    let execution_id = store.put_bytes(b"execution").unwrap();
+
+    let layer_id = "layer_00000000000000000000000000000001";
+    let layers = source.join("layers");
+    std::fs::create_dir(&layers).unwrap();
+    std::fs::write(layers.join(format!("{layer_id}.qcow2")), b"QFI\xfbhead").unwrap();
+    let disk = DiskGenerationManifest {
+        schema: "microsandbox.disk-generation/1".into(),
+        volume_id: "vol_test".into(),
+        device_id: "vdb".into(),
+        generation: 1,
+        layers: vec![DiskLayerRef {
+            file_size: 8,
+            layer_id: layer_id.into(),
+            format: "qcow2".into(),
+            virtual_size: 4096,
+            predecessor: None,
+            integrity_root: None,
+        }],
+        head: layer_id.into(),
+        pause_generation: 1,
+    };
+    let disk_id = store
+        .put_bytes(&disk.to_canonical_bytes().unwrap())
+        .unwrap();
+
+    let checkpoint = CheckpointManifest {
+        schema: "microsandbox.checkpoint/1".into(),
+        checkpoint_id: "checkpoint_archive".into(),
+        capture_intent: CaptureIntent::FullSnapshot,
+        geometry: CheckpointGeometry {
+            vcpus: 1,
+            max_vcpus: 1,
+            memory_mib: 128,
+            max_memory_mib: 128,
+        },
+        architecture: std::env::consts::ARCH.into(),
+        pause_generation: 1,
+        execution_state: execution_id,
+        memory: memory_id,
+        disks: vec![disk_id],
+        devices: Vec::new(),
+        resources: Vec::new(),
+        owned_volumes: Vec::new(),
+        requires: Vec::new(),
+    };
+    let checkpoint_bytes = checkpoint.to_canonical_bytes().unwrap();
+    let checkpoint_root = ObjectId::from_bytes(&checkpoint_bytes).unwrap();
+    std::fs::write(source.join("checkpoint.json"), checkpoint_bytes).unwrap();
+
+    let manifest = Manifest {
+        schema: SCHEMA.into(),
+        snapshot_id: SnapshotId::new("snap_00000000000000000000000000000002").unwrap(),
+        scope: SnapshotScope::Full,
+        state: SnapshotState::Checkpoint(CheckpointSnapshotState {
+            checkpoint_id: checkpoint.checkpoint_id,
+            checkpoint_root: checkpoint_root.to_string(),
+            restore_intents: vec!["clone".into(), "resume".into()],
+            requirements_summary: BTreeMap::new(),
+        }),
+        capture: SnapshotCapture {
+            created_at: "2026-09-17T00:00:00Z".into(),
+            source_lineage: None,
+            source_checkpoint: None,
+            consistency: SnapshotConsistency::ApplicationConsistent,
+        },
+        image: ImageRef {
+            reference: "docker.io/library/alpine:3.21".into(),
+            manifest_digest: format!("sha256:{}", "2".repeat(64)),
+        },
+        root_disk: SnapshotRootDisk::Managed,
+        parent: None,
+        extensions: BTreeMap::new(),
+        requires: Vec::new(),
+    };
+    let out = root.join("checkpoint.msnap");
+    save_direct_checkpoint_snapshot(
+        &manifest,
+        &BTreeMap::new(),
+        "checkpoint",
+        &source,
+        &out,
+        false,
+        false,
+        crate::test_support::DEFAULT_FS_STATE_LIMIT,
     )
     .await
     .unwrap();
@@ -92,9 +221,9 @@ async fn backend(root: &Path, patch: u8) -> Arc<LocalBackend> {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let firmware = root.join("firmware");
     std::fs::write(&firmware, b"not launched").unwrap();
-    let backend = crate::test_support::local_backend(crate::config::GlobalConfig {
+    let backend = local_backend(GlobalConfig {
         home: Some(root.join("home")),
-        paths: crate::config::PathsConfig {
+        paths: PathsConfig {
             msb: Some(executable),
             libkrunfw: Some(firmware),
             ..Default::default()
@@ -110,11 +239,30 @@ async fn assert_rejection_preserves_target(
     archive: &Path,
     reason: &str,
 ) {
+    let mut request = replaceable_config();
+    request.replace_existing = true;
+    request.snapshot_reference = Some(SnapshotReference::path(archive.to_string_lossy()));
+
+    assert_request_preserves_target(backend, request, reason).await;
+}
+
+/// Existing sandbox that a rejected replacement request must leave untouched.
+fn replaceable_config() -> SandboxConfig {
     let mut config = SandboxConfig::default();
     config.spec.name = "replaceable".into();
     config.spec.image = RootfsSource::oci("alpine:3.21");
     config.spec.resources.max_cpus = config.spec.resources.cpus;
     config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
+
+    config
+}
+
+async fn assert_request_preserves_target(
+    backend: Arc<LocalBackend>,
+    request: impl Into<SandboxBuilder>,
+    reason: &str,
+) {
+    let config = replaceable_config();
     let pools = backend.db().await.unwrap();
     let id = LocalBackend::insert_sandbox_record_with_status(
         pools.write(),
@@ -131,17 +279,15 @@ async fn assert_rejection_preserves_target(
     let child = backend.sandboxes_dir().join(&config.spec.name);
     std::fs::create_dir_all(&child).unwrap();
     std::fs::write(child.join("sentinel"), b"keep my disk").unwrap();
-    config.replace_existing = true;
-    config.snapshot_reference = Some(crate::snapshot::SnapshotReference::path(
-        archive.to_string_lossy(),
-    ));
+
     let error = match backend
-        .create_sandbox(backend.clone(), config, SpawnMode::Attached, None)
+        .create_sandbox(backend.clone(), request, SpawnMode::Attached, None)
         .await
     {
         Ok(_) => panic!("unsupported archive must not launch"),
         Err(error) => error,
     };
+
     assert!(error.to_string().contains(reason), "{error}");
     assert_eq!(
         std::fs::read(child.join("sentinel")).unwrap(),
@@ -240,6 +386,59 @@ async fn corrupt_archive_does_not_replace_target() {
         Err(error) => error.to_string(),
     };
     assert_rejection_preserves_target(backend, &archive, &reason).await;
+}
+
+#[tokio::test]
+async fn copy_on_write_disk_archive_preserves_replacement_target() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let archive = archive(root.path(), false, false).await;
+    // Without an installed runtime, launch-contract checks are skipped, so only
+    // the copy-on-write checks can reject this request.
+    let backend = Arc::new(local_backend(GlobalConfig {
+        home: Some(root.path().join("home")),
+        ..Default::default()
+    }));
+
+    // A disk archive has no checkpoint, so CoW memory must fail before replacement.
+    let request = SandboxBuilder::new("replaceable")
+        .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
+        .forked()
+        .replace();
+
+    assert_request_preserves_target(
+        backend,
+        request,
+        "copy-on-write memory requires a full snapshot restore",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn disk_only_restore_from_full_archive_passes_admission() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let archive = checkpoint_archive(root.path()).await;
+    // The newest historical contract admits the request, then rejects the
+    // materialized disk chain, so reaching that check proves restore admission passed.
+    let backend = backend(root.path(), 18).await;
+
+    // Match the public restore builder: the reference is resolved during preparation.
+    let builder = SandboxBuilder::new("disk-only-child")
+        .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
+        .disk_only();
+    let error = match backend
+        .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
+        .await
+    {
+        Ok(_) => panic!("the stub runtime must not launch"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("disk chains require a newer runtime launch contract"),
+        "{error}"
+    );
 }
 
 #[test]
