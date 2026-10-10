@@ -613,7 +613,7 @@ A metadata and lifecycle handle for an existing snapshot.
 
 <p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">digest</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">digest</span>
 
 `string`
 
@@ -631,37 +631,37 @@ Member name within its group, or `null` when no alias is recorded.
 
 Parent snapshot's manifest digest, or `null` for a root.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">scope</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">scope</span>
 
 [`SnapshotScope`](#snapshotscope-type)
 
 Snapshot payload scope (`"disk"` today).
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">imageRef</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">imageRef</span>
 
 `string`
 
 Image reference the snapshot was taken from.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">format</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">format</span>
 
 `"raw" \| "qcow2"`
 
 On-disk format of the upper layer.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">sizeBytes</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">sizeBytes</span>
 
 `bigint \| null`
 
 Apparent size of the upper file at index time.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">createdAt</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">createdAt</span>
 
 `Date`
 
 Snapshot creation time (from manifest).
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">path</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">path</span>
 
 `string`
 
@@ -692,13 +692,13 @@ await h.remove({ force: false });     // refuse if it has children
 ```
 
 </Accordion>
-#### <span className="msb-recv">snap.</span><span className="msb-hn">reference</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">reference</span>
 
 `string`
 
 Backend-relative snapshot reference.
 
-#### <span className="msb-recv">snap.</span><span className="msb-hn">referenceKind</span>
+#### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">referenceKind</span>
 
 `"id" \| "path"`
 
