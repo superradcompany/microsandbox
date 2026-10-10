@@ -1,6 +1,7 @@
 ---
 title: Overview
-description: Install the SDK and create your first sandbox
+"og:title": Microsandbox SDKs for TypeScript, Rust, Python, Go, and Ruby
+description: Install a microsandbox SDK, create your first microVM sandbox, and find API references for TypeScript, Rust, Python, Go, and Ruby.
 keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go SDK"]
 icon: "play"
 ---
@@ -50,10 +51,12 @@ console.log("Output:", output.stdout());
 ```
 
 ```rust Rust
+use std::error::Error;
+
 use microsandbox::Sandbox;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let sb = Sandbox::builder("hello")
         .image("python")
         .create()

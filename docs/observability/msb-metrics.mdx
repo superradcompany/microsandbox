@@ -97,22 +97,22 @@ The collector reads the shared-memory registry directly:
 For production, use Grafana Alloy or another local collector as a forwarder.
 You can also export directly to a hosted backend.
 
-End-to-end setup walkthroughs live under [Examples](/examples/overview):
+End-to-end setup walkthroughs live in [Guides](/how-to/overview#observability):
 
 <CardGroup cols={2}>
-  <Card title="Grafana Alloy" icon="route" href="/examples/metrics-backends/grafana-alloy">
+  <Card title="Grafana Alloy" icon="route" href="/how-to/metrics-backends/grafana-alloy">
     Forward metrics through a local Alloy process.
   </Card>
-  <Card title="Grafana Cloud" icon="cloud-arrow-up" href="/examples/metrics-backends/grafana-cloud">
+  <Card title="Grafana Cloud" icon="cloud-arrow-up" href="/how-to/metrics-backends/grafana-cloud">
     Export directly to Grafana Cloud.
   </Card>
-  <Card title="Prometheus" icon="fire" href="/examples/metrics-backends/prometheus">
+  <Card title="Prometheus" icon="fire" href="/how-to/metrics-backends/prometheus">
     Use Prometheus's native OTLP receiver.
   </Card>
-  <Card title="OpenTelemetry Collector" icon="terminal" href="/examples/metrics-backends/otel-collector">
+  <Card title="OpenTelemetry Collector" icon="terminal" href="/how-to/metrics-backends/otel-collector">
     Run a local OpenTelemetry Collector.
   </Card>
-  <Card title="Datadog" icon="chart-line" href="/examples/metrics-backends/datadog">
+  <Card title="Datadog" icon="chart-line" href="/how-to/metrics-backends/datadog">
     Export through the Datadog Agent.
   </Card>
 </CardGroup>
@@ -138,16 +138,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
 | `uptime` | `s` | Sandbox uptime. |
 
-Unavailable memory usage is omitted from OTLP and displayed as `N/A` in stdout output. The memory limit is still reported. Immediately after a resize, usage can be inaccurate until guest memory statistics catch up.
+During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
 
-Disk and network totals are gauges containing absolute cumulative values. Use
-`rate()` in PromQL for throughput.
-
-During a memory resize, `memory.limit` tracks plugged memory and converges to the
-accepted target as the guest plugs or releases memory. Right after a resize,
-`memory.usage` can briefly be off or missing until the guest's memory statistics
-catch up. Sandboxes started by an older runtime keep reporting their boot
-allocation until they are restarted.
+Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
 
 ### Attributes
 

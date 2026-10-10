@@ -1,0 +1,26 @@
+---
+title: "v0.7.6"
+sidebarTitle: "v0.7.6"
+description: "Host paths stay fixed after a sandbox is created, and local volume operations stay inside the volume."
+icon: "bolt"
+---
+
+October 1, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.6) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.5...v0.7.6)
+
+## Security hardening
+
+**Host paths no longer move.** New local sandboxes save relative host paths from CLI flags and SDK calls as absolute paths when the sandbox is created. Starting the sandbox from another directory keeps the same mount sources and TLS certificate files. Paths in a sandbox configuration file still resolve from that file's directory. Existing saved sandboxes keep their previous behavior and are not rewritten. [Bind mounts](/sandboxes/volumes#bind-mounts)
+
+**Local volume access stays confined.** Volume filesystem operations pin the volume directory, so replacing the root path cannot redirect an operation already in progress. Symlinks that resolve inside the volume still work. Paths that escape it return an error. [Go volume paths](/sdk/go/volumes#local-filesystem-paths)
+
+**Backends capture their locations.** A local backend fixes its home, path overrides, runtime paths, and registry CA path when you construct it. Later changes to the working directory or `MSB_HOME` do not move its files. Relative snapshot artifact paths resolve when each operation begins.
+
+## Before upgrading
+
+- **Check relative paths in configuration files.** Relative host paths in global `config.json` and managed configuration now resolve from the file's own directory, not your working directory. This covers `home`, `paths.*`, and `registries.ca_certs`. Use absolute paths to keep a location elsewhere. [Configuration](/configuration)
+- **Update the Go native library.** Go local volume operations require the v0.7.6 native SDK library. Older libraries return an unsupported-operation error.
+- **Fix ambiguous Go paths.** Go no longer cleans `..` before lookup. A path where a symlink followed by `..` would select a different file now returns an error. Name the destination directly.
+
+## Fixes
+
+- Metrics readers find runs recorded under both the original and normalized spelling of the home path. Running sandboxes do not need a restart. [Metrics upgrades](/sandboxes/metrics#upgrading-with-running-sandboxes)

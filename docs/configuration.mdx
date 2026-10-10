@@ -1,6 +1,7 @@
 ---
-title: Global config reference
-description: Reference for the global config.json shared by the CLI and SDKs
+title: Global configuration
+"og:title": Microsandbox global configuration reference
+description: Configure microsandbox defaults for the CLI and SDKs using the shared config.json file.
 icon: "gear"
 ---
 
@@ -399,11 +400,11 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 |-------|---------|-------------|
 | `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
 
-The budget applies per virtio-fs device to capture, verification, export, import, restore, and live forks. A sandbox reads it when it starts, so restart a running sandbox after changing it; until then it keeps the budget it started with.
+This limit applies per filesystem device during capture, verification, export, import, restore, and live forks.
 
-Snapshot admission uses the current host budget even when the source sandbox started with a larger one. Lowering the setting can therefore refuse a full snapshot from an already-running sandbox; keep a sufficient budget until those snapshots are saved. Values below `4` can also refuse snapshots that hosts with the default budget accept.
-
-Every machine that reads a snapshot needs a budget at least as large as the one that captured it, and a reader with a smaller budget refuses the snapshot before changing anything. A larger budget lets a snapshot use more memory on restore, so raise it on a host that restores imported archives only for archives you trust.
+- **After changing it:** restart running sandboxes to update their capture limit. Host snapshot checks use the new limit immediately, so lowering it can reject captures from sandboxes still using a larger limit.
+- **When reading snapshots:** allow enough space for each device's saved state. The reader does not need to match the capture host's maximum. A smaller limit rejects oversized state before making changes.
+- **Before raising it:** consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
 
 ## `profiles`
 

@@ -189,7 +189,7 @@ nav[aria-label="Pages"] a > div:has(> img[src*="/pi.svg"]) { --msb-agent-icon: u
   .msb-platform-strip { grid-template-columns: 1fr; }
 }
 
-/* Introduction handoff to the examples library. */
+/* Introduction handoff to the task-guide library. */
 .msb-examples-cta {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -585,15 +585,15 @@ details.accordion > [data-component-part="accordion-content"] {
  * inset. Scoped to standalone accordions that hold a code block so prose and
  * grouped accordions are left alone.
  * -------------------------------------------------------------------------- */
-details.accordion:has(.code-block):not(.msb-accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) .code-block { margin: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) > *:not(summary) { margin: 0.75rem !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) .code-block { margin: 0 !important; }
 
 /* The example now sits directly under the signature. The signature code
  * block's 2rem bottom margin and the accordion's top margin stacked into a
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
-.code-block:has(+ details.accordion:not(.msb-accordion-group *)) { margin-bottom: 0 !important; }
-details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5rem !important; }
+.code-block:has(+ details.accordion:not(.msb-accordion-group *, .accordion-group *)) { margin-bottom: 0 !important; }
+details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
   .msb-params { grid-template-columns: 1fr; }
@@ -604,7 +604,8 @@ details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5
  * Availability badges: small pills for local-only, limited-on-cloud, and
  * cloud-only features. Features that work everywhere do not need a badge.
  * -------------------------------------------------------------------------- */
-.msb-badge-local {
+.msb-badge-local,
+.msb-badge-version {
   display: inline-block;
   margin-top: -0.35rem;
   padding: 0.1rem 0.5rem;
@@ -617,10 +618,26 @@ details.accordion:has(.code-block):not(.msb-accordion-group *) { margin-top: 0.5
   border: 1px solid rgba(109, 75, 196, 0.25);
 }
 
-.dark .msb-badge-local {
+.dark .msb-badge-local,
+.dark .msb-badge-version {
   color: #c9b1ff;
   background: rgba(191, 132, 254, 0.12);
   border-color: rgba(191, 132, 254, 0.3);
+}
+
+.msb-badge-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.msb-badge-version:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+span:has(> .msb-badge-version) {
+  text-decoration: none !important;
 }
 
 .msb-badge-local svg,
@@ -703,3 +720,126 @@ span:has(> .msb-badge-limited) {
 span:has(> .msb-badge-cloud) {
   text-decoration: none !important;
 }
+
+/* Tally's embedded form has its own light theme. Keep this text-only form
+   readable in both documentation themes without reloading entered answers. */
+.enterprise-contact-form {
+  color-scheme: light;
+  background: #fff;
+  border-radius: 12px;
+}
+
+.dark .enterprise-contact-form {
+  filter: invert(1) hue-rotate(180deg);
+  /* Blend the inverted white background into the actual page color. */
+  mix-blend-mode: screen;
+}
+
+.dark .enterprise-contact-surface {
+  background: rgb(var(--background-dark));
+  isolation: isolate;
+}
+
+/* Compact grouped links for the guide overview. */
+.msb-guides-grid {
+  column-count: 2;
+  column-gap: 2.5rem;
+  margin: 1.5rem 0 2rem;
+}
+
+/* Keep each topic together while columns fill independently, top to bottom. */
+.msb-guide-group {
+  break-inside: avoid;
+  margin-bottom: 2rem;
+}
+
+.msb-guide-group h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0 0 0.65rem !important;
+  padding: 0 0 0.7rem;
+  border-bottom: 1px solid var(--msb-code-border);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.msb-guide-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.msb-guide-heading > *:first-child {
+  flex-shrink: 0;
+}
+
+.msb-guides-overview .msb-guide-group ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.msb-guides-overview .msb-guide-group li {
+  margin: 0;
+  padding: 0;
+}
+
+.msb-guide-group li::before {
+  display: none;
+}
+
+.msb-guide-group li a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0;
+  border-bottom: 0 !important;
+  color: inherit;
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.5;
+  text-decoration: none;
+}
+
+.msb-guide-group li a > :last-child {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.msb-guide-group li a:hover {
+  color: var(--msb-code-header-text);
+}
+
+.msb-guide-group a:focus-visible {
+  outline: 2px solid var(--msb-code-header-text);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+
+/* Give the overview the space otherwise reserved for a TOC. */
+body:has(.msb-guides-overview) #table-of-contents-layout {
+  display: none;
+}
+
+@media (min-width: 1280px) {
+  .msb-guides-grid {
+    column-count: 3;
+    column-gap: 1.75rem;
+  }
+
+  #content-area:has(.msb-guides-overview) {
+    width: 100% !important;
+    max-width: 72rem !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .msb-guides-grid { column-count: 1; }
+}
+
+/* Show moved-command links only to readers following an old bookmark. */
+.msb-moved-command { display: none; }
+.msb-moved-command:target { display: block; margin: 1rem 0; }

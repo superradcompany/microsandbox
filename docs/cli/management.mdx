@@ -1,11 +1,15 @@
 ---
 title: CLI management
+"og:title": Microsandbox CLI setup and management commands
 sidebarTitle: "Management"
-description: Inspect the active backend, diagnose setup, and manage the CLI
+description: Inspect the active backend, diagnose runtime setup, and manage the microsandbox CLI installation.
 icon: "wrench"
 ---
 
-Inspect your CLI setup and manage the local installation.
+For first-time installation, see the [CLI overview](/cli/overview#install).
+
+<a id="msb-install" className="msb-moved-command" href="/cli/sandbox-commands#msb-install">The msb install reference has moved to Sandbox commands.</a>
+<a id="msb-uninstall" className="msb-moved-command" href="/cli/sandbox-commands#msb-uninstall">The msb uninstall reference has moved to Sandbox commands.</a>
 
 ## msb context
 
@@ -14,48 +18,6 @@ Show the selected backend, API endpoint, and how it was selected. Credentials ar
 ```bash
 msb context
 msb context --format json
-```
-
-## msb install
-
-Install a sandbox as a system command. Creates an executable in `~/.microsandbox/bin/` that launches `msb run` with the specified image and options.
-
-```bash
-msb install ubuntu                   # Install as 'ubuntu' command
-msb install --name nodebox node      # Custom command name
-msb install --tmp alpine             # Fresh sandbox every invocation
-msb install -c 2 -m 1G python  # With resource limits
-msb install --list                   # List installed commands
-```
-
-| Flag | Description |
-|------|-------------|
-| `-n`, `--name` | Command name for the alias (defaults to image name) |
-| `-c`, `--cpus` | Number of virtual CPUs to allocate |
-| `-m`, `--memory` | Amount of memory (e.g. `512M`, `1G`) |
-| `-v`, `--volume` | Mount a host path or named volume (`SOURCE:DEST[:OPTIONS]`, e.g. `./src:/app:ro,noexec`) |
-| `--mount-dir` | Mount a host directory: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
-| `--mount-file` | Mount a host file: `SOURCE:DEST[:OPTIONS]`. Supports `quota` and paired `uid`/`gid` |
-| `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]` |
-| `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |
-| `--security` | In-guest security profile (`default` or `restricted`) |
-| `-w`, `--workdir` | Working directory inside the sandbox |
-| `--shell` | Shell for interactive sessions |
-| `-e`, `--env` | Set an environment variable (`KEY=VALUE`) |
-| `-f`, `--force` | Overwrite an existing alias with the same name |
-| `--no-pull` | Don't pull the image before installing |
-| `--tmp` | Create a fresh sandbox on every invocation (no persistent state) |
-| `-l`, `--list` | List all installed sandbox commands |
-| `--conf` | Load an explicit sparse [sandbox configuration](/cli/configuration). Repeatable |
-| `--net-conf`, `--resource-conf`, `--runtime-conf`, `--fs-conf`, `--secret-conf`, `--script-conf` | Load an explicit [scoped config](/cli/configuration#scoped-config-files). Repeatable |
-
-## msb uninstall
-
-Remove an installed sandbox command.
-
-```bash
-msb uninstall nodebox
-msb uninstall ubuntu alpine   # Remove multiple
 ```
 
 ## msb self
@@ -87,6 +49,8 @@ msb self uninstall --yes      # Skip confirmation
 | `uninstall` | Remove msb, libkrunfw, and command links |
 
 `msb self update` always targets the latest release; it does not accept a version argument. Use `msb self downgrade <version>` to move to a supported older release.
+
+Run downgrade from the newer CLI before replacing it: the older binary does not contain rollback steps for newer migrations. If you already installed an older binary and see `database schema is newer than this msb binary`, follow the [catalog recovery steps](/migrations/v0.7#database-schema-is-newer-than-this-msb-binary). [Snapshot groups can also block downgrade](/migrations/v0.7#snapshot-groups-can-block-downgrade).
 
 Only one downgrade can run per installation. A second command fails immediately; wait for the first to finish or cancel it before retrying.
 

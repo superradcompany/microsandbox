@@ -22,7 +22,6 @@ When a change takes effect depends on the setting:
 | Environment and workdir | Future execs | Processes that are already running keep their current values |
 | `max_cpus` and `max_memory` | Restart or next start | These ceilings are fixed when the VM boots |
 | Root disk size | Live, restart or next start | Managed and flat ext4 roots grow only; tmpfs changes on boot |
-| Published TCP/UDP ports | Restart or next start | Add, update, or explicitly remove individual host endpoints |
 | Named volumes, mount tmpfs, and user disk images | Outside `modify` | Capacity is managed where the storage is defined |
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
@@ -81,12 +80,6 @@ The result is a modification plan showing what changed and whether each change w
 Live growth needs capacity reserved when the VM boots. Set `max_cpus` and `max_memory` above the starting allocation when you create a sandbox that may need to scale:
 
 <CodeGroup>
-```bash CLI
-msb create python --name worker \
-  --cpus 2 --memory 1G \
-  --max-cpus 8 --max-memory 4G
-```
-
 ```typescript TypeScript
 await using sandbox = await Sandbox.builder("worker")
   .image("python")
@@ -127,6 +120,23 @@ sb, err := m.CreateSandbox(ctx, "worker",
     m.WithMaxCPUs(8),
     m.WithMaxMemory(4096),
 )
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  cpus: 2,
+  memory: 1024,
+  max_cpus: 8,
+  max_memory: 4096
+)
+```
+
+```bash CLI
+msb create python --name worker \
+  --cpus 2 --memory 1G \
+  --max-cpus 8 --max-memory 4G
 ```
 </CodeGroup>
 
@@ -223,7 +233,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Use [`msb ps`](/cli/sandbox-commands#msb-status-/-ps) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports `applied`, `converging`, `guest-refused`, or `failed` for each resource so automation can wait for the guest to settle.
+Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports `applied`, `converging`, `guest-refused`, or `failed` for each resource so automation can wait for the guest to settle.
 
 <span id="labels" />
 
@@ -487,61 +497,3 @@ Root disk resizing remains conservative: managed and flat OCI disks grow only, t
 ## Reference
 
 For every CLI flag and result state, see [`msb modify`](/cli/sandbox-commands#msb-modify). The SDK sandbox references expose the same planner and policies for [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), and [Go](/sdk/go/sandbox).
-
-
-## Change published ports
-
-Add or update one mapping without repeating the others. A mapping is identified by its
-host address, host port, and protocol. The default is loopback (`127.0.0.1`) and TCP.
-Removal is explicit; an empty list leaves existing mappings unchanged.
-
-<CodeGroup>
-```bash CLI
-msb modify worker -p 8080:3000 --next-start
-msb modify worker --port-rm 8080 --restart
-# Explicit address and UDP:
-msb modify worker -p 127.0.0.1:5353:53/udp --next-start
-msb modify worker --port-rm 127.0.0.1:5353/udp --next-start
-```
-
-```typescript TypeScript
-await sandbox.modify({
-  ports: [{ hostPort: 8080, guestPort: 3000 }],
-  policy: "next_start",
-});
-await sandbox.modify({ portsRemove: [{ hostPort: 8080 }], policy: "restart" });
-```
-
-```rust Rust
-use microsandbox::sandbox::{PortProtocol, PublishedPortKey};
-
-sb.modify().port(8080, 3000).next_start().apply().await?;
-sb.modify().remove_port(PublishedPortKey {
-    host_bind: "127.0.0.1".into(),
-    host_port: 8080,
-    protocol: PortProtocol::Tcp,
-}).restart().apply().await?;
-```
-
-```python Python
-from microsandbox import ModificationPolicy, PortEndpoint
-
-await sb.modify(ports={8080: 3000}, policy=ModificationPolicy.NEXT_START)
-await sb.modify(ports_rm=[PortEndpoint(8080)], policy=ModificationPolicy.RESTART)
-```
-
-```go Go
-_, err := sb.Modify(ctx, m.ModifyOptions{
-    Ports: []m.PortBinding{{HostPort: 8080, GuestPort: 3000}},
-    Policy: m.ModificationPolicyNextStart,
-})
-_, err = sb.Modify(ctx, m.ModifyOptions{
-    PortsRemove: []m.PortEndpoint{{HostPort: 8080}},
-    Policy: m.ModificationPolicyRestart,
-})
-```
-</CodeGroup>
-
-For running sandboxes, use `--next-start` to defer changes or `--restart` to apply them immediately. Restart preserves disk contents but interrupts processes and connections. Stopped sandboxes save changes for their next start. Use `--dry-run` to preview changes.
-
-Known port conflicts are rejected before changes are applied, but ports aren't reserved: binding can still fail at startup and will be logged. Port modification is supported only for local sandboxes.

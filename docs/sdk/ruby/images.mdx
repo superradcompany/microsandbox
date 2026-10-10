@@ -1,0 +1,218 @@
+---
+title: Images
+"og:title": Ruby SDK Images reference
+description: Inspect and manage cached images with the Ruby SDK.
+---
+
+See [Images](/images/overview) for image sources and caching behavior. These APIs manage the local image cache.
+
+## Image
+
+#### <span className="msb-recv">Microsandbox::Image.</span><span className="msb-hn">get()</span>
+
+```ruby
+Microsandbox::Image.get(reference) # => ImageHandle
+```
+
+Look up a cached image.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Image reference.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">ImageHandle</span></div>
+    <div className="msb-param-desc">Look up a cached image.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Image.</span><span className="msb-hn">list()</span>
+
+```ruby
+Microsandbox::Image.list # => Array<ImageHandle>
+```
+
+<Accordion title="Example">
+
+```ruby
+Microsandbox::Image.list.each do |image|
+  puts "#{image.reference}: #{image.size_bytes} bytes"
+end
+```
+
+</Accordion>
+
+List cached images.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Array&lt;ImageHandle&gt;</span></div>
+    <div className="msb-param-desc">List cached images.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Image.</span><span className="msb-hn">remove()</span>
+
+```ruby
+Microsandbox::Image.remove(reference, force = false) # => nil
+```
+
+Remove a cached image.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reference</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Image reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Force removal; optional positional argument, defaults to false.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Image.</span><span className="msb-hn">prune()</span>
+
+```ruby
+Microsandbox::Image.prune # => Hash
+```
+
+Prune unused cached images.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">String keys: image_refs_removed, manifests_removed, layers_removed, and bytes_reclaimed.</div>
+  </div>
+</div>
+
+Ruby does not expose a standalone image pull method. Select an OCI reference using `image:` when creating a sandbox.
+
+## ImageHandle
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">reference</span>
+
+```ruby
+image.reference # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Image reference.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">size_bytes</span>
+
+```ruby
+image.size_bytes # => Integer | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Cached size.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">manifest_digest</span>
+
+```ruby
+image.manifest_digest # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Manifest digest.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">architecture</span>
+
+```ruby
+image.architecture # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Image platform.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">os</span>
+
+```ruby
+image.os # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Image platform.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">layer_count</span>
+
+```ruby
+image.layer_count # => Integer
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Number of layers.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">image.</span><span className="msb-hn">created_at</span>
+
+```ruby
+image.created_at # => String | nil
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">RFC 3339 creation timestamp.</div>
+  </div>
+</div>

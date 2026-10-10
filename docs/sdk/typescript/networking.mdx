@@ -1,10 +1,11 @@
 ---
 title: Networking
-description: TypeScript SDK - Network API reference
+"og:title": TypeScript SDK Networking reference
+description: Configure sandbox network policies with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript networking", "microsandbox networking"]
 ---
 
-Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
+See [Networking](/networking/overview) for network policies, DNS, TLS, and port publishing.
 
 ## NetworkPolicy
 
@@ -581,13 +582,19 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 http(configure: (h: HttpBuilder) => HttpBuilder): this
 ```
 
-Denial responses are disabled by default. Use `h.denyResponse(true)` to enable readable `403` responses, and optionally `h.denyMessage(message)` to customize the body. `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it.
+Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
+
+<Accordion title="Example">
 
 ```typescript
-network.http((h) => h.denyResponse(true).denyMessage("Blocked: {host}"))
+import { NetworkBuilder } from "microsandbox";
+
+const network = new NetworkBuilder()
+    .http((h) => h.denyResponse(true).denyMessage("Blocked: {host}"))
+    .build();
 ```
 
-See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees).
+</Accordion>
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
@@ -1744,6 +1751,34 @@ upstreamCaCertFor(pattern: string, path: string): this
 
 Path to a PEM file with extra root CAs the proxy should trust only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported.
 
+
+## HttpBuilder
+
+#### <span className="msb-recv">HttpBuilder.</span><span className="msb-hn">constructor()</span>
+
+```typescript
+new HttpBuilder()
+```
+
+Create HTTP settings with denial responses disabled. [`network.http()`](#network-http) supplies this builder automatically.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyResponse()</span>
+
+<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+denyResponse(enabled: boolean): this
+```
+
+Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS requires TLS interception. Enabling this requires a supporting local runtime; older runtimes and cloud reject it. See [denied HTTP requests](/networking/overview#what-a-denied-http-request-sees) for supported requests and examples.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyMessage()</span>
+
+```typescript
+denyMessage(message: string): this
+```
+
+Set the response body, replacing `{host}` with the blocked hostname. Omission uses the built-in message; an empty string sends no body. Requires `denyResponse(true)`.
 
 ## NetworkRateLimiterBuilder
 

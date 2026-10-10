@@ -1,30 +1,11 @@
 ---
 title: Sandbox
-description: Python SDK - Sandbox API reference
+"og:title": Python SDK Sandbox reference
+description: Create and manage microVM sandboxes with the Python SDK.
 keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
-
-For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
-
-Pass `intercept_tls=True` when creating a local sandbox to enable [TLS interception](/networking/tls). It preserves any supplied `network` settings; `False` leaves them unchanged.
-
-## Reuse and restart sandboxes
-
-```python
-await Sandbox.connect_or_create(name, **kwargs) -> Sandbox
-await handle.connect_or_start(detached=False) -> Sandbox
-await handle.wait_for_status(status) -> SandboxHandle
-await handle.restart(force=False, timeout=None, detached=False) -> Sandbox
-await handle.destroy(force=False, timeout=None) -> None
-await sandbox.id -> str
-handle.id -> str
-```
-
-Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Creation arguments apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver raises `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
 ## Forking
 
@@ -130,6 +111,8 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
+
+Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
 <p className="msb-label">Parameters</p>
 
@@ -600,8 +583,6 @@ async def modify(
     workdir: str | None = None,
     secrets: Mapping[str, SecretModifySpec] | None = None,
     secrets_rm: list[str] | None = None,
-    ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
-    ports_rm: Sequence[PortEndpoint] | None = None,
     policy: ModificationPolicy | None = None,
     dry_run: bool = False,
 ) -> SandboxModificationPlan
@@ -743,11 +724,6 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
   </div>
 </div>
-
-Published ports can be added or updated with `ports`, preserving other mappings. Remove an
-endpoint with `ports_rm=[PortEndpoint(host_port=8080)]`. `PortEndpoint` accepts optional
-`bind` and `protocol` fields, defaulting to loopback TCP. Port changes require restart or
-next-start policy on a running sandbox. See [published port changes](/sandboxes/tuning#change-published-ports).
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
@@ -1373,41 +1349,14 @@ Create a symlink at `link` pointing to `target`.
 
 A metadata and lifecycle handle for an existing sandbox.
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`str`
-
-Sandbox name, up to 128 UTF-8 bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
-
-`str`
-
-Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
-
-[`SandboxStatus`](#sandboxstatus)
-
-Current status
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
-
-`str`
-
-Raw JSON configuration
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
-
-`float | None`
-
-Creation timestamp (ms since epoch)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
-
-`float | None`
-
-Last update timestamp (ms since epoch)
+| Field | Type | Description |
+|---|---|---|
+| <span id="handle-name"></span>`name` | `str` | Sandbox name, up to 128 UTF-8 bytes |
+| <span id="handle-id"></span>`id` | `str` | Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox. |
+| <span id="handle-status"></span>`status` | [`SandboxStatus`](#sandboxstatus) | Current status |
+| <span id="handle-config_json"></span>`config_json` | `str` | Raw JSON configuration |
+| <span id="handle-created_at"></span>`created_at` | `float \| None` | Creation timestamp (ms since epoch) |
+| <span id="handle-updated_at"></span>`updated_at` | `float \| None` | Last update timestamp (ms since epoch) |
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 
@@ -1673,7 +1622,7 @@ Stream captured log entries (works without starting)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 snapshot(name)
@@ -1724,35 +1673,13 @@ Use with `async for`
 
 A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
 
-#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp_ms</span>
-
-`float`
-
-Wall-clock capture time (ms since Unix epoch, UTC)
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
-
-[`LogSource`](#logsource)
-
-Where the chunk came from
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
-
-`int | None`
-
-Relay-monotonic session id; `None` for `"system"` entries
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
-
-`str`
-
-Opaque resume token; pass back via `log_stream(from_cursor=...)`
-
-#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
-
-`bytes`
-
-The chunk's raw bytes
+| Field | Type | Description |
+|---|---|---|
+| <span id="entry-timestamp_ms"></span>`timestamp_ms` | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
+| <span id="entry-source"></span>`source` | [`LogSource`](#logsource) | Where the chunk came from |
+| <span id="entry-session_id"></span>`session_id` | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
+| <span id="entry-cursor"></span>`cursor` | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
+| <span id="entry-data"></span>`data` | `bytes` | The chunk's raw bytes |
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
 
