@@ -95,7 +95,7 @@ async fn control_names_never_trigger_shutdown_or_new_sessions() {
                         incarnation: None,
                         active_sessions: HashSet::from([11]),
                         active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                        finished_bulk: None,
+                        completed_bulk_ids: None,
                         write_tx,
                         write_budget: Arc::new(Semaphore::new(
                             CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY,

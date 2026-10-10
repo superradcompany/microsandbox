@@ -199,8 +199,8 @@ struct ClientState {
 
     /// Active generation-8 bulk operations that need typed transport-failure cancellation.
     active_bulk: Arc<std::sync::Mutex<HashMap<u32, BulkKind>>>,
-    /// Completed bulk operations whose in-flight input can be discarded safely.
-    finished_bulk: Option<FinishedIds>,
+    /// IDs of completed bulk operations whose in-flight input can be discarded safely.
+    completed_bulk_ids: Option<FinishedIds>,
     /// Channel for sending frames to this client's writer task.
     /// Using a channel avoids holding the client mutex across async writes.
     /// Uses `Bytes` for zero-copy frame forwarding from the ring buffer.
@@ -2198,7 +2198,7 @@ impl AgentRelay {
                                     incarnation,
                                     active_sessions: HashSet::new(),
                                     active_bulk: Arc::clone(&active_bulk),
-                                    finished_bulk: None,
+                                    completed_bulk_ids: None,
                                     write_tx: write_tx.clone(),
                                     write_budget: Arc::clone(&write_budget),
                                     disconnect_tx,
@@ -3928,7 +3928,7 @@ async fn route_guest_lane_frame(
                     let (start, end) = relay_client_id_range(client_slot)
                         .expect("routed client has an assigned ID range");
                     client
-                        .finished_bulk
+                        .completed_bulk_ids
                         .get_or_insert_with(|| FinishedIds::new(start..end))
                         .mark_finished(frame.id);
                 }
@@ -4786,16 +4786,16 @@ async fn client_reader_task(
             if active_kind != Some(kind) {
                 // Input already in flight can follow a guest terminal. Only discard records
                 // for this connection's completed bulk operations; unknown IDs remain invalid.
-                let finished = active_kind.is_none()
+                let completed = active_kind.is_none()
                     && clients.lock().await.get(&slot).is_some_and(|client| {
                         client.incarnation == incarnation
                             && client
-                                .finished_bulk
+                                .completed_bulk_ids
                                 .as_ref()
-                                .is_some_and(|finished| finished.is_finished(frame.id))
+                                .is_some_and(|ids| ids.is_finished(frame.id))
                     });
 
-                if finished {
+                if completed {
                     continue;
                 }
 
@@ -5882,7 +5882,7 @@ mod tests {
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx,
                 write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
                 disconnect_tx,
@@ -5938,7 +5938,7 @@ mod tests {
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx,
                 write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
                 disconnect_tx,
@@ -6068,7 +6068,7 @@ mod tests {
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx: write_tx.clone(),
                 write_budget: Arc::clone(&write_budget),
                 disconnect_tx: disconnect_tx.clone(),
@@ -6447,7 +6447,7 @@ mod tests {
                     incarnation: Some(TEST_INCARNATION),
                     active_sessions: HashSet::from([id_start, id_start + 1]),
                     active_bulk: Arc::clone(&active_bulk),
-                    finished_bulk: None,
+                    completed_bulk_ids: None,
                     write_tx: write_tx.clone(),
                     write_budget: Arc::clone(&budget),
                     disconnect_tx,
@@ -6578,7 +6578,7 @@ mod tests {
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx: write_tx.clone(),
                 write_budget: Arc::clone(&write_budget),
                 disconnect_tx,
@@ -6719,7 +6719,7 @@ mod tests {
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx: write_tx.clone(),
                 write_budget: Arc::clone(&write_budget),
                 disconnect_tx,
@@ -7473,7 +7473,7 @@ mod tests {
                     incarnation: Some(TEST_INCARNATION),
                     active_sessions: HashSet::from([id]),
                     active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                    finished_bulk: None,
+                    completed_bulk_ids: None,
                     write_tx,
                     write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
                     disconnect_tx,
@@ -7916,7 +7916,7 @@ mod tests {
                 incarnation: None,
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
-                finished_bulk: None,
+                completed_bulk_ids: None,
                 write_tx,
                 write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
                 disconnect_tx,
