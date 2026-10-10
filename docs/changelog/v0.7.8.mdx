@@ -32,7 +32,7 @@ Stopping the sandbox still stops its jobs. A restart does not rerun them. [Manag
 
 - **Map external mounts on disk restores.** Restores now reject missing recorded host mounts. Supply bindings or explicitly accept missing resources with `--allow-missing-resources`. Older disk snapshots without mount records behave as before.
 - **Finish active jobs before full snapshots or forks.** Resident pause/resume remains supported.
-- **Update the runtime for new capabilities.** Scoped secret headers and non-default filesystem budgets require support. Snapshot readers need sufficient budgets; older releases may reject larger state. See [upgrade notes](/migrations/v0.7#later-v07-releases).
+- **Update the runtime for new capabilities.** Scoped secret headers and non-default filesystem budgets require support. Snapshot readers need sufficient budgets; older releases may reject larger state. See [upgrade notes](/migrations/v0.7#later-v0-7-releases).
 
 ## Fixes
 
