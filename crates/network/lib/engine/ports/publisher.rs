@@ -1164,6 +1164,10 @@ mod tests {
     /// host once TIME-WAIT expires and the relay is dropped must fail.
     const PROMPT_STEPS: usize = 100;
 
+    /// Tiny real host TCP windows can take seconds to reopen and drain on Linux.
+    /// Use 1 ms simulated steps so this wait stays below guest TIME-WAIT expiry.
+    const HOST_DRAIN_STEPS: usize = 5000;
+
     /// Step budget for relay cleanup, which may wait out TIME-WAIT.
     const CLEANUP_STEPS: usize = 2000;
 
@@ -1536,6 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn time_wait_keeps_slow_host_response_in_the_active_budget() {
         let mut h = Harness::new();
+        h.step_millis = 1;
         h.publisher.max_inbound = NonZeroUsize::new(1);
         let mut client = h.connect_host_with_send_buffer(Some(4096)).await;
         h.wait_for_guest_accept().await;
@@ -1570,7 +1575,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
         let reader = spawn_read_to_end(client);
-        h.run_until("host response drained", PROMPT_STEPS, |_| {
+        h.run_until("host response drained", HOST_DRAIN_STEPS, |_| {
             reader.is_finished()
         })
         .await;
@@ -1585,6 +1590,7 @@ mod tests {
     #[tokio::test]
     async fn host_response_progress_renews_the_write_deadline() {
         let mut h = Harness::new();
+        h.step_millis = 1;
         let mut client = h.connect_host_with_send_buffer(Some(4096)).await;
         h.wait_for_guest_accept().await;
         client.shutdown().await.unwrap();
@@ -1613,7 +1619,7 @@ mod tests {
             });
             h.run_until(
                 "response delivered after write progress",
-                PROMPT_STEPS,
+                HOST_DRAIN_STEPS,
                 |_| reader.is_finished(),
             )
             .await;
