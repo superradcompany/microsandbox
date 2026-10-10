@@ -15,7 +15,7 @@ Show storage used by images, snapshots, sandboxes, volumes, and runtime memory f
 msb df
 ```
 
-Add `--verbose` for individual paths and details, or `--format json` for structured output. Use `msb inspect NAME` or `msb snap inspect REF` to inspect one sandbox or snapshot.
+Add `--verbose` for object paths, ownership, and accounting details, or `--format json` for structured output. Use `msb inspect NAME` or `msb snap inspect REF` to inspect one sandbox or snapshot.
 
 `RECLAIMABLE` shows unused runtime memory files eligible for cleanup. Reported sizes may differ from the disk space actually freed, especially when files share data.
 
