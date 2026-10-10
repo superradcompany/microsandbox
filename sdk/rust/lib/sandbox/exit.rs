@@ -48,11 +48,13 @@ impl SandboxHandle {
         let identity = self
             .local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxHandleTerminalExit))?;
+
         // Serialize with SDK start/remove so a new execution cannot race the
         // terminal-state and latest-run reads below.
         let _transition =
             LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), self.name())
                 .await?;
+
         let db = local.db().await?;
         let current = microsandbox_db::catalog::sandbox_query(db.read())
             .await?
@@ -60,6 +62,7 @@ impl SandboxHandle {
             .one(db.read())
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(self.name().into()))?;
+
         if current.id != identity.db_id {
             return Err(MicrosandboxError::SandboxReplaced {
                 name: self.name().into(),
@@ -67,18 +70,22 @@ impl SandboxHandle {
                 actual: current.id.to_string(),
             });
         }
+
         if !matches!(
             current.status,
             SandboxStatus::Stopped | SandboxStatus::Crashed
         ) {
             return Ok(None);
         }
+
         let Some(run) = LocalBackend::load_latest_run(db.read(), current.id).await? else {
             return Ok(None);
         };
+
         if run.status != run::RunStatus::Terminated {
             return Ok(None);
         }
+
         Ok(Some(SandboxRunExit {
             run_id: run.id,
             exit_code: run.exit_code,
@@ -170,9 +177,11 @@ mod tests {
                 .unwrap(),
         );
         let db = backend.db().await.unwrap();
+
         let mut config = SandboxConfig::default();
         config.spec.name = "retained-exit".into();
         config.spec.lifecycle.ephemeral = false;
+
         let record = sandbox::ActiveModel {
             name: Set(config.spec.name.clone()),
             config: Set(serde_json::to_string(&config).unwrap()),
@@ -183,8 +192,10 @@ mod tests {
         .insert(db.write())
         .await
         .unwrap();
+
         let handle = backend.get(backend.clone(), "retained-exit").await.unwrap();
         assert_eq!(handle.terminal_exit().await.unwrap(), None);
+
         let ended = chrono::Utc::now().naive_utc();
         let first = run::ActiveModel {
             sandbox_id: Set(record.id),
@@ -207,6 +218,7 @@ mod tests {
                 terminated_at: Some(ended.and_utc()),
             })
         );
+
         // A newer execution must hide the old idle-timeout result, even if
         // the sandbox row has not yet transitioned out of Stopped.
         let next = run::ActiveModel {
@@ -218,18 +230,22 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(handle.terminal_exit().await.unwrap(), None);
+
         let mut next: run::ActiveModel = next.into();
         next.status = Set(run::RunStatus::Terminated);
         next.exit_code = Set(Some(17));
         next.termination_reason = Set(Some(SandboxTerminationReason::Failed));
         next.update(db.write()).await.unwrap();
+
         let result = handle.terminal_exit().await.unwrap().unwrap();
         assert_eq!(result.exit_code, Some(17));
         assert_eq!(result.reason, Some(SandboxTerminationReason::Failed));
+
         let mut active: sandbox::ActiveModel = record.clone().into();
         active.status = Set(SandboxStatus::Starting);
         active.update(db.write()).await.unwrap();
         assert_eq!(handle.terminal_exit().await.unwrap(), None);
+
         sandbox::Entity::delete_by_id(record.id)
             .exec(db.write())
             .await
@@ -238,6 +254,7 @@ mod tests {
             handle.terminal_exit().await,
             Err(MicrosandboxError::SandboxNotFound(_))
         ));
+
         sandbox::ActiveModel {
             id: Set(record.id + 10),
             name: Set(config.spec.name.clone()),
