@@ -838,11 +838,23 @@ Return warnings for unavailable external filesystems and accepted restore mismat
 
 Each `ExternalMountWarning` contains:
 
-| Field | Type | Description |
-|---|---|---|
-| `guest_path` | `String` | Guest-visible mount path. |
-| `reason` | `String` | Why the resource could not be reconstructed. |
-| `stale_inodes` | `Vec<u64>` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
+#### <span className="msb-hn">guest_path</span>
+
+`String`
+
+Guest-visible mount path.
+
+#### <span className="msb-hn">reason</span>
+
+`String`
+
+Why the resource could not be reconstructed.
+
+#### <span className="msb-hn">stale_inodes</span>
+
+`Vec<u64>`
+
+Permanently invalid captured node IDs; empty when the whole export is unavailable.
 
 ## SandboxBuilder
 
@@ -2321,6 +2333,19 @@ Remove a secret. Removal is always explicit; omitting a secret from the patch ne
     <div className="msb-param-desc">Secret name (its environment variable name).</div>
   </div>
 </div>
+
+#### <span className="msb-recv">modification.</span><span className="msb-hn">port() / remove_port()</span>
+
+```rust
+fn port(self, host_port: u16, guest_port: u16) -> Self
+fn port_mapping(self, port: PublishedPortSpec) -> Self
+fn remove_port(self, port: PublishedPortKey) -> Self
+```
+
+Add/update a mapping or remove a host endpoint, preserving other mappings. Both types are
+exported from `microsandbox::sandbox`. Port changes require restart or next-start policy
+on a running sandbox. See [published port changes](/sandboxes/tuning#change-published-ports).
+
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">workdir()</span>
 

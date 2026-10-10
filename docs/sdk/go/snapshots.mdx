@@ -1037,17 +1037,59 @@ read them through the accessor methods below.
 
 Configures [`Snapshot.Create`](#snapshot-create). `FromSandbox` is required. An empty `Name` is generated; an empty `Group` uses the source sandbox's name.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Name | `string` | Member name within its group; generated when empty |
-| Group | `string` | Destination snapshot group; defaults to the source sandbox's name |
-| FromSandbox | `string` | Name of the source sandbox; local disk capture supports running, paused, stopped, and crashed sources. Cloud requires a stopped persistent source |
-| DestDir | `string` | Parent directory containing snapshot groups; empty = the default snapshots directory |
-| Labels | `map[string]string` | Arbitrary user labels recorded in the manifest |
-| Force | `bool` | Overwrite a direct archive output; rejected for installed group members |
-| RecordIntegrity | `bool` | Record content hashes so [`Verify`](#s-verify) can recompute them later |
-| Full | `bool` | Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source |
-| GuestFlush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlushAuto`. See [guest writeback](#guest-writeback) |
+#### <span className="msb-hn">Name</span>
+
+`string`
+
+Member name within its group; generated when empty
+
+#### <span className="msb-hn">Group</span>
+
+`string`
+
+Destination snapshot group; defaults to the source sandbox's name
+
+#### <span className="msb-hn">FromSandbox</span>
+
+`string`
+
+Name of the source sandbox; local disk capture supports running, paused, stopped, and crashed sources. Cloud requires a stopped persistent source
+
+#### <span className="msb-hn">DestDir</span>
+
+`string`
+
+Parent directory containing snapshot groups; empty = the default snapshots directory
+
+#### <span className="msb-hn">Labels</span>
+
+`map[string]string`
+
+Arbitrary user labels recorded in the manifest
+
+#### <span className="msb-hn">Force</span>
+
+`bool`
+
+Overwrite a direct archive output; rejected for installed group members
+
+#### <span className="msb-hn">RecordIntegrity</span>
+
+`bool`
+
+Record content hashes so [`Verify`](#s-verify) can recompute them later
+
+#### <span className="msb-hn">Full</span>
+
+`bool`
+
+Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source
+
+#### <span className="msb-hn">GuestFlush</span>
+
+`GuestFlush`
+
+Guest writeback policy; defaults to `GuestFlushAuto`. See [guest writeback](#guest-writeback)
 
 ### SnapshotSaveOptions<span className="msb-tag is-type" style={{marginLeft: "8px"}}>struct</span>
 

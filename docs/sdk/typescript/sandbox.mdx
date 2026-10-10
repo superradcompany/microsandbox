@@ -892,11 +892,23 @@ Return warnings for unavailable external filesystems and accepted restore mismat
 
 Each `ExternalMountWarning` contains:
 
-| Field | Type | Description |
-|---|---|---|
-| `guestPath` | `string` | Guest-visible mount path. |
-| `reason` | `string` | Why the resource could not be reconstructed. |
-| `staleInodes` | `readonly bigint[]` | Permanently invalid captured node IDs; empty when the whole export is unavailable. |
+#### <span className="msb-hn">guestPath</span>
+
+`string`
+
+Guest-visible mount path.
+
+#### <span className="msb-hn">reason</span>
+
+`string`
+
+Why the resource could not be reconstructed.
+
+#### <span className="msb-hn">staleInodes</span>
+
+`readonly bigint[]`
+
+Permanently invalid captured node IDs; empty when the whole export is unavailable.
 
 ## SandboxBuilder
 
@@ -2147,13 +2159,35 @@ Write UTF-8 text content at `path`.
 
 A class wrapping one captured log entry from `exec.log`. Bytes are exposed via `data`; use `text()` for a UTF-8-lossy decode.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="entry-timestamp"></span>`timestamp` | `Date` | Wall-clock capture time on the host |
-| <span id="entry-source"></span>`source` | [`LogSource`](#logsource) | Where the chunk came from |
-| <span id="entry-sessionid"></span>`sessionId` | `number \| null` | Relay-monotonic session id; `null` for `"system"` entries |
-| <span id="entry-data"></span>`data` | `Uint8Array` | The captured chunk's bytes (UTF-8 lossy decoded by default) |
-| <span id="entry-cursor"></span>`cursor` | `string` | Opaque resume token; pass to [`LogStreamOptions.fromCursor`](#logstreamoptions) to resume |
+#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp</span>
+
+`Date`
+
+Wall-clock capture time on the host
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
+
+[`LogSource`](#logsource)
+
+Where the chunk came from
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">sessionId</span>
+
+`number \| null`
+
+Relay-monotonic session id; `null` for `"system"` entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
+
+`Uint8Array`
+
+The captured chunk's bytes (UTF-8 lossy decoded by default)
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
+
+`string`
+
+Opaque resume token; pass to [`LogStreamOptions.fromCursor`](#logstreamoptions) to resume
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
 
@@ -2335,14 +2369,41 @@ Add several AND-matched labels
 
 A metadata and lifecycle handle for an existing sandbox.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="handle-name"></span>`name` | `string` | Sandbox name, up to 128 UTF-8 bytes |
-| <span id="handle-id"></span>`id` | `string` | Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox. |
-| <span id="handle-status"></span>`status` | [`SandboxStatus`](#sandboxstatus) | Current status |
-| <span id="handle-configjson"></span>`configJson` | `string` | Raw JSON configuration |
-| <span id="handle-createdat"></span>`createdAt` | `Date \| null` | Creation timestamp |
-| <span id="handle-updatedat"></span>`updatedAt` | `Date \| null` | Last update timestamp |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`string`
+
+Sandbox name, up to 128 UTF-8 bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+`string`
+
+Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
+
+[`SandboxStatus`](#sandboxstatus)
+
+Current status
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">configJson</span>
+
+`string`
+
+Raw JSON configuration
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
+
+`Date \| null`
+
+Creation timestamp
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">updatedAt</span>
+
+`Date \| null`
+
+Last update timestamp
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 
@@ -2804,22 +2865,113 @@ type LogSource = "stdout" | "stderr" | "output" | "system";
 
 A requested sandbox modification. Omitted fields are left unchanged.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| cpus | `number` | Desired effective vCPU count. Live when within the booted `maxCpus` |
-| maxCpus | `number` | Boot-time maximum possible vCPUs (restart-backed) |
-| memory | `number` | Desired effective guest memory in MiB. Live when within the booted `maxMemory` |
-| maxMemory | `number` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
-| rootDiskSize | `number` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
-| env | `Record<string, string>` | Environment variables to set for future execs |
-| envRemove | `string[]` | Environment variable keys to remove |
-| labels | `Record<string, string>` | Labels to set |
-| labelsRemove | `string[]` | Label keys to remove |
-| workdir | `string` | Working directory for future execs |
-| secrets | `Record<string, SecretModifySpec>` | Desired secret specs keyed by stable secret name |
-| secretsRemove | `string[]` | Secret names to remove explicitly |
-| policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
-| dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
+#### <span className="msb-hn">cpus</span>
+
+`number`
+
+Desired effective vCPU count. Live when within the booted `maxCpus`
+
+#### <span className="msb-hn">maxCpus</span>
+
+`number`
+
+Boot-time maximum possible vCPUs (restart-backed)
+
+#### <span className="msb-hn">memory</span>
+
+`number`
+
+Desired effective guest memory in MiB. Live when within the booted `maxMemory`
+
+#### <span className="msb-hn">maxMemory</span>
+
+`number`
+
+Boot-time maximum hotpluggable memory in MiB (restart-backed)
+
+#### <span className="msb-hn">rootDiskSize</span>
+
+`number`
+
+Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start
+
+#### <span className="msb-hn">env</span>
+
+`Record<string, string>`
+
+Environment variables to set for future execs
+
+#### <span className="msb-hn">envRemove</span>
+
+`string[]`
+
+Environment variable keys to remove
+
+#### <span className="msb-hn">ports</span>
+
+`ModifyPort[]`
+
+Add/update `{hostPort, guestPort, hostBind?, protocol?}` mappings; other endpoints stay unchanged
+
+#### <span className="msb-hn">portsRemove</span>
+
+`ModifyPortEndpoint[]`
+
+Remove `{hostPort, hostBind?, protocol?}` endpoints; loopback TCP by default
+
+#### <span className="msb-hn">portsTcp</span>
+
+`Array<readonly [number, number]>`
+
+TCP host→guest mappings
+
+#### <span className="msb-hn">portsUdp</span>
+
+`Array<readonly [number, number]>`
+
+UDP host→guest mappings
+
+#### <span className="msb-hn">labels</span>
+
+`Record<string, string>`
+
+Labels to set
+
+#### <span className="msb-hn">labelsRemove</span>
+
+`string[]`
+
+Label keys to remove
+
+#### <span className="msb-hn">workdir</span>
+
+`string`
+
+Working directory for future execs
+
+#### <span className="msb-hn">secrets</span>
+
+`Record<string, SecretModifySpec>`
+
+Desired secret specs keyed by stable secret name
+
+#### <span className="msb-hn">secretsRemove</span>
+
+`string[]`
+
+Secret names to remove explicitly
+
+#### <span className="msb-hn">policy</span>
+
+`"no_restart" \| "next_start" \| "restart"`
+
+`"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now
+
+#### <span className="msb-hn">dryRun</span>
+
+`boolean`
+
+Compute the plan without applying anything. Defaults to `false`
 
 ### SecretModifySpec
 

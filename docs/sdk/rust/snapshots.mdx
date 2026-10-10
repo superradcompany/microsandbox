@@ -1216,17 +1216,59 @@ read the snapshot metadata. The handle retains its backend, so `open()` and
 
 Inputs to create a snapshot. A type alias for `SnapshotSpec`. Usually built via [`SnapshotBuilder`](#snapshotbuilder) rather than constructed directly.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| name | `String` | Member name within its group; generated when empty |
-| group | `Option<String>` | Destination group; defaults to the source sandbox's name |
-| dest_dir | `Option<PathBuf>` | Parent directory containing groups; `None` = the default snapshots directory |
-| source_sandbox | `String` | Name of the source sandbox; local disk capture preserves running/paused state. Cloud requires a stopped persistent source |
-| labels | `Vec<(String, String)>` | User-supplied labels |
-| force | `bool` | Overwrite a direct archive output; rejected for installed group members |
-| record_integrity | `bool` | Compute and record upper-layer integrity at creation |
-| full | `bool` | Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source |
-| guest_flush | `GuestFlush` | Guest writeback policy; defaults to `GuestFlush::Auto`. See [guest writeback](#guest-writeback) |
+#### <span className="msb-hn">name</span>
+
+`String`
+
+Member name within its group; generated when empty
+
+#### <span className="msb-hn">group</span>
+
+`Option<String>`
+
+Destination group; defaults to the source sandbox's name
+
+#### <span className="msb-hn">dest_dir</span>
+
+`Option<PathBuf>`
+
+Parent directory containing groups; `None` = the default snapshots directory
+
+#### <span className="msb-hn">source_sandbox</span>
+
+`String`
+
+Name of the source sandbox; local disk capture preserves running/paused state. Cloud requires a stopped persistent source
+
+#### <span className="msb-hn">labels</span>
+
+`Vec<(String, String)>`
+
+User-supplied labels
+
+#### <span className="msb-hn">force</span>
+
+`bool`
+
+Overwrite a direct archive output; rejected for installed group members
+
+#### <span className="msb-hn">record_integrity</span>
+
+`bool`
+
+Compute and record upper-layer integrity at creation
+
+#### <span className="msb-hn">full</span>
+
+`bool`
+
+Local-only when `true`: include memory and execution state from a running or paused source. With `false`, local disk capture supports running, paused, stopped, or crashed sources. Cloud requires `false` and a stopped persistent source
+
+#### <span className="msb-hn">guest_flush</span>
+
+`GuestFlush`
+
+Guest writeback policy; defaults to `GuestFlush::Auto`. See [guest writeback](#guest-writeback)
 
 ### SnapshotFormat
 

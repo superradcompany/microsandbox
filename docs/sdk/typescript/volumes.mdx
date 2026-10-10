@@ -11,10 +11,17 @@ See [Volumes](/sandboxes/volumes) for usage examples.
 
 <p className="msb-member-group">Instance properties</p>
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="volume-name"></span>`name` | `string` | The volume's name. |
-| <span id="volume-path"></span>`path` | `string` | Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`. <Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip> |
+#### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
+
+`string`
+
+The volume's name.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+
+`string`
+
+Absolute host path to the volume's directory. By default volumes live under `~/.microsandbox/volumes/<name>/`. <Tooltip tip="Only local volumes expose a path on the computer running the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 <p className="msb-member-group">Static methods</p>
 
@@ -748,17 +755,59 @@ Check whether a path exists.
 
 A metadata and lifecycle handle for an existing volume.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="handle-name"></span>`name` | `string` | Volume name |
-| <span id="handle-kind"></span>`kind` | `string` | Volume kind (`"dir"` or `"disk"`) |
-| <span id="handle-quotamib"></span>`quotaMib` | `number \| null` | Recorded storage quota in MiB |
-| <span id="handle-usedbytes"></span>`usedBytes` | `number` | Current disk usage in bytes |
-| <span id="handle-capacitybytes"></span>`capacityBytes` | `number \| null` | Disk capacity in bytes (disk volumes) |
-| <span id="handle-diskformat"></span>`diskFormat` | `string \| null` | Disk image format (disk volumes) |
-| <span id="handle-diskfstype"></span>`diskFstype` | `string \| null` | Inner disk filesystem (disk volumes) |
-| <span id="handle-labels"></span>`labels` | `ReadonlyArray<readonly [string, string]>` | Metadata labels |
-| <span id="handle-createdat"></span>`createdAt` | `Date \| null` | Creation timestamp |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`string`
+
+Volume name
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
+
+`string`
+
+Volume kind (`"dir"` or `"disk"`)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">quotaMib</span>
+
+`number \| null`
+
+Recorded storage quota in MiB
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">usedBytes</span>
+
+`number`
+
+Current disk usage in bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">capacityBytes</span>
+
+`number \| null`
+
+Disk capacity in bytes (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFormat</span>
+
+`string \| null`
+
+Disk image format (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFstype</span>
+
+`string \| null`
+
+Inner disk filesystem (disk volumes)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
+
+`ReadonlyArray<readonly [string, string]>`
+
+Metadata labels
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
+
+`Date \| null`
+
+Creation timestamp
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">fs()</span>
 

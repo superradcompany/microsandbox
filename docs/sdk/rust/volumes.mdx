@@ -1248,9 +1248,22 @@ Create the volume on the active backend. Equivalent to `Volume::create(self.buil
 
 ## MountBuilder
 
-<p className="msb-backref">Used by <a href="/sdk/rust/sandbox#sandbox-volume">SandboxBuilder::volume()</a></p>
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owned()</span>
 
-Builder for configuring a sandbox volume mount.
+```rust
+fn owned(self) -> Self
+```
+
+Create an empty directory owned by this sandbox. It survives stop/start and is removed with the sandbox. Snapshots and forks capture it; restore makes private copies. Cloud rejects owned mounts.
+
+#### <span className="msb-recv">mount.</span><span className="msb-hn">owned_with()</span>
+
+```rust
+fn owned_with(self, f: impl FnOnce(OwnedVolumeBuilder) -> OwnedVolumeBuilder) -> Self
+```
+
+Configure an owned directory or raw ext4 disk. Directory storage accepts a quota; disks require a positive size. Common mount flags stay on `MountBuilder`. See [owned mounts](/sandboxes/volumes#owned-volumes) for lifecycle and examples.
+
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">bind()</span>
 
@@ -1787,3 +1800,37 @@ Sandbox-time behavior for a named volume mount, chosen via [`NamedVolumeBuilder`
 | `Existing` | Require the named volume to already exist (default) |
 | `Create` | Create the named volume and fail if it already exists |
 | `EnsureExists` | Ensure the volume exists, or reuse a compatible existing one |
+
+## OwnedVolumeBuilder
+
+#### <span className="msb-recv">owned.</span><span className="msb-hn">directory()</span>
+
+```rust
+fn directory(self) -> Self
+```
+
+Select directory storage (the default).
+
+#### <span className="msb-recv">owned.</span><span className="msb-hn">disk()</span>
+
+```rust
+fn disk(self) -> Self
+```
+
+Select raw ext4 disk storage. Requires a positive size.
+
+#### <span className="msb-recv">owned.</span><span className="msb-hn">quota()</span>
+
+```rust
+fn quota(self, quota: impl Into<Mebibytes>) -> Self
+```
+
+Set a directory quota in MiB. Unset means no quota.
+
+#### <span className="msb-recv">owned.</span><span className="msb-hn">size()</span>
+
+```rust
+fn size(self, size: impl Into<Mebibytes>) -> Self
+```
+
+Set disk capacity in MiB. The value must be positive.

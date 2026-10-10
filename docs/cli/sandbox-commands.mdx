@@ -562,6 +562,8 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--workdir` | Working directory for future execs |
 | `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
 | `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
+| `-p`, `--port` | Add or update `[BIND_ADDR:]HOST[-END]:GUEST[-END][/tcp\|udp]`; ranges must have equal lengths and other mappings stay unchanged |
+| `--port-rm` | Remove `[BIND_ADDR:]HOST[/tcp\|udp]`; defaults to loopback TCP |
 | `--dry-run` | Show the plan without applying anything |
 | `--next-start` | Save changes for the next start without mutating a running VM |
 | `--restart` | Restart if needed so restart-required changes become active now |

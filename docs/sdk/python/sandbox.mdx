@@ -583,10 +583,17 @@ async def modify(
     workdir: str | None = None,
     secrets: Mapping[str, SecretModifySpec] | None = None,
     secrets_rm: list[str] | None = None,
+    ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+    ports_rm: Sequence[PortEndpoint] | None = None,
     policy: ModificationPolicy | None = None,
     dry_run: bool = False,
 ) -> SandboxModificationPlan
 ```
+
+Published ports can be added or updated with `ports`, preserving other mappings. Remove an
+endpoint with `ports_rm=[PortEndpoint(host_port=8080)]`. `PortEndpoint` accepts optional
+`bind` and `protocol` fields, defaulting to loopback TCP. Port changes require restart or
+next-start policy on a running sandbox. See [published port changes](/sandboxes/tuning#change-published-ports).
 
 <Accordion title="Example">
 
@@ -1349,14 +1356,41 @@ Create a symlink at `link` pointing to `target`.
 
 A metadata and lifecycle handle for an existing sandbox.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="handle-name"></span>`name` | `str` | Sandbox name, up to 128 UTF-8 bytes |
-| <span id="handle-id"></span>`id` | `str` | Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox. |
-| <span id="handle-status"></span>`status` | [`SandboxStatus`](#sandboxstatus) | Current status |
-| <span id="handle-config_json"></span>`config_json` | `str` | Raw JSON configuration |
-| <span id="handle-created_at"></span>`created_at` | `float \| None` | Creation timestamp (ms since epoch) |
-| <span id="handle-updated_at"></span>`updated_at` | `float \| None` | Last update timestamp (ms since epoch) |
+#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+
+`str`
+
+Sandbox name, up to 128 UTF-8 bytes
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
+
+`str`
+
+Opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and raise `SandboxReplacedError` when the reusable name now points to another sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
+
+[`SandboxStatus`](#sandboxstatus)
+
+Current status
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">config_json</span>
+
+`str`
+
+Raw JSON configuration
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
+
+`float \| None`
+
+Creation timestamp (ms since epoch)
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
+
+`float \| None`
+
+Last update timestamp (ms since epoch)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
 
@@ -1673,13 +1707,35 @@ Use with `async for`
 
 A single captured log entry returned by [`logs()`](#sb-logs) or iterated from a [`LogStream`](#logstream).
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="entry-timestamp_ms"></span>`timestamp_ms` | `float` | Wall-clock capture time (ms since Unix epoch, UTC) |
-| <span id="entry-source"></span>`source` | [`LogSource`](#logsource) | Where the chunk came from |
-| <span id="entry-session_id"></span>`session_id` | `int \| None` | Relay-monotonic session id; `None` for `"system"` entries |
-| <span id="entry-cursor"></span>`cursor` | `str` | Opaque resume token; pass back via `log_stream(from_cursor=...)` |
-| <span id="entry-data"></span>`data` | `bytes` | The chunk's raw bytes |
+#### <span className="msb-recv">entry.</span><span className="msb-hn">timestamp_ms</span>
+
+`float`
+
+Wall-clock capture time (ms since Unix epoch, UTC)
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">source</span>
+
+[`LogSource`](#logsource)
+
+Where the chunk came from
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
+
+`int \| None`
+
+Relay-monotonic session id; `None` for `"system"` entries
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">cursor</span>
+
+`str`
+
+Opaque resume token; pass back via `log_stream(from_cursor=...)`
+
+#### <span className="msb-recv">entry.</span><span className="msb-hn">data</span>
+
+`bytes`
+
+The chunk's raw bytes
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">text()</span>
 

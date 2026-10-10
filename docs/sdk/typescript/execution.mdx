@@ -371,11 +371,23 @@ Interactive PTY attach with options for arguments, environment variables, workin
 
 Collected output and exit status.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="output-code"></span>`code` | `number` | Getter. Process exit code |
-| <span id="output-success"></span>`success` | `boolean` | Getter. `true` when `code === 0` |
-| <span id="output-status"></span>`status` | [`ExitStatus`](#exitstatus) | Getter. Exit status object |
+#### <span className="msb-recv">output.</span><span className="msb-hn">code</span>
+
+`number`
+
+Getter. Process exit code
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">success</span>
+
+`boolean`
+
+Getter. `true` when `code === 0`
+
+#### <span className="msb-recv">output.</span><span className="msb-hn">status</span>
+
+[`ExitStatus`](#exitstatus)
+
+Getter. Exit status object
 
 #### <span className="msb-recv">output.</span><span className="msb-hn">stdout()</span>
 
@@ -986,3 +998,325 @@ type RlimitResource =
   | "nproc" | "nofile" | "memlock" | "as" | "locks"
   | "sigpending" | "msgqueue" | "nice" | "rtprio" | "rttime";
 ```
+
+## Managed jobs
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">execDetached()</span>
+
+```typescript
+execDetached(cmd: string, args?: Iterable<string>): Promise<Job>
+```
+
+Start a runtime-owned command and return after guest startup. Defaults to pipes with stdin retained. Requires a supporting local runtime. Dropping the handle does not stop the job; stopping the sandbox does. See [background jobs](/sandboxes/commands#managed-jobs) for lifecycle and limits.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">execDetachedWith()</span>
+
+```typescript
+execDetachedWith(cmd: string, configure: (b: ExecOptionsBuilder) => ExecOptionsBuilder): Promise<Job>
+```
+
+Configure detached execution with the existing execution builder. `stdinNull()` closes stdin; `stdinBytes()` provides at most 64 KiB followed by EOF. Use attachment writes for larger input.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">getJob()</span>
+
+```typescript
+getJob(id: string): Promise<Job>
+```
+
+Look up a sandbox-scoped job. Available on `Sandbox` and `SandboxHandle`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobs()</span>
+
+```typescript
+listJobs(): Promise<JobPage>
+```
+
+List active jobs. Available on `Sandbox` and `SandboxHandle`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobsWith()</span>
+
+```typescript
+listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage>
+```
+
+Configure pagination or include retained completed jobs. Available on `Sandbox` and `SandboxHandle`.
+
+### Job
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">id</span>
+
+```typescript
+readonly id: string
+```
+
+Opaque sandbox-scoped job identity.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">inspect()</span>
+
+```typescript
+inspect(): Promise<JobInfo>
+```
+
+Read current status and capture failures.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">wait()</span>
+
+```typescript
+wait(): Promise<JobExit>
+```
+
+Wait for process exit independently of output consumption.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">signal()</span>
+
+```typescript
+signal(signal: number): Promise<void>
+```
+
+Request delivery of a numeric signal.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">kill()</span>
+
+```typescript
+kill(): Promise<void>
+```
+
+Request termination. Use `wait()` to confirm exit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">eof()</span>
+
+```typescript
+eof(): Promise<void>
+```
+
+Permanently close pipe stdin. PTYs reject EOF; use terminal control characters.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">logs()</span>
+
+```typescript
+logs(options?: JobLogOptions): Promise<JobLogEntry[]>
+```
+
+Read bounded retained output. Cursors are opaque and job-scoped; retention gaps are explicit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">logStream()</span>
+
+```typescript
+logStream(options?: JobLogOptions): Promise<JobLogStream>
+```
+
+Open an output stream. Close or dispose it to release the observer.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">followLogs()</span>
+
+```typescript
+followLogs(options?: JobLogOptions): Promise<JobLogStream>
+```
+
+Open a stream with following enabled.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attach()</span>
+
+```typescript
+attach(): Promise<JobAttachment>
+```
+
+Attach as the single input owner. Detaching preserves the job and its stdin.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attachWith()</span>
+
+```typescript
+attachWith(configure: (b: JobAttachOptionsBuilder) => JobAttachOptionsBuilder): Promise<JobAttachment>
+```
+
+Configure read-only observation or replay. Multiple read-only observers may coexist.
+
+### JobAttachment
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">recv()</span>
+
+```typescript
+recv(): Promise<JobEvent | null>
+```
+
+Receive output, a retention gap, or completion; `null` ends the stream. May run concurrently with input and detach.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">writeStdin()</span>
+
+```typescript
+writeStdin(data: Uint8Array): Promise<void>
+```
+
+Admit at most 16 KiB per call. An empty buffer does not send EOF.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">resize()</span>
+
+```typescript
+resize(rows: number, cols: number): Promise<void>
+```
+
+Resize the attached PTY.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">detach()</span>
+
+```typescript
+detach(): Promise<void>
+```
+
+Release the attachment without closing stdin or killing the job. Async disposal and ending async iteration also detach.
+
+### JobLogStream
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next()</span>
+
+```typescript
+next(): Promise<JobLogEntry | null>
+```
+
+Read the next entry, or `null` at end. Also supports async iteration.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```typescript
+close(): Promise<void>
+```
+
+Release the observer without killing the job. Async disposal and ending async iteration also close the stream.
+
+### JobListBuilder
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">all()</span>
+
+```typescript
+all(value?: boolean): this
+```
+
+Include completed jobs. Calling without an argument enables it.
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
+
+```typescript
+limit(value: number): this
+```
+
+Set page size (default 50).
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">cursor()</span>
+
+```typescript
+cursor(value: string): this
+```
+
+Continue from `JobPage.nextCursor`.
+
+### JobAttachOptionsBuilder
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">readOnly()</span>
+
+```typescript
+readOnly(value?: boolean): this
+```
+
+Observe without owning input. Calling without an argument enables it.
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">replayRecent()</span>
+
+```typescript
+replayRecent(maxBytes: number): this
+```
+
+Replay up to this many recent bytes; replaces a replay cursor.
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">replayAfter()</span>
+
+```typescript
+replayAfter(cursor: string): this
+```
+
+Replay after a job-scoped cursor; replaces the recent-byte limit.
+
+### JobState
+
+```typescript
+type JobState = "starting" | "running" | "exited" | "failed" | "lost";
+```
+
+### JobInfo
+
+```typescript
+interface JobInfo {
+  readonly id: string;
+  readonly runtimeBootId: string;
+  readonly command: readonly string[];
+  readonly state: JobState;
+  readonly tty: boolean;
+  readonly stdinClosed: boolean;
+  readonly pid: number | null;
+  /** Unix milliseconds. */
+  readonly createdAt: number;
+  readonly startedAt: number | null;
+  readonly finishedAt: number | null;
+  readonly exitCode: number | null;
+  readonly timedOut: boolean;
+  readonly error: string | null;
+  readonly failure: { kind: string; message: string; errno?: number; errno_name?: string; stage?: string } | null;
+}
+```
+
+### JobPage
+
+```typescript
+interface JobPage { readonly items: readonly JobInfo[]; readonly nextCursor: string | null }
+```
+
+### JobExit
+
+```typescript
+interface JobExit { readonly code: number; readonly success: boolean; readonly timedOut: boolean }
+```
+
+### JobLogEntry
+
+```typescript
+interface JobLogEntry {
+  readonly timestamp: number;
+  readonly source: string;
+  readonly data: Buffer;
+  readonly cursor: string;
+}
+```
+
+### JobLogOptions
+
+```typescript
+interface JobLogOptions {
+  tail?: number;
+  since?: number;
+  until?: number;
+  sources?: string[];
+  fromCursor?: string;
+  follow?: boolean;
+}
+```
+
+Timestamps use Unix milliseconds. `fromCursor` resumes after an opaque job-scoped cursor; `follow` keeps reading new output. `tail`, `since`, `until`, and `sources` filter logs.
+
+### JobEvent
+
+```typescript
+type JobEvent =
+  | { type: "output"; value: JobLogEntry }
+  | { type: "gap"; value: { cursor: string } }
+  | { type: "completed"; value: JobInfo };
+```
+
+### JobError
+
+```typescript
+declare class JobError extends Error {
+  readonly code: string;
+  readonly jobId?: string;
+}
+```
+
+Stable failure code and, for uncertain launch errors, a recoverable job ID. Inspect that ID before retrying.

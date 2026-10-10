@@ -1281,13 +1281,35 @@ Grant a one-time startup burst of extra frames on top of the ops bucket. Require
 
 A single policy rule. The `destination` interpretation is direction-dependent: egress destination, or ingress peer/source. `ports` is always the guest-side port (egress destination port / ingress listening port).
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="ruledirection"></span>`direction` | [`Direction`](#direction) | Which evaluator considers this rule |
-| <span id="ruledestination"></span>`destination` | [`Destination`](#destination) | Target filter |
-| <span id="ruleprotocols"></span>`protocols` | [`Vec<Protocol>`](#protocol) | Set semantics; empty = any protocol |
-| <span id="ruleports"></span>`ports` | [`Vec<PortRange>`](#portrange) | Set semantics; empty = any port |
-| <span id="ruleaction"></span>`action` | [`Action`](#action) | What to do on match |
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">direction</span>
+
+[`Direction`](#direction)
+
+Which evaluator considers this rule
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">destination</span>
+
+[`Destination`](#destination)
+
+Target filter
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">protocols</span>
+
+[`Vec<Protocol>`](#protocol)
+
+Set semantics; empty = any protocol
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">ports</span>
+
+[`Vec<PortRange>`](#portrange)
+
+Set semantics; empty = any port
+
+#### <span className="msb-recv">Rule::</span><span className="msb-hn">action</span>
+
+[`Action`](#action)
+
+What to do on match
 
 Convenience constructors build any-protocol, any-port rules:
 
@@ -1363,10 +1385,17 @@ Deny plain DNS (UDP/53 + TCP/53) to the gateway forwarder; place before profile-
 
 An inclusive port range.
 
-| Field | Type | Description |
-|---|---|---|
-| <span id="portrangestart"></span>`start` | `u16` | Start port (inclusive) |
-| <span id="portrangeend"></span>`end` | `u16` | End port (inclusive) |
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">start</span>
+
+`u16`
+
+Start port (inclusive)
+
+#### <span className="msb-recv">PortRange::</span><span className="msb-hn">end</span>
+
+`u16`
+
+End port (inclusive)
 
 #### <span className="msb-recv">PortRange::</span><span className="msb-hn">single()</span>
 
