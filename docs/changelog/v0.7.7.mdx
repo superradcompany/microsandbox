@@ -1,0 +1,41 @@
+---
+title: "v0.7.7"
+sidebarTitle: "v0.7.7"
+description: "Connect through HTTP proxies, inspect local storage, and control the clock in snapshot-based tests."
+icon: "bolt"
+---
+
+October 5, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.7) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.6...v0.7.7)
+
+## New features
+
+**Use an HTTP CONNECT proxy.** Local sandboxes can tunnel outbound TCP through an HTTP proxy, alongside existing SOCKS support. Destination policies still apply. Proxy authentication, UDP, DNS forwarding, and host image downloads are not covered by this tunnel.
+
+```bash
+msb create alpine --name proxied --proxy http://127.0.0.1:3128
+```
+
+See [proxy setup and limits](/networking/outbound-proxy#http-connect).
+
+**See what uses disk space.** `msb df` reports local storage usage; `msb prune --dry-run` previews unused runtime memory files that can be removed. Pruning preserves saved snapshots, sandbox disks, volumes, and images. The SDKs expose storage reporting and cleanup too. [Storage commands](/cli/storage-commands)
+
+**Keep a snapshot's starting time.** `--guest-clock off` stops host clock updates after boot, so full restores continue from saved time. The guest clock still advances. Available through the local CLI and Rust SDK. [Guest clock](/sandboxes/snapshots#keep-the-guest-clock)
+
+The bundled guest kernel is updated to Linux 6.12.111. Other additions include command-tree display controls and direct file-memory mapping support (DAX) in Linux and Windows filesystem backends. macOS DAX is not included.
+
+## Fixes
+
+- Paused sandboxes use less host CPU; host-resident memory metrics are unavailable while paused rather than reporting stale values.
+- TCP responses drain before closing, ports work without host routes, and rotating DNS answers retain earlier addresses until expiry.
+- Snapshot archives import across disk locations and reordered metadata; restored CPU and memory targets are available during startup.
+- Non-root commands receive resource limits correctly. SFTP creates files as the session user, and startup errors expose guest initialization failures. Symlinked bind-mount roots fail early with a useful error.
+- SDK fixes protect secret handling, preserve Go binary output, and support Python secret-policy updates. Sandboxes that never started can be removed.
+
+## Before upgrading
+
+- **Ruby now requires 3.3 or newer.** Update Go's native library for configured-shell execution and binary-output fixes.
+- **Check numeric inputs.** TypeScript rejects invalid or out-of-range numeric options. Python lifetime values must be finite and non-negative.
+- **Upgrade snapshot readers together.** New Windows full snapshots preserve bind-mount hardlinks and require an updated runtime to restore.
+- **Plan clock-policy rollback.** Older tools cannot read full snapshots saved with the clock set to `off`. Downgrading the local database is blocked while saved or active sandboxes use that policy.
+
+See the [upgrade guide](/migrations/v0.7#later-v07-releases) for patch-release compatibility notes.

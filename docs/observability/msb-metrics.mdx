@@ -126,8 +126,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | Suffix | Unit | Description |
 | --- | --- | --- |
 | `cpu.utilization` | `1` | vCPU-seconds per wall-second. A fully used 2-vCPU sandbox reports `2.0`. |
-| `memory.usage` | `By` | Resident memory. |
-| `memory.limit` | `By` | Configured guest memory limit. |
+| `memory.usage` | `By` | Guest memory in use, measured against the live memory size when the runtime reports it. |
+| `memory.limit` | `By` | Effective guest memory limit: boot memory plus plugged memory. Follows live memory resizes. |
+| `memory.host_resident` | `By` | Host-resident memory backing the guest, when the VMM can report it. |
 | `disk.bytes_read` | `By` | Cumulative bytes read by the sandbox process. |
 | `disk.bytes_written` | `By` | Cumulative bytes written. |
 | `network.bytes_received` | `By` | Cumulative bytes from runtime to guest. |
@@ -137,8 +138,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
 | `uptime` | `s` | Sandbox uptime. |
 
-Disk and network totals are gauges containing absolute cumulative values. Use
-`rate()` in PromQL for throughput.
+During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
+
+Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
 
 ### Attributes
 

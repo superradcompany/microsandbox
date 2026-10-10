@@ -223,6 +223,8 @@ Run `<configured-shell> -c command` with streaming output. The shell comes from 
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ErrExecTimeout` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
 
 ```go
@@ -921,3 +923,287 @@ type ExecOption func(*ExecConfig)
 ```
 
 A functional option that mutates an [`ExecConfig`](#execconfig). Construct them with the `WithExec*` functions below.
+
+## Managed jobs
+
+Run and reconnect to background commands. See [Background jobs](/sandboxes/commands#background-jobs) for lifecycle, retention, and runtime limits.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ExecDetached()</span>
+
+```go
+func (s *Sandbox) ExecDetached(ctx context.Context, cmd string, args []string, opts ...JobExecOption) (*Job, error)
+```
+
+Start a job after confirming guest startup. Accepts existing `ExecOption` values and the job options below. Stdin defaults to a retained pipe.
+
+<Accordion title="Example">
+
+```go
+job, err := sb.ExecDetached(ctx, "cat", nil, msb.WithExecCwd("/tmp"))
+if err != nil { return err }
+defer job.Close()
+io, err := job.Attach(ctx)
+if err != nil { return err }
+defer io.Close()
+if err := io.WriteStdin(ctx, []byte("hello\n")); err != nil { return err }
+if err := io.Detach(ctx); err != nil { return err }
+if err := job.EOF(ctx); err != nil { return err }
+result, err := job.Wait(ctx)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">GetJob()</span>
+
+```go
+func (s *Sandbox) GetJob(ctx context.Context, id string) (*Job, error)
+```
+
+Retrieve a retained job by ID. Also available on `SandboxHandle`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ListJobs()</span>
+
+```go
+func (s *Sandbox) ListJobs(ctx context.Context, opts ...JobListOption) (*JobPage, error)
+```
+
+List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100. Also available on `SandboxHandle`.
+
+### Job
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">ID()</span>
+
+```go
+func (j *Job) ID() string
+```
+
+The job ID within its sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Inspect()</span>
+
+```go
+func (j *Job) Inspect(ctx context.Context) (*JobInfo, error)
+```
+
+Read current metadata without starting a stopped sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Wait()</span>
+
+```go
+func (j *Job) Wait(ctx context.Context) (*JobExit, error)
+```
+
+Wait for a confirmed exit without consuming output. The result contains the exit code, success flag, and timeout flag. Cancelling a context cancels the operation without stopping the job.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Signal()</span>
+
+```go
+func (j *Job) Signal(ctx context.Context, signal int) error
+```
+
+Send a Linux signal to the process group.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Kill()</span>
+
+```go
+func (j *Job) Kill(ctx context.Context) error
+```
+
+Request SIGKILL. Wait separately to confirm exit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">EOF()</span>
+
+```go
+func (j *Job) EOF(ctx context.Context) error
+```
+
+Permanently close pipe input after accepted bytes. PTYs reject this operation; use terminal control characters instead.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Logs()</span>
+
+```go
+func (j *Job) Logs(ctx context.Context, options JobLogOptions) ([]JobLogEntry, error)
+```
+
+Read retained output. Entries contain original bytes, a source, a Unix-millisecond timestamp, and an opaque cursor belonging to this job.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">LogStream()</span>
+
+```go
+func (j *Job) LogStream(ctx context.Context, options JobLogOptions) (*JobLogStream, error)
+```
+
+Read retained output and optionally follow new records. Close the stream when finished.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">FollowLogs()</span>
+
+```go
+func (j *Job) FollowLogs(ctx context.Context, options JobLogOptions) (*JobLogStream, error)
+```
+
+Stream logs with following enabled.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Attach()</span>
+
+```go
+func (j *Job) Attach(ctx context.Context, opts ...JobAttachOption) (*JobAttachment, error)
+```
+
+Attach to live I/O. Only one attachment may own input; read-only observers may coexist. Recent-byte replay and cursor replay are alternatives.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">Close()</span>
+
+```go
+func (j *Job) Close() error
+```
+
+Release the native job handle when finished. This does not stop the job.
+
+### JobAttachment
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">Recv()</span>
+
+```go
+func (a *JobAttachment) Recv(ctx context.Context) (*JobEvent, error)
+```
+
+Read an output, history-gap, or completion event. Returns `io.EOF` at the end.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">WriteStdin()</span>
+
+```go
+func (a *JobAttachment) WriteStdin(ctx context.Context, data []byte) error
+```
+
+Write up to 16 KiB through the input-owning attachment.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">Resize()</span>
+
+```go
+func (a *JobAttachment) Resize(ctx context.Context, rows, cols uint16) error
+```
+
+Resize the job terminal.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">Detach()</span>
+
+```go
+func (a *JobAttachment) Detach(ctx context.Context) error
+```
+
+Detach without stopping the job or closing its input.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">Close()</span>
+
+```go
+func (a *JobAttachment) Close() error
+```
+
+Release the native attachment handle when finished.
+
+### JobLogStream
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">Next()</span>
+
+```go
+func (s *JobLogStream) Next(ctx context.Context) (*JobLogEntry, error)
+```
+
+Read the next entry; returns `io.EOF` at the end.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">Close()</span>
+
+```go
+func (s *JobLogStream) Close() error
+```
+
+Release the native log-stream handle when finished.
+
+### Job options
+
+#### <span className="msb-hn">WithJobInput()</span>
+
+```go
+func WithJobInput(data []byte) JobExecOption
+```
+
+Send at most 64 KiB of input, then EOF. Use attachment writes for larger input.
+
+#### <span className="msb-hn">WithJobRlimits()</span>
+
+```go
+func WithJobRlimits(limits ...JobRlimit) JobExecOption
+```
+
+Set Linux resource limits. `JobRlimit` contains `Resource string`, `Soft uint64`, and `Hard uint64`.
+
+#### <span className="msb-hn">WithExecStdinNull()</span>
+
+```go
+func WithExecStdinNull() ExecOption
+```
+
+Close detached pipe input after startup.
+
+#### <span className="msb-hn">WithAllJobs()</span>
+
+```go
+func WithAllJobs() JobListOption
+```
+
+Include retained terminal jobs.
+
+#### <span className="msb-hn">WithJobLimit()</span>
+
+```go
+func WithJobLimit(limit uint) JobListOption
+```
+
+Set the page size, from 1 to 100. Default: 50.
+
+#### <span className="msb-hn">WithJobCursor()</span>
+
+```go
+func WithJobCursor(cursor string) JobListOption
+```
+
+Continue from the previous page’s `NextCursor`.
+
+#### <span className="msb-hn">WithJobReadOnly()</span>
+
+```go
+func WithJobReadOnly() JobAttachOption
+```
+
+Observe without owning input.
+
+#### <span className="msb-hn">WithJobReplayRecent()</span>
+
+```go
+func WithJobReplayRecent(bytes uint) JobAttachOption
+```
+
+Replay recent output, up to 1 MiB.
+
+#### <span className="msb-hn">WithJobReplayAfter()</span>
+
+```go
+func WithJobReplayAfter(cursor string) JobAttachOption
+```
+
+Resume after an output cursor from this job.
+
+### JobLogOptions
+
+```go
+type JobLogOptions struct {
+    Tail       *uint
+    Since      *int64
+    Until      *int64
+    Sources    []string
+    FromCursor string
+    Follow     bool
+}
+```
+
+`Tail` selects the last N filtered records. `Since` is inclusive and `Until` exclusive, both in Unix milliseconds. Empty `Sources` selects program output. `FromCursor` resumes after a job cursor and cannot be combined with `Since`. `Follow` continues after retained output.

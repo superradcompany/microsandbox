@@ -104,6 +104,9 @@ Relative host paths stored in this file resolve from the file's directory, inclu
   "metrics": {
     "capacity": 4096
   },
+  "snapshots": {
+    "max_filesystem_state_mib": 4
+  },
   "active_profile": "prod",
   "profiles": {
     "prod": {
@@ -132,6 +135,7 @@ Relative host paths stored in this file resolve from the file's directory, inclu
 | `registries` | [reference](#registries) | Container registry authentication |
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
+| `snapshots` | [reference](#snapshots) | Full snapshot capture and restore limits |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
 | `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
 
@@ -389,6 +393,18 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 | Field | Default | Description |
 |-------|---------|-------------|
 | `capacity` | `0` | Number of slots reserved in the live metrics shared-memory registry. `0` uses the built-in default. Stop all sandboxes for the same home before changing this value. |
+
+## `snapshots`
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_filesystem_state_mib` | `4` | Largest virtio-fs backend state, in MiB, that one filesystem device can carry through a full snapshot. Valid values are `1` through `4095`. |
+
+This limit applies per filesystem device during capture, verification, export, import, restore, and live forks.
+
+- **After changing it:** restart running sandboxes to update their capture limit. Host snapshot checks use the new limit immediately, so lowering it can reject captures from sandboxes still using a larger limit.
+- **When reading snapshots:** allow enough space for each device's saved state. The reader does not need to match the capture host's maximum. A smaller limit rejects oversized state before making changes.
+- **Before raising it:** consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
 
 ## `profiles`
 

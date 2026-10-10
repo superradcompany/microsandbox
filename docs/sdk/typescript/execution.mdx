@@ -432,6 +432,8 @@ Raw stderr bytes
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ExecTimeoutError` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">recv()</span>
 
 ```typescript

@@ -919,6 +919,7 @@ Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with)
 
 A handle to a running streaming execution. Receives [`ExecEvent`](#execevent)s as the process produces output, and provides control over stdin, signals, and the PTY size.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ExecTimeout` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">recv()</span>
 
@@ -1240,3 +1241,268 @@ POSIX resource limit identifiers. Each maps to an `RLIMIT_*` constant.
 | `Nice` | Max nice priority (`RLIMIT_NICE`) |
 | `Rtprio` | Max real-time priority (`RLIMIT_RTPRIO`) |
 | `Rttime` | Max real-time timeout (`RLIMIT_RTTIME`) |
+
+## Managed jobs
+
+Run and reconnect to background commands. See [Background jobs](/sandboxes/commands#background-jobs) for lifecycle, retention, and runtime limits.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec_detached()</span>
+
+```rust
+async fn exec_detached(
+    &self, cmd: impl Into<String>,
+    args: impl IntoIterator<Item = impl Into<String>>,
+) -> JobResult<Job>
+```
+
+Start a job after confirming guest startup. Stdin defaults to a retained pipe.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">exec_detached_with()</span>
+
+```rust
+async fn exec_detached_with(
+    &self, cmd: impl Into<String>,
+    configure: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
+) -> JobResult<Job>
+```
+
+Configure launch with `ExecOptionsBuilder`. `stdin_null()` closes input; `stdin_bytes()` sends at most 64 KiB followed by EOF.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::jobs::JobLogOptions;
+
+let job = sb.exec_detached_with("cat", |e| e.cwd("/tmp")).await?;
+let id = job.id().to_string();
+let io = job.attach().await?;
+io.write_stdin(b"hello\n").await?;
+io.detach().await?;
+
+let job = sb.get_job(&id).await?;
+job.eof().await?;
+let exit = job.wait().await?;
+let output = job.logs(&JobLogOptions::default()).await?;
+let page = sb.list_jobs_with(|b| b.all(true).limit(50)).await?;
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">get_job()</span>
+
+```rust
+async fn get_job(&self, id: impl AsRef<str>) -> JobResult<Job>
+```
+
+Retrieve a retained job by ID. Also available on `SandboxHandle`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">list_jobs()</span>
+
+```rust
+async fn list_jobs(&self) -> JobResult<JobPage>
+```
+
+List up to 50 active jobs. Returns items and a next-page cursor. Use `list_jobs_with()` to include retained history or change the page size. Also available on `SandboxHandle`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">list_jobs_with()</span>
+
+```rust
+async fn list_jobs_with(
+    &self, configure: impl FnOnce(JobListBuilder) -> JobListBuilder,
+) -> JobResult<JobPage>
+```
+
+Configure a page with `JobListBuilder`. Also available on `SandboxHandle`.
+
+### Job
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">id()</span>
+
+```rust
+fn id(&self) -> &JobId
+```
+
+The job ID within its sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">inspect()</span>
+
+```rust
+async fn inspect(&self) -> JobResult<JobInfo>
+```
+
+Read current metadata without starting a stopped sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">wait()</span>
+
+```rust
+async fn wait(&self) -> JobResult<JobExit>
+```
+
+Wait for a confirmed exit without consuming output. The result contains the exit code, success flag, and timeout flag. Cancelling the future leaves the job running.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">signal()</span>
+
+```rust
+async fn signal(&self, signal: i32) -> JobResult<()>
+```
+
+Send a Linux signal to the process group.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">kill()</span>
+
+```rust
+async fn kill(&self) -> JobResult<()>
+```
+
+Request SIGKILL. Wait separately to confirm exit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">eof()</span>
+
+```rust
+async fn eof(&self) -> JobResult<()>
+```
+
+Permanently close pipe input after accepted bytes. PTYs reject this operation; use terminal control characters instead.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">logs()</span>
+
+```rust
+async fn logs(&self, options: &JobLogOptions) -> JobResult<Vec<JobLogEntry>>
+```
+
+Read retained output. Entries contain original bytes, a source, a Unix-millisecond timestamp, and an opaque cursor belonging to this job.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">log_stream()</span>
+
+```rust
+async fn log_stream(&self, options: &JobLogOptions) -> JobResult<JobLogStream>
+```
+
+Read retained output and optionally follow new records. The stream yields `JobResult<JobLogEntry>`; drop it when finished.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">follow_logs()</span>
+
+```rust
+async fn follow_logs(&self, options: &JobLogOptions) -> JobResult<JobLogStream>
+```
+
+Stream logs with following enabled.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attach()</span>
+
+```rust
+async fn attach(&self) -> JobResult<JobAttachment>
+```
+
+Attach with input ownership and no replay.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attach_with()</span>
+
+```rust
+async fn attach_with(
+    &self, configure: impl FnOnce(JobAttachOptionsBuilder) -> JobAttachOptionsBuilder,
+) -> JobResult<JobAttachment>
+```
+
+Attach to live I/O. Only one attachment may own input; read-only observers may coexist. Recent-byte replay and cursor replay are alternatives.
+
+### JobAttachment
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">recv()</span>
+
+```rust
+async fn recv(&self) -> JobResult<Option<JobEvent>>
+```
+
+Read an `Output(JobLogEntry)`, `Gap { cursor }`, or `Completed(JobInfo)` event. Only one receiver may run at a time; input writes may run concurrently.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">write_stdin()</span>
+
+```rust
+async fn write_stdin(&self, data: impl AsRef<[u8]>) -> JobResult<()>
+```
+
+Write up to 16 KiB through the input-owning attachment. Cancelling this future does not kill the job.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">resize()</span>
+
+```rust
+async fn resize(&self, rows: u16, cols: u16) -> JobResult<()>
+```
+
+Resize the job terminal.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">detach()</span>
+
+```rust
+async fn detach(&self) -> JobResult<()>
+```
+
+Release the attachment. Detaching or dropping it leaves the job and its input open.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">interact_terminal()</span>
+
+```rust
+async fn interact_terminal(&self) -> JobResult<Option<i32>>
+```
+
+Connect the host terminal, handle resizing, and restore raw mode on exit. Requires terminal stdin. Returns an exit code on completion or `None` on detach. See [interrupted input](/sandboxes/commands#background-jobs) for Ctrl-], the 1 MiB lookahead limit, two-second drain, and `input_not_flushed` errors.
+
+### JobListBuilder
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">all()</span>
+
+```rust
+fn all(self, all: bool) -> Self
+```
+
+Include retained terminal records. Default: `false`.
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">limit()</span>
+
+```rust
+fn limit(self, limit: usize) -> Self
+```
+
+Set the page size, from 1 to 100. Default: 50.
+
+#### <span className="msb-recv">list.</span><span className="msb-hn">cursor()</span>
+
+```rust
+fn cursor(self, cursor: JobId) -> Self
+```
+
+Continue after the previous page’s cursor.
+
+### JobAttachOptionsBuilder
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">read_only()</span>
+
+```rust
+fn read_only(self, read_only: bool) -> Self
+```
+
+Observe without owning input. Default: `false`.
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">replay()</span>
+
+```rust
+fn replay(self, replay: JobReplay) -> Self
+```
+
+Choose `JobReplay::None` (default), `Recent { max_bytes }` (up to 1 MiB), or `After(String)` with a cursor from this job.
+
+### JobLogOptions
+
+```rust
+pub struct JobLogOptions {
+    pub tail: Option<usize>,
+    pub since: Option<i64>,
+    pub until: Option<i64>,
+    pub sources: Vec<String>,
+    pub from_cursor: Option<String>,
+    pub follow: bool,
+}
+```
+
+`tail` selects the last N filtered records. `since` is inclusive and `until` exclusive, both in Unix milliseconds. Empty `sources` selects program output. `from_cursor` resumes after a job cursor and cannot be combined with `since`. `follow` continues after retained output.

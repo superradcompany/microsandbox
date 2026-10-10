@@ -828,24 +828,23 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 
 ```rust
 fn http(self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self
-
-// Within the callback:
-fn deny_response(self, enabled: bool) -> Self
-fn deny_message(self, message: impl Into<String>) -> Self
 ```
 
-Denial responses are disabled by default. Call `deny_response(true)` to return `403 Forbidden` for supported HTTP requests, including HTTPS on intercepted ports. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
 
-`HttpBuilder::build()` returns `HttpConfig`, stored in `NetworkConfig.http`:
+<Accordion title="Example">
 
 ```rust
-pub struct HttpConfig {
-    pub deny_response: bool,
-    pub deny_message: Option<String>,
-}
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n.http(|h| h.deny_response(true).deny_message("Blocked: {host}")))
+    .create()
+    .await?;
 ```
 
-When enabled, `None` uses the built-in message; `Some(String::new())` sends an empty body.
+</Accordion>
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
@@ -1160,6 +1159,47 @@ fn verify_upstream_for(
 
 Whether the proxy verifies upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
 
+
+## HttpBuilder
+
+#### <span className="msb-recv">HttpBuilder::</span><span className="msb-hn">new()</span>
+
+```rust
+fn new() -> Self
+```
+
+Create HTTP settings with denial responses disabled. [`network.http()`](#network-http) supplies this builder automatically.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_response()</span>
+
+<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn deny_response(self, enabled: bool) -> Self
+```
+
+Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS requires TLS interception. Enabling this requires a supporting local runtime; older runtimes and cloud reject it. See [denied HTTP requests](/networking/overview#what-a-denied-http-request-sees) for supported requests and examples.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_message()</span>
+
+```rust
+fn deny_message(self, message: impl Into<String>) -> Self
+```
+
+Set the response body, replacing `{host}` with the blocked hostname. Omission uses the built-in message; an empty string sends no body. Requires `deny_response(true)`.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">build()</span>
+
+```rust
+fn build(self) -> HttpConfig
+
+pub struct HttpConfig {
+    pub deny_response: bool,
+    pub deny_message: Option<String>,
+}
+```
+
+Return the HTTP configuration stored in `NetworkConfig.http`. [`network.http()`](#network-http) calls this automatically.
 
 ## NetworkRateLimiterBuilder
 

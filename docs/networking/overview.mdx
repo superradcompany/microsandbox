@@ -285,6 +285,8 @@ Use an explicit bind address, such as `0.0.0.0`, only when you intentionally wan
 
 If the host starts without IPv4 or IPv6 routes, microsandbox assigns private guest addresses for published ports unless guest addresses are already configured. A specific host bind address must still exist at startup.
 
+CLI `-p` and YAML `ports` lists also accept inclusive, equal-length port ranges: `-p 8000-8002:80-82` forwards three TCP ports, while `-p 0.0.0.0:10240-11264:10240-11264/udp` publishes 1,025 UDP ports. Ranges expand into the same individual mappings used by the SDKs, with one host socket per port. See [Published ports](/cli/sandbox-commands#published-ports) for validation and host resource requirements.
+
 On Windows, the first published port may trigger a Windows Defender Firewall prompt for `msb.exe` because the runtime opens a host listening socket. For local development, keep the bind address on `127.0.0.1`. Only allow private/public network access in the firewall prompt when you intentionally bind a published port beyond loopback.
 
 ## Rate limits
@@ -361,23 +363,13 @@ msb create python --name throttled \
 
 The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-ingress-bandwidth`, `--net-ingress-bandwidth-burst`, `--net-ingress-ops`, `--net-ingress-ops-burst`). Sizes accept raw bytes plus `K`, `M`, and `G` suffixes; the interval defaults to one second when omitted. A frame larger than the bandwidth bucket is delivered once and the limiter then pauses long enough to pay it off, so oversized packets are throttled instead of stuck.
 
-## What a denied HTTP request sees
+<span id="what-a-denied-http-request-sees" />
 
-Denied connections fail without an HTTP response by default. Set `http.deny_response` to `true` (`denyResponse(true)` in TypeScript) to return a readable `403 Forbidden` instead. This applies to HTTP/1.0 and HTTP/1.1 in plaintext or over HTTPS on an intercepted port (see [TLS interception](/networking/tls)). The gateway never dials upstream.
+## HTTP denial responses
 
-When enabled without a custom message, the response body is:
+By default, denied connections close without a response. Enable HTTP denial responses to return `403 Forbidden` with a message your app or agent can act on. This requires a supporting local runtime and is unavailable on cloud.
 
-```text
-This host is not allowed by the sandbox network policy config.
-
-Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
-```
-
-Enabling denial responses requires a supporting local runtime. The SDK rejects `deny_response: true` on older runtimes and on cloud. With it disabled, existing workflows need no new capability.
-
-An HTTP `403` is a response, not a connection error. Check the status in your client, or use `curl --fail` when relying on its exit code.
-
-Setting a message alone does not enable responses. Configure HTTP’s `deny_message` (`denyMessage` in TypeScript) to replace the body; `{host}` is substituted with the blocked hostname. Use it to name the tool or workflow your agent should use to request access.
+You can customize the message and use `{host}` for the blocked hostname. Enable denial responses explicitly; setting a message alone leaves them disabled.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -386,7 +378,7 @@ await using sb = await Sandbox.builder("agent")
     .network((n) => n
         .policy(policy)
         .tls((t) => t)
-        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Ask the user to allow it.")))
     .create();
 ```
 
@@ -396,7 +388,7 @@ let sb = Sandbox::builder("agent")
     .network(|n| n
         .policy(policy)
         .tls(|t| t.enabled(true))
-        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it.")))
+        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.")))
     .create()
     .await?;
 ```
@@ -410,7 +402,7 @@ sb = await Sandbox.create(
     network=Network(
         policy=policy,
         tls=TlsConfig(),
-        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."),
+        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Ask the user to allow it."),
     ),
 )
 ```
@@ -421,7 +413,7 @@ sb, err := m.CreateSandbox(ctx, "agent",
     m.WithNetwork(&m.NetworkConfig{
         Rules:           rules,
         TLS:             &m.TLSConfig{},
-        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."},
+        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Ask the user to allow it."},
     }),
 )
 ```
@@ -441,11 +433,31 @@ network:
   allow: [github.com]
   http:
     deny_response: true
-    deny_message: "{host} is blocked. Call the `RequestHostAccess` tool to ask the user for it."
+    deny_message: "{host} is blocked. Ask the user to allow it."
 ```
 </CodeGroup>
 
-DNS-level denies (a name matched by a `deny` domain rule, or a deny-by-default policy without a DNS allow) still fail at resolution with `NXDOMAIN`, before any HTTP exchange. HTTPS on a port that is not intercepted, or to a name on the TLS bypass list, is closed without a response: the gateway cannot answer inside a TLS session it does not terminate. HTTP/2 and non-HTTP protocols are closed without an HTTP response. The gateway buffers fragmented request lines within a fixed size and time limit; incomplete requests, silent clients, and malformed input also close without a response.
+Check the response status, or use `curl --fail` to make a `403` return a nonzero exit code.
+
+<Accordion title="Which requests receive a response?">
+
+Responses work for HTTP/1.0 and HTTP/1.1. HTTPS requires [TLS interception](/networking/tls) on the destination port, with no bypass for the host. The denied request never reaches the upstream server.
+
+DNS denies still return `NXDOMAIN`. HTTP/2, other protocols, malformed or incomplete requests, and silent clients close without an HTTP response.
+
+</Accordion>
+
+<Accordion title="Default response message">
+
+When no custom message is set, the body names the blocked host:
+
+```text
+This host is not allowed by the sandbox network policy config.
+
+Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
+```
+
+</Accordion>
 
 ## Reaching the host
 

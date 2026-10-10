@@ -358,6 +358,8 @@ Bridge your terminal to the sandbox's default shell in a fully interactive PTY s
 
 A handle to a running streaming execution and its events.
 
+A configured streaming timeout is enforced by the SDK even when the caller is not reading output. At expiry, the SDK waits for process startup before sending SIGKILL. Waiting or collecting reports `ExecTimeoutError` after the guest confirms exit; cancelling a pending wait does not cancel the deadline. Raw event readers receive the actual exit event. If termination cannot be delivered, the SDK reports a separate error without claiming the process exited. The SDK connection must remain open for this client-owned deadline to run.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
 
 `str`
@@ -671,3 +673,199 @@ String enum (`enum.StrEnum`) naming a limitable POSIX resource.
 | `RlimitResource.NICE` | `"nice"` | Nice priority ceiling |
 | `RlimitResource.RTPRIO` | `"rtprio"` | Real-time priority ceiling |
 | `RlimitResource.RTTIME` | `"rttime"` | Real-time CPU time |
+
+## Managed jobs
+
+Run and reconnect to background commands. See [Background jobs](/sandboxes/commands#background-jobs) for lifecycle, retention, and runtime limits.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_detached()</span>
+
+```python
+async def exec_detached(
+    cmd: str,
+    args: list[str] | ExecOptions | None = None,
+    *,
+    cwd: str | None = None,
+    user: str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: float | None = None,
+    stdin: Stdin | bytes | None = None,
+    tty: bool = False,
+    rlimits: list[Rlimit] | None = None,
+) -> Job
+```
+
+Start a job and return after guest startup is confirmed. Uses the same options as [`exec()`](#sandbox-exec). Stdin defaults to a retained pipe; `Stdin.null()` closes it, and bytes supply at most 64 KiB followed by EOF.
+
+<Accordion title="Example">
+
+```python
+job = await sb.exec_detached("cat", cwd="/tmp")
+io = await job.attach()
+await io.write_stdin(b"hello\n")
+await io.detach()
+job = await sb.get_job(job.id)
+await job.eof()
+result = await job.wait()
+output = await job.logs()
+page = await sb.list_jobs(all=True, limit=50)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">get_job()</span>
+
+```python
+async def get_job(id: str) -> Job
+```
+
+Retrieve a retained job by ID. Also available on `SandboxHandle`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">list_jobs()</span>
+
+```python
+async def list_jobs(*, all: bool = False, limit: int = 50, cursor: str | None = None) -> JobPage
+```
+
+List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100. Also available on `SandboxHandle`.
+
+### Job
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">id</span>
+
+```python
+id: str
+```
+
+The job ID within its sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">inspect()</span>
+
+```python
+async def inspect() -> JobInfo
+```
+
+Read current metadata without starting a stopped sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">wait()</span>
+
+```python
+async def wait() -> JobExit
+```
+
+Wait for a confirmed exit without consuming output. The result contains the exit code, success flag, and timeout flag. Cancelling the await leaves the job running.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">signal()</span>
+
+```python
+async def signal(signal: int) -> None
+```
+
+Send a Linux signal to the process group.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">kill()</span>
+
+```python
+async def kill() -> None
+```
+
+Request SIGKILL. Wait separately to confirm exit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">eof()</span>
+
+```python
+async def eof() -> None
+```
+
+Permanently close pipe input after accepted bytes. PTYs reject this operation; use terminal control characters instead.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">logs()</span>
+
+```python
+async def logs(
+    *, tail: int | None = None, since: int | None = None,
+    until: int | None = None, sources: list[str] | None = None,
+    from_cursor: str | None = None
+) -> list[JobLogEntry]
+```
+
+Read retained output. Entries contain original bytes, a source, a Unix-millisecond timestamp, and an opaque cursor belonging to this job. `since` is inclusive and `until` exclusive, both in Unix milliseconds; `from_cursor` cannot be combined with `since`.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">log_stream()</span>
+
+```python
+async def log_stream(
+    *, tail: int | None = None, since: int | None = None,
+    until: int | None = None, sources: list[str] | None = None,
+    from_cursor: str | None = None, follow: bool = False
+) -> JobLogStream
+```
+
+Read retained output and optionally follow new records. Supports async iteration; call `await stream.close()` when finished.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">follow_logs()</span>
+
+```python
+async def follow_logs(
+    *, tail: int | None = None, since: int | None = None,
+    until: int | None = None, sources: list[str] | None = None,
+    from_cursor: str | None = None
+) -> JobLogStream
+```
+
+Stream logs with following enabled. Accepts the same filters as `logs()`.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attach()</span>
+
+```python
+async def attach(
+    *, read_only: bool = False, replay_bytes: int | None = None,
+    cursor: str | None = None,
+) -> JobAttachment
+```
+
+Attach to live I/O. Only one attachment may own input; read-only observers may coexist. Recent-byte replay and cursor replay are alternatives.
+
+### JobAttachment
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">recv()</span>
+
+```python
+async def recv() -> JobEvent | None
+```
+
+Read an output, history-gap, or completion event. Also supports async iteration. One reader may run alongside input writes.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">write_stdin()</span>
+
+```python
+async def write_stdin(data: bytes) -> None
+```
+
+Write up to 16 KiB through the input-owning attachment.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">resize()</span>
+
+```python
+async def resize(rows: int, cols: int) -> None
+```
+
+Resize the job terminal. Each dimension must fit an unsigned 16-bit integer.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">detach()</span>
+
+```python
+async def detach() -> None
+```
+
+Release the attachment when finished. The job and its input remain open.
+
+### JobLogStream
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close()</span>
+
+```python
+async def close() -> None
+```
+
+Stop observing logs. This does not stop the job.

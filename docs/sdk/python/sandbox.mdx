@@ -9,18 +9,22 @@ See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/
 
 ## Forking
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
+Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
 
 ### fork() and fork_many()
 
 ```python
 async def fork(self, name: str, *, record_integrity: bool = False,
-               guest_flush: GuestFlush | None = None) -> Sandbox: ...
+               guest_flush: GuestFlush | None = None,
+               volumes: Mapping[str, MountConfig] | None = None) -> Sandbox: ...
 async def fork_many(self, names: list[str], *, record_integrity: bool = False,
-                    guest_flush: GuestFlush | None = None) -> list[ForkOutcome]: ...
+                    guest_flush: GuestFlush | None = None,
+                    volumes: Mapping[str, MountConfig] | None = None) -> list[ForkOutcome]: ...
 ```
 
 `record_integrity` records disk hashes. `guest_flush` accepts `GuestFlush.AUTO`, `REQUIRED`, or `SKIP`; omitting it uses `AUTO`. Import `GuestFlush` from `microsandbox`.
+
+`volumes` rebinds a captured disk to a host image consistent with the captured state, for example `volumes={"/data": Volume.disk("./seed.img")}`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
 
 ### ForkOutcome
 
@@ -107,6 +111,8 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
+
+Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
 <p className="msb-label">Parameters</p>
 

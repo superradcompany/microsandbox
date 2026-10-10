@@ -1043,6 +1043,14 @@ Guest user.
   </div>
 </div>
 
+#### <span className="msb-recv">builder.</span><span className="msb-hn">intercept_tls()</span>
+
+```ruby
+builder.intercept_tls # => SandboxBuilder
+```
+
+Enable [TLS interception](/networking/tls) while preserving existing network settings. `Sandbox.create` also accepts `intercept_tls: true`.
+
 #### <span className="msb-recv">builder.</span><span className="msb-hn">detached()</span>
 
 ```ruby
@@ -2005,3 +2013,181 @@ Microsandbox.install unless Microsandbox.installed?
 ```
 
 </Accordion>
+
+## Managed jobs
+
+Run and reconnect to background commands. See [Background jobs](/sandboxes/commands#background-jobs) for lifecycle, retention, and runtime limits.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec_detached()</span>
+
+```ruby
+sandbox.exec_detached(cmd, args = [], **options) # => Job
+```
+
+Start a job after confirming guest startup. Accepts the `exec` options: `cwd`, `user`, `env`, `timeout`, `stdin`, `tty`, and `rlimits`. Stdin defaults to `:pipe`; `:null` closes it, and a String supplies at most 64 KiB followed by EOF.
+
+<Accordion title="Example">
+
+```ruby
+job = sb.exec_detached("cat", cwd: "/tmp")
+io = job.attach
+io.write_stdin("hello\n")
+io.detach
+found = sb.get_job(job.id)
+found.eof
+result = found.wait
+output = found.logs
+page = sb.list_jobs(all: true, limit: 50)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">get_job()</span>
+
+```ruby
+sandbox.get_job(id) # => Job
+```
+
+Retrieve a retained job by ID. Also available on `SandboxHandle`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">list_jobs()</span>
+
+```ruby
+sandbox.list_jobs(all: false, limit: 50, cursor: nil) # => JobPage
+```
+
+List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100. Also available on `SandboxHandle`.
+
+### Job
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">id</span>
+
+```ruby
+job.id # => String
+```
+
+The job ID within its sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">inspect</span>
+
+```ruby
+job.inspect # => JobInfo
+```
+
+Read current metadata without starting a stopped sandbox.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">wait</span>
+
+```ruby
+job.wait # => JobExit
+```
+
+Wait for a confirmed exit without consuming output. The result contains the exit code, success flag, and timeout flag. Blocking operations release the Ruby GVL.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">signal</span>
+
+```ruby
+job.signal(signal) # => nil
+```
+
+Send a Linux signal to the process group.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">kill</span>
+
+```ruby
+job.kill # => nil
+```
+
+Request SIGKILL. Wait separately to confirm exit.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">eof</span>
+
+```ruby
+job.eof # => nil
+```
+
+Permanently close pipe input after accepted bytes. PTYs reject this operation; use terminal control characters instead.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">logs</span>
+
+```ruby
+job.logs(tail: nil, since: nil, until: nil, sources: [], from_cursor: nil) # => Array<JobLogEntry>
+```
+
+Read retained output. Entries contain original bytes, a source, a Unix-millisecond timestamp, and an opaque cursor belonging to this job. `since` is inclusive and `until` exclusive, both in Unix milliseconds; `from_cursor` cannot be combined with `since`.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">log_stream</span>
+
+```ruby
+job.log_stream(tail: nil, since: nil, until: nil, sources: [], from_cursor: nil, follow: false) # => JobLogStream
+```
+
+Read retained output and optionally follow new records. Use `each` for automatic cleanup or close the stream explicitly.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">follow_logs</span>
+
+```ruby
+job.follow_logs(**options) # => JobLogStream
+```
+
+Stream logs with following enabled. Accepts the same filters as `logs`.
+
+#### <span className="msb-recv">job.</span><span className="msb-hn">attach</span>
+
+```ruby
+job.attach(read_only: false, replay_bytes: nil, cursor: nil) # => JobAttachment
+```
+
+Attach to live I/O. Only one attachment may own input; read-only observers may coexist. Recent-byte replay and cursor replay are alternatives.
+
+### JobAttachment
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">recv</span>
+
+```ruby
+attachment.recv # => JobEvent or nil
+```
+
+Read an output, history-gap, or completion event. `each` iterates events and detaches on exit. Input and output can run on separate Ruby threads.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">write_stdin</span>
+
+```ruby
+attachment.write_stdin(bytes) # => nil
+```
+
+Write a String of up to 16 KiB through the input-owning attachment.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">resize</span>
+
+```ruby
+attachment.resize(rows, cols) # => nil
+```
+
+Resize the job terminal. Each dimension must fit an unsigned 16-bit integer.
+
+#### <span className="msb-recv">attachment.</span><span className="msb-hn">detach</span>
+
+```ruby
+attachment.detach # => nil
+```
+
+Release the attachment when finished. The job and its input remain open. `close` is an alias.
+
+### JobLogStream
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">next</span>
+
+```ruby
+stream.next # => JobLogEntry or nil
+```
+
+Read the next log entry. `each` iterates entries and closes the stream on exit.
+
+#### <span className="msb-recv">stream.</span><span className="msb-hn">close</span>
+
+```ruby
+stream.close # => nil
+```
+
+Stop observing logs. This does not stop the job.
