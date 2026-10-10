@@ -25,7 +25,7 @@ pub struct DfArgs {
     #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
     pub format: Option<String>,
 
-    /// Include individual objects, backing paths, and retention reasons.
+    /// Include object paths, retention reasons, and accounting details.
     #[arg(long)]
     pub verbose: bool,
 }
@@ -158,41 +158,40 @@ fn render_usage(usage: &StorageUsage, verbose: bool) -> String {
         ]);
     }
     let mut output = table.render();
+    if !verbose {
+        output.push_str("\nlogical sizes; '-' means unknown. use --verbose for details.\n");
+        return output;
+    }
+
     output.push_str("\nReclaimable shows logical bytes; '-' means unknown.\nPhysical space freed may differ because files can share disk blocks.\n");
-    if verbose {
-        for note in &usage.notes {
-            let _ = writeln!(output, "{note}");
-        }
-    } else {
-        output.push_str("Use --verbose for ownership details and accounting exclusions.\n");
+    for note in &usage.notes {
+        let _ = writeln!(output, "{note}");
     }
     for (name, category) in categories(usage) {
-        if verbose {
-            let mut title = name.to_string();
-            title[..1].make_ascii_uppercase();
+        let mut title = name.to_string();
+        title[..1].make_ascii_uppercase();
+        let _ = writeln!(
+            output,
+            "\n{}",
+            style(format!("{title} ({})", count_cell(category.count))).bold()
+        );
+        for item in &category.items {
+            let _ = writeln!(output, "  {}", item.name);
+            let _ = writeln!(output, "    Path:          {}", item.path.display());
             let _ = writeln!(
                 output,
-                "\n{}",
-                style(format!("{title} ({})", count_cell(category.count))).bold()
+                "    Logical size:  {}",
+                size_cell(item.logical_bytes)
             );
-            for item in &category.items {
-                let _ = writeln!(output, "  {}", item.name);
-                let _ = writeln!(output, "    Path:          {}", item.path.display());
-                let _ = writeln!(
-                    output,
-                    "    Logical size:  {}",
-                    size_cell(item.logical_bytes)
-                );
-                let _ = writeln!(
-                    output,
-                    "    Allocated:     {}",
-                    size_cell(item.allocated_bytes)
-                );
-                let _ = writeln!(output, "    In use:        {}", bool_cell(item.in_use));
-                let _ = writeln!(output, "    Reclaimable:   {}", bool_cell(item.reclaimable));
-                for reason in &item.reasons {
-                    let _ = writeln!(output, "    Reason:        {reason}");
-                }
+            let _ = writeln!(
+                output,
+                "    Allocated:     {}",
+                size_cell(item.allocated_bytes)
+            );
+            let _ = writeln!(output, "    In use:        {}", bool_cell(item.in_use));
+            let _ = writeln!(output, "    Reclaimable:   {}", bool_cell(item.reclaimable));
+            for reason in &item.reasons {
+                let _ = writeln!(output, "    Reason:        {reason}");
             }
         }
         for note in &category.notes {
@@ -423,8 +422,10 @@ mod tests {
     }
 
     #[test]
-    fn usage_always_lists_six_categories_and_preserves_unknowns() {
+    fn default_usage_is_concise_and_preserves_categories_and_unknowns() {
         let mut usage = StorageUsage::default();
+        usage.notes.push("shared storage roots".into());
+        usage.images.notes.push("measurement incomplete".into());
         usage.branch_memory = StorageCategoryUsage {
             count: Some(0),
             in_use: Some(0),
@@ -450,7 +451,16 @@ mod tests {
             row.split_whitespace().collect::<Vec<_>>(),
             ["images", "-", "-", "-", "-"]
         );
-        assert!(plain.contains("Physical space freed may differ"));
+        assert!(plain.contains("'-' means unknown"));
+        assert!(plain.contains("--verbose"));
+        assert!(!plain.contains("shared storage roots"));
+        assert!(!plain.contains("measurement incomplete"));
+        assert!(!plain.contains("Physical space freed may differ"));
+
+        let verbose = render_usage(&usage, true);
+        assert!(verbose.contains("shared storage roots"));
+        assert!(verbose.contains("measurement incomplete"));
+        assert!(verbose.contains("Physical space freed may differ"));
     }
 
     #[test]
