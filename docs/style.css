@@ -843,3 +843,32 @@ body:has(.msb-guides-overview) #table-of-contents-layout {
 /* Show moved-command links only to readers following an old bookmark. */
 .msb-moved-command { display: none; }
 .msb-moved-command:target { display: block; margin: 1rem 0; }
+
+/* Credit release contributors without turning the changelog into a directory. */
+.msb-release-contributors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.msb-release-contributors li {
+  margin: 0;
+  padding: 0;
+}
+
+.msb-release-contributors a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.msb-release-contributors img {
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  border-radius: 50%;
+}
