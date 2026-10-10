@@ -450,6 +450,8 @@ pub enum Operation {
     SandboxHandleConnect,
     /// `SandboxHandle::metrics`.
     SandboxHandleMetrics,
+    /// Read the retained local runtime exit.
+    SandboxHandleTerminalExit,
     /// `SandboxHandle::remove`.
     SandboxHandleRemove,
     /// `SandboxHandle::snapshot`.
@@ -601,6 +603,7 @@ impl Operation {
             Operation::SandboxHandleConfig => "SandboxHandle::config",
             Operation::SandboxHandleConnect => "SandboxHandle::connect",
             Operation::SandboxHandleMetrics => "SandboxHandle::metrics",
+            Operation::SandboxHandleTerminalExit => "SandboxHandle::terminal_exit",
             Operation::SandboxHandleRemove => "SandboxHandle::remove",
             Operation::SandboxHandleSnapshot => "SandboxHandle::snapshot",
             Operation::SandboxHandleSnapshotTo => "SandboxHandle::snapshot_to",

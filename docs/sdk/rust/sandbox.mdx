@@ -2451,6 +2451,28 @@ Add several AND-matched labels
 A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
 
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">terminal_exit()</span>
+
+Available with the Rust SDK's `local` feature. Cloud handles return an unsupported-operation error.
+
+```rust
+async fn terminal_exit(&self) -> MicrosandboxResult<Option<SandboxRunExit>>
+```
+
+Read the latest runtime-recorded exit for this exact sandbox identity, including
+`run_id`, optional `exit_code`, `signal`, `reason`, and `terminated_at`.
+`SandboxRunExit` and `SandboxTerminationReason` are in `microsandbox::sandbox`.
+Reasons include `IdleTimeout`, `MaxDurationExceeded`, `Completed`, and `Failed`.
+
+Returns `None` while the sandbox is nonterminal or the latest run lacks a terminal
+record. A new run never exposes an older run's exit. A removed or replaced sandbox
+returns an error. Missing metadata is not evidence of an idle timeout.
+
+Local ephemeral cleanup removes this information along with the sandbox. If an
+orchestrator needs the result, create the local sandbox with `.ephemeral(false)`,
+consume its exit, then explicitly destroy it when its retention policy requires
+cleanup. This does not disable idle timeouts or enable automatic snapshots.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">config()</span>
 
 <Tooltip tip="Parsed SandboxConfig is local-only; use config_json() for the raw cloud specification."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>

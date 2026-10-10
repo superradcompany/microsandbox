@@ -19,6 +19,8 @@ pub(crate) mod config;
 mod control_pipe;
 pub mod exec;
 #[cfg(feature = "local")]
+mod exit;
+#[cfg(feature = "local")]
 pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
@@ -148,6 +150,8 @@ pub use builder::{RegistryConfigBuilder, SandboxBuilder};
 pub use compact::{DiskCompactionBuilder, DiskCompactionDiskResult, DiskCompactionResult};
 pub use config::{SandboxConfig, SandboxConfigPatch};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
+#[cfg(feature = "local")]
+pub use exit::{SandboxRunExit, SandboxTerminationReason};
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
