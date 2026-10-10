@@ -879,12 +879,25 @@ impl GuestFrameMerger {
                 if finish.flow != BulkFlow::GuestToHost {
                     return Ok(vec![lane_frame]);
                 }
-                let flow = self.flows.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Custom(format!(
-                        "bulk finish arrived before acceptance for correlation {}",
-                        message.id
-                    ))
-                })?;
+
+                let Some(flow) = self.flows.get_mut(&key) else {
+                    return if self.is_retired(incarnation, message.id) {
+                        Ok(Vec::new())
+                    } else {
+                        Err(RuntimeError::Custom(format!(
+                            "bulk finish for unregistered correlation {}",
+                            message.id
+                        )))
+                    };
+                };
+
+                // A cancelled flow has already released its records, so this finish can never be
+                // drained. Discard it here instead of holding its lane permit until the terminal
+                // response arrives.
+                if flow.cancelling {
+                    return Ok(Vec::new());
+                }
+
                 if !flow.accepted_forwarded || !flow.guest_to_host {
                     return Err(RuntimeError::Custom(format!(
                         "bulk finish arrived for inactive guest-to-host flow {}",
@@ -5734,6 +5747,7 @@ mod tests {
     };
     use microsandbox_protocol::core::Ready;
     use microsandbox_protocol::fs::FsResponse;
+    use microsandbox_protocol::tcp::TcpClosed;
     use microsandbox_protocol::transport::{
         BulkTransportReady, RelayLeaseReady, decode_bulk_ack, encode_bulk_hello,
     };
@@ -6229,6 +6243,34 @@ mod tests {
             incarnation: Some(incarnation),
             _permit: permit,
         }
+    }
+
+    fn tcp_guest_raw(id: u32, offset: u64, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::new();
+        codec::encode_bulk_to_buf(
+            &BulkRecord {
+                id,
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::GuestToHost,
+                offset,
+                payload: Bytes::copy_from_slice(payload),
+            },
+            &mut frame,
+        )
+        .unwrap();
+        frame
+    }
+
+    fn guest_finish(kind: BulkKind, id: u32, final_offset: u64) -> Vec<u8> {
+        encoded_message_id(
+            MessageType::BulkFinish,
+            id,
+            &BulkFinish {
+                kind,
+                flow: BulkFlow::GuestToHost,
+                final_offset,
+            },
+        )
     }
 
     fn bulk_accepted() -> BulkAccepted {
@@ -6785,6 +6827,202 @@ mod tests {
     }
 
     #[test]
+    fn issue1801_retired_tcp_finish_is_discarded() {
+        const ID: u32 = 15;
+
+        // An ordinary close answers with `TcpClosed` and a cancelled stream with `TcpFailed`.
+        // Either terminal retires the correlation, so a finish the guest had already queued must
+        // be discarded instead of failing the relay shared by every client.
+        for terminal in [
+            encoded_message_id(MessageType::TcpClosed, ID, &TcpClosed {}),
+            encoded_message_id(
+                MessageType::TcpFailed,
+                ID,
+                &TcpFailed {
+                    error: "cancelled".into(),
+                },
+            ),
+        ] {
+            let budget = Arc::new(Semaphore::new(64 * 1024));
+            let full_budget = budget.available_permits();
+            let mut merger = GuestFrameMerger::default();
+            merger.register(TEST_INCARNATION, ID).unwrap();
+
+            let accepted = merger
+                .push(lane_frame(
+                    encoded_message_id(
+                        MessageType::BulkAccepted,
+                        ID,
+                        &BulkAccepted {
+                            kind: BulkKind::Tcp,
+                            ..bulk_accepted()
+                        },
+                    ),
+                    &budget,
+                ))
+                .unwrap();
+            assert_eq!(accepted.len(), 1);
+            drop(accepted);
+
+            merger.drop_flow(TEST_INCARNATION, ID);
+            let forwarded = merger.push(lane_frame(terminal, &budget)).unwrap();
+            assert_eq!(forwarded.len(), 1);
+            drop(forwarded);
+            assert!(!merger.flows.contains_key(&(TEST_INCARNATION, ID)));
+
+            let late_finish = merger
+                .push(lane_frame(guest_finish(BulkKind::Tcp, ID, 0), &budget))
+                .expect("a finish for a retired correlation must not fail the relay");
+
+            assert!(late_finish.is_empty());
+            assert_eq!(budget.available_permits(), full_budget);
+        }
+    }
+
+    #[test]
+    fn guest_merger_discards_finish_while_cancelling() {
+        let id = 71;
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let full_budget = budget.available_permits();
+        let mut merger = GuestFrameMerger::default();
+        merger.register(TEST_INCARNATION, id).unwrap();
+        let accepted = merger
+            .push(lane_frame(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+            ))
+            .unwrap();
+        assert_eq!(accepted.len(), 1);
+        drop(accepted);
+
+        // The finish arrives between cancellation and the terminal that retires the correlation.
+        merger.drop_flow(TEST_INCARNATION, id);
+        let discarded = merger
+            .push(lane_frame(guest_finish(BulkKind::Tcp, id, 4), &budget))
+            .expect("a finish for a cancelling flow must not fail the relay");
+
+        assert!(discarded.is_empty());
+        // A retained `pending_finish` would keep holding this frame's admission permit.
+        assert_eq!(budget.available_permits(), full_budget);
+
+        let forwarded = merger
+            .push(lane_frame(
+                encoded_message_id(
+                    MessageType::TcpFailed,
+                    id,
+                    &TcpFailed {
+                        error: "cancelled".into(),
+                    },
+                ),
+                &budget,
+            ))
+            .unwrap();
+
+        assert_eq!(forwarded.len(), 1);
+        assert_eq!(
+            decode_frame(forwarded[0].frame.data.as_ref()).unwrap().t,
+            MessageType::TcpFailed
+        );
+        assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
+    }
+
+    #[test]
+    fn guest_merger_scopes_retired_finishes_to_one_incarnation() {
+        let id = 73;
+        let old = [0x33; CLIENT_INCARNATION_SIZE];
+        let new = [0x44; CLIENT_INCARNATION_SIZE];
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let mut merger = GuestFrameMerger::default();
+        merger.register(old, id).unwrap();
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+                old,
+            ))
+            .unwrap();
+        merger.drop_flow(old, id);
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(MessageType::TcpClosed, id, &TcpClosed {}),
+                &budget,
+                old,
+            ))
+            .unwrap();
+
+        // The other owner never registered this correlation, so its finish stays a protocol error.
+        let error = merger
+            .push(lane_frame_with_incarnation(
+                guest_finish(BulkKind::Tcp, id, 0),
+                &budget,
+                new,
+            ))
+            .err()
+            .expect("an unregistered correlation must not inherit another owner's retirement");
+        assert!(
+            error
+                .to_string()
+                .contains("bulk finish for unregistered correlation"),
+            "unexpected error: {error}"
+        );
+
+        // Neither may the retirement relax offset validation for the other owner's live transfer.
+        merger.register(new, id).unwrap();
+        merger
+            .push(lane_frame_with_incarnation(
+                encoded_message_id(
+                    MessageType::BulkAccepted,
+                    id,
+                    &BulkAccepted {
+                        kind: BulkKind::Tcp,
+                        ..bulk_accepted()
+                    },
+                ),
+                &budget,
+                new,
+            ))
+            .unwrap();
+        let forwarded = merger
+            .push(lane_frame_with_incarnation(
+                tcp_guest_raw(id, 0, b"abc"),
+                &budget,
+                new,
+            ))
+            .unwrap();
+        assert_eq!(forwarded.len(), 1);
+
+        let error = merger
+            .push(lane_frame_with_incarnation(
+                guest_finish(BulkKind::Tcp, id, 0),
+                &budget,
+                new,
+            ))
+            .err()
+            .expect("a finish behind the forwarded offset must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("regressed behind forwarded offset"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn guest_merger_cancel_releases_data_and_discards_late_raw() {
         let id = 61;
         let budget = Arc::new(Semaphore::new(64 * 1024));
@@ -6883,6 +7121,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert!(
+            merger
+                .push(lane_frame(
+                    guest_finish(BulkKind::Filesystem, id, 14),
+                    &budget
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(budget.available_permits(), full_budget);
 
         let terminal = merger
             .push(lane_frame(
@@ -6901,6 +7149,18 @@ mod tests {
         assert_eq!(terminal.len(), 1);
         assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
         assert!(merger.register(TEST_INCARNATION, id).is_err());
+        drop(terminal);
+
+        assert!(
+            merger
+                .push(lane_frame(
+                    guest_finish(BulkKind::Filesystem, id, 14),
+                    &budget
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(budget.available_permits(), full_budget);
     }
 
     #[test]
