@@ -1920,7 +1920,6 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secretViolationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
 | maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
-| maxInboundTcpConnections | `number \| null` (optional) | Active inbound TCP cap across published ports; zero is unlimited, absent uses the runtime default |
 | tcpAcceptQueueSize | `number \| null` (optional) | Accept-queue depth for published TCP port listeners; absent means the default, 1,024 |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |
