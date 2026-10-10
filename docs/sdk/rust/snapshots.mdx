@@ -1062,6 +1062,8 @@ Map a host volume to a guest path, or use `|v| v.captured()` to select its captu
 <Accordion title="Example">
 
 ```rust
+use microsandbox::Sandbox;
+
 let child = Sandbox::restore("api:baseline")
     .name("api-restored")
     .volume("/data", |v| v.disk("./seed.img").fstype("ext4"))
