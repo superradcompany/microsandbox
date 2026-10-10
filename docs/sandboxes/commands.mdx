@@ -236,11 +236,10 @@ for {
 
 </CodeGroup>
 
-With the local runtime's dedicated signal channel, calling `kill()` or sending a
-signal after an execution has ended returns an immediate `execution_closed`
-error. Cleanup code can skip the call once it has received an exit or failed-start
-event. A successful signal call confirms delivery, not process exit; keep reading
-events or wait for completion to confirm termination.
+With the local runtime's dedicated signal channel, `kill()` and other signals
+return `execution_closed` immediately if the execution ended or its start was
+rejected. Successful delivery does not confirm process exit; wait for completion.
+A timeout reports whether the signal was queued and may still be delivered.
 
 ## Interactive attach
 

@@ -129,7 +129,8 @@ impl ExecControlRegistry {
             Arc::clone(owner)
         };
 
-        let delivered = async {
+        let deadline = tokio::time::Instant::now() + DELIVERY_DEADLINE;
+        let enqueue = async {
             // The separate sockets can race, including an immediate kill after exec() returns.
             // Wait for this owner's actual ExecStarted rather than overtaking process creation.
             // Once captured, retain the same lease through terminal/disconnect; never retarget it.
@@ -196,19 +197,30 @@ impl ExecControlRegistry {
                 )
             })?;
 
-            completed.await.map_err(|_| {
-                ExecControlResponse::error(
-                    "delivery_unconfirmed",
-                    "execution ended or its transport closed before delivery confirmation",
-                )
-            })
+            Ok(completed)
         };
-        match tokio::time::timeout(DELIVERY_DEADLINE, delivered).await {
+
+        let completed = match tokio::time::timeout_at(deadline, enqueue).await {
+            Ok(Ok(completed)) => completed,
+            Ok(Err(response)) => return response,
+            Err(_) => {
+                return ExecControlResponse::error(
+                    "delivery_unconfirmed",
+                    "signal delivery deadline expired; the signal was not queued and will not be delivered",
+                );
+            }
+        };
+
+        // Enqueueing and delivery confirmation share one deadline.
+        match tokio::time::timeout_at(deadline, completed).await {
             Ok(Ok(())) => ExecControlResponse::delivered(),
-            Ok(Err(response)) => response,
+            Ok(Err(_)) => ExecControlResponse::error(
+                "delivery_unconfirmed",
+                "execution ended or its transport closed before delivery confirmation",
+            ),
             Err(_) => ExecControlResponse::error(
                 "delivery_unconfirmed",
-                "signal delivery deadline expired; an admitted request may still be delivered",
+                "signal delivery deadline expired; the queued signal may still be delivered",
             ),
         }
     }
@@ -222,9 +234,9 @@ impl Executions {
     fn mark_finished(&mut self, id: u32) {
         if let Some(lease) = self.active.remove(&id) {
             lease.live.store(false, Ordering::Release);
-            let marked = self.finished.mark_finished(id);
-            debug_assert!(marked, "registered execution belongs to the owner's range");
         }
+        // Host rejection can end an execution before it ever gets an active lease.
+        self.finished.mark_finished(id);
     }
 }
 

@@ -4621,6 +4621,15 @@ async fn client_reader_task(
                 break;
             };
             response.v = request.v;
+            if message_type == Some(MessageType::ExecRequest) {
+                let map = clients.lock().await;
+                if let Some(connection) = map
+                    .get(&slot)
+                    .and_then(|client| client.exec_control.as_ref())
+                {
+                    connection.mark_finished(frame.id);
+                }
+            }
             if queue_client_rejection(&write_tx, &write_budget, &response).is_err() {
                 break;
             }
@@ -5443,6 +5452,58 @@ mod tests {
         assert!(matches!(write.order, ControlOrder::ExecSignal(101)));
         write.completion.take().unwrap().send(()).unwrap();
         assert!(task.await.unwrap().delivered);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exec_control_timeout_reports_whether_the_signal_was_queued() {
+        use microsandbox_protocol::exec_control::ExecControlRequest;
+
+        for (started, full) in [(false, false), (true, true), (true, false)] {
+            let (tx, mut rx) = ControlWriter::new();
+            let owner = tx.exec_controls.connect(100, 200);
+            owner.register(101);
+            if started {
+                owner.started(101);
+            }
+            if full {
+                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                    tx.send(ControlWrite::ordinary(
+                        Bytes::from_static(b"control"),
+                        102,
+                        false,
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+            let response = tx
+                .exec_controls
+                .signal(
+                    &tx,
+                    ExecControlRequest {
+                        version: 1,
+                        connection: owner.token(),
+                        id: 101,
+                        signal: 9,
+                    },
+                )
+                .await;
+            assert_eq!(response.error_code.as_deref(), Some("delivery_unconfirmed"));
+            let queued = started && !full;
+            let message = response.error.unwrap();
+            if queued {
+                assert!(message.contains("may still be delivered"), "{message}");
+            } else {
+                assert!(message.contains("was not queued"), "{message}");
+            }
+            if full {
+                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                    assert!(rx.try_recv().is_ok());
+                }
+            }
+            assert_eq!(rx.try_recv().is_ok(), queued);
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -6300,10 +6361,13 @@ mod tests {
         let (disconnect_tx, disconnect_rx) = watch::channel(false);
         let write_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
         let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let owner = agent_tx.exec_controls.connect(id_start, id_end_exclusive);
+        let token = owner.token();
+        let signal_writer = agent_tx.clone();
         let clients = Arc::new(Mutex::new(HashMap::from([(
             slot,
             ClientState {
-                exec_control: None,
+                exec_control: Some(owner),
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6368,6 +6432,22 @@ mod tests {
             drop(rejected);
             assert_eq!(write_budget.available_permits(), initial_budget);
         }
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            signal_writer.exec_controls.signal(
+                &signal_writer,
+                microsandbox_protocol::exec_control::ExecControlRequest {
+                    version: 1,
+                    connection: token,
+                    id: id_start,
+                    signal: 9,
+                },
+            ),
+        )
+        .await
+        .expect("host-rejected executions must reject signals immediately");
+        assert_eq!(response.error_code.as_deref(), Some("execution_closed"));
+        assert!(agent_rx.try_recv().is_err());
         // Existing streams still enter bounded source-owned admission while paused. Classification
         // reuses this reader's already decoded envelope, including empty stdin/TCP EOF payloads.
         for (kind, uses_data_credit) in [
