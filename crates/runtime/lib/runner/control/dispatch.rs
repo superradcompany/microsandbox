@@ -1,4 +1,4 @@
-//! Fair serialized host dispatch with pre-reserved response capacity.
+//! Fair host dispatch with ordered connections and pre-reserved response capacity.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
@@ -21,7 +21,8 @@ use super::handler::{Handler, Reply};
 pub(crate) const CONNECTION_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const RUNTIME_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_QUEUED: usize = 256;
-const MAX_SIGNAL_QUEUED: usize = 64;
+// Includes both queued and running signal requests across all connections.
+const MAX_SIGNAL_REQUESTS: usize = 64;
 // Generation-one replies contain only fixed records and static diagnostics.
 // This reservation is acquired before dispatching even a resource mutation.
 pub(crate) const REPLY_BYTES: u32 = MAX_HANDSHAKE_FRAME_SIZE + 4;
@@ -47,6 +48,7 @@ struct Queues {
     by_connection: HashMap<u64, VecDeque<Job>>,
     ready: VecDeque<u64>,
     count: usize,
+    active: HashSet<u64>,
 }
 
 pub(crate) struct Budget {
@@ -111,7 +113,7 @@ impl Dispatcher {
         // A connection keeps one lane for its whole lifetime, preserving its FIFO even when a
         // low-level client mixes operations. The native signal helper uses a dedicated connection.
         let (queue, wake, limit) = if signal {
-            (&self.signal_queues, &self.signal_wake, MAX_SIGNAL_QUEUED)
+            (&self.signal_queues, &self.signal_wake, MAX_SIGNAL_REQUESTS)
         } else {
             (&self.queues, &self.wake, MAX_QUEUED)
         };
@@ -119,8 +121,9 @@ impl Dispatcher {
         if queues.count >= limit {
             return Err(Box::new(job));
         }
+        let active = queues.active.contains(&connection);
         let queue = queues.by_connection.entry(connection).or_default();
-        let newly_ready = queue.is_empty();
+        let newly_ready = queue.is_empty() && !active;
         queue.push_back(job);
         if newly_ready {
             queues.ready.push_back(connection);
@@ -142,7 +145,7 @@ impl Dispatcher {
         }
     }
 
-    fn next_lane(&self, signal: bool) -> Option<Job> {
+    fn next_lane(&self, signal: bool) -> Option<(u64, Job)> {
         let mut queues = if signal {
             &self.signal_queues
         } else {
@@ -155,11 +158,24 @@ impl Dispatcher {
         let job = queue.pop_front().unwrap();
         if queue.is_empty() {
             queues.by_connection.remove(&connection);
-        } else {
+        } else if !signal {
             queues.ready.push_back(connection);
         }
+        if signal {
+            queues.active.insert(connection);
+        } else {
+            queues.count -= 1;
+        }
+        Some((connection, job))
+    }
+
+    fn finish_signal(&self, connection: u64) {
+        let mut queues = self.signal_queues.lock().unwrap();
+        queues.active.remove(&connection);
         queues.count -= 1;
-        Some(job)
+        if queues.by_connection.contains_key(&connection) {
+            queues.ready.push_back(connection);
+        }
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -169,23 +185,44 @@ impl Dispatcher {
     }
 
     async fn run_lane(self: Arc<Self>, signal: bool) {
+        let mut running = tokio::task::JoinSet::new();
         loop {
+            while let Some(Ok(connection)) = running.try_join_next() {
+                self.finish_signal(connection);
+            }
             let notified = if signal {
                 &self.signal_wake
             } else {
                 &self.wake
             }
             .notified();
-            if let Some(job) = self.next_lane(signal) {
-                if !job.cancelled.is_cancelled() {
-                    let dispatcher = self.clone();
-                    let _ = tokio::task::spawn_blocking(move || dispatcher.execute(job)).await;
+            if let Some((connection, job)) = self.next_lane(signal) {
+                if job.cancelled.is_cancelled() {
+                    if signal {
+                        self.finish_signal(connection);
+                    }
+                    continue;
                 }
-                // Let accept/read/write tasks enqueue other ready connections.
-                // FIFO within each connection plus round-robin above is fair.
+                let dispatcher = self.clone();
+                let execute = async move {
+                    let _ = tokio::task::spawn_blocking(move || dispatcher.execute(job)).await;
+                    connection
+                };
+                if signal {
+                    // Only one request per connection runs at once. The signal budget includes
+                    // these running requests, so blocked guests cannot grow the worker count.
+                    running.spawn(execute);
+                } else {
+                    execute.await;
+                }
                 tokio::task::yield_now().await;
             } else {
-                notified.await;
+                tokio::select! {
+                    _ = notified => {}
+                    Some(Ok(connection)) = running.join_next(), if !running.is_empty() => {
+                        self.finish_signal(connection);
+                    }
+                }
             }
         }
     }

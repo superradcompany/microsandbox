@@ -210,7 +210,7 @@ fn queued_json(online: u32, reply: mpsc::Sender<super::dispatch::Outgoing>) -> J
 }
 
 #[tokio::test]
-async fn blocked_exec_signal_does_not_block_lifecycle_lane_or_reorder_its_connection() {
+async fn blocked_exec_signal_does_not_block_other_connections_or_reorder_its_connection() {
     use microsandbox_protocol::exec_control::{
         EXEC_CONTROL_REQUEST, ExecControlRequest, ExecControlResponse,
     };
@@ -223,7 +223,10 @@ async fn blocked_exec_signal_does_not_block_lifecycle_lane_or_reorder_its_connec
         fn handle(&self, request: ControlOperation, generation: u8) -> Response {
             self.host.handle(request, generation)
         }
-        fn handle_exec_signal(&self, _: ExecControlRequest) -> ExecControlResponse {
+        fn handle_exec_signal(&self, request: ExecControlRequest) -> ExecControlResponse {
+            if request.id != 101 {
+                return ExecControlResponse::delivered();
+            }
             self.started.notify_one();
             self.release
                 .lock()
@@ -280,8 +283,32 @@ async fn blocked_exec_signal_does_not_block_lifecycle_lane_or_reorder_its_connec
             .t,
         "control.capabilities.result"
     );
+    let (mut independent, independent_server) = connection(&dispatcher);
+    handshake_generation(&mut independent, 4, 2).await;
+    request_at(
+        &mut independent,
+        2,
+        1,
+        0,
+        EXEC_CONTROL_REQUEST,
+        &ExecControlRequest {
+            version: 1,
+            connection: [0; 16],
+            id: 102,
+            signal: 9,
+        },
+    )
+    .await;
+    let independent_result =
+        tokio::time::timeout(Duration::from_secs(1), response(&mut independent)).await;
     assert_eq!(*host.host.calls.lock().unwrap(), [0]);
     release.send(()).unwrap();
+    assert_eq!(
+        independent_result.unwrap().t,
+        microsandbox_protocol::exec_control::EXEC_CONTROL_RESPONSE
+    );
+    drop(independent);
+    independent_server.await.unwrap().unwrap();
     assert_eq!(
         response(&mut signal).await.t,
         microsandbox_protocol::exec_control::EXEC_CONTROL_RESPONSE

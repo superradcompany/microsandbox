@@ -324,6 +324,11 @@ for {
 
 </CodeGroup>
 
+With the local runtime's dedicated signal channel, `kill()` and other signals
+return `execution_closed` immediately if the execution ended or its start was
+rejected. Successful delivery does not confirm process exit; wait for completion.
+A timeout reports whether the signal was queued and may still be delivered.
+
 ## Interactive attach
 
 Bridges your terminal directly to a process inside the sandbox for a fully interactive PTY session. Useful for debugging, running REPLs, or anything that expects a real terminal.
