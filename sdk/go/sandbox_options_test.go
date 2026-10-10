@@ -913,17 +913,22 @@ func TestFFIWireShape_NetworkConnectionLimits(t *testing.T) {
 	}
 }
 
-func TestFFIWireShape_TCPAcceptQueueSize(t *testing.T) {
+func TestFFIWireShape_PublishedTCPConfiguration(t *testing.T) {
 	omitted := marshalCreateOptions(t, WithNetwork(&NetworkConfig{}))["network"].(map[string]any)
 	if value, present := omitted["tcp_accept_queue_size"]; present {
 		t.Fatalf("unset accept queue size reached the wire as %#v", value)
 	}
 
 	size := uint32(4096)
+	unlimited := uint(0)
 	got := marshalCreateOptions(t, WithNetwork(&NetworkConfig{
-		Ports:              map[uint16]uint16{8080: 80},
-		TCPAcceptQueueSize: &size,
+		Ports:                    map[uint16]uint16{8080: 80},
+		TCPAcceptQueueSize:       &size,
+		MaxInboundTCPConnections: &unlimited,
 	}))["network"].(map[string]any)
+	if got["max_inbound_tcp_connections"] != float64(0) {
+		t.Fatalf("published TCP overrides lost: %#v", got)
+	}
 	if got["tcp_accept_queue_size"] != float64(4096) {
 		t.Fatalf("tcp_accept_queue_size = %#v, want 4096", got["tcp_accept_queue_size"])
 	}

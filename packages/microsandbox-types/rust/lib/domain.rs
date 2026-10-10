@@ -638,6 +638,10 @@ pub struct NetworkSpec {
     #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<usize>,
 
+    /// Active inbound TCP connection cap across published ports. Omitted uses the runtime default; zero is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inbound_tcp_connections: Option<usize>,
+
     /// Max concurrent UDP relay sessions. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_udp_connections: Option<usize>,
@@ -1915,6 +1919,7 @@ impl Default for NetworkSpec {
             max_tcp_connections: None,
             max_udp_connections: None,
             tcp_accept_queue_size: None,
+            max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,

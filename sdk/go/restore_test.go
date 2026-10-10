@@ -97,9 +97,10 @@ func TestRestoreConnectionLimitsPreserveExplicitZero(t *testing.T) {
 	}
 }
 
-func TestRestoreTCPAcceptQueueSizeReachesFFI(t *testing.T) {
+func TestRestorePublishedTCPConfigurationReachesFFI(t *testing.T) {
 	var config RestoreConfig
 	WithRestoreTCPAcceptQueueSize(4096)(&config)
+	WithRestoreMaxInboundTCPConnections(0)(&config)
 	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +108,9 @@ func TestRestoreTCPAcceptQueueSizeReachesFFI(t *testing.T) {
 	var got map[string]any
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatal(err)
+	}
+	if got["max_inbound_tcp_connections"] != float64(0) {
+		t.Fatalf("published TCP overrides lost: %s", encoded)
 	}
 	if got["tcp_accept_queue_size"] != float64(4096) {
 		t.Fatalf("tcp_accept_queue_size lost: %s", encoded)

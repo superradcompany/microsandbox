@@ -988,13 +988,16 @@ describe("TCP connection limit aliases", () => {
   });
 });
 
-describe("TCP accept queue size", () => {
+describe("Published TCP configuration", () => {
   it("is absent unless set and survives into the sandbox configuration", async () => {
-    expect(new NetworkBuilder().build().tcpAcceptQueueSize).toBeUndefined();
+    const defaults = new NetworkBuilder().build();
+    expect(defaults.tcpAcceptQueueSize).toBeUndefined();
+    expect(defaults.maxInboundTcpConnections).toBeUndefined();
     expect(new NetworkBuilder().tcpAcceptQueueSize(4096).build().tcpAcceptQueueSize).toBe(4096);
     const config = await Sandbox.builder("x").image("alpine").port(8080, 80)
-      .network(n => n.tcpAcceptQueueSize(4096)).build();
+      .network(n => n.tcpAcceptQueueSize(4096).maxInboundTcpConnections(0)).build();
     expect(config.network.tcpAcceptQueueSize).toBe(4096);
+    expect(config.network.maxInboundTcpConnections).toBe(0);
   });
 
   it("rejects values instead of wrapping or truncating them", () => {

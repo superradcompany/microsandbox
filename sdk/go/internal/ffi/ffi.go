@@ -1858,26 +1858,27 @@ type HTTPConfig struct {
 
 // NetworkOptions is the JSON representation of the network config block.
 type NetworkOptions struct {
-	CustomPolicy          *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
-	DNS                   *DNSOptions                `json:"dns,omitempty"`
-	DNSRebindProtection   *bool                      `json:"dns_rebind_protection,omitempty"`
-	DenyDomains           []string                   `json:"deny_domains,omitempty"`
-	DenyDomainSuffixes    []string                   `json:"deny_domain_suffixes,omitempty"`
-	TLS                   *TLSOptions                `json:"tls,omitempty"`
-	Strict                *bool                      `json:"strict,omitempty"`
-	Ports                 map[uint16]uint16          `json:"ports,omitempty"`
-	PortBindings          []PortBindingOptions       `json:"port_bindings,omitempty"`
-	TCPAcceptQueueSize    *uint32                    `json:"tcp_accept_queue_size,omitempty"`
-	IPv4Pool              string                     `json:"ipv4_pool,omitempty"`
-	IPv6Pool              string                     `json:"ipv6_pool,omitempty"`
-	NAT64Prefixes         []string                   `json:"nat64_prefixes,omitempty"`
-	MaxConnections        *uint                      `json:"max_connections,omitempty"`
-	MaxTCPConnections     *uint                      `json:"max_tcp_connections,omitempty"`
-	MaxUDPConnections     *uint                      `json:"max_udp_connections,omitempty"`
-	RateLimiter           *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
-	SecretViolationAction string                     `json:"secret_violation_action,omitempty"`
-	TrustHostCAs          *bool                      `json:"trust_host_cas,omitempty"`
-	HTTP                  *HTTPConfig                `json:"http,omitempty"`
+	CustomPolicy             *CustomNetworkPolicy       `json:"custom_policy,omitempty"`
+	DNS                      *DNSOptions                `json:"dns,omitempty"`
+	DNSRebindProtection      *bool                      `json:"dns_rebind_protection,omitempty"`
+	DenyDomains              []string                   `json:"deny_domains,omitempty"`
+	DenyDomainSuffixes       []string                   `json:"deny_domain_suffixes,omitempty"`
+	TLS                      *TLSOptions                `json:"tls,omitempty"`
+	Strict                   *bool                      `json:"strict,omitempty"`
+	Ports                    map[uint16]uint16          `json:"ports,omitempty"`
+	PortBindings             []PortBindingOptions       `json:"port_bindings,omitempty"`
+	TCPAcceptQueueSize       *uint32                    `json:"tcp_accept_queue_size,omitempty"`
+	MaxInboundTCPConnections *uint                      `json:"max_inbound_tcp_connections,omitempty"`
+	IPv4Pool                 string                     `json:"ipv4_pool,omitempty"`
+	IPv6Pool                 string                     `json:"ipv6_pool,omitempty"`
+	NAT64Prefixes            []string                   `json:"nat64_prefixes,omitempty"`
+	MaxConnections           *uint                      `json:"max_connections,omitempty"`
+	MaxTCPConnections        *uint                      `json:"max_tcp_connections,omitempty"`
+	MaxUDPConnections        *uint                      `json:"max_udp_connections,omitempty"`
+	RateLimiter              *NetworkRateLimiterOptions `json:"rate_limiter,omitempty"`
+	SecretViolationAction    string                     `json:"secret_violation_action,omitempty"`
+	TrustHostCAs             *bool                      `json:"trust_host_cas,omitempty"`
+	HTTP                     *HTTPConfig                `json:"http,omitempty"`
 }
 
 // RateLimiterOptions limits one traffic direction; a nil bucket leaves that

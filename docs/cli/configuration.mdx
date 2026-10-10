@@ -72,7 +72,7 @@ Scoped files contain one group of settings without its wrapper key. Unrelated fi
 | Flag | Accepted fields |
 | --- | --- |
 | `--conf PATH` | Any sandbox configuration field |
-| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `tcp_accept_queue_size` |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `max_inbound_tcp_connections`, `tcp_accept_queue_size` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
 | `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
@@ -339,3 +339,7 @@ Set `max_udp_connections` in the network configuration, or pass `--max-udp-conne
 ### Published-port accept queue size
 
 Set `tcp_accept_queue_size` in the network configuration, or pass `--tcp-accept-queue-size 4096`, to change how many not-yet-accepted connections each published TCP port queues on the host. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; the host kernel caps the effective depth at its own `somaxconn`. See [Published ports](/cli/sandbox-commands#published-ports).
+
+### Published-port connection limit
+
+`max_inbound_tcp_connections` (or `--max-inbound-tcp-connections`) limits active inbound TCP connections across published ports; zero means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Unsupported overrides fail with an upgrade-required error. Also applies to restore and fork children. See [Published ports](/cli/sandbox-commands#published-ports).

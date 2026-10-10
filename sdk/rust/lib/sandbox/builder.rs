@@ -4611,11 +4611,12 @@ mod tests {
         let config = SandboxBuilder::new("test")
             .image("alpine")
             .port(8080, 80)
-            .network(|n| n.tcp_accept_queue_size(4096))
+            .network(|n| n.tcp_accept_queue_size(4096).max_inbound_tcp_connections(0))
             .build()
             .await
             .unwrap();
         assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
+        assert_eq!(config.spec.network.max_inbound_tcp_connections, Some(0));
         assert_eq!(config.spec.network.ports.len(), 1);
         assert_eq!(
             config

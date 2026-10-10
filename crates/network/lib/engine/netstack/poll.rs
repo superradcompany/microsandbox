@@ -244,6 +244,7 @@ pub fn smoltcp_poll_loop(
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
     tcp_accept_queue_size: TcpAcceptQueueSize,
+    max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -288,6 +289,7 @@ pub fn smoltcp_poll_loop(
     let mut port_publisher = PortPublisher::new(
         &published_ports,
         tcp_accept_queue_size,
+        max_inbound_tcp_connections,
         config.guest_ipv4,
         config.guest_ipv6,
         config.gateway.ipv4,
@@ -2054,6 +2056,7 @@ mod tests {
                 None,
                 None,
                 TcpAcceptQueueSize::DEFAULT,
+                None,
                 handle,
                 SecretsHandle::new(Default::default()),
                 None,

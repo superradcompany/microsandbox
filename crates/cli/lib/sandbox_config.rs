@@ -404,6 +404,7 @@ struct NetworkConfigInput {
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
     tcp_accept_queue_size: Option<u32>,
+    max_inbound_tcp_connections: Option<usize>,
     #[config_patch(nested)]
     http: Option<HttpInput>,
 }
@@ -1753,6 +1754,9 @@ fn materialize_network_patch(
     if let Some(max) = input.max_udp_connections {
         patch = patch.max_udp_connections(max);
     }
+    if let Some(value) = input.max_inbound_tcp_connections {
+        patch = patch.max_inbound_tcp_connections(value);
+    }
     if let Some(size) = input.tcp_accept_queue_size {
         // Refuse here rather than at launch, where the runtime would reject the whole network.
         microsandbox_network::config::TcpAcceptQueueSize::try_from(size)?;
@@ -1863,6 +1867,20 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn published_tcp_overrides_survive_cli_config_materialization() {
+        let input: NetworkInput = serde_json::from_value(serde_json::json!({
+            "max_inbound_tcp_connections": 0
+        }))
+        .unwrap();
+        let mut network = microsandbox_types::NetworkSpec::default();
+        materialize_network_patch(Some(&input), None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert_eq!(network.max_inbound_tcp_connections, Some(0));
     }
 
     #[cfg(feature = "net")]

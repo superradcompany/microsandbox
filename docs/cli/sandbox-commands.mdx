@@ -81,6 +81,7 @@ Common flags:
 | `--mount-named` | Create or reuse a named volume: `NAME:DEST[:OPTIONS]`. See [kind, size, and quota options](/cli/volume-commands#using-volumes-with-sandboxes) |
 | `-p`, `--port` | Publish a port, such as `8000:8000` for loopback-only or `0.0.0.0:8000:8000` for all host interfaces |
 | `--tcp-accept-queue-size` | Accept-queue depth for published TCP ports, `1` to `2147483647` (default: `1024`). See [Published ports](#published-ports) |
+| `--max-inbound-tcp-connections` | Active inbound TCP limit; `0` means unlimited. See [defaults and compatibility](#published-ports). |
 | `--vsock` | Expose local host IPC at host CID 2 using `HOST_PATH:PORT[/stream\|/dgram]`; Unix sockets and local Windows named pipes are supported, the flag is repeatable, and stream is the default |
 | `-e`, `--env` | Set an environment variable |
 | `--label` | Attach a label for metric attribution (`KEY=VALUE`, or bare `KEY`). Repeatable |
@@ -141,6 +142,8 @@ msb create node --name services -p 8000-8002:80-82/tcp
 The second mapping forwards host ports 8000, 8001, and 8002 to guest ports 80, 81, and 82. TCP is the default; `/udp` selects UDP. IPv6 bind addresses require brackets, for example `[::1]:8000-8002:80-82`. Range endpoints must be from 1 to 65535; reversed ranges and unequal lengths are rejected. The same syntax works with run, create, restore, and fork, and in configuration-file `ports` lists.
 
 Ranges expand into individual mappings. The UDP example opens 1,025 host sockets; large ranges require enough host socket/file-descriptor capacity and consume resources per port. A range does not reserve ports as one atomic block; existing per-port listener startup and error reporting apply.
+
+`--max-inbound-tcp-connections` limits active connections across published TCP ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Unsupported overrides fail with an upgrade-required error. This limit is separate from the listener queue. See [connection limits](/networking/overview#deployment-profiles).
 
 Each published TCP port's host listener queues up to 1,024 connections that the runtime has not yet accepted. Connections that arrive while the queue is full never reach the sandbox. A burst larger than the queue can fail at the proxy. For example, a reverse proxy may open one upstream connection per request for a page that loads many assets at once. Set `--tcp-accept-queue-size` to change the depth for every published TCP port of the sandbox:
 
@@ -287,6 +290,7 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `--mount-disk` | Mount a disk image: `SOURCE:DEST[:OPTIONS]`, as in `msb create`; it wins over `-v` at the same guest path. A full restore accepts a disk only at a guest path captured in the snapshot, and the image must hold that disk's contents; use `--disk-only` to attach one at a new path |
 | `-p`, `--port` | Publish `[BIND:]HOST:GUEST[/tcp\|udp]` |
 | `--tcp-accept-queue-size` | Accept-queue depth for the child's published TCP ports (default: `1024`) |
+| `--max-inbound-tcp-connections` | Active inbound TCP limit; `0` means unlimited. See [defaults and compatibility](#published-ports). |
 | `--vsock` | Bind `HOST_PATH:PORT[/stream\|/dgram]` |
 | `--external-mount-policy` | Validate supplied mappings: `strict` (default) or `relaxed` |
 | `--dangerously-inherit-resources` | Inherit unspecified host bindings; may share host resources |

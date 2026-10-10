@@ -84,6 +84,15 @@ impl LaunchContract {
         msb_path: &Path,
         network: &microsandbox_network::config::NetworkConfig,
     ) -> MicrosandboxResult<()> {
+        if self.machine && network.max_inbound_tcp_connections.is_some() {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.max_inbound_tcp_connections,
+                "inbound tcp connection limits",
+            )
+            .await?;
+        }
+
         if self.machine && network.tcp_accept_queue_size.is_some() {
             require_tcp_accept_queue_size(msb_path).await?;
         }
@@ -131,6 +140,9 @@ impl LaunchContract {
 
         if network.max_udp_connections.is_some() {
             return unsupported("UDP connection limits");
+        }
+        if network.max_inbound_tcp_connections.is_some() {
+            return unsupported("inbound tcp connection limits");
         }
         if network.tcp_accept_queue_size.is_some() {
             return unsupported("TCP accept queue size");
@@ -937,6 +949,58 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Explicit published-port overrides require support; omission leaves runtime defaults alone.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn published_tcp_overrides_require_advertised_support() {
+        use microsandbox_network::config::NetworkConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(dir.path(), "old", "printf '%s' '{\"protocols\":[2,1]}'");
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        machine
+            .require_network_capabilities(&dir.path().join("absent"), &NetworkConfig::default())
+            .await
+            .unwrap();
+        for (key, value) in [
+            ("max_inbound_tcp_connections", 0),
+            ("max_inbound_tcp_connections", 512),
+        ] {
+            let network: NetworkConfig = serde_json::from_value(json!({key: value})).unwrap();
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("upgrade msb"), "{error}");
+            let new = script(
+                dir.path(),
+                "supported",
+                &format!("printf '%s' '{}'", json!({"protocols": [2,1], key: true})),
+            );
+            machine
+                .require_network_capabilities(&new, &network)
+                .await
+                .unwrap();
+            for patch in 0..=18 {
+                let legacy = LaunchContract {
+                    patch,
+                    machine: false,
+                };
+                assert!(
+                    legacy
+                        .validate_network(
+                            &network,
+                            microsandbox_types::DeploymentProfile::SingleTenant
+                        )
+                        .is_err()
+                );
+            }
+        }
     }
 
     /// The check create runs before `replace` touches its target: refuse a v0.7.x-shaped

@@ -349,6 +349,15 @@ macro_rules! resource_methods {
                 self
             }
 
+            /// Set inbound tcp connection limits for this child's published ports.
+            #[cfg(feature = "net")]
+            pub fn max_inbound_tcp_connections(mut self, value: usize) -> Self {
+                self.inner = self
+                    .inner
+                    .network(|network| network.max_inbound_tcp_connections(value));
+                self
+            }
+
             /// Set the accept-queue depth of this child's published TCP listeners, `1..=i32::MAX`.
             /// Defaults to 1024; the host kernel clamps it to its own `somaxconn`.
             #[cfg(feature = "net")]

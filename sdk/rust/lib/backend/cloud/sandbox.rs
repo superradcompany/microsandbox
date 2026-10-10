@@ -610,6 +610,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
     }
+    if config.spec.network.max_inbound_tcp_connections.is_some() {
+        return Err(unsupported("network.max_inbound_tcp_connections"));
+    }
     // Tunes published-port listeners, which the cloud create contract does not carry.
     if config.spec.network.tcp_accept_queue_size.is_some() {
         return Err(unsupported("network.tcp_accept_queue_size"));

@@ -135,6 +135,8 @@ export interface NetworkConfig {
   readonly maxUdpConnections?: number | null;
   /** Accept-queue depth for published TCP port listeners. Absent means the default, 1024. */
   readonly tcpAcceptQueueSize?: number | null;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  readonly maxInboundTcpConnections?: number | null;
   readonly strict: boolean;
   readonly rateLimiter: NetworkRateLimiterConfig | null;
   readonly interface?: {

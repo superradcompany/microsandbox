@@ -50,7 +50,10 @@ type RestoreConfig struct {
 	// TCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
 	// listeners, 1 to 2147483647. Nil keeps the default, 1024.
 	TCPAcceptQueueSize *uint32
-	Vsock              []VsockRoute
+
+	// MaxInboundTCPConnections caps active inbound TCP connections; zero is unlimited. Nil uses the runtime default.
+	MaxInboundTCPConnections *uint
+	Vsock                    []VsockRoute
 }
 
 // RestoreSandbox restores an installed snapshot or archive into a detached sandbox.
@@ -105,6 +108,11 @@ func WithRestoreMaxTCPConnections(count uint) RestoreOption {
 // WithRestoreMaxUDPConnections caps destination UDP relay sessions. Zero means unlimited.
 func WithRestoreMaxUDPConnections(count uint) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxUDPConnections = &count }
+}
+
+// WithRestoreMaxInboundTCPConnections caps active inbound TCP connections; zero is unlimited.
+func WithRestoreMaxInboundTCPConnections(value uint) RestoreOption {
+	return func(o *RestoreConfig) { o.MaxInboundTCPConnections = &value }
 }
 
 // WithRestoreTCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
@@ -214,6 +222,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		AllowMissingResources:       config.AllowMissingResources,
 		Volumes:                     resources.Volumes, CapturedVolumes: config.CapturedVolumes,
 		Ports: buildFFIPortBindings(config.Ports), TCPAcceptQueueSize: config.TCPAcceptQueueSize,
-		Vsock: buildFFIVsockRoutes(config.Vsock),
+		MaxInboundTCPConnections: config.MaxInboundTCPConnections,
+		Vsock:                    buildFFIVsockRoutes(config.Vsock),
 	}
 }

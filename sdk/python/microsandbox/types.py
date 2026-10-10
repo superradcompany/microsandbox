@@ -1837,6 +1837,8 @@ class Network:
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    max_inbound_tcp_connections: int | None = field(default=None, kw_only=True)
+    """Active inbound TCP cap; zero is unlimited. None uses the runtime default."""
     tcp_accept_queue_size: int | None = field(default=None, kw_only=True)
     """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
     Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
@@ -1911,6 +1913,8 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.max_inbound_tcp_connections is not None:
+            d["max_inbound_tcp_connections"] = self.max_inbound_tcp_connections
         if self.tcp_accept_queue_size is not None:
             d["tcp_accept_queue_size"] = self.tcp_accept_queue_size
         if self.rate_limiter is not None:

@@ -343,6 +343,15 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default.
+    #[napi(js_name = "maxInboundTcpConnections")]
+    pub fn max_inbound_tcp_connections(&mut self, value: f64) -> Result<&Self> {
+        let value = crate::numeric::safe_integer(value, "maxInboundTcpConnections")?;
+        let prev = self.take_inner()?;
+        self.inner = Some(prev.max_inbound_tcp_connections(value as usize));
+        Ok(self)
+    }
+
     /// Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647.
     #[napi(js_name = "tcpAcceptQueueSize")]
     pub fn tcp_accept_queue_size(&mut self, size: f64) -> Result<&Self> {

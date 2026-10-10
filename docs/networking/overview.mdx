@@ -59,19 +59,17 @@ The TypeScript and Rust examples disable the network device. Python `Network.non
 
 `single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
 
-The per-sandbox `maxTcpConnections` setting optionally limits concurrent TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
+The per-sandbox `maxTcpConnections` setting optionally limits concurrent guest-initiated TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
 
 Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections when the limit is omitted. The current SDK rejects explicit unlimited TCP connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero TCP limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
 
 `maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
 
-Each tracked TCP socket currently allocates 64 KiB for receiving and 64 KiB for
-sending. A ceiling of 1024 therefore requires up to 128 MiB of socket-buffer
-capacity per sandbox, in addition to other runtime allocations. Reserve that
-capacity on the host when configuring a ceiling. Selecting unlimited does not
-remove memory or operating-system resource constraints. Closing sockets remain tracked
-until their TCP state permits removal. Host file descriptors and shared egress
-source ports impose additional constraints.
+`maxInboundTcpConnections` limits active inbound TCP connections across published ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Explicit overrides require runtime support or fail with an upgrade-required error. This local-only limit is separate from the listener queue (`tcpAcceptQueueSize`).
+
+On 0.7.9+, finished connections leave the active budget after response delivery. The runtime retains up to 256 finished sockets in TIME-WAIT, evicting the oldest under pressure and shortening protection against delayed packets. Host writes stalled for 30 seconds are closed; successful writes restart the timer.
+
+Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.
 
 For NAT64, microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
 

@@ -314,6 +314,12 @@ impl NetworkBuilder {
         self
     }
 
+    /// Set the active inbound TCP cap across all published ports; zero selects unlimited.
+    pub fn max_inbound_tcp_connections(mut self, max: usize) -> Self {
+        self.config.max_inbound_tcp_connections = Some(ConnectionLimit::from(max));
+        self
+    }
+
     /// Set the UDP relay session limit; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant.
     pub fn max_udp_connections(mut self, max: usize) -> Self {
         self.config.max_udp_connections = Some(ConnectionLimit::from(max));

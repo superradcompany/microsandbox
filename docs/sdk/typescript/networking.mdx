@@ -613,6 +613,14 @@ Require hostname-based policy allows to use an inspectable request authority. De
   </div>
 </div>
 
+#### maxInboundTcpConnections()
+
+```typescript
+maxInboundTcpConnections(max: number): this
+```
+
+Limit active inbound TCP connections across published ports. Accepts non-negative safe integers; `0` means unlimited. When omitted, the runtime defaults to unlimited in **0.7.9+**, or **256** in older versions. Local-only; unsupported overrides fail with an upgrade-required error. Also available on `Sandbox.restore(...)`.
+
 #### tcpAcceptQueueSize()
 
 `network.tcpAcceptQueueSize(4096)` sets how many not-yet-accepted connections each published TCP port's host listener queues. The default is 1,024, and values from 1 to 2,147,483,647 are accepted; any other number, including a fraction, makes the `tcpAcceptQueueSize()` call itself throw. Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at its own `somaxconn` (4,096 by default on Linux, 128 on macOS). `Sandbox.restore(...).tcpAcceptQueueSize(n)` applies it to the listeners a restored child publishes.
@@ -1912,6 +1920,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | secretViolationAction | [`ViolationAction`](/sdk/typescript/secrets#violationaction) ` \| null` | Action on disallowed secret use |
 | maxTcpConnections | `number \| null` | Maximum concurrent TCP connections |
 | maxUdpConnections | `number \| null` (optional) | Maximum concurrent UDP relay sessions |
+| maxInboundTcpConnections | `number \| null` (optional) | Active inbound TCP cap across published ports; zero is unlimited, absent uses the runtime default |
 | tcpAcceptQueueSize | `number \| null` (optional) | Accept-queue depth for published TCP port listeners; absent means the default, 1,024 |
 | strict | `boolean` | Strict hostname policy mode |
 | rateLimiter | [`NetworkRateLimiterConfig`](#networkratelimiterconfig) ` \| null` | Local rate limits grouped by direction |

@@ -95,6 +95,10 @@ pub struct NetworkConfig {
     #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<ConnectionLimit>,
 
+    /// Active inbound TCP connection cap across published ports. Omitted uses the runtime default; zero is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inbound_tcp_connections: Option<ConnectionLimit>,
+
     /// UDP relay session cap. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
     #[serde(default)]
     pub max_udp_connections: Option<ConnectionLimit>,
@@ -329,6 +333,7 @@ impl Default for NetworkConfig {
             max_tcp_connections: None,
             max_udp_connections: None,
             tcp_accept_queue_size: None,
+            max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
@@ -693,6 +698,26 @@ mod tests {
 #[cfg(test)]
 mod connection_limit_tests {
     use super::*;
+
+    #[test]
+    fn published_tcp_limits_preserve_intent_through_saved_spec() {
+        for cap in [None, Some(0), Some(4096)] {
+            let wire = serde_json::json!({"max_inbound_tcp_connections": cap});
+            let config: NetworkConfig = serde_json::from_value(wire).unwrap();
+            let spec: microsandbox_types::NetworkSpec =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(spec.max_inbound_tcp_connections, cap);
+            let back: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(
+                back.max_inbound_tcp_connections,
+                cap.map(ConnectionLimit::from)
+            );
+        }
+
+        let omitted = serde_json::to_value(NetworkConfig::default()).unwrap();
+        assert!(omitted.get("max_inbound_tcp_connections").is_none());
+    }
 
     #[test]
     fn wire_connection_limits_preserve_default_and_unlimited_through_spec() {

@@ -303,6 +303,8 @@ export interface NapiRestoreBuilderSetters {
   portUdpBind(bind: string, host: number, guest: number): this;
   /** 1..=2147483647; omission keeps the default, 1024. */
   tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   vsock(path: string, port: number): this;
   vsockDgram(path: string, port: number): this;
 }
@@ -1145,6 +1147,8 @@ export interface NapiNetworkBuilder {
   maxTcpConnections(max: number): this;
   maxUdpConnections(max: number): this;
   tcpAcceptQueueSize(size: number): this;
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this;
   strict(enabled: boolean): this;
   ipv4Pool(pool: string): this;
   ipv6Pool(pool: string): this;

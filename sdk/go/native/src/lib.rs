@@ -972,6 +972,7 @@ struct NetworkOpts {
     port_bindings: Vec<PortBindingOpts>,
     /// Accept-queue depth for published TCP port listeners.
     tcp_accept_queue_size: Option<u32>,
+    max_inbound_tcp_connections: Option<usize>,
     /// IPv4 pool used to derive per-sandbox /30 guest subnets.
     ipv4_pool: Option<String>,
     /// IPv6 pool used to derive per-sandbox /64 guest prefixes.
@@ -1521,6 +1522,9 @@ fn apply_network(
     }
     if let Some(max) = net.max_udp_connections {
         builder = builder.network(move |n| n.max_udp_connections(max));
+    }
+    if let Some(value) = net.max_inbound_tcp_connections {
+        builder = builder.network(move |n| n.max_inbound_tcp_connections(value));
     }
     if let Some(size) = net.tcp_accept_queue_size {
         builder = builder.network(move |n| n.tcp_accept_queue_size(size));
@@ -7822,7 +7826,8 @@ mod tests {
         assert_eq!(omitted.tcp_accept_queue_size, None);
 
         let net: super::NetworkOpts = serde_json::from_value(serde_json::json!({
-            "ports": {"8080": 80}, "tcp_accept_queue_size": 4096
+            "ports": {"8080": 80}, "tcp_accept_queue_size": 4096,
+            "max_inbound_tcp_connections": 0
         }))
         .unwrap();
         let builder = microsandbox::Sandbox::builder("accept-queue").image("alpine");
@@ -7831,6 +7836,7 @@ mod tests {
         };
         let config = builder.build().await.unwrap();
         assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
+        assert_eq!(config.spec.network.max_inbound_tcp_connections, Some(0));
     }
 
     #[tokio::test]

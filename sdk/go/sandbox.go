@@ -413,21 +413,22 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
-		DNSRebindProtection:   n.DNSRebindProtection,
-		DenyDomains:           n.DenyDomains,
-		DenyDomainSuffixes:    n.DenyDomainSuffixes,
-		Ports:                 n.Ports,
-		PortBindings:          buildFFIPortBindings(n.PortBindings),
-		TCPAcceptQueueSize:    n.TCPAcceptQueueSize,
-		IPv4Pool:              n.IPv4Pool,
-		IPv6Pool:              n.IPv6Pool,
-		NAT64Prefixes:         n.NAT64Prefixes,
-		MaxConnections:        n.MaxConnections,
-		MaxTCPConnections:     n.MaxTCPConnections,
-		MaxUDPConnections:     n.MaxUDPConnections,
-		RateLimiter:           buildFFINetworkRateLimiter(n.RateLimiter),
-		SecretViolationAction: string(n.SecretViolationAction),
-		TrustHostCAs:          n.TrustHostCAs,
+		DNSRebindProtection:      n.DNSRebindProtection,
+		DenyDomains:              n.DenyDomains,
+		DenyDomainSuffixes:       n.DenyDomainSuffixes,
+		Ports:                    n.Ports,
+		PortBindings:             buildFFIPortBindings(n.PortBindings),
+		TCPAcceptQueueSize:       n.TCPAcceptQueueSize,
+		MaxInboundTCPConnections: n.MaxInboundTCPConnections,
+		IPv4Pool:                 n.IPv4Pool,
+		IPv6Pool:                 n.IPv6Pool,
+		NAT64Prefixes:            n.NAT64Prefixes,
+		MaxConnections:           n.MaxConnections,
+		MaxTCPConnections:        n.MaxTCPConnections,
+		MaxUDPConnections:        n.MaxUDPConnections,
+		RateLimiter:              buildFFINetworkRateLimiter(n.RateLimiter),
+		SecretViolationAction:    string(n.SecretViolationAction),
+		TrustHostCAs:             n.TrustHostCAs,
 	}
 
 	if n.HTTP != nil {

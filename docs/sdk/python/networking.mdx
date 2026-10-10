@@ -28,6 +28,7 @@ Network(
     max_tcp_connections: int | None = None,
     max_udp_connections: int | None = None,
     tcp_accept_queue_size: int | None = None,
+    max_inbound_tcp_connections: int | None = None,
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG,
     http: HttpConfig | None = None,
 )
@@ -104,6 +105,12 @@ IPv4 pool used for per-sandbox `/30` guest subnets. Defaults to `172.16.0.0/12`
 Default: `None`.
 
 IPv6 pool used for per-sandbox `/64` guest prefixes. Defaults to `fd42:6d73:62::/48`
+
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_inbound_tcp_connections</span>
+
+`int \| None` · Default: `None`
+
+Limit active inbound TCP connections across published ports; `0` means unlimited. `None` uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Local-only; unsupported overrides fail with an upgrade-required error. Pass by keyword: `Network(max_inbound_tcp_connections=512)`. Restore accepts the same keyword.
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size</span>
 

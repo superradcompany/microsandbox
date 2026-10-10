@@ -854,6 +854,16 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_inbound_tcp_connections()</span>
+
+```rust
+fn max_inbound_tcp_connections(self, max: usize) -> Self
+```
+
+Limit active inbound TCP connections across published ports; `0` means unlimited. When omitted, the runtime defaults to unlimited in **0.7.9+**, or **256** in older versions. Local-only; unsupported overrides fail with an upgrade-required error.
+
+`RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same setter for the child's published ports.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size()</span>
 
 ```rust

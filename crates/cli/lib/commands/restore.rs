@@ -74,6 +74,11 @@ pub struct RestoreResourceArgs {
     #[cfg(feature = "net")]
     #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
     pub tcp_accept_queue_size: Option<u32>,
+
+    /// Maximum active inbound TCP connections across published ports; zero is unlimited.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub max_inbound_tcp_connections: Option<usize>,
     /// Default user for new exec commands; captured processes keep their credentials.
     #[arg(short, long)]
     pub user: Option<String>,
@@ -321,6 +326,10 @@ macro_rules! apply_resources {
                             }
                         };
                     }
+                }
+                #[cfg(feature = "net")]
+                if let Some(value) = self.max_inbound_tcp_connections {
+                    builder = builder.max_inbound_tcp_connections(value);
                 }
                 #[cfg(feature = "net")]
                 if let Some(size) = self.tcp_accept_queue_size {

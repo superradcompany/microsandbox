@@ -219,6 +219,7 @@ pub(crate) fn restore_builder_from_args(
             "captured_volumes",
             "ports",
             "tcp_accept_queue_size",
+            "max_inbound_tcp_connections",
             "vsock",
             "external_mount_policy",
             "dangerously_inherit_resources",
@@ -360,6 +361,9 @@ pub(crate) fn restore_builder_from_args(
     }
     if let Some(ports) = kwargs.get_item("ports")?.filter(|v| !v.is_none()) {
         builder = apply_ports(builder, &ports, PortBindingSource::PublicConfig)?;
+    }
+    if let Some(value) = extract_opt::<usize>(kwargs, "max_inbound_tcp_connections")? {
+        builder = builder.max_inbound_tcp_connections(value);
     }
     if let Some(size) = extract_opt::<u32>(kwargs, "tcp_accept_queue_size")? {
         builder = builder.tcp_accept_queue_size(size);
@@ -1620,6 +1624,9 @@ fn apply_network(
     }
     if let Some(max) = extract_opt::<usize>(net, "max_udp_connections")? {
         builder = builder.network(|n| n.max_udp_connections(max));
+    }
+    if let Some(value) = extract_opt::<usize>(net, "max_inbound_tcp_connections")? {
+        builder = builder.network(|n| n.max_inbound_tcp_connections(value));
     }
     if let Some(size) = extract_opt::<u32>(net, "tcp_accept_queue_size")? {
         builder = builder.network(|n| n.tcp_accept_queue_size(size));
