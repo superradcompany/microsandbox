@@ -1,23 +1,35 @@
 //! Sandbox modification planning.
 
-use std::{collections::HashMap, sync::Arc};
-
-use microsandbox_types::{
-    EnvVar, RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction,
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
 };
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
-use crate::backend::{Backend, ControlSession};
-use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
-use crate::error::{Operation, UnsupportedReason};
-use crate::size::Mebibytes;
-use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_control_client::{
     CompactDisks, CreateCheckpoint, CreateDiskCheckpoint, GetCpuState, GetMemoryState,
     GrowRootDisk, SecretsResult, SetCpuTarget, SetMemoryTarget, UpdateSecrets,
 };
+use microsandbox_types::{
+    EnvVar, HostPermissions, MountOptions, NamedVolumeCreate, NamedVolumeMode, OwnedVolumeStorage,
+    RootDisk, RootfsSource, SecretSubstitution, SecretViolationAction, StatVirtualization,
+    VolumeKind, VolumeMount, canonical_guest_mount_path,
+};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
-use super::{SandboxConfig, SandboxStatus};
+use crate::backend::local::host_paths;
+use crate::backend::{Backend, ControlSession, sandbox::SandboxIdentity};
+use crate::db::entity::{
+    sandbox as sandbox_entity, sandbox_label as sandbox_label_entity, volume as volume_entity,
+};
+use crate::error::{Operation, UnsupportedReason};
+use crate::runtime::launch_contract::validate_runtime_config;
+use crate::runtime::spawn::{DiskReservations, EnsuredNamedVolumes, reserve_added_disks};
+use crate::runtime::{SpawnMode, ensure_named_volumes};
+use crate::size::Mebibytes;
+use crate::{LocalBackend, MicrosandboxError, MicrosandboxResult};
+
+use super::{SandboxConfig, SandboxStatus, validate_volume_mounts};
 
 #[path = "modify_ports.rs"]
 mod ports;
@@ -34,6 +46,9 @@ pub use microsandbox_types::modify::{
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// How long a restart-backed apply waits for another lifecycle operation on the
+/// sandbox before refusing. Only the wait is bounded, never the stop or start.
+const RESTART_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 const LIVE_RESIZE_UNAVAILABLE: &str =
     "live CPU and memory resize are not available in this runtime yet";
 const LIVE_SECRET_RECONFIGURE_UNAVAILABLE: &str =
@@ -44,6 +59,8 @@ const LIVE_EXEC_DEFAULT_UPDATE_UNAVAILABLE: &str =
     "affects future execs only after restart; live exec-default updates are not available yet";
 const LIVE_LABEL_UPDATE_UNAVAILABLE: &str =
     "live label updates are not available in this runtime yet";
+const LIVE_MOUNT_UPDATE_UNAVAILABLE: &str =
+    "mounts are fixed when the VM boots; adding or removing one needs a restart";
 const UPPER_LIVE_RESIZE_UNAVAILABLE: &str =
     "the mounted upper filesystem cannot be resized while the sandbox is running";
 const UPPER_GROWS_ON_NEXT_START: &str =
@@ -61,6 +78,8 @@ const ROOT_DISK_FIELD: &str = "root_disk_size";
 const ENV_FIELD: &str = "env";
 const LABEL_FIELD: &str = "label";
 const WORKDIR_FIELD: &str = "workdir";
+const MOUNT_FIELD: &str = "mount";
+const RUNTIME_FIELD: &str = "runtime";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -104,6 +123,13 @@ struct ExistingSecret {
     passthrough_hosts: Vec<String>,
     violation_action: Option<SecretViolationAction>,
     require_tls_identity: bool,
+}
+
+/// One planned mount change, with the guest path as its identity.
+struct MountDelta {
+    kind: ChangeKind,
+    before: Option<String>,
+    after: Option<String>,
 }
 
 /// Live-control operations the running sandbox process actually serves,
@@ -202,6 +228,33 @@ impl SandboxModificationBuilder {
         self
     }
 
+    /// Add a volume mount, or replace the mount already at its guest path.
+    ///
+    /// Mounts are fixed when the VM boots, so a running sandbox needs
+    /// [`next_start`](Self::next_start) or [`restart`](Self::restart).
+    /// Sandbox-owned volumes cannot be added here: they are created with the
+    /// sandbox. A named volume must already exist, so a mount that carries
+    /// creation settings such as a quota is a conflict.
+    ///
+    /// ```ignore
+    /// sandbox.modify()
+    ///     .mount(MountBuilder::new("/opt/apps").bind("/host/apps").readonly().build()?)
+    ///     .next_start()
+    ///     .apply()
+    ///     .await?;
+    /// ```
+    pub fn mount(mut self, mount: VolumeMount) -> Self {
+        self.patch.mounts.push(mount);
+        self
+    }
+
+    /// Remove the mount at a guest path. Sandbox-owned volumes cannot be
+    /// removed, since that would delete their data.
+    pub fn remove_mount(mut self, guest: impl Into<String>) -> Self {
+        self.patch.mounts_remove.push(guest.into());
+        self
+    }
+
     /// Add or update a published mapping without changing other host endpoints.
     /// This requires restart or next-start policy on a running sandbox.
     pub fn port(self, host_port: u16, guest_port: u16) -> Self {
@@ -281,7 +334,11 @@ impl SandboxModificationBuilder {
     }
 
     /// Compute a modification plan without applying anything.
-    pub async fn dry_run(self) -> MicrosandboxResult<SandboxModificationPlan> {
+    pub async fn dry_run(mut self) -> MicrosandboxResult<SandboxModificationPlan> {
+        if self.backend.as_local().is_some() {
+            resolve_patch_mount_paths(&mut self.patch)?;
+        }
+
         let handle = self
             .backend
             .sandboxes()
@@ -301,6 +358,9 @@ impl SandboxModificationBuilder {
             self.patch.clone(),
             self.policy,
         );
+        let source_conflicts =
+            mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?;
+        plan.conflicts.extend(source_conflicts);
         if ports::requested(&self.patch) && plan.conflicts.is_empty() {
             if handle.local().is_none() {
                 return Err(MicrosandboxError::local_only(Operation::SandboxModify));
@@ -312,6 +372,64 @@ impl SandboxModificationBuilder {
                 });
             }
         }
+
+        // Run apply's pre-mutation checks under its conditions, reporting refusals
+        // as conflicts. Apply refuses unsupported plans before reaching them.
+        let Some(local) = self.backend.as_local() else {
+            return Ok(plan);
+        };
+        if validate_apply_supported(&plan).is_err() {
+            return Ok(plan);
+        }
+
+        let prospective = match build_prospective_config(&config, &self.patch) {
+            Ok(prospective) => prospective,
+            Err((Some(field), MicrosandboxError::InvalidConfig(message))) => {
+                plan.conflicts.push(ModificationConflict {
+                    field: field.to_string(),
+                    message,
+                });
+                return Ok(plan);
+            }
+            Err((_, error)) => return Err(error),
+        };
+
+        let restart_required = plan_requires_restart(&plan) && running_status(status);
+        let runtime_refusal =
+            match validate_prospective_runtime(local, &prospective, &self.patch, restart_required)
+                .await
+            {
+                Ok(()) => None,
+                Err(
+                    error @ (MicrosandboxError::Runtime(_)
+                    | MicrosandboxError::Unsupported { .. }
+                    | MicrosandboxError::InvalidConfig(_)),
+                ) => Some(error.to_string()),
+                Err(error) => return Err(error),
+            };
+        if let Some(message) = runtime_refusal {
+            plan.conflicts.push(ModificationConflict {
+                field: RUNTIME_FIELD.to_string(),
+                message,
+            });
+            return Ok(plan);
+        }
+
+        // Check the disks a restart would take without keeping them; apply reserves them.
+        if restart_required {
+            let running = active.as_ref().unwrap_or(&config);
+            match reserve_added_disks(local, running, &prospective).await {
+                Ok(_) => {}
+                Err(MicrosandboxError::InvalidConfig(message)) => {
+                    plan.conflicts.push(ModificationConflict {
+                        field: MOUNT_FIELD.to_string(),
+                        message,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
         Ok(plan)
     }
 
@@ -322,11 +440,13 @@ impl SandboxModificationBuilder {
     /// the desired config is persisted only after the live step succeeds. For
     /// stopped sandboxes or `next_start` requests, changes persist for the next
     /// start. When the policy is `restart`, the existing stop/start lifecycle
-    /// path makes restart-required changes active. Live secret rotation,
-    /// removal, and allowed-host updates go through the runtime control
-    /// socket; the durable config records host-side source references for
-    /// source-based specs and persists the value for value-based specs (the
-    /// same at-rest property as create's `secret_env`).
+    /// path makes restart-required changes active; if that start fails, the
+    /// previous config is restored and started again, and `apply` returns an
+    /// error. Live secret rotation, removal, and allowed-host updates go
+    /// through the runtime control socket; the durable config records
+    /// host-side source references for source-based specs and persists the
+    /// value for value-based specs (the same at-rest property as create's
+    /// `secret_env`).
     ///
     /// Configuring a secret that requires TLS identity on a sandbox with
     /// interception off also turns interception on. That is planned as a
@@ -336,7 +456,11 @@ impl SandboxModificationBuilder {
     /// Changes to an existing secret's substitution, violation action, TLS
     /// identity requirement, or placeholder passthrough hosts require restart
     /// or next-start policy, even when combined with otherwise live edits.
-    pub async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan> {
+    pub async fn apply(mut self) -> MicrosandboxResult<SandboxModificationPlan> {
+        if self.backend.as_local().is_some() {
+            resolve_patch_mount_paths(&mut self.patch)?;
+        }
+
         let handle = self
             .backend
             .sandboxes()
@@ -360,6 +484,10 @@ impl SandboxModificationBuilder {
             self.patch.clone(),
             self.policy,
         );
+        // Check mount sources before a restart-backed apply stops the VM.
+        let source_conflicts =
+            mount_source_conflicts(&self.backend, &config.spec.mounts, &self.patch).await?;
+        plan.conflicts.extend(source_conflicts);
 
         validate_apply_supported(&plan)?;
         if ports::requested(&self.patch) {
@@ -368,17 +496,51 @@ impl SandboxModificationBuilder {
             }
             ports::preflight(&config, active.as_ref(), &self.patch, status)?;
         }
-        if handle.local().is_some() {
+        let restart_required = plan_requires_restart(&plan) && running_status(status);
+        let adds_named = self
+            .patch
+            .mounts
+            .iter()
+            .any(|mount| matches!(mount, VolumeMount::Named { .. }));
+
+        let mut _named_volume_locks = None;
+        let mut disk_reservations = DiskReservations::default();
+        if let Some(local) = self.backend.as_local() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
-            let mut prospective = config.clone();
-            apply_patch_to_config(&mut prospective, &self.patch);
-            apply_secret_patch_to_config(&mut prospective, &self.patch)?;
-            serde_json::to_string(&prospective)?;
+            let prospective = prospective_config(&config, &self.patch)?;
+            validate_prospective_runtime(local, &prospective, &self.patch, restart_required)
+                .await?;
+
+            // Named-volume locks span persistence and any stop/start; bounded transition
+            // acquisition breaks the inverse lock order with create. A restart also locks the
+            // volumes of the configuration a failed start falls back to.
+            if restart_required {
+                _named_volume_locks =
+                    Some(lock_restart_named_volumes(local, &prospective, &config).await?);
+            } else if adds_named {
+                _named_volume_locks = Some(lock_named_volumes(local, &prospective).await?);
+            }
+
+            // Disks another sandbox holds would fail the start after the stop, so take
+            // the disks the running sandbox does not hold now, including ones staged by an
+            // earlier next-start modification, and hand those same locks to the start.
+            if restart_required {
+                let running = active.as_ref().unwrap_or(&config);
+                disk_reservations = reserve_added_disks(local, running, &prospective).await?;
+            }
         }
-        let restart_required = plan_requires_restart(&plan) && running_status(status);
         if restart_required {
-            handle.stop().await?;
+            stop_for_restart(&self.backend, &handle, config.spec.lifecycle.ephemeral)
+                .await
+                .map_err(|error| {
+                    restart_error(error, |detail| {
+                        format!(
+                            "requested changes were not saved; shutdown may already have been requested: {detail}. Inspect sandbox {} before retrying",
+                            self.name
+                        )
+                    })
+                })?;
         }
         if !restart_required && let Some(target) = live_cpu_target(&plan, &self.patch) {
             let state = control_session(&session)?
@@ -503,13 +665,22 @@ impl SandboxModificationBuilder {
         {
             grow_root_disk_now(&self.backend, &self.name, &config, target_mib).await?;
         }
+        let mut saved_config_json = handle.config_json().to_owned();
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             apply_secret_patch_to_config(&mut config, &self.patch)?;
-            persist_config(&self.backend, &handle, &config).await?;
+            apply_mount_patch_to_config(&mut config, &self.patch)?;
+            saved_config_json = persist_config(&self.backend, &handle, &config).await?;
         }
         if restart_required {
-            start_after_modify(&handle).await?;
+            start_or_restore(
+                &self.backend,
+                &handle,
+                saved_config_json,
+                disk_reservations,
+                |reservations| start_after_modify(&self.backend, &handle, reservations),
+            )
+            .await?;
         }
         plan.applied = true;
         Ok(plan)
@@ -648,6 +819,15 @@ fn build_plan(
         }
     }
     push_spec_changes(status, config, &patch, policy, &mut changes, &mut warnings);
+    push_mount_changes(
+        status,
+        config,
+        active,
+        &patch,
+        policy,
+        &mut changes,
+        &mut conflicts,
+    );
     ports::plan(
         status,
         config,
@@ -1286,6 +1466,54 @@ fn validate_apply_supported(plan: &SandboxModificationPlan) -> MicrosandboxResul
     Ok(())
 }
 
+/// Build the config an apply would persist, checking that it serializes.
+fn prospective_config(
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<SandboxConfig> {
+    build_prospective_config(config, patch).map_err(|(_, error)| error)
+}
+
+/// Build the prospective config, naming the patch field whose application failed
+/// so dry runs can report it as a conflict on that field.
+fn build_prospective_config(
+    config: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> Result<SandboxConfig, (Option<&'static str>, MicrosandboxError)> {
+    let mut prospective = config.clone();
+
+    apply_patch_to_config(&mut prospective, patch);
+    apply_secret_patch_to_config(&mut prospective, patch)
+        .map_err(|error| (Some(SECRET_FIELD), error))?;
+    apply_mount_patch_to_config(&mut prospective, patch)
+        .map_err(|error| (Some(MOUNT_FIELD), error))?;
+
+    serde_json::to_string(&prospective).map_err(|error| (None, error.into()))?;
+
+    Ok(prospective)
+}
+
+/// Whether the installed runtime must accept the prospective config: a restart
+/// launches it, and mount changes are checked even when persisted for later.
+fn runtime_check_required(patch: &SandboxModificationPatch, restart_required: bool) -> bool {
+    restart_required || !patch.mounts.is_empty()
+}
+
+/// Check that the installed runtime can launch the prospective config. Apply
+/// and dry runs share this so a clean plan cannot hide a runtime refusal.
+async fn validate_prospective_runtime(
+    local: &LocalBackend,
+    prospective: &SandboxConfig,
+    patch: &SandboxModificationPatch,
+    restart_required: bool,
+) -> MicrosandboxResult<()> {
+    if !runtime_check_required(patch, restart_required) {
+        return Ok(());
+    }
+
+    validate_runtime_config(prospective, local.config()).await
+}
+
 fn plan_requires_restart(plan: &SandboxModificationPlan) -> bool {
     plan.changes.iter().any(|change| match change {
         PlannedChange::Config(change) => {
@@ -1640,11 +1868,34 @@ fn resolve_secret_source_value(
     }
 }
 
+/// Save the configuration and its labels, returning the saved configuration text.
 async fn persist_config(
     backend: &Arc<dyn Backend>,
     handle: &super::SandboxHandle,
     config: &SandboxConfig,
-) -> MicrosandboxResult<()> {
+) -> MicrosandboxResult<String> {
+    let config_json = serde_json::to_string(config)?;
+    persist_config_json(
+        backend,
+        handle,
+        config_json.clone(),
+        config.spec.labels.clone(),
+        None,
+    )
+    .await?;
+    Ok(config_json)
+}
+
+/// Save serialized configuration and its labels. With `expected_config`, save them only
+/// while the saved configuration is still exactly that text and the sandbox is in a status a
+/// start can claim, and return whether they were saved.
+async fn persist_config_json(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    config_json: String,
+    labels: BTreeMap<String, String>,
+    expected_config: Option<String>,
+) -> MicrosandboxResult<bool> {
     let local = handle
         .local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
@@ -1652,24 +1903,40 @@ async fn persist_config(
         .as_local()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
 
-    let labels = config.spec.labels.clone();
     let write_db = local_backend.db().await?.write();
-    let config_json = serde_json::to_string(config)?;
 
     write_db
         .transaction(|txn| {
             let config_json = config_json.clone();
             let labels = labels.clone();
+            let expected_config = expected_config.clone();
             async move {
-                sandbox_entity::Entity::update_many()
+                let mut update = sandbox_entity::Entity::update_many()
                     .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
                     .col_expr(
                         sandbox_entity::Column::UpdatedAt,
                         Expr::value(chrono::Utc::now().naive_utc()),
                     )
-                    .filter(sandbox_entity::Column::Id.eq(local.db_id))
-                    .exec(&txn)
-                    .await?;
+                    .filter(sandbox_entity::Column::Id.eq(local.db_id));
+                if let Some(expected_config) = &expected_config {
+                    // A start claims the sandbox by moving one of these statuses to Starting
+                    // in a single conditional update, so checking them in this update is enough:
+                    // either a competing start already claimed the sandbox and this save is
+                    // refused, or the competing start claims it afterwards and boots the
+                    // configuration saved here.
+                    update = update
+                        .filter(sandbox_entity::Column::Config.eq(expected_config))
+                        .filter(sandbox_entity::Column::Status.is_in([
+                            SandboxStatus::Created,
+                            SandboxStatus::Stopped,
+                            SandboxStatus::Crashed,
+                        ]));
+                }
+                let updated = update.exec(&txn).await?;
+
+                if expected_config.is_some() && updated.rows_affected == 0 {
+                    return Ok((txn, false));
+                }
 
                 sandbox_label_entity::Entity::delete_many()
                     .filter(sandbox_label_entity::Column::SandboxId.eq(local.db_id))
@@ -1687,7 +1954,7 @@ async fn persist_config(
                     .await?;
                 }
 
-                Ok((txn, ()))
+                Ok((txn, true))
             }
         })
         .await
@@ -1713,10 +1980,166 @@ async fn persist_active_config(
     Ok(())
 }
 
-async fn start_after_modify(handle: &super::SandboxHandle) -> MicrosandboxResult<()> {
-    let sandbox = handle.refresh().await?.start_detached().await?;
+/// Start the sandbox after a restart-backed apply. The local start attaches the disks
+/// in `disk_reservations` with their reserved locks.
+async fn start_after_modify(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    disk_reservations: DiskReservations,
+) -> MicrosandboxResult<()> {
+    let sandbox = match (backend.as_local(), handle.identity()) {
+        (Some(local), SandboxIdentity::Local(id)) => {
+            local
+                .start_sandbox(
+                    backend.clone(),
+                    handle.name(),
+                    Some(id),
+                    SpawnMode::Detached,
+                    Some(RESTART_TRANSITION_TIMEOUT),
+                    disk_reservations,
+                )
+                .await?
+        }
+        _ => handle.refresh().await?.start_detached().await?,
+    };
     sandbox.detach().await;
     Ok(())
+}
+
+/// Start the sandbox with its new configuration through `start`. If that fails, save the
+/// configuration `handle` was loaded with and start the sandbox again, so a configuration
+/// that cannot boot never stays saved. The previous configuration is saved back only while
+/// `saved_config_json`, the configuration this apply saved, is still the saved one and the
+/// sandbox is not starting or running: a change another operation saved meanwhile is kept, a
+/// start another operation claimed meanwhile keeps its configuration, and the sandbox is not
+/// started again.
+///
+/// `start` returns a plain future rather than being an async closure, so the apply future
+/// stays `Send` for the language bindings that spawn it.
+async fn start_or_restore<Start, Started>(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    saved_config_json: String,
+    disk_reservations: DiskReservations,
+    mut start: Start,
+) -> MicrosandboxResult<()>
+where
+    Start: FnMut(DiskReservations) -> Started,
+    Started: Future<Output = MicrosandboxResult<()>>,
+{
+    let Err(error) = start(disk_reservations).await else {
+        return Ok(());
+    };
+
+    // `handle` was loaded before this apply, so it still holds the previous configuration.
+    // A root disk grown for this apply stays grown: saving the smaller previous size is safe
+    // because a start only grows the disk up to the saved size and never shrinks it.
+    let previous_config_json = handle.config_json().to_owned();
+    let previous_labels = handle.config()?.spec.labels;
+    let restore = persist_config_json(
+        backend,
+        handle,
+        previous_config_json,
+        previous_labels,
+        Some(saved_config_json),
+    )
+    .await;
+    match restore {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(restart_outcome_error(error, |detail| {
+                format!(
+                    "the restart with the requested changes failed: {detail}; the sandbox or its configuration changed concurrently, so the previous configuration was not restored and the sandbox was not restarted"
+                )
+            }));
+        }
+        Err(restore_error) => {
+            return Err(restart_outcome_error(error, |detail| {
+                format!(
+                    "requested changes are saved, but the restart with them failed: {detail}; restoring the previous configuration also failed: {restore_error}"
+                )
+            }));
+        }
+    }
+
+    // The reservations went to the first start and cover only disks the changes add; the
+    // previous configuration locks its own disks as any start does.
+    let previous_start = start(DiskReservations::default()).await;
+
+    match previous_start {
+        Ok(()) => Err(restart_outcome_error(error, |detail| {
+            format!(
+                "requested changes were not applied; the previous configuration was restored and the sandbox restarted. The restart with the changes failed: {detail}"
+            )
+        })),
+        Err(rollback_error) => Err(restart_outcome_error(error, |detail| {
+            format!(
+                "requested changes were not applied; the previous configuration is saved, but the sandbox did not restart with it: {rollback_error}. The restart with the changes failed: {detail}"
+            )
+        })),
+    }
+}
+
+/// Rewrite the detail of a runtime error; other errors keep their type.
+fn restart_error(
+    error: MicrosandboxError,
+    message: impl FnOnce(String) -> String,
+) -> MicrosandboxError {
+    match error {
+        MicrosandboxError::Runtime(detail) => MicrosandboxError::Runtime(message(detail)),
+        other => other,
+    }
+}
+
+/// Rewrite a failed start's detail with `message`, the outcome of the restart and its
+/// rollback. Errors that carry a free-form detail keep their type, so callers can still branch
+/// on it; a boot failure keeps its stage and errno. Any other error has no detail to rewrite and
+/// becomes a runtime error built from its full text, so the outcome `message` describes always
+/// reaches the caller.
+fn restart_outcome_error(
+    error: MicrosandboxError,
+    message: impl FnOnce(String) -> String,
+) -> MicrosandboxError {
+    match error {
+        MicrosandboxError::Runtime(detail) => MicrosandboxError::Runtime(message(detail)),
+        MicrosandboxError::InvalidConfig(detail) => {
+            MicrosandboxError::InvalidConfig(message(detail))
+        }
+        MicrosandboxError::RuntimeNotInstalled(detail) => {
+            MicrosandboxError::RuntimeNotInstalled(message(detail))
+        }
+        MicrosandboxError::RuntimeIncomplete(detail) => {
+            MicrosandboxError::RuntimeIncomplete(message(detail))
+        }
+        MicrosandboxError::Custom(detail) => MicrosandboxError::Custom(message(detail)),
+        MicrosandboxError::BootStart { name, mut err } => {
+            err.message = message(err.message);
+            MicrosandboxError::BootStart { name, err }
+        }
+        other => MicrosandboxError::Runtime(message(other.to_string())),
+    }
+}
+
+/// Graceful stop for a restart-backed apply. On the local backend only the wait for the
+/// sandbox transition guard is bounded, never the shutdown itself.
+async fn stop_for_restart(
+    backend: &Arc<dyn Backend>,
+    handle: &super::SandboxHandle,
+    ephemeral: bool,
+) -> MicrosandboxResult<()> {
+    match (backend.as_local(), handle.identity()) {
+        (Some(local), SandboxIdentity::Local(id)) => {
+            local
+                .stop_complete(
+                    handle.name(),
+                    id,
+                    ephemeral,
+                    Some(RESTART_TRANSITION_TIMEOUT),
+                )
+                .await
+        }
+        _ => handle.stop().await,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2325,6 +2748,499 @@ fn push_spec_changes(
     }
 }
 
+/// Return the validated, ordered mounts and their effective changes. Guest paths identify
+/// mounts; identical additions produce no change.
+fn resolve_mount_patch(
+    current: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> Result<(Vec<VolumeMount>, Vec<MountDelta>), String> {
+    let mut mounts = current.to_vec();
+    let mut deltas = Vec::new();
+    let mut requested_guests = Vec::new();
+
+    let canonical =
+        |guest: &str| canonical_guest_mount_path(guest).map_err(|error| error.to_string());
+    let mut removal_targets = Vec::new();
+    for guest in &patch.mounts_remove {
+        removal_targets.push(canonical(guest)?);
+    }
+
+    for requested in &patch.mounts {
+        let mut mount = requested.clone();
+        let guest = canonical(mount.guest())?;
+
+        if let VolumeMount::Named { create, .. } = &mut mount {
+            // Modify never provisions named volumes; the volume must already exist,
+            // which `mount_source_conflicts` checks before anything is stopped.
+            // Dropping creation settings would lose them silently, so only the
+            // default intent that plain named mounts carry is accepted.
+            if create
+                .as_ref()
+                .is_some_and(|create| !only_ensures_volume_exists(create))
+            {
+                return Err(format!(
+                    "{guest}: modify does not create or configure named volumes; create the volume first"
+                ));
+            }
+            *create = None;
+        }
+
+        if matches!(mount, VolumeMount::Owned { .. }) {
+            return Err(format!(
+                "{guest} cannot be an owned volume: owned volumes are created with the sandbox"
+            ));
+        }
+        if requested_guests.contains(&guest) {
+            return Err(format!("mount {guest} is set more than once"));
+        }
+        if removal_targets.contains(&guest) {
+            return Err(format!(
+                "mount {guest} is both set and removed in the same modification"
+            ));
+        }
+
+        *guest_of(&mut mount) = guest.clone();
+        requested_guests.push(guest.clone());
+
+        match mounts.iter().position(|existing| existing.guest() == guest) {
+            Some(index) => {
+                if matches!(mounts[index], VolumeMount::Owned { .. }) {
+                    return Err(format!(
+                        "{guest} is an owned volume and cannot be replaced: that would orphan its data"
+                    ));
+                }
+                if mount_json(&mounts[index]) == mount_json(&mount) {
+                    continue;
+                }
+
+                deltas.push(MountDelta {
+                    kind: ChangeKind::Updated,
+                    before: Some(format_mount(&mounts[index])),
+                    after: Some(format_mount(&mount)),
+                });
+                mounts[index] = mount;
+            }
+            None => {
+                deltas.push(MountDelta {
+                    kind: ChangeKind::Added,
+                    before: None,
+                    after: Some(format_mount(&mount)),
+                });
+                mounts.push(mount);
+            }
+        }
+    }
+
+    for guest in removal_targets {
+        let Some(index) = mounts.iter().position(|mount| mount.guest() == guest) else {
+            return Err(format!("no mount at {guest} to remove"));
+        };
+        if matches!(mounts[index], VolumeMount::Owned { .. }) {
+            return Err(format!(
+                "{guest} is an owned volume and cannot be removed: that would delete its data"
+            ));
+        }
+
+        deltas.push(MountDelta {
+            kind: ChangeKind::Removed,
+            before: Some(format_mount(&mounts[index])),
+            after: None,
+        });
+        mounts.remove(index);
+    }
+
+    if !deltas.is_empty() {
+        validate_volume_mounts(&mut mounts).map_err(|error| error.to_string())?;
+    }
+
+    Ok((mounts, deltas))
+}
+
+/// Whether `create` only asks for the volume to exist, with no settings of its own. The CLI
+/// attaches this to every named volume mount it parses.
+fn only_ensures_volume_exists(create: &NamedVolumeCreate) -> bool {
+    create.mode == NamedVolumeMode::EnsureExists
+        && create.kind == VolumeKind::Directory
+        && create.quota_mib.is_none()
+        && create.capacity_mib.is_none()
+        && create.labels.is_empty()
+}
+
+fn guest_of(mount: &mut VolumeMount) -> &mut String {
+    match mount {
+        VolumeMount::Bind { guest, .. }
+        | VolumeMount::Owned { guest, .. }
+        | VolumeMount::Named { guest, .. }
+        | VolumeMount::Tmpfs { guest, .. }
+        | VolumeMount::DiskImage { guest, .. } => guest,
+    }
+}
+
+fn mount_json(mount: &VolumeMount) -> Option<serde_json::Value> {
+    serde_json::to_value(mount).ok()
+}
+
+/// Render a mount on one line with every setting it is compared by, so a replacement
+/// that changes any option shows different before and after text. Access and disk
+/// format are always shown; other settings only when they differ from their default.
+fn format_mount(mount: &VolumeMount) -> String {
+    let (source, settings) = match mount {
+        VolumeMount::Bind {
+            host,
+            options,
+            stat_virtualization,
+            host_permissions,
+            follow_root_symlinks,
+            quota_mib,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                *follow_root_symlinks,
+            );
+            if let Some(quota_mib) = quota_mib {
+                settings.push(format!("quota={quota_mib}MiB"));
+            }
+            (format!("bind {}", host.display()), settings)
+        }
+        VolumeMount::Named {
+            name,
+            options,
+            stat_virtualization,
+            host_permissions,
+            follow_root_symlinks,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                *follow_root_symlinks,
+            );
+            (format!("named {name}"), settings)
+        }
+        VolumeMount::DiskImage {
+            host,
+            format,
+            fstype,
+            options,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            settings.push(format!("format={}", format.as_str()));
+            if let Some(fstype) = fstype {
+                settings.push(format!("fstype={fstype}"));
+            }
+            (format!("disk {}", host.display()), settings)
+        }
+        VolumeMount::Tmpfs {
+            size_mib, options, ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            if let Some(size_mib) = size_mib {
+                settings.push(format!("size={size_mib}MiB"));
+            }
+            ("tmpfs".to_string(), settings)
+        }
+        VolumeMount::Owned {
+            storage,
+            options,
+            stat_virtualization,
+            host_permissions,
+            ..
+        } => {
+            let mut settings = mount_option_settings(options);
+            push_policy_settings(
+                &mut settings,
+                *stat_virtualization,
+                *host_permissions,
+                false,
+            );
+            match storage {
+                OwnedVolumeStorage::Directory { quota_mib } => {
+                    if let Some(quota_mib) = quota_mib {
+                        settings.push(format!("quota={quota_mib}MiB"));
+                    }
+                    ("owned directory".to_string(), settings)
+                }
+                OwnedVolumeStorage::Disk { capacity_mib } => {
+                    settings.push(format!("capacity={capacity_mib}MiB"));
+                    ("owned disk".to_string(), settings)
+                }
+            }
+        }
+    };
+
+    format!("{}: {source} ({})", mount.guest(), settings.join(","))
+}
+
+/// Access and ownership settings every mount kind carries, in mount option spelling.
+fn mount_option_settings(options: &MountOptions) -> Vec<String> {
+    let access = if options.readonly { "ro" } else { "rw" };
+    let mut settings = vec![access.to_string()];
+
+    if options.noexec {
+        settings.push("noexec".to_string());
+    }
+    if options.nosuid {
+        settings.push("nosuid".to_string());
+    }
+    if options.nodev {
+        settings.push("nodev".to_string());
+    }
+    if let Some(uid) = options.override_uid {
+        settings.push(format!("uid={uid}"));
+    }
+    if let Some(gid) = options.override_gid {
+        settings.push(format!("gid={gid}"));
+    }
+    settings
+}
+
+/// Append the directory-backed policy settings that differ from their defaults.
+fn push_policy_settings(
+    settings: &mut Vec<String>,
+    stat_virtualization: StatVirtualization,
+    host_permissions: HostPermissions,
+    follow_root_symlinks: bool,
+) {
+    match stat_virtualization {
+        StatVirtualization::Strict => {}
+        StatVirtualization::Relaxed => settings.push("stat-virt=relaxed".to_string()),
+        StatVirtualization::Off => settings.push("stat-virt=off".to_string()),
+    }
+    if host_permissions == HostPermissions::Mirror {
+        settings.push("host-perms=mirror".to_string());
+    }
+    if follow_root_symlinks {
+        settings.push("follow-root-symlinks".to_string());
+    }
+}
+
+fn push_mount_changes(
+    status: SandboxStatus,
+    config: &SandboxConfig,
+    active: Option<&SandboxConfig>,
+    patch: &SandboxModificationPatch,
+    policy: ModificationPolicy,
+    changes: &mut Vec<PlannedChange>,
+    conflicts: &mut Vec<ModificationConflict>,
+) {
+    if patch.mounts.is_empty() && patch.mounts_remove.is_empty() {
+        return;
+    }
+
+    match resolve_mount_patch(&config.spec.mounts, patch) {
+        Ok((mounts, deltas)) => {
+            // Volume removal finds a running sandbox's named volumes through its active
+            // configuration; without one, the desired configuration is the only record.
+            let kept_volumes: Vec<&str> = named_volumes(&mounts).collect();
+            let drops_a_volume =
+                named_volumes(&config.spec.mounts).any(|name| !kept_volumes.contains(&name));
+            if running_status(status)
+                && policy == ModificationPolicy::NextStart
+                && active.is_none()
+                && drops_a_volume
+            {
+                conflicts.push(ModificationConflict {
+                    field: MOUNT_FIELD.to_string(),
+                    message: "cannot stage removal of a named-volume reference without an active configuration; apply with a restart or stop the sandbox first".to_string(),
+                });
+            }
+
+            for delta in deltas {
+                changes.push(spec_change(
+                    MOUNT_FIELD,
+                    delta.kind,
+                    delta.before,
+                    delta.after,
+                    status,
+                    policy,
+                    LIVE_MOUNT_UPDATE_UNAVAILABLE,
+                ));
+            }
+        }
+        Err(message) => conflicts.push(ModificationConflict {
+            field: MOUNT_FIELD.to_string(),
+            message,
+        }),
+    }
+}
+
+fn named_volumes(mounts: &[VolumeMount]) -> impl Iterator<Item = &str> {
+    mounts.iter().filter_map(|mount| match mount {
+        VolumeMount::Named { name, .. } => Some(name.as_str()),
+        _ => None,
+    })
+}
+
+/// Make relative host paths in new mounts absolute against the caller's working
+/// directory, once, before the patch is planned or persisted.
+fn resolve_patch_mount_paths(patch: &mut SandboxModificationPatch) -> MicrosandboxResult<()> {
+    if patch.mounts.is_empty() {
+        return Ok(());
+    }
+
+    let mut config = SandboxConfig::default();
+    config.spec.mounts = std::mem::take(&mut patch.mounts);
+    let result = host_paths::resolve_host_paths(&mut config);
+    patch.mounts = config.spec.mounts;
+    result
+}
+
+/// Lock and resolve the configuration's named volumes without provisioning.
+async fn lock_named_volumes(
+    local: &LocalBackend,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<EnsuredNamedVolumes> {
+    ensure_named_volumes(local, &config.clone_for_persistence()).await
+}
+
+/// Lock the named volumes of `prospective` and of `previous`, the configuration a failed
+/// restart starts again, in one sorted acquisition, so none can be removed until the
+/// restart and any rollback finish.
+async fn lock_restart_named_volumes(
+    local: &LocalBackend,
+    prospective: &SandboxConfig,
+    previous: &SandboxConfig,
+) -> MicrosandboxResult<EnsuredNamedVolumes> {
+    let mut lock_scope = prospective.clone();
+    for mount in &previous.spec.mounts {
+        let VolumeMount::Named { .. } = mount else {
+            continue;
+        };
+
+        // Only the locks are wanted: the previous volumes already exist.
+        let mut mount = mount.clone();
+        if let VolumeMount::Named { create, .. } = &mut mount {
+            *create = None;
+        }
+        lock_scope.spec.mounts.push(mount);
+    }
+
+    lock_named_volumes(local, &lock_scope).await
+}
+
+/// Reject added mounts whose source is already missing, or whose bind root goes
+/// through a symlink the runtime would refuse, so a restart-backed apply does not
+/// stop the VM only to fail its start. Bind paths and disk images the host changes
+/// later are an inherent race; named volumes are locked separately. Local backend only.
+async fn mount_source_conflicts(
+    backend: &Arc<dyn Backend>,
+    current: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<Vec<ModificationConflict>> {
+    let mut conflicts = Vec::new();
+    let Some(local) = backend.as_local() else {
+        return Ok(conflicts);
+    };
+
+    for mount in &patch.mounts {
+        let guest = mount.guest();
+        let problem = match mount {
+            VolumeMount::Bind { host, .. } => {
+                let metadata = tokio::fs::metadata(host).await;
+                metadata
+                    .err()
+                    .map(|error| format!("{guest}: host path {}: {error}", host.display()))
+            }
+            VolumeMount::DiskImage { host, .. } => match tokio::fs::metadata(host).await {
+                Ok(metadata) if metadata.is_file() => None,
+                Ok(_) => Some(format!(
+                    "{guest}: disk image {} is not a file",
+                    host.display()
+                )),
+                Err(error) => Some(format!("{guest}: disk image {}: {error}", host.display())),
+            },
+            VolumeMount::Named { name, .. } => {
+                let db = local.db().await?;
+                let volume = volume_entity::Entity::find()
+                    .filter(volume_entity::Column::Name.eq(name.as_str()))
+                    .one(db.read())
+                    .await?;
+                volume
+                    .is_none()
+                    .then(|| format!("{guest}: volume {name} does not exist; create it first"))
+            }
+            VolumeMount::Tmpfs { .. } | VolumeMount::Owned { .. } => None,
+        };
+
+        if let Some(message) = problem {
+            conflicts.push(ModificationConflict {
+                field: MOUNT_FIELD.to_string(),
+                message,
+            });
+        }
+    }
+
+    let changed_binds = changed_bind_mounts(current, patch);
+    if changed_binds.is_empty()
+        || !host_paths::runtime_refuses_symlinked_bind_roots(local.config()).await?
+    {
+        return Ok(conflicts);
+    }
+
+    for mount in changed_binds {
+        let guest = mount.guest().to_string();
+        let mut config = SandboxConfig::default();
+        config.spec.mounts = vec![mount];
+
+        match host_paths::check_bind_roots_do_not_follow_symlinks(&config) {
+            Ok(()) => {}
+            Err(MicrosandboxError::InvalidConfig(message)) => {
+                conflicts.push(ModificationConflict {
+                    field: MOUNT_FIELD.to_string(),
+                    message: format!("{guest}: {message}"),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(conflicts)
+}
+
+/// Bind mounts the patch adds or replaces. Mounts it leaves unchanged keep their
+/// saved behavior and are not checked again. An invalid patch yields none; planning
+/// already reports why.
+fn changed_bind_mounts(
+    current: &[VolumeMount],
+    patch: &SandboxModificationPatch,
+) -> Vec<VolumeMount> {
+    let Ok((mounts, _)) = resolve_mount_patch(current, patch) else {
+        return Vec::new();
+    };
+    let current_forms: Vec<_> = current.iter().map(mount_json).collect();
+
+    let mut changed = Vec::new();
+    for mount in mounts {
+        let is_bind = matches!(mount, VolumeMount::Bind { .. });
+        if is_bind && !current_forms.contains(&mount_json(&mount)) {
+            changed.push(mount);
+        }
+    }
+    changed
+}
+
+/// Apply mount additions and removals to the desired configuration.
+fn apply_mount_patch_to_config(
+    config: &mut SandboxConfig,
+    patch: &SandboxModificationPatch,
+) -> MicrosandboxResult<()> {
+    if patch.mounts.is_empty() && patch.mounts_remove.is_empty() {
+        return Ok(());
+    }
+
+    let (mounts, _) = resolve_mount_patch(&config.spec.mounts, patch)
+        .map_err(MicrosandboxError::InvalidConfig)?;
+    config.spec.mounts = mounts;
+    Ok(())
+}
+
 fn push_spec_conflicts(
     patch: &SandboxModificationPatch,
     conflicts: &mut Vec<ModificationConflict>,
@@ -2900,12 +3816,31 @@ fn format_mib(mib: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::cell::RefCell;
+    #[cfg(unix)]
+    use std::fs::{File, Permissions};
+    #[cfg(unix)]
+    use std::future;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::Path;
+    use std::time::Instant;
+
+    use microsandbox_runtime::boot_error::{BootError, BootErrorStage};
+    use microsandbox_types::DiskImageFormat;
     use sea_orm::ActiveModelTrait;
     use tempfile::tempdir;
 
     use super::*;
     use crate::backend::LocalBackend;
+    #[cfg(unix)]
+    use crate::config::{GlobalConfig, PathsConfig};
+    use crate::sandbox::MountBuilder;
+    use crate::sandbox::types::NamedVolumeBuilder;
     use crate::size::SizeExt;
+    #[cfg(unix)]
+    use crate::test_support;
 
     #[test]
     fn guest_flush_capability_never_silently_weakens_capture() {
@@ -4548,6 +5483,1803 @@ mod tests {
         );
         assert!(!current.spec.labels.contains_key("team"));
         assert_eq!(current.spec.runtime.workdir.as_deref(), Some("/srv"));
+    }
+
+    fn bind_mount(guest: &str, host: &str, readonly: bool) -> VolumeMount {
+        let mut mount = MountBuilder::new(guest).bind(host);
+        if readonly {
+            mount = mount.readonly();
+        }
+        mount.build().unwrap()
+    }
+
+    fn owned_mount(guest: &str) -> VolumeMount {
+        MountBuilder::new(guest).owned().build().unwrap()
+    }
+
+    fn config_with_mounts(mounts: Vec<VolumeMount>) -> SandboxConfig {
+        let mut config = config(2, 1024);
+        config.spec.mounts = mounts;
+        config
+    }
+
+    fn mount_plan(
+        status: SandboxStatus,
+        policy: ModificationPolicy,
+        config: &SandboxConfig,
+        patch: SandboxModificationPatch,
+    ) -> SandboxModificationPlan {
+        build_plan(
+            "api".to_string(),
+            status,
+            config,
+            None,
+            LiveControl::default(),
+            patch,
+            policy,
+        )
+    }
+
+    fn mount_guests(config: &SandboxConfig) -> Vec<&str> {
+        config.spec.mounts.iter().map(VolumeMount::guest).collect()
+    }
+
+    #[test]
+    fn mount_changes_follow_the_restart_required_policy_matrix() {
+        let config = config_with_mounts(vec![bind_mount("/opt/old", "/host/old", false)]);
+        let patch = SandboxModificationPatch {
+            mounts: vec![bind_mount("/opt/apps", "/host/apps", true)],
+            mounts_remove: vec!["/opt/old".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        for (status, policy, expected) in [
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::NoRestart,
+                ModificationDisposition::RequiresRestart,
+            ),
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::Restart,
+                ModificationDisposition::RequiresRestart,
+            ),
+            (
+                SandboxStatus::Running,
+                ModificationPolicy::NextStart,
+                ModificationDisposition::NextStart,
+            ),
+            (
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                ModificationDisposition::NextStart,
+            ),
+        ] {
+            let plan = mount_plan(status, policy, &config, patch.clone());
+
+            assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+            assert_eq!(plan.changes.len(), 2);
+            for change in &plan.changes {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                assert_eq!(change.field, "mount");
+                assert_eq!(change.disposition, expected);
+            }
+            // A running sandbox under the default policy rejects the whole patch.
+            assert_eq!(
+                validate_apply_supported(&plan).is_err(),
+                expected == ModificationDisposition::RequiresRestart
+                    && policy == ModificationPolicy::NoRestart
+            );
+        }
+    }
+
+    #[test]
+    fn mount_plans_show_every_changed_option() {
+        let bind = || MountBuilder::new("/data").bind("/host/data");
+        let tmpfs = || MountBuilder::new("/scratch").tmpfs();
+        let disk = || {
+            MountBuilder::new("/disk")
+                .disk("/host/data.img")
+                .format(DiskImageFormat::Raw)
+        };
+        let config = config_with_mounts(vec![
+            bind().build().unwrap(),
+            tmpfs().build().unwrap(),
+            disk().build().unwrap(),
+        ]);
+        let replacements = [
+            bind().noexec(),
+            bind().nosuid(),
+            bind().nodev(),
+            bind().owner(1000, 1000),
+            bind().quota(64),
+            bind().stat_virtualization(StatVirtualization::Relaxed),
+            bind().host_permissions(HostPermissions::Mirror),
+            bind().follow_root_symlinks(true),
+            tmpfs().size(64),
+            disk().format(DiskImageFormat::Qcow2),
+            disk().fstype("ext4"),
+        ];
+
+        for replacement in replacements {
+            let replacement = replacement.build().unwrap();
+            let rendered = format_mount(&replacement);
+            let patch = SandboxModificationPatch {
+                mounts: vec![replacement],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert!(
+                plan.conflicts.is_empty(),
+                "{rendered}: {:?}",
+                plan.conflicts
+            );
+            let [PlannedChange::Config(change)] = plan.changes.as_slice() else {
+                panic!("{rendered}: expected one config change");
+            };
+            assert_eq!(change.change, ChangeKind::Updated, "{rendered}");
+            assert_ne!(change.before, change.after, "{rendered}");
+        }
+    }
+
+    #[test]
+    fn mount_plans_render_every_setting_on_one_line() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            .readonly()
+            .noexec()
+            .nosuid()
+            .nodev()
+            .owner(1000, 1001)
+            .stat_virtualization(StatVirtualization::Relaxed)
+            .host_permissions(HostPermissions::Mirror)
+            .follow_root_symlinks(true)
+            .quota(64)
+            .build()
+            .unwrap();
+
+        let rendered = format_mount(&mount);
+        let plain = format_mount(&bind_mount("/data", "/host/data", false));
+
+        assert_eq!(
+            rendered,
+            "/data: bind /host/data (ro,noexec,nosuid,nodev,uid=1000,gid=1001,stat-virt=relaxed,host-perms=mirror,follow-root-symlinks,quota=64MiB)"
+        );
+        assert_eq!(plain, "/data: bind /host/data (rw)");
+    }
+
+    #[test]
+    fn applying_mount_patch_adds_replaces_and_removes_by_guest_path() {
+        let mut config = config_with_mounts(vec![
+            bind_mount("/opt/keep", "/host/keep", false),
+            bind_mount("/opt/replace", "/host/before", false),
+            bind_mount("/opt/drop", "/host/drop", false),
+        ]);
+        let patch = SandboxModificationPatch {
+            mounts: vec![
+                bind_mount("/opt/replace/", "/host/after", true),
+                bind_mount("/opt/new", "/host/new", false),
+            ],
+            mounts_remove: vec!["/opt/drop".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+
+        let plan = mount_plan(
+            SandboxStatus::Stopped,
+            ModificationPolicy::NoRestart,
+            &config,
+            patch.clone(),
+        );
+        let kinds: Vec<_> = plan
+            .changes
+            .iter()
+            .map(|change| match change {
+                PlannedChange::Config(change) => change.change,
+                PlannedChange::Secret(_) => panic!("unexpected secret change"),
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![ChangeKind::Updated, ChangeKind::Added, ChangeKind::Removed]
+        );
+
+        apply_mount_patch_to_config(&mut config, &patch).unwrap();
+        let replaced = config
+            .spec
+            .mounts
+            .iter()
+            .find(|mount| mount.guest() == "/opt/replace")
+            .unwrap();
+
+        assert_eq!(
+            mount_guests(&config),
+            vec!["/opt/keep", "/opt/new", "/opt/replace"]
+        );
+        assert!(matches!(
+            replaced,
+            VolumeMount::Bind { host, options, .. }
+                if host == Path::new("/host/after") && options.readonly
+        ));
+    }
+
+    #[test]
+    fn owned_volumes_cannot_be_added_replaced_or_removed() {
+        let config = config_with_mounts(vec![owned_mount("/data")]);
+        let cases = [
+            (
+                SandboxModificationPatch {
+                    mounts: vec![owned_mount("/scratch")],
+                    ..SandboxModificationPatch::default()
+                },
+                "owned volumes are created with the sandbox",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![bind_mount("/data", "/host/data", false)],
+                    ..SandboxModificationPatch::default()
+                },
+                "cannot be replaced",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts_remove: vec!["/data".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "cannot be removed",
+            ),
+        ];
+
+        for (patch, expected) in cases {
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                &config,
+                patch.clone(),
+            );
+            let mut applied = config.clone();
+            let applied_result = apply_mount_patch_to_config(&mut applied, &patch);
+
+            assert!(plan.changes.is_empty());
+            assert_eq!(plan.conflicts.len(), 1);
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "{}",
+                plan.conflicts[0].message
+            );
+            assert!(applied_result.is_err());
+            assert_eq!(mount_guests(&applied), vec!["/data"]);
+        }
+    }
+
+    #[test]
+    fn mount_patch_is_validated_like_create() {
+        let config = config_with_mounts(vec![bind_mount("/opt/apps", "/host/apps", true)]);
+        let cases = [
+            (
+                SandboxModificationPatch {
+                    mounts: vec![VolumeMount::Tmpfs {
+                        guest: "opt/relative".to_string(),
+                        size_mib: None,
+                        options: Default::default(),
+                    }],
+                    ..SandboxModificationPatch::default()
+                },
+                "must be absolute",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![
+                        bind_mount("/opt/new", "/host/a", false),
+                        bind_mount("/opt/new/", "/host/b", false),
+                    ],
+                    ..SandboxModificationPatch::default()
+                },
+                "set more than once",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts: vec![bind_mount("/opt/new", "/host/a", false)],
+                    mounts_remove: vec!["/opt/new".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "both set and removed",
+            ),
+            (
+                SandboxModificationPatch {
+                    mounts_remove: vec!["/opt/nothing".to_string()],
+                    ..SandboxModificationPatch::default()
+                },
+                "no mount at /opt/nothing",
+            ),
+        ];
+
+        for (patch, expected) in cases {
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NoRestart,
+                &config,
+                patch,
+            );
+
+            assert_eq!(plan.conflicts.len(), 1, "{expected}");
+            assert_eq!(plan.conflicts[0].field, "mount");
+            assert!(
+                plan.conflicts[0].message.contains(expected),
+                "{}",
+                plan.conflicts[0].message
+            );
+            assert!(plan.changes.is_empty());
+            assert!(validate_apply_supported(&plan).is_err());
+        }
+
+        // An identical mount is a no-op, not a change.
+        let noop = mount_plan(
+            SandboxStatus::Running,
+            ModificationPolicy::NoRestart,
+            &config,
+            SandboxModificationPatch {
+                mounts: vec![bind_mount("/opt/apps", "/host/apps", true)],
+                ..SandboxModificationPatch::default()
+            },
+        );
+
+        assert!(noop.changes.is_empty() && noop.conflicts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_missing_mount_sources_and_keeps_the_config() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let current = config(2, 1024);
+        sandbox_entity::ActiveModel {
+            name: Set(current.spec.name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let named = MountBuilder::new("/vol").named("nope").build().unwrap();
+        let missing = temp.path().join("missing");
+        let patch = SandboxModificationPatch {
+            mounts: vec![named, bind_mount("/gone", missing.to_str().unwrap(), false)],
+            ..SandboxModificationPatch::default()
+        };
+
+        let name = current.spec.name.clone();
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &name)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.conflicts.len(), 2, "{:?}", plan.conflicts);
+        assert!(error.contains("volume nope does not exist"), "{error}");
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn restart_apply_named_volume_guard_blocks_volume_removal() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let local = backend.as_local().unwrap();
+        let pools = local.db().await.unwrap();
+        volume_entity::ActiveModel {
+            name: Set("data".to_string()),
+            kind: Set("directory".to_string()),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let mut target = config(2, 1024);
+        target.spec.mounts = vec![MountBuilder::new("/vol").named("data").build().unwrap()];
+
+        let guard = lock_named_volumes(local, &target).await.unwrap();
+        let mut removal = Box::pin(crate::volume::remove_local(backend.clone(), "data"));
+        let blocked_removal =
+            tokio::time::timeout(Duration::from_millis(100), removal.as_mut()).await;
+
+        assert!(
+            blocked_removal.is_err(),
+            "volume removal ran while the restart held the volume lock"
+        );
+
+        // Releasing the guard allows the pending removal to finish.
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), removal)
+            .await
+            .expect("removal did not resume after the guard dropped")
+            .unwrap();
+
+        // Lock acquisition fails after the volume has been removed.
+        assert!(lock_named_volumes(local, &target).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn restart_named_volume_guard_covers_the_previous_config() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let local = backend.as_local().unwrap();
+        let pools = local.db().await.unwrap();
+        for name in ["data", "logs"] {
+            volume_entity::ActiveModel {
+                name: Set(name.to_string()),
+                kind: Set("directory".to_string()),
+                created_at: Set(Some(chrono::Utc::now().naive_utc())),
+                updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+                ..Default::default()
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+        }
+
+        // The change replaces the mount of `data` with one of `logs`.
+        let mut previous = config(2, 1024);
+        previous.spec.mounts = vec![MountBuilder::new("/vol").named("data").build().unwrap()];
+        let mut prospective = config(2, 1024);
+        prospective.spec.mounts = vec![MountBuilder::new("/vol").named("logs").build().unwrap()];
+
+        let guard = lock_restart_named_volumes(local, &prospective, &previous)
+            .await
+            .unwrap();
+        let mut previous_removal = Box::pin(crate::volume::remove_local(backend.clone(), "data"));
+        let mut prospective_removal =
+            Box::pin(crate::volume::remove_local(backend.clone(), "logs"));
+        let blocked_previous =
+            tokio::time::timeout(Duration::from_millis(100), previous_removal.as_mut()).await;
+        let blocked_prospective =
+            tokio::time::timeout(Duration::from_millis(100), prospective_removal.as_mut()).await;
+
+        assert!(
+            blocked_previous.is_err(),
+            "the previous config's volume was removed during the restart"
+        );
+        assert!(
+            blocked_prospective.is_err(),
+            "the new config's volume was removed during the restart"
+        );
+
+        // Releasing the guard allows both pending removals to finish.
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(2), previous_removal)
+            .await
+            .expect("removal did not resume after the guard dropped")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), prospective_removal)
+            .await
+            .expect("removal did not resume after the guard dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_apply_refuses_within_the_bound_when_the_transition_guard_is_held() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let local = backend.as_local().unwrap();
+        let pools = local.db().await.unwrap();
+        volume_entity::ActiveModel {
+            name: Set("data".to_string()),
+            kind: Set("directory".to_string()),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let current = config(2, 1024);
+        let name = current.spec.name.clone();
+        sandbox_entity::ActiveModel {
+            name: Set(name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let named = MountBuilder::new("/vol").named("data").build().unwrap();
+
+        // Hold transition ownership to exercise the restart acquisition deadline.
+        let transition =
+            LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), &name)
+                .await
+                .unwrap();
+        let started = Instant::now();
+        let error = SandboxModificationBuilder::new(backend.clone(), name.clone())
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![named],
+                ..SandboxModificationPatch::default()
+            })
+            .apply()
+            .await
+            .unwrap_err()
+            .to_string();
+        let elapsed = started.elapsed();
+
+        assert!(error.contains("concurrent lifecycle operation"), "{error}");
+        assert!(
+            elapsed < RESTART_TRANSITION_TIMEOUT + Duration::from_secs(5),
+            "refusal was not bounded: {elapsed:?}"
+        );
+
+        // A refused apply must release its volume lock.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::volume::remove_local(backend.clone(), "data"),
+        )
+        .await
+        .expect("volume lock was still held after the refused apply")
+        .unwrap();
+        drop(transition);
+    }
+
+    #[tokio::test]
+    async fn bounded_transition_acquisition_times_out_and_unbounded_waits() {
+        let temp = tempdir().unwrap();
+        let run_dir = temp.path().join("run");
+        let held = LocalBackend::acquire_sandbox_transition_guard(&run_dir, "busy")
+            .await
+            .unwrap();
+        let error = LocalBackend::acquire_sandbox_transition_guard_with_timeout(
+            &run_dir,
+            "busy",
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .err()
+        .expect("held guard must time out")
+        .to_string();
+
+        assert!(error.contains("concurrent lifecycle operation"), "{error}");
+
+        drop(held);
+        LocalBackend::acquire_sandbox_transition_guard_with_timeout(
+            &run_dir,
+            "busy",
+            Some(Duration::from_millis(50)),
+        )
+        .await
+        .unwrap();
+    }
+
+    fn named_mount(guest: &str, volume: &str) -> VolumeMount {
+        MountBuilder::new(guest).named(volume).build().unwrap()
+    }
+
+    #[test]
+    fn named_mounts_accept_only_the_default_creation_intent() {
+        let config = config_with_mounts(Vec::new());
+        let named_with = |configure: fn(NamedVolumeBuilder) -> NamedVolumeBuilder| {
+            MountBuilder::new("/vol")
+                .named_with("data", configure)
+                .build()
+                .unwrap()
+        };
+        let plain = [
+            named_mount("/vol", "data"),
+            named_with(|volume| volume.ensure_exists()),
+        ];
+        let configured = [
+            named_with(|volume| volume.create()),
+            named_with(|volume| volume.ensure_exists().quota(64)),
+            named_with(|volume| volume.ensure_exists().disk().size(64)),
+            named_with(|volume| volume.ensure_exists().label("team", "data")),
+        ];
+
+        for mount in plain {
+            let patch = SandboxModificationPatch {
+                mounts: vec![mount],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+            assert_eq!(plan.changes.len(), 1);
+        }
+        for mount in configured {
+            let patch = SandboxModificationPatch {
+                mounts: vec![mount],
+                ..SandboxModificationPatch::default()
+            };
+
+            let plan = mount_plan(
+                SandboxStatus::Stopped,
+                ModificationPolicy::NextStart,
+                &config,
+                patch,
+            );
+
+            assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+            assert_eq!(
+                plan.conflicts[0].message,
+                "/vol: modify does not create or configure named volumes; create the volume first"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_named_volume_removal_needs_an_active_configuration() {
+        let config = config_with_mounts(vec![named_mount("/vol", "data")]);
+        let patch = SandboxModificationPatch {
+            mounts_remove: vec!["/vol".to_string()],
+            ..SandboxModificationPatch::default()
+        };
+        let plan = |status, policy, active: Option<&SandboxConfig>| {
+            build_plan(
+                "api".to_string(),
+                status,
+                &config,
+                active,
+                LiveControl::default(),
+                patch.clone(),
+                policy,
+            )
+        };
+
+        let unknown = plan(SandboxStatus::Running, ModificationPolicy::NextStart, None);
+        let known = plan(
+            SandboxStatus::Running,
+            ModificationPolicy::NextStart,
+            Some(&config),
+        );
+        let stopped = plan(SandboxStatus::Stopped, ModificationPolicy::NextStart, None);
+        let replaced = build_plan(
+            "api".to_string(),
+            SandboxStatus::Running,
+            &config,
+            None,
+            LiveControl::default(),
+            SandboxModificationPatch {
+                mounts: vec![bind_mount("/vol", "/host/vol", false)],
+                ..SandboxModificationPatch::default()
+            },
+            ModificationPolicy::NextStart,
+        );
+
+        assert_eq!(unknown.conflicts.len(), 1);
+        assert!(
+            unknown.conflicts[0]
+                .message
+                .contains("without an active configuration")
+        );
+        assert!(known.conflicts.is_empty());
+        assert!(stopped.conflicts.is_empty());
+        assert_eq!(replaced.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn stop_errors_rewrite_only_runtime_details() {
+        let timeout = Duration::from_secs(5);
+        let stop_failures = vec![
+            MicrosandboxError::StopTimeout {
+                name: "api".into(),
+                identity: "sandbox-1".into(),
+                timeout,
+            },
+            MicrosandboxError::SandboxStillRunning("api".into()),
+            MicrosandboxError::SandboxReplaced {
+                name: "api".into(),
+                expected: "sandbox-1".into(),
+                actual: "sandbox-2".into(),
+            },
+            MicrosandboxError::InvalidConfig("bad".into()),
+        ];
+        let expected_texts: Vec<_> = stop_failures.iter().map(ToString::to_string).collect();
+
+        let wrapped = restart_error(MicrosandboxError::Runtime("boom".into()), |detail| {
+            format!("wrapped: {detail}")
+        });
+        let mut kept = Vec::new();
+        for error in stop_failures {
+            kept.push(restart_error(error, |_| unreachable!()));
+        }
+
+        assert_eq!(wrapped.to_string(), "runtime error: wrapped: boom");
+        assert!(matches!(kept[0], MicrosandboxError::StopTimeout { .. }));
+        assert!(matches!(kept[1], MicrosandboxError::SandboxStillRunning(_)));
+        assert!(matches!(kept[2], MicrosandboxError::SandboxReplaced { .. }));
+        assert!(matches!(kept[3], MicrosandboxError::InvalidConfig(_)));
+        let kept_texts: Vec<_> = kept.iter().map(ToString::to_string).collect();
+        assert_eq!(kept_texts, expected_texts);
+    }
+
+    #[test]
+    fn restart_outcome_errors_rewrite_details_and_keep_their_type() {
+        let wrapped = restart_outcome_error(MicrosandboxError::Runtime("boom".into()), |detail| {
+            format!("wrapped: {detail}")
+        });
+        let wrapped_config =
+            restart_outcome_error(MicrosandboxError::InvalidConfig("bad".into()), |detail| {
+                format!("wrapped: {detail}")
+            });
+        let wrapped_custom =
+            restart_outcome_error(MicrosandboxError::Custom("odd".into()), |detail| {
+                format!("wrapped: {detail}")
+            });
+
+        assert_eq!(wrapped.to_string(), "runtime error: wrapped: boom");
+        assert_eq!(wrapped_config.to_string(), "invalid config: wrapped: bad");
+        assert!(matches!(wrapped_custom, MicrosandboxError::Custom(_)));
+        assert_eq!(wrapped_custom.to_string(), "wrapped: odd");
+    }
+
+    #[test]
+    fn restart_outcome_errors_rewrite_boot_failures_and_keep_their_record() {
+        let boot_failure = MicrosandboxError::BootStart {
+            name: "api".into(),
+            err: BootError {
+                t: "2026-10-08T00:00:00Z".into(),
+                stage: BootErrorStage::Mount,
+                errno: Some(2),
+                reason: None,
+                message: "mount data: No such file or directory (os error 2)".into(),
+            },
+        };
+
+        let wrapped = restart_outcome_error(boot_failure, |detail| format!("wrapped: {detail}"));
+
+        let MicrosandboxError::BootStart { name, err } = wrapped else {
+            panic!("the boot failure changed type: {wrapped:?}");
+        };
+        assert_eq!(name, "api");
+        assert_eq!(err.stage, BootErrorStage::Mount);
+        assert_eq!(err.errno, Some(2));
+        assert_eq!(
+            err.message,
+            "wrapped: mount data: No such file or directory (os error 2)"
+        );
+    }
+
+    #[test]
+    fn restart_outcome_errors_without_a_detail_become_runtime_errors() {
+        let wrapped = restart_outcome_error(
+            MicrosandboxError::SandboxStillRunning("api".into()),
+            |detail| format!("wrapped: {detail}"),
+        );
+
+        let MicrosandboxError::Runtime(message) = wrapped else {
+            panic!("the error was not wrapped: {wrapped:?}");
+        };
+        assert_eq!(message, "wrapped: sandbox still running: api");
+    }
+
+    #[tokio::test]
+    async fn next_start_named_addition_holds_the_volume_lock_until_persisted() {
+        let temp = tempdir().unwrap();
+        let local = LocalBackend::builder()
+            .config_path(temp.path().join("home").join("config.json"))
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let local = backend.as_local().unwrap();
+        let pools = local.db().await.unwrap();
+        volume_entity::ActiveModel {
+            name: Set("data".to_string()),
+            kind: Set("directory".to_string()),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+        let current = config(2, 1024);
+        let name = current.spec.name.clone();
+        sandbox_entity::ActiveModel {
+            name: Set(name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+
+        let held = crate::volume::lock_volume_name(local, "data")
+            .await
+            .unwrap();
+        let mut apply = Box::pin(
+            SandboxModificationBuilder::new(backend.clone(), name.clone())
+                .next_start()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![named_mount("/vol", "data")],
+                    ..SandboxModificationPatch::default()
+                })
+                .apply(),
+        );
+        let blocked_apply = tokio::time::timeout(Duration::from_millis(200), apply.as_mut()).await;
+
+        assert!(
+            blocked_apply.is_err(),
+            "apply did not wait for the named volume lock"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), apply)
+            .await
+            .expect("apply did not resume after the lock was released")
+            .unwrap();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &name)
+            .await
+            .unwrap();
+
+        assert_eq!(mount_guests(&handle.config().unwrap()), vec!["/vol"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_too_old_for_a_mount_is_refused_before_the_restart_stops_anything() {
+        let temp = tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let msb = bin.join("msb");
+        std::fs::write(&msb, "#!/bin/sh\nprintf 'msb 0.6.4\\n'\n").unwrap();
+        std::fs::set_permissions(&msb, Permissions::from_mode(0o700)).unwrap();
+        let library = bin.join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+        std::fs::write(&library, "").unwrap();
+        let config_path = temp.path().join("home").join("config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::json!({ "paths": { "msb": msb, "libkrunfw": library } }).to_string(),
+        )
+        .unwrap();
+        let file = temp.path().join("secret.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        let local = LocalBackend::builder()
+            .config_path(config_path)
+            .managed_config_path(temp.path().join("home").join("managed.json"))
+            .home(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(local);
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        let current = config(2, 1024);
+        let name = current.spec.name.clone();
+        sandbox_entity::ActiveModel {
+            name: Set(name.clone()),
+            config: Set(serde_json::to_string(&current).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+
+        let error = SandboxModificationBuilder::new(backend.clone(), name.clone())
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![bind_mount("/file", file.to_str().unwrap(), false)],
+                ..SandboxModificationPatch::default()
+            })
+            .apply()
+            .await
+            .unwrap_err()
+            .to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &name)
+            .await
+            .unwrap();
+
+        assert!(error.contains("isolated file mounts"), "{error}");
+        assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    /// A local backend whose runtime reports `msb 0.6.{patch}`; nothing is ever launched.
+    #[cfg(unix)]
+    async fn backend_with_runtime(root: &Path, patch: u8) -> Arc<dyn Backend> {
+        let msb = root.join("msb");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'msb 0.6.{patch}'; else exit 99; fi\n"
+        );
+        std::fs::write(&msb, script).unwrap();
+        std::fs::set_permissions(&msb, Permissions::from_mode(0o700)).unwrap();
+        let firmware = root.join("firmware");
+        std::fs::write(&firmware, b"not launched").unwrap();
+
+        let local = test_support::local_backend(GlobalConfig {
+            home: Some(root.join("home")),
+            paths: PathsConfig {
+                msb: Some(msb),
+                libkrunfw: Some(firmware),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        local.db().await.unwrap();
+        Arc::new(local)
+    }
+
+    #[cfg(unix)]
+    async fn insert_stopped_sandbox(backend: &Arc<dyn Backend>, config: &SandboxConfig) {
+        insert_sandbox(backend, config, SandboxStatus::Stopped).await;
+    }
+
+    #[cfg(unix)]
+    async fn insert_sandbox(
+        backend: &Arc<dyn Backend>,
+        config: &SandboxConfig,
+        status: SandboxStatus,
+    ) {
+        let pools = backend.as_local().unwrap().db().await.unwrap();
+        sandbox_entity::ActiveModel {
+            name: Set(config.spec.name.clone()),
+            config: Set(serde_json::to_string(config).unwrap()),
+            active_config: Set(None),
+            status: Set(status),
+            ephemeral: Set(false),
+            created_at: Set(None),
+            updated_at: Set(None),
+            ..Default::default()
+        }
+        .insert(pools.write())
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_roots_through_symlinks_are_refused_and_keep_the_config() {
+        let temp = tempdir().unwrap();
+        // macOS temp directories sit under the symlinked /var: start from the resolved path.
+        let base = temp.path().canonicalize().unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        let link = base.join("link");
+        symlink(&real, &link).unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_stopped_sandbox(&backend, &current).await;
+        let patch = SandboxModificationPatch {
+            mounts: vec![
+                bind_mount("/root", link.to_str().unwrap(), false),
+                bind_mount("/parent", link.join("child").to_str().unwrap(), false),
+            ],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+
+        let messages: Vec<_> = plan
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.message.as_str())
+            .collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages[0].starts_with("/parent: ") && messages[0].contains("goes through symlink"),
+            "{messages:?}"
+        );
+        assert!(
+            messages[1].starts_with("/root: ") && messages[1].contains("is a symlink"),
+            "{messages:?}"
+        );
+        assert!(error.contains("goes through symlink"), "{error}");
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dry_run_reports_file_mounts_the_runtime_cannot_launch() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let file = base.join("secret.txt");
+        std::fs::write(&file, "x").unwrap();
+        let patch = SandboxModificationPatch {
+            mounts: vec![bind_mount("/secret.txt", file.to_str().unwrap(), false)],
+            ..SandboxModificationPatch::default()
+        };
+
+        let mut plans = Vec::new();
+        for (dir, patch_version) in [("old", 15), ("new", 16)] {
+            let root = base.join(dir);
+            std::fs::create_dir_all(&root).unwrap();
+            let backend = backend_with_runtime(&root, patch_version).await;
+            let current = config(2, 1024);
+            insert_stopped_sandbox(&backend, &current).await;
+
+            let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+                .dry_run()
+                .await
+                .unwrap();
+            plans.push(plan);
+        }
+
+        let old = &plans[0];
+        assert_eq!(old.conflicts.len(), 1, "{:?}", old.conflicts);
+        assert_eq!(old.conflicts[0].field, RUNTIME_FIELD);
+        assert!(
+            old.conflicts[0].message.contains("isolated file mounts"),
+            "{:?}",
+            old.conflicts
+        );
+        assert!(plans[1].conflicts.is_empty(), "{:?}", plans[1].conflicts);
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn dry_run_reports_invalid_secrets_alongside_mount_changes() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let dir = base.join("data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let backend = backend_with_runtime(&base, 16).await;
+        let current = config(2, 1024);
+        insert_stopped_sandbox(&backend, &current).await;
+        let mut spec = source_spec("API_KEY", &["api.example.com"]);
+        spec.placeholder = Some(String::new());
+        let secret_only = patch_with_specs(vec![spec]);
+        let with_mount = SandboxModificationPatch {
+            mounts: vec![bind_mount("/data", dir.to_str().unwrap(), false)],
+            ..secret_only.clone()
+        };
+
+        let mut conflicts = Vec::new();
+        for patch in [secret_only, with_mount] {
+            let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .with_patch(patch)
+                .dry_run()
+                .await
+                .unwrap();
+            conflicts.push(plan.conflicts);
+        }
+
+        assert_eq!(conflicts[0], conflicts[1]);
+        assert_eq!(conflicts[0].len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0][0].field, SECRET_FIELD);
+        assert!(
+            conflicts[0][0]
+                .message
+                .contains("placeholder must not be empty"),
+            "{conflicts:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bind_roots_that_avoid_or_opt_into_symlinks_are_accepted() {
+        let temp = tempdir().unwrap();
+        // macOS temp directories sit under the symlinked /var: start from the resolved path.
+        let base = temp.path().canonicalize().unwrap();
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        symlink(&real, &link).unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        // A saved mount is not checked again when the patch repeats it unchanged.
+        let saved = bind_mount("/saved", link.to_str().unwrap(), false);
+        let current = config_with_mounts(vec![saved.clone()]);
+        insert_stopped_sandbox(&backend, &current).await;
+        let follow = MountBuilder::new("/follow")
+            .bind(&link)
+            .follow_root_symlinks(true)
+            .build()
+            .unwrap();
+        let resolved = bind_mount("/resolved", real.to_str().unwrap(), false);
+        let patch = SandboxModificationPatch {
+            mounts: vec![saved, follow, resolved],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        builder().apply().await.unwrap();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+        let persisted = handle.config().unwrap();
+        let mut guests = mount_guests(&persisted);
+        guests.sort();
+
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+        assert_eq!(guests, vec!["/follow", "/resolved", "/saved"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_apply_refuses_busy_disks_before_stopping() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        let disk = base.join("busy.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+        // Another sandbox attached the disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let patch = SandboxModificationPatch {
+            mounts: vec![MountBuilder::new("/busy").disk(&disk).build().unwrap()],
+            ..SandboxModificationPatch::default()
+        };
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(patch.clone())
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+        assert!(
+            plan.conflicts[0].message.contains("already attached"),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(error.contains("already attached"), "{error}");
+        assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
+        assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_check_named_disk_volumes_by_mode() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let local = backend.as_local().unwrap();
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        volume_entity::ActiveModel {
+            name: Set("shared".to_string()),
+            kind: Set("disk".to_string()),
+            disk_format: Set(Some("raw".to_string())),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        let volume_dir = local.volume_path("shared");
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        let disk = volume_dir.join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let reader = MountBuilder::new("/shared")
+            .named("shared")
+            .readonly()
+            .build()
+            .unwrap();
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![reader.clone()],
+                    ..SandboxModificationPatch::default()
+                })
+        };
+
+        // Another sandbox reads the volume: a read-only attachment can share it.
+        let holder = File::open(&disk).unwrap();
+        holder.lock_shared().unwrap();
+        let shared_plan = builder().dry_run().await.unwrap();
+        drop(holder);
+
+        // Another sandbox writes the volume: nothing else may attach it.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+        let exclusive_plan = builder().dry_run().await.unwrap();
+
+        assert!(
+            shared_plan.conflicts.is_empty(),
+            "{:?}",
+            shared_plan.conflicts
+        );
+        assert_eq!(exclusive_plan.conflicts.len(), 1);
+        assert!(
+            exclusive_plan.conflicts[0]
+                .message
+                .contains("volume \"shared\" is already attached"),
+            "{:?}",
+            exclusive_plan.conflicts
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_leave_named_disks_held_when_mounted_by_path() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let local = backend.as_local().unwrap();
+
+        volume_entity::ActiveModel {
+            name: Set("shared".to_string()),
+            kind: Set("disk".to_string()),
+            disk_format: Set(Some("raw".to_string())),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+
+        let volume_dir = local.volume_path("shared");
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        let disk = volume_dir.join("disk.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        let by_name = MountBuilder::new("/data").named("shared").build().unwrap();
+        let current = config_with_mounts(vec![by_name]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        // The running sandbox itself holds the volume's disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let by_path = MountBuilder::new("/data").disk(&disk).build().unwrap();
+
+        let plan = SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![by_path],
+                ..SandboxModificationPatch::default()
+            })
+            .dry_run()
+            .await
+            .unwrap();
+
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_reserves_disks_staged_for_the_next_start() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let disk = base.join("staged.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+
+        // An earlier next-start modification staged the disk; the VM booted without it.
+        let staged = MountBuilder::new("/staged").disk(&disk).build().unwrap();
+        let current = config_with_mounts(vec![staged]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+        let running_json = serde_json::to_string(&config(2, 1024)).unwrap();
+        sandbox_entity::Entity::update_many()
+            .col_expr(
+                sandbox_entity::Column::ActiveConfig,
+                Expr::value(running_json),
+            )
+            .filter(sandbox_entity::Column::Name.eq(&current.spec.name))
+            .exec(backend.as_local().unwrap().db().await.unwrap().write())
+            .await
+            .unwrap();
+
+        // Another sandbox attached the disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        // The restart changes no mount, yet its start attaches the staged disk.
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    max_cpus: Some(4),
+                    ..SandboxModificationPatch::default()
+                })
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), &current.spec.name)
+            .await
+            .unwrap();
+
+        assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+        assert!(
+            plan.conflicts[0].message.contains("already attached"),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(error.contains("already attached"), "{error}");
+        assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
+        assert_eq!(
+            handle.config_json(),
+            serde_json::to_string(&current).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_plans_leave_held_disks_and_refuse_aliases() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let disk = base.join("held.raw");
+        std::fs::write(&disk, b"disk").unwrap();
+        let alias = base.join("alias.raw");
+        symlink(&disk, &alias).unwrap();
+
+        let held = MountBuilder::new("/held").disk(&disk).build().unwrap();
+        let current = config_with_mounts(vec![held]);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+
+        // The running sandbox itself holds its disk read-write.
+        let holder = File::options().read(true).write(true).open(&disk).unwrap();
+        holder.lock().unwrap();
+
+        let reopened = MountBuilder::new("/held")
+            .disk(&disk)
+            .readonly()
+            .build()
+            .unwrap();
+        let aliased = MountBuilder::new("/alias").disk(&alias).build().unwrap();
+
+        let plan = |mount: VolumeMount| {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .restart()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![mount],
+                    ..SandboxModificationPatch::default()
+                })
+                .dry_run()
+        };
+
+        let reopened_plan = plan(reopened).await.unwrap();
+        let aliased_plan = plan(aliased).await.unwrap();
+
+        assert!(
+            reopened_plan.conflicts.is_empty(),
+            "{:?}",
+            reopened_plan.conflicts
+        );
+        assert_eq!(aliased_plan.conflicts.len(), 1);
+        assert!(
+            aliased_plan.conflicts[0]
+                .message
+                .contains("attached more than once"),
+            "{:?}",
+            aliased_plan.conflicts
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_restores_the_previous_config_and_starts_it() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let mut previous = config(2, 1024);
+        previous.spec.labels.insert("team".into(), "infra".into());
+        let previous_json = saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let mut changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        changed.spec.labels.insert("team".into(), "data".into());
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        let started_configs = RefCell::new(Vec::new());
+        let guest_mount_failure = MicrosandboxError::BootStart {
+            name: "api".into(),
+            err: BootError {
+                t: "2026-10-08T00:00:00Z".into(),
+                stage: BootErrorStage::Mount,
+                errno: Some(13),
+                reason: None,
+                message: "guest mount failed".into(),
+            },
+        };
+        let mut results = vec![Err(guest_mount_failure), Ok(())].into_iter();
+        let start = |_: DiskReservations| {
+            let result = results.next().unwrap();
+            let backend = &backend;
+            let started_configs = &started_configs;
+            async move {
+                let saved = backend.sandboxes().get(backend.clone(), "api").await?;
+                started_configs
+                    .borrow_mut()
+                    .push(saved.config_json().to_owned());
+                result
+            }
+        };
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json.clone(),
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let label_rows = sandbox_label_entity::Entity::find()
+            .all(backend.as_local().unwrap().db().await.unwrap().read())
+            .await
+            .unwrap();
+        let labels: Vec<_> = label_rows
+            .into_iter()
+            .map(|row| (row.key, row.value))
+            .collect();
+
+        let MicrosandboxError::BootStart { err, .. } = error else {
+            panic!("the boot failure changed type: {error:?}");
+        };
+        let message = err.message;
+        assert!(
+            message.contains("previous configuration was restored and the sandbox restarted"),
+            "{message}"
+        );
+        assert!(message.contains("guest mount failed"), "{message}");
+        assert_eq!(err.stage, BootErrorStage::Mount);
+        assert_eq!(
+            started_configs.into_inner(),
+            vec![changed_json, previous_json]
+        );
+        assert_eq!(labels, vec![("team".to_string(), "infra".to_string())]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restore_start_reports_both_failures() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let previous = config(2, 1024);
+        let previous_json = saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        let mut results = vec![
+            Err(MicrosandboxError::InvalidConfig("disk is busy".into())),
+            Err(MicrosandboxError::Runtime("runtime exited".into())),
+        ]
+        .into_iter();
+        let start = |_: DiskReservations| future::ready(results.next().unwrap());
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json,
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        let MicrosandboxError::InvalidConfig(message) = error else {
+            panic!("the configuration error changed type: {error:?}");
+        };
+        assert!(
+            message.contains("previous configuration is saved, but the sandbox did not restart"),
+            "{message}"
+        );
+        assert!(message.contains("runtime exited"), "{message}");
+        assert!(message.contains("disk is busy"), "{message}");
+        assert_eq!(saved.config_json(), previous_json);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_keeps_a_config_saved_concurrently() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let previous = config(2, 1024);
+        saved_previous_config(&backend, &previous).await;
+
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+        let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+        // Another modification saves its own change while the first start fails.
+        let mut concurrent = config(4, 2048);
+        concurrent.spec.labels.insert("team".into(), "web".into());
+        let concurrent_json = serde_json::to_string(&concurrent).unwrap();
+        let start_count = RefCell::new(0);
+        let start = |_: DiskReservations| {
+            let backend = &backend;
+            let handle = &handle;
+            let concurrent = &concurrent;
+            let start_count = &start_count;
+            async move {
+                *start_count.borrow_mut() += 1;
+                persist_config(backend, handle, concurrent).await?;
+                Err(MicrosandboxError::Runtime("runtime exited".into()))
+            }
+        };
+
+        let error = start_or_restore(
+            &backend,
+            &handle,
+            changed_json,
+            DiskReservations::default(),
+            start,
+        )
+        .await
+        .unwrap_err();
+        let saved = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        let MicrosandboxError::Runtime(message) = error else {
+            panic!("the runtime error changed type: {error:?}");
+        };
+        assert!(
+            message.contains("the sandbox or its configuration changed concurrently"),
+            "{message}"
+        );
+        assert!(message.contains("runtime exited"), "{message}");
+        assert_eq!(start_count.into_inner(), 1);
+        assert_eq!(saved.config_json(), concurrent_json);
+        assert_eq!(saved.config().unwrap().spec.labels, concurrent.spec.labels);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_restart_keeps_the_config_a_competing_start_claimed() {
+        for competing_status in [SandboxStatus::Starting, SandboxStatus::Running] {
+            let temp = tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let backend = backend_with_runtime(&base, 7).await;
+            let mut previous = config(2, 1024);
+            previous.spec.labels.insert("team".into(), "infra".into());
+            saved_previous_config(&backend, &previous).await;
+
+            let handle = backend
+                .sandboxes()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+            let mut changed = config_with_mounts(vec![bind_mount("/data", "/srv/data", false)]);
+            changed.spec.labels.insert("team".into(), "data".into());
+            let changed_json = persist_config(&backend, &handle, &changed).await.unwrap();
+
+            // Another start claims the sandbox with the saved changes while the first start fails.
+            let start_count = RefCell::new(0);
+            let start = |_: DiskReservations| {
+                let backend = &backend;
+                let start_count = &start_count;
+                async move {
+                    *start_count.borrow_mut() += 1;
+                    sandbox_entity::Entity::update_many()
+                        .col_expr(
+                            sandbox_entity::Column::Status,
+                            Expr::value(competing_status),
+                        )
+                        .filter(sandbox_entity::Column::Name.eq("api"))
+                        .exec(backend.as_local().unwrap().db().await?.write())
+                        .await?;
+                    Err(MicrosandboxError::Runtime("runtime exited".into()))
+                }
+            };
+
+            let error = start_or_restore(
+                &backend,
+                &handle,
+                changed_json.clone(),
+                DiskReservations::default(),
+                start,
+            )
+            .await
+            .unwrap_err();
+            let saved = backend
+                .sandboxes()
+                .get(backend.clone(), "api")
+                .await
+                .unwrap();
+
+            let MicrosandboxError::Runtime(message) = error else {
+                panic!("the runtime error changed type: {error:?}");
+            };
+            assert!(
+                message.contains("the sandbox or its configuration changed concurrently"),
+                "{message}"
+            );
+            assert_eq!(start_count.into_inner(), 1);
+            assert_eq!(saved.config_json(), changed_json);
+            assert_eq!(saved.config().unwrap().spec.labels, changed.spec.labels);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_apply_that_cannot_start_keeps_the_previous_config() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let backend = backend_with_runtime(&base, 7).await;
+        let current = config(2, 1024);
+        insert_sandbox(&backend, &current, SandboxStatus::Running).await;
+        // Starts reach the runtime launch only when the sandbox directory exists.
+        let sandbox_dir = backend.as_local().unwrap().sandboxes_dir().join("api");
+        std::fs::create_dir_all(&sandbox_dir).unwrap();
+        let data = base.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let previous_json = serde_json::to_string(&current).unwrap();
+
+        // The stale running record stops cleanly, but the fake runtime never starts.
+        let error = SandboxModificationBuilder::new(backend.clone(), "api")
+            .restart()
+            .with_patch(SandboxModificationPatch {
+                mounts: vec![bind_mount("/data", data.to_str().unwrap(), false)],
+                ..SandboxModificationPatch::default()
+            })
+            .apply()
+            .await
+            .unwrap_err()
+            .to_string();
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+
+        assert!(
+            error.contains("previous configuration is saved, but the sandbox did not restart"),
+            "{error}"
+        );
+        assert_eq!(handle.config_json(), previous_json);
+        assert!(
+            !matches!(
+                handle.status_snapshot(),
+                SandboxStatus::Running | SandboxStatus::Starting
+            ),
+            "{:?}",
+            handle.status_snapshot()
+        );
+    }
+
+    /// Insert a stopped sandbox whose saved configuration is pretty-printed, which
+    /// re-serializing it would not reproduce. Returns the saved text.
+    #[cfg(unix)]
+    async fn saved_previous_config(backend: &Arc<dyn Backend>, previous: &SandboxConfig) -> String {
+        insert_stopped_sandbox(backend, previous).await;
+        let handle = backend
+            .sandboxes()
+            .get(backend.clone(), "api")
+            .await
+            .unwrap();
+        let previous_json = serde_json::to_string_pretty(previous).unwrap();
+
+        persist_config_json(
+            backend,
+            &handle,
+            previous_json.clone(),
+            previous.spec.labels.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        previous_json
     }
 
     #[test]

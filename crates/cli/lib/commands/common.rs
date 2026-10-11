@@ -1877,27 +1877,18 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 ///
 /// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
-    let parsed = parse_volume_mount_spec(spec)?;
-    let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
-    let source = parsed.source.to_string();
-    let guest = parsed.guest.to_string();
-    let options = parsed.options;
+    let (guest, mount) = volume_mount(spec)?;
 
     // Keep SDK validation at the existing SandboxBuilder boundary. YAML uses
     // the same configurator below but builds the individual mount immediately.
-    Ok(builder.volume(guest, move |mount| {
-        configure_volume_mount(mount, &source, is_path, options)
-    }))
+    Ok(builder.volume(guest, move |_| mount))
 }
 
-/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
-pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
-    if spec.starts_with('/') && !spec.contains(':') {
-        return Ok((spec.into(), MountBuilder::new(spec).captured()));
-    }
+/// Parse a `-v/--volume` spec into its guest path and mount builder.
+pub(crate) fn volume_mount(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     let parsed = parse_volume_mount_spec(spec)?;
-    let guest = parsed.guest.to_string();
     let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
+    let guest = parsed.guest.to_string();
     let mount = configure_volume_mount(
         MountBuilder::new(&guest),
         parsed.source,
@@ -1905,6 +1896,14 @@ pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountB
         parsed.options,
     );
     Ok((guest, mount))
+}
+
+/// Restore-only guest-path shorthand; explicit mappings retain the existing path grammar.
+pub(crate) fn parse_restore_volume(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
+    if spec.starts_with('/') && !spec.contains(':') {
+        return Ok((spec.into(), MountBuilder::new(spec).captured()));
+    }
+    volume_mount(spec)
 }
 
 /// Parse and materialize a bind mount with the shared `-v/--volume` options.

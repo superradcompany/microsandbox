@@ -396,7 +396,7 @@ async fn capture_installed(
 
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let artifact_started = Instant::now();
-    let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
+    let external_mounts = captured_external_mounts(&current)?;
     let built = build_artifact(
         &staging_dir,
         &disk,
@@ -728,7 +728,7 @@ pub(super) async fn create_snapshot_archive(
     manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults {
         user: sandbox_config.spec.runtime.user.clone(),
     })?;
-    let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
+    let external_mounts = captured_external_mounts(&current)?;
     manifest.set_external_mounts(external_mounts)?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
@@ -1330,6 +1330,16 @@ fn new_file_manifest_with_id(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Guest paths of the host-backed mounts the captured disk was written under.
+///
+/// A running sandbox can have mount changes staged for its next start, so the mounts it is
+/// actually running with come from its active config, which is cleared once it stops.
+fn captured_external_mounts(current: &sandbox_entity::Model) -> MicrosandboxResult<Vec<String>> {
+    let config: SandboxConfig =
+        serde_json::from_str(current.active_config.as_deref().unwrap_or(&current.config))?;
+    uncaptured_mount_paths(&config.spec.mounts)
+}
 
 /// Guest paths of mounts backed by host state that a disk snapshot never captures.
 fn uncaptured_mount_paths(mounts: &[VolumeMount]) -> MicrosandboxResult<Vec<String>> {
@@ -3049,6 +3059,35 @@ mod tests {
 
         assert_eq!(paths, ["/data", "/shared", "/disk"]);
         assert_eq!(config.spec.mounts[0].guest(), "/data//./");
+    }
+
+    #[test]
+    fn captured_external_mounts_prefer_the_running_config() {
+        let running = SandboxBuilder::new("source")
+            .volume("/data", |m| m.bind("/host/data"))
+            .config
+            .into_config();
+        let staged = SandboxBuilder::new("source")
+            .volume("/new", |m| m.bind("/host/new"))
+            .config
+            .into_config();
+        let mut current = sandbox_entity::Model {
+            id: 1,
+            name: "source".into(),
+            config: serde_json::to_string(&staged).unwrap(),
+            active_config: Some(serde_json::to_string(&running).unwrap()),
+            status: SandboxStatus::Running,
+            network_slot: None,
+            ephemeral: false,
+            created_at: None,
+            updated_at: None,
+        };
+
+        assert_eq!(captured_external_mounts(&current).unwrap(), ["/data"]);
+
+        current.active_config = None;
+        current.status = SandboxStatus::Stopped;
+        assert_eq!(captured_external_mounts(&current).unwrap(), ["/new"]);
     }
 
     #[tokio::test]

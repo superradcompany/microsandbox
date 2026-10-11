@@ -872,16 +872,26 @@ where
         .await?;
 
     for sandbox in sandboxes {
-        let config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&sandbox.config)?;
-        if config.spec.mounts.iter().any(|mount| {
-            matches!(
-                mount,
-                VolumeMount::Named {
-                    name: mounted_name,
-                    ..
-                } if mounted_name == name
-            )
-        }) {
+        // A running VM keeps the mounts it booted with, even after a modification
+        // has staged a removal in the desired config.
+        let mut configs = vec![serde_json::from_str::<SandboxConfig>(&sandbox.config)?];
+        if let Some(active) = &sandbox.active_config {
+            configs.push(serde_json::from_str::<SandboxConfig>(active)?);
+        }
+
+        let mounts_volume = configs
+            .iter()
+            .flat_map(|config| &config.spec.mounts)
+            .any(|mount| {
+                matches!(
+                    mount,
+                    VolumeMount::Named {
+                        name: mounted_name,
+                        ..
+                    } if mounted_name == name
+                )
+            });
+        if mounts_volume {
             return Err(MicrosandboxError::InvalidConfig(format!(
                 "volume {name:?} is attached to active sandbox {:?}",
                 sandbox.name
@@ -1077,6 +1087,13 @@ mod tests {
 
     #[cfg(feature = "local")]
     async fn exercise_active_named_volume_reference(status: SandboxStatus) {
+        exercise_named_volume_reference(status, false).await;
+    }
+
+    /// With `staged_removal`, the desired config no longer lists the mount that the
+    /// running VM booted with, as after a mount removal saved for the next start.
+    #[cfg(feature = "local")]
+    async fn exercise_named_volume_reference(status: SandboxStatus, staged_removal: bool) {
         let temp = tempfile::tempdir().unwrap();
         let local = Arc::new(
             LocalBackend::builder()
@@ -1132,9 +1149,15 @@ mod tests {
                     checkpoint_id: "pending".into(),
                 });
         }
+        let active_config = staged_removal.then(|| serde_json::to_string(&config).unwrap());
+        if staged_removal {
+            config.spec.mounts.clear();
+        }
+
         let sandbox = sandbox_entity::ActiveModel {
             name: Set("active-sandbox".to_string()),
             config: Set(serde_json::to_string(&config).unwrap()),
+            active_config: Set(active_config),
             status: Set(status),
             ephemeral: Set(false),
             created_at: Set(Some(chrono::Utc::now().naive_utc())),
@@ -1175,6 +1198,12 @@ mod tests {
     #[cfg(feature = "local")]
     async fn test_remove_local_rejects_active_named_volume_reference() {
         exercise_active_named_volume_reference(SandboxStatus::Running).await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "local")]
+    async fn test_remove_local_rejects_volume_still_mounted_by_running_sandbox() {
+        exercise_named_volume_reference(SandboxStatus::Running, true).await;
     }
 
     #[tokio::test]

@@ -2728,6 +2728,13 @@ struct SandboxModifyOpts {
     dry_run: bool,
 }
 
+/// Capability marker: this library's modify patch understands `mounts` and
+/// `mounts_remove`. Older libraries lack the symbol and would ignore the fields.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_sandbox_modify_mounts_supported() -> bool {
+    true
+}
+
 /// Capability marker for published-port modification in the Go bindings.
 #[unsafe(no_mangle)]
 pub extern "C" fn msb_supports_port_modification() -> bool {

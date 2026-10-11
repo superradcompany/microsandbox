@@ -2898,6 +2898,18 @@ Add/update published mappings; other endpoints stay unchanged
 
 Remove host endpoints (`Bind`, `HostPort`, `Protocol`); loopback TCP by default
 
+#### <span className="msb-hn">Mounts</span>
+
+`map[string]MountConfig`
+
+Mounts to add keyed by guest path; replaces a mount at the same path. Named volumes must already exist, so creation settings such as a quota are rejected, as are owned mounts. Applies on restart or next start
+
+#### <span className="msb-hn">MountsRemove</span>
+
+`[]string`
+
+Guest paths whose mounts are removed; applies on restart or next start
+
 #### <span className="msb-hn">Policy</span>
 
 `ModificationPolicy`

@@ -40,6 +40,7 @@ export interface NativeBindings {
   readonly popDefaultBackend?: (token: number) => void;
   readonly defaultBackendKind?: () => "local" | "cloud";
   readonly defaultBackendInfo?: () => NapiBackendInfo;
+  readonly supportsModifyMounts?: () => boolean;
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
@@ -467,6 +468,8 @@ export interface NapiSandboxModifyOptions {
   workdir?: string;
   secrets?: Record<string, NapiSecretModifySpec>;
   secretsRemove?: string[];
+  mounts?: NapiVolumeMount[];
+  mountsRemove?: string[];
   policy?: string;
   dryRun?: boolean;
 }

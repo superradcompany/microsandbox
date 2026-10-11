@@ -4,7 +4,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
 
 use crate::error::to_py_err;
-use crate::helpers::{apply_fork_volumes, extract_str_enum, prepare_fork_volumes, str_enum_member};
+use crate::helpers::{
+    apply_fork_volumes, extract_str_enum, parse_mount_patches, prepare_fork_volumes,
+    str_enum_member,
+};
 use crate::metrics::convert_metrics;
 use crate::sandbox::{
     PySandbox, PySandboxPingResult, PySandboxStopResult, PySandboxTouchResult, optional_duration,
@@ -210,6 +213,10 @@ impl PySandboxHandle {
     /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
     /// hosts, substitution, violation action, TLS identity requirement, and
     /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
+    ///
+    /// `mounts` maps guest paths to `MountConfig` values and replaces any
+    /// mount already at that path; `mounts_rm` removes mounts by guest path.
+    /// Mount changes take effect on the next start.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -224,6 +231,8 @@ impl PySandboxHandle {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        mounts = None,
+        mounts_rm = None,
         ports = None,
         ports_rm = None,
         policy = None,
@@ -247,6 +256,8 @@ impl PySandboxHandle {
             std::collections::HashMap<String, std::collections::HashMap<String, Py<PyAny>>>,
         >,
         secrets_rm: Option<Vec<String>>,
+        mounts: Option<Py<PyAny>>,
+        mounts_rm: Option<Vec<String>>,
         ports: Option<Py<PyAny>>,
         ports_rm: Option<Py<PyAny>>,
         policy: Option<Py<PyAny>>,
@@ -254,6 +265,7 @@ impl PySandboxHandle {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = crate::sandbox::build_secret_patches(py, secrets)?;
+        let mounts = parse_mount_patches(mounts.as_ref().map(|m| m.bind(py)))?;
         let mut patch = crate::sandbox::build_modify_patch(
             cpus,
             max_cpus,
@@ -267,6 +279,8 @@ impl PySandboxHandle {
             workdir,
             secrets,
             secrets_rm,
+            mounts,
+            mounts_rm,
         );
         patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
         patch.ports_remove =

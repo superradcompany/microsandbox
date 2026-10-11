@@ -2590,6 +2590,10 @@ export interface SandboxModifyOptions {
   workdir?: string
   secrets?: Record<string, SecretModifySpec>
   secretsRemove?: Array<string>
+  /** Mounts to add; each replaces any mount already at its guest path. */
+  mounts?: Array<VolumeMount>
+  /** Guest paths of the mounts to remove. */
+  mountsRemove?: Array<string>
   ports?: Array<ModifyPort>
   portsRemove?: Array<ModifyPortEndpoint>
   policy?: string
@@ -2732,6 +2736,12 @@ export declare function setRuntimeLibkrunfwPath(path: string): void
  * This avoids using `process.env` as an internal JS-to-native config channel.
  */
 export declare function setRuntimeMsbPath(path: string): void
+
+/**
+ * Report that this native build applies mount changes in `modify`, so the TypeScript layer
+ * can refuse them cleanly when paired with an older native addon.
+ */
+export declare function supportsModifyMounts(): boolean
 
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {

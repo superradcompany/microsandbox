@@ -47,10 +47,10 @@ pub struct JsBuiltVolumeMount {
     pub host_permissions: Option<String>,
     /// Guest owner uid for host-created files under bind/named or owned-directory mounts;
     /// `None` when unset or for tmpfs/disks. Set together with `override_gid`.
-    pub override_uid: Option<u32>,
+    pub override_uid: Option<f64>,
     /// Guest owner gid for host-created files under bind/named or owned-directory mounts;
     /// `None` when unset or for tmpfs/disks. Set together with `override_uid`.
-    pub override_gid: Option<u32>,
+    pub override_gid: Option<f64>,
 }
 
 /// Fluent builder for a sandbox volume mount.
@@ -372,9 +372,117 @@ impl JsMountBuilder {
     }
 }
 
+impl JsBuiltVolumeMount {
+    /// Rebuild the core mount through the same builder validation as `MountBuilder`.
+    ///
+    /// Named volume creation settings are kept, so `modify` can refuse those it cannot apply.
+    pub(crate) fn into_core(self) -> Result<RustVolumeMount> {
+        let missing = |field: &str| {
+            napi::Error::from_reason(format!("{} mount requires `{field}`", self.kind))
+        };
+        let mut builder = JsMountBuilder::new(self.guest.clone());
+        match self.kind.as_str() {
+            "bind" => {
+                builder.bind(self.host.clone().ok_or_else(|| missing("host"))?);
+            }
+            "named" => {
+                builder.named_with(
+                    self.name.clone().ok_or_else(|| missing("name"))?,
+                    self.named_mode.clone(),
+                    self.named_kind.clone(),
+                    self.size_mib,
+                    self.quota_mib,
+                )?;
+            }
+            "owned" => {
+                let previous = builder.take_inner();
+                builder.inner = Some(previous.owned_with(|mut owned| {
+                    owned = if self.owned_kind.as_deref() == Some("disk") {
+                        owned.disk()
+                    } else {
+                        owned.directory()
+                    };
+                    if let Some(size) = self.size_mib {
+                        owned = owned.size(size);
+                    }
+                    if let Some(quota) = self.quota_mib {
+                        owned = owned.quota(quota);
+                    }
+                    owned
+                }));
+            }
+            "tmpfs" => {
+                builder.tmpfs();
+            }
+            "disk" => {
+                builder.disk(self.host.clone().ok_or_else(|| missing("host"))?);
+            }
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "invalid mount kind `{other}` (expected bind | named | owned | tmpfs | disk)"
+                )));
+            }
+        }
+        // Apply every supplied option and let the core builder reject those that do not fit the
+        // kind, as create does. Named and owned mounts consumed `size_mib` and `quota_mib` above
+        // as storage settings.
+        if !matches!(self.kind.as_str(), "named" | "owned") {
+            if let Some(size) = self.size_mib {
+                builder.size(f64::from(size))?;
+            }
+            if let Some(quota) = self.quota_mib {
+                builder.quota(f64::from(quota))?;
+            }
+        }
+        if let Some(format) = self.format.clone() {
+            builder.format(format)?;
+        }
+        if let Some(fstype) = self.fstype.clone() {
+            builder.fstype(fstype);
+        }
+        if self.readonly {
+            builder.readonly();
+        }
+        if self.noexec {
+            builder.noexec();
+        }
+        if self.nosuid {
+            builder.nosuid();
+        }
+        if self.nodev {
+            builder.nodev();
+        }
+        if let Some(policy) = self.stat_virtualization.clone() {
+            builder.stat_virtualization(policy)?;
+        }
+        if let Some(policy) = self.host_permissions.clone() {
+            builder.host_permissions(policy)?;
+        }
+        match (self.override_uid, self.override_gid) {
+            (Some(uid), Some(gid)) => {
+                builder.owner(uid, gid)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "mount uid and gid must be specified together",
+                ));
+            }
+        }
+        builder.take_inner_builder()?.build().map_err(to_napi_error)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Report that this native build applies mount changes in `modify`, so the TypeScript layer
+/// can refuse them cleanly when paired with an older native addon.
+#[napi(js_name = "supportsModifyMounts")]
+pub fn supports_modify_mounts() -> bool {
+    true
+}
 
 fn validate_owner_id(name: &str, value: f64) -> Result<u32> {
     if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
@@ -441,8 +549,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             fstype: None,
             stat_virtualization: Some(sv_str(stat_virtualization)),
             host_permissions: Some(hp_str(host_permissions)),
-            override_uid: options.override_uid,
-            override_gid: options.override_gid,
+            override_uid: options.override_uid.map(f64::from),
+            override_gid: options.override_gid.map(f64::from),
         },
         RustVolumeMount::Named {
             name,
@@ -483,8 +591,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 fstype: None,
                 stat_virtualization: Some(sv_str(stat_virtualization)),
                 host_permissions: Some(hp_str(host_permissions)),
-                override_uid: options.override_uid,
-                override_gid: options.override_gid,
+                override_uid: options.override_uid.map(f64::from),
+                override_gid: options.override_gid.map(f64::from),
             }
         }
         RustVolumeMount::Owned {
@@ -517,8 +625,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
                 fstype: None,
                 stat_virtualization: directory.then(|| sv_str(stat_virtualization)),
                 host_permissions: directory.then(|| hp_str(host_permissions)),
-                override_uid: options.override_uid,
-                override_gid: options.override_gid,
+                override_uid: options.override_uid.map(f64::from),
+                override_gid: options.override_gid.map(f64::from),
             }
         }
         RustVolumeMount::Tmpfs {
@@ -648,5 +756,113 @@ mod tests {
     fn fork_volumes_anchor_relative_disk_paths_for_a_local_backend() {
         assert!(disk_host(true).is_absolute());
         assert_eq!(disk_host(false), PathBuf::from("./seed.img"));
+    }
+
+    #[test]
+    fn built_mounts_round_trip_through_the_core_builder() {
+        let mounts = [
+            RustMountBuilder::new("/code")
+                .bind("/srv/code")
+                .readonly()
+                .quota(Mebibytes::from(512))
+                .owner(1000, 1000),
+            RustMountBuilder::new("/data").named("shared").noexec(),
+            RustMountBuilder::new("/tmp/scratch")
+                .tmpfs()
+                .size(Mebibytes::from(64)),
+            RustMountBuilder::new("/disk")
+                .disk("/srv/data.qcow2")
+                .fstype("ext4"),
+        ];
+
+        for builder in mounts {
+            let mount = builder.build().unwrap();
+            let rebuilt = to_built_mount(mount.clone()).into_core().unwrap();
+            assert_eq!(
+                serde_json::to_value(&rebuilt).unwrap(),
+                serde_json::to_value(&mount).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn built_mount_without_its_source_is_rejected() {
+        let mut built = to_built_mount(
+            RustMountBuilder::new("/code")
+                .bind("/srv/code")
+                .build()
+                .unwrap(),
+        );
+        built.host = None;
+        let error = built.into_core().unwrap_err();
+        assert!(error.reason.contains("requires `host`"), "{}", error.reason);
+    }
+
+    fn built(builder: RustMountBuilder) -> JsBuiltVolumeMount {
+        to_built_mount(builder.build().unwrap())
+    }
+
+    #[test]
+    fn built_mount_owner_ids_are_validated_and_paired() {
+        let bind = || built(RustMountBuilder::new("/code").bind("/srv/code"));
+        let reason = |uid, gid| {
+            let mut mount = bind();
+            mount.override_uid = uid;
+            mount.override_gid = gid;
+            mount.into_core().unwrap_err().reason
+        };
+
+        let lone = "mount uid and gid must be specified together";
+        assert_eq!(reason(Some(1000.0), None), lone);
+        assert_eq!(reason(None, Some(1000.0)), lone);
+        for bad in [-1.0, 1.5, 4_294_967_296.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                reason(Some(bad), Some(1000.0)).contains("mount owner uid must be an integer"),
+                "{bad}"
+            );
+            assert!(
+                reason(Some(1000.0), Some(bad)).contains("mount owner gid must be an integer"),
+                "{bad}"
+            );
+        }
+
+        let mut ok = bind();
+        ok.override_uid = Some(4_294_967_295.0);
+        ok.override_gid = Some(0.0);
+        assert!(ok.into_core().is_ok());
+    }
+
+    #[test]
+    fn built_mount_options_that_do_not_fit_the_kind_are_rejected() {
+        let bind = || built(RustMountBuilder::new("/code").bind("/srv/code"));
+        let tmpfs = || built(RustMountBuilder::new("/scratch").tmpfs());
+        let disk = || built(RustMountBuilder::new("/disk").disk("/srv/data.img"));
+
+        let mut mount = bind();
+        mount.size_mib = Some(64);
+        assert!(mount.into_core().unwrap_err().reason.contains("size"));
+        let mut mount = tmpfs();
+        mount.format = Some("qcow2".into());
+        assert!(mount.into_core().unwrap_err().reason.contains("format"));
+        let mut mount = tmpfs();
+        mount.quota_mib = Some(64);
+        assert!(mount.into_core().unwrap_err().reason.contains("quota"));
+        let mut mount = bind();
+        mount.fstype = Some("ext4".into());
+        assert!(mount.into_core().unwrap_err().reason.contains("fstype"));
+        let mut mount = tmpfs();
+        mount.stat_virtualization = Some("strict".into());
+        assert!(mount.into_core().is_err());
+        let mut mount = disk();
+        mount.stat_virtualization = Some("strict".into());
+        assert!(mount.into_core().is_err());
+
+        // Named volume creation settings reach the core, which refuses them in a modification.
+        let mut named = built(RustMountBuilder::new("/data").named("shared"));
+        named.named_mode = Some("ensure-exists".into());
+        named.quota_mib = Some(64);
+        let rebuilt = named.into_core().unwrap();
+        let quota_mib = rebuilt.named_create().and_then(|create| create.quota_mib());
+        assert_eq!(quota_mib, Some(64));
     }
 }

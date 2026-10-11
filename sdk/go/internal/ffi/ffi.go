@@ -129,6 +129,7 @@ typedef char *(*msb_sandbox_stop_gracefully_fn)(uint64_t cancel_id, uint64_t han
 typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef bool (*msb_sandbox_modify_mounts_supported_fn)(void);
 typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
@@ -309,6 +310,7 @@ static msb_sandbox_stop_gracefully_fn ptr_msb_sandbox_stop_gracefully = NULL;
 static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
+static msb_sandbox_modify_mounts_supported_fn ptr_msb_sandbox_modify_mounts_supported = NULL;
 static msb_sandbox_pause_with_guest_flush_fn ptr_msb_sandbox_pause_with_guest_flush = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
@@ -516,6 +518,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE_OPTIONAL(msb_sandbox_pause_with_guest_flush);
+	RESOLVE_OPTIONAL(msb_sandbox_modify_mounts_supported);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
@@ -764,6 +767,7 @@ char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *s
 }
 bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
 bool has_guest_flush(void) { return ptr_msb_sandbox_pause_with_guest_flush != NULL; }
+bool has_modify_mounts(void) { return ptr_msb_sandbox_modify_mounts_supported != NULL && ptr_msb_sandbox_modify_mounts_supported(); }
 char *call_msb_sandbox_pause_with_guest_flush(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_pause_with_guest_flush ? ptr_msb_sandbox_pause_with_guest_flush(cancel_id, handle, source, expected_id, policy, buf, buf_len) : NULL;
 }
@@ -2656,6 +2660,15 @@ func TouchSandboxByName(ctx context.Context, name string) (*SandboxTouchResult, 
 		return nil, fmt.Errorf("parse touch response: %w", err)
 	}
 	return &result, nil
+}
+
+// ModifyMountsSupported reports whether the native library's modify patch
+// understands mounts; older libraries silently ignore the unknown fields.
+func ModifyMountsSupported() (bool, error) {
+	if err := ensureLoaded(); err != nil {
+		return false, err
+	}
+	return bool(C.has_modify_mounts()), nil
 }
 
 // ModifySandboxByName plans or applies a sandbox modification by name.
