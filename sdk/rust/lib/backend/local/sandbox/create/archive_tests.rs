@@ -253,6 +253,8 @@ fn replaceable_config() -> SandboxConfig {
     config.spec.image = RootfsSource::oci("alpine:3.21");
     config.spec.resources.max_cpus = config.spec.resources.cpus;
     config.spec.resources.max_memory_mib = config.spec.resources.memory_mib;
+    // Historical runtimes lack HTTP denials; reach the archive admission checks.
+    config.spec.network.http.deny_response = false;
 
     config
 }
@@ -423,6 +425,7 @@ async fn disk_only_restore_from_full_archive_passes_admission() {
 
     // Match the public restore builder: the reference is resolved during preparation.
     let builder = SandboxBuilder::new("disk-only-child")
+        .network(|network| network.http(|http| http.deny_response(false)))
         .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
         .disk_only();
     let error = match backend
