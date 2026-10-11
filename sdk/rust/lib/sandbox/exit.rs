@@ -129,16 +129,17 @@ mod tests {
             .await
             .unwrap();
         with_backend(backend, async {
-            let sandbox = Sandbox::builder("retained-idle")
+            let builder = Sandbox::builder("retained-idle")
                 .image("alpine:3.20")
                 .cpus(1)
                 .memory(256)
                 .ephemeral(false)
                 .idle_timeout(5)
-                .max_duration(60)
-                .create_detached()
-                .await
-                .unwrap();
+                .max_duration(60);
+            // Released runtimes may not support HTTP denial responses.
+            #[cfg(feature = "net")]
+            let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+            let sandbox = builder.create_detached().await.unwrap();
             let handle = Sandbox::get(sandbox.name()).await.unwrap();
             let result = tokio::time::timeout(Duration::from_secs(45), async {
                 loop {
