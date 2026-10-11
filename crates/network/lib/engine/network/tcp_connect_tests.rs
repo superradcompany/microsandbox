@@ -9,11 +9,14 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
 use super::{HostRoutes, SmoltcpNetwork};
 use crate::config::{EnvNetworkSecretResolver, NetworkConfig};
 use crate::policy::NetworkPolicy;
+use crate::proxy::OutboundProxy;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -46,6 +49,9 @@ fn guest_tcp_connect_reflects_upstream_outcome() {
         .build()
         .unwrap();
     runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), check_stalled_ipv6_fallback())
+            .await
+            .expect("stalled IPv6 fallback or cancellation timed out");
         for ipv6 in [false, true] {
             for listening in [false, true] {
                 tokio::time::timeout(Duration::from_secs(5), check_connect(ipv6, listening))
@@ -199,4 +205,163 @@ async fn check_connect(ipv6: bool, listening: bool) {
     if let Some(server) = server {
         server.await.unwrap();
     }
+}
+
+async fn check_stalled_ipv6_fallback() {
+    // Withhold the IPv6 CONNECT response to keep the real host dial pending
+    // without depending on external routes, firewall rules, or host IPv6 support.
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let config = NetworkConfig {
+        policy: NetworkPolicy::allow_all(),
+        outbound_proxy: Some(OutboundProxy::HttpConnect {
+            address: listener.local_addr().unwrap(),
+        }),
+        ..Default::default()
+    };
+    let (pending_tx, mut pending_rx) = oneshot::channel();
+    let (fallback_tx, mut fallback_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stalled, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_connect_request(&mut stalled).await,
+            "[2001:db8::122]:8080"
+        );
+        pending_tx.send(()).unwrap();
+
+        tokio::select! {
+            result = stalled.read_u8() => {
+                panic!("IPv6 dial ended before guest cancellation: {result:?}");
+            }
+            _ = async {
+                let (mut ready, _) = listener.accept().await.unwrap();
+                assert_eq!(read_connect_request(&mut ready).await, "192.0.2.122:8080");
+                ready.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\nready").await.unwrap();
+                let mut response = [0; 4];
+                ready.read_exact(&mut response).await.unwrap();
+                assert_eq!(&response, b"done");
+            } => {}
+        }
+        fallback_tx.send(()).unwrap();
+        assert_eq!(
+            stalled.read(&mut [0; 1]).await.unwrap(),
+            0,
+            "guest reset must cancel the pending host dial"
+        );
+    });
+
+    let mut network = SmoltcpNetwork::build(
+        config.resolve(&EnvNetworkSecretResolver).unwrap(),
+        2,
+        Default::default(),
+        HostRoutes {
+            ipv4: true,
+            ipv6: true,
+        },
+    )
+    .unwrap();
+    let bootstrap = network.guest_bootstrap_network();
+    let v4 = bootstrap.ipv4.unwrap();
+    let v6 = bootstrap.ipv6.unwrap();
+    let mut device = GuestDevice(network.take_backend());
+    let mut iface = Interface::new(
+        Config::new(HardwareAddress::Ethernet(EthernetAddress(
+            network.guest_mac(),
+        ))),
+        &mut device,
+        Instant::from_millis(0),
+    );
+    iface.update_ip_addrs(|ips| {
+        ips.push(IpCidr::new(v4.address.into(), 30)).unwrap();
+        ips.push(IpCidr::new(v6.address.into(), 64)).unwrap();
+    });
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(v4.gateway)
+        .unwrap();
+    iface
+        .routes_mut()
+        .add_default_ipv6_route(v6.gateway)
+        .unwrap();
+    let mut sockets = SocketSet::new(vec![]);
+    let v6_handle = sockets.add(tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 1024]),
+        tcp::SocketBuffer::new(vec![0; 1024]),
+    ));
+    let v4_handle = sockets.add(tcp::Socket::new(
+        tcp::SocketBuffer::new(vec![0; 1024]),
+        tcp::SocketBuffer::new(vec![0; 1024]),
+    ));
+    sockets
+        .get_mut::<tcp::Socket>(v6_handle)
+        .connect(
+            iface.context(),
+            ("2001:db8::122".parse::<Ipv6Addr>().unwrap(), 8080),
+            (v6.address, 49152),
+        )
+        .unwrap();
+    network.start(tokio::runtime::Handle::current());
+    let started = std::time::Instant::now();
+    let mut fallback_started = false;
+    let mut cancelled = false;
+    let mut received = Vec::new();
+    let mut replied = false;
+    loop {
+        let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+        iface.poll_ingress_single(now, &mut device, &mut sockets);
+        iface.poll_egress(now, &mut device, &mut sockets);
+        if !cancelled {
+            assert_eq!(
+                sockets.get::<tcp::Socket>(v6_handle).state(),
+                tcp::State::SynSent,
+                "stalled IPv6 must not complete the guest handshake"
+            );
+        }
+        if !fallback_started && pending_rx.try_recv().is_ok() {
+            sockets
+                .get_mut::<tcp::Socket>(v4_handle)
+                .connect(
+                    iface.context(),
+                    (Ipv4Addr::new(192, 0, 2, 122), 8080),
+                    (v4.address, 49153),
+                )
+                .unwrap();
+            fallback_started = true;
+        }
+        let socket = sockets.get_mut::<tcp::Socket>(v4_handle);
+        if socket.can_recv() {
+            socket
+                .recv(|bytes| {
+                    received.extend_from_slice(bytes);
+                    (bytes.len(), ())
+                })
+                .unwrap();
+        }
+        if received.len() >= 5 && !replied {
+            assert_eq!(received, b"ready");
+            socket.send_slice(b"done").unwrap();
+            replied = true;
+        }
+        if !cancelled && fallback_rx.try_recv().is_ok() {
+            sockets.get_mut::<tcp::Socket>(v6_handle).abort();
+            cancelled = true;
+        }
+        if server.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    server.await.unwrap();
+    assert!(fallback_started && replied && cancelled);
+}
+
+async fn read_connect_request(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    while !request.ends_with(b"\r\n\r\n") {
+        assert!(request.len() < 1024, "oversized CONNECT request");
+        request.push(stream.read_u8().await.unwrap());
+    }
+    let request = std::str::from_utf8(&request).unwrap();
+    let mut words = request.split_whitespace();
+    assert_eq!(words.next(), Some("CONNECT"));
+    words.next().unwrap().to_owned()
 }
