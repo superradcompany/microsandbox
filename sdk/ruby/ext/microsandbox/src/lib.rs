@@ -873,12 +873,41 @@ fn apply_builder_options(
         }
     }
     if let Some(http) = keyword::<RHash>(kwargs, "http")? {
-        reject_unknown_keywords(ruby, http, &["deny_response", "deny_message"])?;
+        reject_unknown_keywords(
+            ruby,
+            http,
+            &[
+                "deny_response",
+                "deny_response_format",
+                "deny_message",
+                "network_deny_message",
+                "secret_deny_message",
+            ],
+        )?;
         if let Some(enabled) = keyword::<bool>(http, "deny_response")? {
             builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
         }
+        if let Some(format) = keyword::<String>(http, "deny_response_format")? {
+            let format = match format.as_str() {
+                "text" => microsandbox_core::sandbox::HttpDenyResponseFormat::Text,
+                "json" => microsandbox_core::sandbox::HttpDenyResponseFormat::Json,
+                _ => {
+                    return Err(argument_error(
+                        ruby,
+                        "deny_response_format must be text or json",
+                    ));
+                }
+            };
+            builder = builder.network(|network| network.http(|h| h.deny_response_format(format)));
+        }
         if let Some(message) = keyword::<String>(http, "deny_message")? {
             builder = builder.network(|network| network.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = keyword::<String>(http, "network_deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = keyword::<String>(http, "secret_deny_message")? {
+            builder = builder.network(|network| network.http(|h| h.secret_deny_message(message)));
         }
     }
     if keyword::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
@@ -1158,12 +1187,44 @@ impl RubySandboxBuilder {
         enabled: Option<bool>,
         message: Option<String>,
     ) -> Result<(), Error> {
+        Self::http_config(this, enabled, None, None, None, message)
+    }
+    fn http_config(
+        this: typed_data::Obj<Self>,
+        enabled: Option<bool>,
+        network_message: Option<String>,
+        secret_message: Option<String>,
+        format: Option<String>,
+        message: Option<String>,
+    ) -> Result<(), Error> {
+        let format = format
+            .map(|format| match format.as_str() {
+                "text" => Ok(microsandbox_core::sandbox::HttpDenyResponseFormat::Text),
+                "json" => Ok(microsandbox_core::sandbox::HttpDenyResponseFormat::Json),
+                _ => Err(argument_error(
+                    &current_ruby(),
+                    "deny_response_format must be text or json",
+                )),
+            })
+            .transpose()?;
         put_builder(&this, |mut builder| {
             if let Some(enabled) = enabled {
                 builder = builder.network(|network| network.http(|h| h.deny_response(enabled)));
             }
+            if let Some(format) = format {
+                builder =
+                    builder.network(|network| network.http(|h| h.deny_response_format(format)));
+            }
             if let Some(message) = message {
                 builder = builder.network(|network| network.http(|h| h.deny_message(message)));
+            }
+            if let Some(message) = network_message {
+                builder =
+                    builder.network(|network| network.http(|h| h.network_deny_message(message)));
+            }
+            if let Some(message) = secret_message {
+                builder =
+                    builder.network(|network| network.http(|h| h.secret_deny_message(message)));
             }
             builder
         })
@@ -2821,6 +2882,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
         method!(RubySandboxBuilder::disable_network, 0),
     )?;
     builder.define_method("http!", method!(RubySandboxBuilder::http, 2))?;
+    builder.define_method("http_config!", method!(RubySandboxBuilder::http_config, 5))?;
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;

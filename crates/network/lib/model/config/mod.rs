@@ -8,7 +8,7 @@ mod types;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use microsandbox_types::HttpConfig;
+pub use microsandbox_types::{HttpConfig, HttpDenyResponseFormat};
 
 pub use builder::*;
 pub use resolver::*;

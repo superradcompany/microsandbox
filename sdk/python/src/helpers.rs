@@ -1684,7 +1684,7 @@ fn apply_network(
         builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
-    // Body returned to HTTP/HTTPS clients when egress is denied.
+    // HTTP denial response settings.
     if let Some(http) = net.get_item("http")?
         && !http.is_none()
     {
@@ -1692,8 +1692,26 @@ fn apply_network(
         if let Some(enabled) = extract_opt::<bool>(http, "deny_response")? {
             builder = builder.network(move |n| n.http(|h| h.deny_response(enabled)));
         }
+        if let Some(format) = extract_opt::<String>(http, "deny_response_format")? {
+            let format = match format.as_str() {
+                "text" => microsandbox::sandbox::HttpDenyResponseFormat::Text,
+                "json" => microsandbox::sandbox::HttpDenyResponseFormat::Json,
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "deny_response_format must be text or json",
+                    ));
+                }
+            };
+            builder = builder.network(move |n| n.http(|h| h.deny_response_format(format)));
+        }
         if let Some(message) = extract_opt::<String>(http, "deny_message")? {
             builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = extract_opt::<String>(http, "network_deny_message")? {
+            builder = builder.network(move |n| n.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = extract_opt::<String>(http, "secret_deny_message")? {
+            builder = builder.network(move |n| n.http(|h| h.secret_deny_message(message)));
         }
     }
 

@@ -365,9 +365,11 @@ The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-
 
 ## HTTP denial responses
 
-By default, denied connections close without a response. Enable HTTP denial responses to return `403 Forbidden` with a message your app or agent can act on. This requires a supporting local runtime and is unavailable on cloud.
+New local sandboxes return JSON `403 Forbidden` responses for supported denied requests by default, with `code`, `message`, and `domain` fields. Set `deny_response: false` to close denied connections without a response. This requires a supporting runtime; cloud behavior is unchanged.
 
-You can customize the message and use `{host}` for the blocked hostname. Enable denial responses explicitly; setting a message alone leaves them disabled.
+In JSON mode, `network_deny_message` and `secret_deny_message` customize the respective messages. Messages are used as-is; the destination is in `domain`. Changing a message or format does not override an explicit `deny_response: false`.
+
+Select `deny_response_format: text` for legacy behavior: network denials return plain text, `deny_message` substitutes `{host}`, and secret violations close without a response. The old message setting remains supported but is deprecated for new integrations. Each mode uses only its own message settings. Omitted settings use the runtime defaults: responses enabled with JSON format. Explicit settings take precedence. Cloud accepts the default settings without applying them; enabled custom settings are local-only.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -376,17 +378,27 @@ await using sb = await Sandbox.builder("agent")
     .network((n) => n
         .policy(policy)
         .tls((t) => t)
-        .http((h) => h.denyResponse(true).denyMessage("{host} is blocked. Ask the user to allow it.")))
+        .http((h) => h
+            .denyResponse(true)
+            .denyResponseFormat("json")
+            .networkDenyMessage("Ask the user for network access.")
+            .secretDenyMessage("Ask the user to review secret access.")))
     .create();
 ```
 
 ```rust Rust
+use microsandbox::sandbox::HttpDenyResponseFormat;
+
 let sb = Sandbox::builder("agent")
     .image("python")
     .network(|n| n
         .policy(policy)
         .tls(|t| t.enabled(true))
-        .http(|h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.")))
+        .http(|h| h
+            .deny_response(true)
+            .deny_response_format(HttpDenyResponseFormat::Json)
+            .network_deny_message("Ask the user for network access.")
+            .secret_deny_message("Ask the user to review secret access.")))
     .create()
     .await?;
 ```
@@ -400,7 +412,12 @@ sb = await Sandbox.create(
     network=Network(
         policy=policy,
         tls=TlsConfig(),
-        http=HttpConfig(deny_response=True, deny_message="{host} is blocked. Ask the user to allow it."),
+        http=HttpConfig(
+            deny_response=True,
+            deny_response_format="json",
+            network_deny_message="Ask the user for network access.",
+            secret_deny_message="Ask the user to review secret access.",
+        ),
     ),
 )
 ```
@@ -411,7 +428,12 @@ sb, err := m.CreateSandbox(ctx, "agent",
     m.WithNetwork(&m.NetworkConfig{
         Rules:           rules,
         TLS:             &m.TLSConfig{},
-        HTTP: &m.HTTPConfig{DenyResponse: true, DenyMessage: "{host} is blocked. Ask the user to allow it."},
+        HTTP: &m.HTTPConfig{
+            DenyResponse: true,
+            DenyResponseFormat: m.HTTPDenyResponseJSON,
+            NetworkDenyMessage: "Ask the user for network access.",
+            SecretDenyMessage: "Ask the user to review secret access.",
+        },
     }),
 )
 ```
@@ -421,7 +443,12 @@ sb = Microsandbox::Sandbox.create(
   "agent",
   image: "python",
   network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
-  http: { deny_response: true, deny_message: "{host} is blocked. Ask the user to allow it." }
+  http: {
+    deny_response: true,
+    deny_response_format: "json",
+    network_deny_message: "Ask the user for network access.",
+    secret_deny_message: "Ask the user to review secret access."
+  }
 )
 ```
 
@@ -431,7 +458,9 @@ network:
   allow: [github.com]
   http:
     deny_response: true
-    deny_message: "{host} is blocked. Ask the user to allow it."
+    deny_response_format: json
+    network_deny_message: "Ask the user for network access."
+    secret_deny_message: "Ask the user to review secret access."
 ```
 </CodeGroup>
 
@@ -439,21 +468,41 @@ Check the response status, or use `curl --fail` to make a `403` return a nonzero
 
 <Accordion title="Which requests receive a response?">
 
-Responses work for HTTP/1.0 and HTTP/1.1. HTTPS requires [TLS interception](/networking/tls) on the destination port, with no bypass for the host. The denied request never reaches the upstream server.
+Responses work for HTTP/1.0 and HTTP/1.1. HTTPS requires [TLS interception](/networking/tls) on the destination port, with no bypass for the host. Network-policy denials never reach the upstream server.
+
+In JSON mode, secret-policy denials can also return a response for the first request on a connection, before any upstream response bytes have reached the guest. The connection may already be open when a placeholder is detected; forwarding stops at the violation.
+
+Secret-policy violations still close the connection for later or pipelined requests, after an upstream response (including `100 Continue`), and for `HEAD`, `CONNECT`, `block-and-terminate`, or unsupported body substitution.
 
 DNS denies still return `NXDOMAIN`. HTTP/2, other protocols, malformed or incomplete requests, and silent clients close without an HTTP response.
 
 </Accordion>
 
-<Accordion title="Default response message">
+<Accordion title="Response format">
 
-When no custom message is set, the body names the blocked host:
+JSON responses use `Content-Type: application/json`. Match `code` to identify the error and display `message` to the user. `domain` is the requested hostname, an IP address fallback for network denials, or `null` when unknown.
 
-```text
-This host is not allowed by the sandbox network policy config.
+Network-policy denial:
 
-Note to agent: `example.com` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.
+```json
+{
+  "code": "network_policy_denied",
+  "message": "Request blocked by network policy.",
+  "domain": "example.com"
+}
 ```
+
+Secret-policy denial:
+
+```json
+{
+  "code": "secret_policy_denied",
+  "message": "Request blocked by secret policy.",
+  "domain": "example.com"
+}
+```
+
+Both custom messages are JSON-escaped. An omitted message uses the default; an empty string leaves `message` empty (Go treats an empty string as omitted). Text mode works with older runtimes that support denial responses. JSON mode requires the new runtime capability; the SDK returns an upgrade-required error if it is missing.
 
 </Accordion>
 

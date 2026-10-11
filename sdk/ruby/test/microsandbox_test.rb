@@ -221,18 +221,26 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal backend_kind, Microsandbox.default_backend_kind
   end
 
-  def test_http_deny_message_reaches_cloud_validation
+  def test_http_deny_messages_reach_cloud_validation
     script = <<~RUBY
       require "microsandbox"
       Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
       settings = Microsandbox::HttpBuilder.new
-      settings.deny_message("dormant")
+      settings.deny_message("legacy {host}").deny_response_format("json")
+      abort "legacy config lost" unless settings.message == "legacy {host}" && settings.format == "json"
+      settings.network_deny_message("dormant").secret_deny_message("secret")
+      abort "secret message lost" unless settings.secret_message == "secret"
       abort "message enabled responses" unless settings.response.nil?
       settings.deny_response(true).deny_response(false)
       abort "disable ignored" unless settings.response == false
       operations = [
-        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true }) },
-        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_message("blocked {host}") }.create }
+        -> {
+          builder = Microsandbox::Sandbox.builder("ruby-test").image("alpine")
+          builder.http!(true, "legacy {host}")
+          builder.create
+        },
+        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true, deny_response_format: "json", deny_message: "legacy", network_deny_message: "network", secret_deny_message: "secret" }) },
+        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_response_format("json").deny_message("legacy").network_deny_message("blocked {host}").secret_deny_message("secret") }.create }
       ]
       operations.each do |operation|
         begin
@@ -248,7 +256,7 @@ class MicrosandboxTest < Test::Unit::TestCase
     output = IO.popen([RbConfig.ruby, "-I", lib, "-e", script], &:read)
 
     assert_true $?.success?
-    assert_equal ["rejected", "rejected"], output.lines(chomp: true)
+    assert_equal ["rejected", "rejected", "rejected"], output.lines(chomp: true)
   end
 
   def test_with_is_available

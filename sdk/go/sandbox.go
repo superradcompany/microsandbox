@@ -121,10 +121,7 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 		opt(&o)
 	}
 
-	if err := resolveRegistryCACertPaths(&o); err != nil {
-		return nil, err
-	}
-	if err := validateOwnedMounts(o.Volumes); err != nil {
+	if err := prepareSandboxCreateConfig(&o); err != nil {
 		return nil, err
 	}
 
@@ -143,6 +140,17 @@ func createSandboxWithMode(ctx context.Context, name string, connectOrCreate boo
 	return &Sandbox{inner: inner}, nil
 }
 
+// prepareSandboxCreateConfig resolves host inputs and validates options before native creation.
+func prepareSandboxCreateConfig(config *SandboxConfig) error {
+	if err := resolveRegistryCACertPaths(config); err != nil {
+		return err
+	}
+	if err := validateOwnedMounts(config.Volumes); err != nil {
+		return err
+	}
+	return validateHTTPConfig(config.Network)
+}
+
 // resolveRegistryCACertPaths reads every PEM file named by
 // RegistryCACertPaths and appends its contents to RegistryCACerts. The option
 // functions only record paths, since they cannot report a read failure.
@@ -150,7 +158,7 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 	for _, path := range o.RegistryCACertPaths {
 		pem, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("microsandbox: reading registry CA certs %q: %w", path, err)
+			return &Error{Kind: ErrInvalidConfig, Message: fmt.Sprintf("microsandbox: reading registry CA certs %q", path), Cause: err}
 		}
 		o.RegistryCACerts = append(o.RegistryCACerts, pem)
 	}
@@ -410,6 +418,18 @@ func sandboxTouchResultFromFFI(result *ffi.SandboxTouchResult) *SandboxTouchResu
 	}
 }
 
+func validateHTTPConfig(network *NetworkConfig) error {
+	if network == nil || network.HTTP == nil {
+		return nil
+	}
+	switch network.HTTP.DenyResponseFormat {
+	case "", HTTPDenyResponseText, HTTPDenyResponseJSON:
+		return nil
+	default:
+		return &Error{Kind: ErrInvalidConfig, Message: "deny_response_format must be text or json"}
+	}
+}
+
 // buildFFINetwork converts a public NetworkConfig into its ffi counterpart.
 func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	out := &ffi.NetworkOptions{
@@ -432,7 +452,11 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 	}
 
 	if n.HTTP != nil {
-		out.HTTP = &ffi.HTTPConfig{DenyResponse: n.HTTP.DenyResponse, DenyMessage: n.HTTP.DenyMessage}
+		format := n.HTTP.DenyResponseFormat
+		if format == "" {
+			format = HTTPDenyResponseJSON
+		}
+		out.HTTP = &ffi.HTTPConfig{DenyResponseFormat: string(format), DenyMessage: n.HTTP.DenyMessage, DenyResponse: n.HTTP.DenyResponse, NetworkDenyMessage: n.HTTP.NetworkDenyMessage, SecretDenyMessage: n.HTTP.SecretDenyMessage}
 	}
 
 	strict := !n.DisableStrict

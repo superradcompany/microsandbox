@@ -990,7 +990,7 @@ struct NetworkOpts {
     secret_violation_action: Option<String>,
     /// Trust the host's extra CA certificates inside the guest.
     trust_host_cas: Option<bool>,
-    /// Body returned to HTTP/HTTPS clients when egress is denied.
+    /// HTTP denial response settings.
     http: Option<microsandbox_network::config::HttpConfig>,
 }
 
@@ -1557,12 +1557,22 @@ fn apply_network(
         builder = builder.network(move |n| n.trust_host_cas(trust));
     }
 
-    // Body returned to HTTP/HTTPS clients when egress is denied.
+    // HTTP denial response settings.
     if let Some(http) = net.http.as_ref() {
         builder = builder.network(|n| n.http(|h| h.deny_response(http.deny_response)));
+        builder =
+            builder.network(|n| n.http(|h| h.deny_response_format(http.deny_response_format)));
         if let Some(message) = http.deny_message.as_ref() {
             let message = message.clone();
             builder = builder.network(move |n| n.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = http.network_deny_message.as_ref() {
+            let message = message.clone();
+            builder = builder.network(move |n| n.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = http.secret_deny_message.as_ref() {
+            let message = message.clone();
+            builder = builder.network(move |n| n.http(|h| h.secret_deny_message(message)));
         }
     }
 

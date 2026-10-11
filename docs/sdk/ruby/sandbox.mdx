@@ -1416,16 +1416,16 @@ Create or reuse the configured sandbox, with the same behavior as `Microsandbox:
 #### <span className="msb-recv">builder.</span><span className="msb-hn">http()</span>
 
 ```ruby
-builder.http { |h| h.deny_response(true).deny_message(message) } # => SandboxBuilder
+builder.http { |h| h.deny_response(true).deny_response_format("json").network_deny_message(message) } # => SandboxBuilder
 ```
 
-Denial responses are disabled by default. Call `h.deny_response(true)` to enable readable `403` responses. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it. See [HTTP denial responses](/networking/overview#what-a-denied-http-request-sees) for which requests receive a response.
+Local denial responses default to JSON `403` errors. Call `h.deny_response(false)` to disable them. `network_deny_message` and `secret_deny_message` customize the respective messages. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 <Accordion title="Example">
 ```ruby
 builder = Microsandbox::Sandbox.builder("agent")
   .image("python")
-  .http { |h| h.deny_response(true).deny_message("{host} is blocked. Ask the user to allow it.") }
+  .http { |h| h.deny_response(true).deny_response_format("json").network_deny_message("Request blocked. Ask the user for access.") }
 ```
 
 The same option is available when creating a sandbox:
@@ -1435,7 +1435,7 @@ Microsandbox::Sandbox.create(
   "agent",
   image: "python",
   network: { allowed_hosts: ["example.com"], allowed_ports: [80, 443] },
-  http: { deny_response: true, deny_message: "{host} is blocked. Ask the user to allow it." }
+  http: { deny_response: true, deny_response_format: "json", network_deny_message: "Request blocked. Ask the user for access." }
 )
 ```
 </Accordion>

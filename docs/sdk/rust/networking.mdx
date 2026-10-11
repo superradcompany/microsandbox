@@ -835,11 +835,11 @@ Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
 <Accordion title="Example">
 
 ```rust
-use microsandbox::Sandbox;
+use microsandbox::{Sandbox, sandbox::HttpDenyResponseFormat};
 
 let sb = Sandbox::builder("agent")
     .image("python")
-    .network(|n| n.http(|h| h.deny_response(true).deny_message("Blocked: {host}")))
+    .network(|n| n.http(|h| h.deny_response(true).deny_response_format(HttpDenyResponseFormat::Json).network_deny_message("Request blocked.")))
     .create()
     .await?;
 ```
@@ -1178,7 +1178,7 @@ Whether the proxy verifies upstream server certificates only when the upstream S
 fn new() -> Self
 ```
 
-Create HTTP settings with denial responses disabled. [`network.http()`](#network-http) supplies this builder automatically.
+Create HTTP settings with JSON denial responses enabled. [`network.http()`](#network-http) supplies this builder automatically.
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">deny_response()</span>
 
@@ -1188,7 +1188,15 @@ Create HTTP settings with denial responses disabled. [`network.http()`](#network
 fn deny_response(self, enabled: bool) -> Self
 ```
 
-Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS requires TLS interception. Enabling this requires a supporting local runtime; older runtimes and cloud reject it. See [denied HTTP requests](/networking/overview#what-a-denied-http-request-sees) for supported requests and examples.
+Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_response_format()</span>
+
+```rust
+fn deny_response_format(self, format: HttpDenyResponseFormat) -> Self
+```
+
+Choose `HttpDenyResponseFormat::Text` or `Json` (default). JSON mode requires a supporting runtime.
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">deny_message()</span>
 
@@ -1196,7 +1204,23 @@ Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS req
 fn deny_message(self, message: impl Into<String>) -> Self
 ```
 
-Set the response body, replacing `{host}` with the blocked hostname. Omission uses the built-in message; an empty string sends no body. Requires `deny_response(true)`.
+Deprecated legacy text message with `{host}` substitution. Ignored in JSON mode; use `network_deny_message` there.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">network_deny_message()</span>
+
+```rust
+fn network_deny_message(self, message: impl Into<String>) -> Self
+```
+
+Set the network-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `deny_response(true)` and JSON mode.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">secret_deny_message()</span>
+
+```rust
+fn secret_deny_message(self, message: impl Into<String>) -> Self
+```
+
+Set the secret-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `deny_response(true)` and JSON mode.
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">build()</span>
 
@@ -1205,7 +1229,10 @@ fn build(self) -> HttpConfig
 
 pub struct HttpConfig {
     pub deny_response: bool,
+    pub deny_response_format: HttpDenyResponseFormat,
     pub deny_message: Option<String>,
+    pub network_deny_message: Option<String>,
+    pub secret_deny_message: Option<String>,
 }
 ```
 

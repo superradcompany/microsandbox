@@ -576,20 +576,47 @@ pub enum Patch {
 // Types: Networking
 //--------------------------------------------------------------------------------------------------
 
-/// HTTP responses returned when network policy denies a request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ConfigPatch)]
+/// Wire format of HTTP denial responses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpDenyResponseFormat {
+    /// Legacy plain-text network denials with host substitution.
+    Text,
+
+    /// JSON network and secret denials with literal messages.
+    #[default]
+    Json,
+}
+
+/// HTTP responses returned for network and secret policy denials.
+#[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]
 pub struct HttpConfig {
-    /// Return readable HTTP 403 responses for supported denied requests. Default: false.
+    /// Return readable HTTP 403 responses for supported denied requests. Default: true.
     pub deny_response: bool,
 
-    /// Denial response body. `{host}` names the blocked host.
-    /// Used only when `deny_response` is enabled. Omission uses the default;
-    /// an empty string produces an empty body.
+    /// Omission uses the runtime default: JSON.
+    pub deny_response_format: HttpDenyResponseFormat,
+
+    /// Legacy plain-text message with `{host}` substitution. Deprecated: use JSON mode
+    /// and `network_deny_message` for new integrations. Ignored in JSON mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deny_message: Option<String>,
+
+    /// Network-denial JSON `message`. Used as-is.
+    /// Used only when `deny_response` is enabled in JSON mode. Omission uses the default;
+    /// an empty string preserves the error code with an empty `message`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_deny_message: Option<String>,
+
+    /// Secret-denial JSON `message`. Used as-is when `deny_response` is enabled in JSON mode.
+    /// Omission uses the default; an empty string leaves `message` empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_deny_message: Option<String>,
 }
 
 /// Complete network specification for a sandbox.
@@ -667,6 +694,7 @@ pub struct NetworkSpec {
 
     /// HTTP denial response settings.
     #[config_patch(nested)]
+    #[serde(default)]
     pub http: HttpConfig,
 
     /// Proxy used for outbound sandbox connections and supported datagram flows.
@@ -1901,6 +1929,18 @@ impl Default for SandboxRuntimeOptions {
             metrics_sample_interval_ms: Some(DEFAULT_METRICS_SAMPLE_INTERVAL_MS),
             disable_metrics_sample: false,
             guest_clock: None,
+        }
+    }
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            deny_response: true,
+            deny_response_format: HttpDenyResponseFormat::Json,
+            deny_message: None,
+            network_deny_message: None,
+            secret_deny_message: None,
         }
     }
 }

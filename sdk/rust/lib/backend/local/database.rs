@@ -610,7 +610,7 @@ mod tests {
                 // request that the selected previous runtime cannot honor.
                 let rejected = crate::Sandbox::builder("catalog-unsupported")
                     .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
-                    .network(|network| network.max_udp_connections(0))
+                    .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false)))
                     .create().await;
                 let error = match rejected {
                     Ok(unexpected) => {
@@ -631,7 +631,12 @@ mod tests {
             for count in [0, 1, 3] {
                 let name = format!("catalog-mounts-{count}");
                 let started = std::time::Instant::now();
+                // Keep catalog compatibility independent of newer HTTP denial support.
                 let mut builder = crate::Sandbox::builder(&name).image("alpine:3.21").cpus(1).memory(256u32).max_duration(120);
+                #[cfg(feature = "net")]
+                {
+                    builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+                }
                 for index in 0..count {
                     builder = builder.volume(format!("/catalog-{index}"), |mount| mount.tmpfs().size(16u32));
                 }
@@ -640,7 +645,7 @@ mod tests {
                     #[cfg(feature = "net")]
                     {
                         let error = crate::Sandbox::builder(&name).image("alpine:3.21")
-                            .network(|network| network.max_udp_connections(0)).replace()
+                            .network(|network| network.max_udp_connections(0).http(|http| http.deny_response(false))).replace()
                             .create().await.err().expect("unsupported replacement must fail");
                         assert!(error.to_string().contains("UDP connection limits"), "{error}");
                     }
@@ -683,10 +688,12 @@ mod tests {
             }
             let host_file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(host_file.path(), b"file-mount-compatible").unwrap();
-            let result = crate::Sandbox::builder("catalog-file-mount")
+            let builder = crate::Sandbox::builder("catalog-file-mount")
                 .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
-                .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly())
-                .create().await;
+                .volume("/compat-file", |mount| mount.bind(host_file.path()).readonly());
+            #[cfg(feature = "net")]
+            let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
+            let result = builder.create().await;
             if expected < 16 {
                 let error = result.err().expect("old runtime must reject isolated file mounts");
                 assert!(error.to_string().contains("file mounts"), "{error}");

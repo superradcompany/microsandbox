@@ -434,31 +434,34 @@ async fn https_connect_proxy_blocks_secret_for_wrong_host() {
 
     let out = sb
         .shell(format!(
-            r#"set +e
-curl -k --http1.1 -m 10 -sS -o /dev/null \
-  -w 'code=%{{http_code}}' \
+            r#"curl -k --http1.1 -m 10 -sS -o /tmp/denial \
+  -w '%{{http_code}}\n' \
   -H "Authorization: Bearer $API_KEY" \
   --proxytunnel \
   --proxy http://host.microsandbox.internal:{proxy_port} \
-  https://host.microsandbox.internal:{target_port}/api
-echo "status=$?"
+  https://host.microsandbox.internal:{target_port}/api && cat /tmp/denial
 "#
         ))
         .await
         .expect("curl wrong host");
 
     let stdout = out.stdout().unwrap_or_default();
-    if stdout.trim_end().ends_with("status=0") {
-        let auth =
-            tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;
-        let auth_val = match auth {
-            Ok(Ok(a)) => a,
-            _ => String::new(),
-        };
-        panic!(
-            "expected curl to fail when secret host does not match tunnel target; got: {stdout:?}; target auth: {auth_val:?}"
-        );
-    }
+    let (code, body) = stdout.split_once('\n').expect("HTTP status and body");
+    assert_eq!(
+        code,
+        "403",
+        "stdout: {stdout}, stderr: {}",
+        out.stderr().unwrap_or_default()
+    );
+    let error: serde_json::Value = serde_json::from_str(body).expect("complete JSON body");
+    assert_eq!(
+        error,
+        serde_json::json!({
+            "code": "secret_policy_denied",
+            "message": "Request blocked by secret policy.",
+            "domain": "host.microsandbox.internal"
+        })
+    );
 
     let auth =
         tokio::time::timeout(std::time::Duration::from_secs(5), target.received_auth()).await;

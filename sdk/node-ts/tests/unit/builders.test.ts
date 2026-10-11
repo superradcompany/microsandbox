@@ -1012,20 +1012,28 @@ describe("Published TCP configuration", () => {
 });
 
 describe("NetworkBuilder HTTP denial messages", () => {
-  it("requires an explicit opt-in and preserves settings across callbacks", () => {
-    expect(new NetworkBuilder().build().http.denyResponse).toBe(false);
-    expect(new NetworkBuilder().http((h) => h.denyMessage("custom")).build().http.denyResponse).toBe(false);
+  it("defaults to JSON and preserves explicit opt-outs across callbacks", () => {
+    expect(new NetworkBuilder().build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("custom")).build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h.denyMessage("blocked {host}")).build().http)
+      .toEqual({ denyResponse: true, denyResponseFormat: "json", denyMessage: "blocked {host}" });
+    expect(new NetworkBuilder().http((h) => h.denyResponseFormat("json")).build().http.denyResponseFormat).toBe("json");
+    expect(() => new NetworkBuilder().http((h) => h.denyResponseFormat("xml" as "json"))).toThrow();
+    expect(new NetworkBuilder().http((h) => h.denyResponseFormat("text")).build().http.denyResponseFormat).toBe("text");
     const builder = new NetworkBuilder().http((h) => h.denyResponse(true));
-    expect(builder.build().http).toEqual({ denyResponse: true });
-    builder.http((h) => h.denyMessage("keep"));
-    expect(builder.build().http).toEqual({ denyResponse: true, denyMessage: "keep" });
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: true });
+    builder.http((h) => h.networkDenyMessage("keep"));
+    builder.http((h) => h.secretDenyMessage("secret {host}"));
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: true, networkDenyMessage: "keep", secretDenyMessage: "secret {host}" });
     builder.http((h) => h.denyResponse(false));
-    expect(builder.build().http).toEqual({ denyResponse: false, denyMessage: "keep" });
-    expect(new NetworkBuilder().http((h) => h.denyMessage("blocked {host}")).build().http.denyMessage)
+    expect(builder.build().http).toEqual({ denyResponseFormat: "json", denyResponse: false, networkDenyMessage: "keep", secretDenyMessage: "secret {host}" });
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("blocked {host}")).build().http.networkDenyMessage)
       .toBe("blocked {host}");
-    expect(new NetworkBuilder().http((h) => h.denyMessage("")).build().http.denyMessage).toBe("");
-    expect(new NetworkBuilder().http((h) => h).build().http.denyMessage).toBeUndefined();
-    expect(new NetworkBuilder().http((h) => h.denyMessage("keep")).http((h) => h).build().http.denyMessage).toBe("keep");
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("")).build().http.networkDenyMessage).toBe("");
+    expect(new NetworkBuilder().http((h) => h.secretDenyMessage("")).build().http.secretDenyMessage).toBe("");
+    expect(new NetworkBuilder().http((h) => h.secretDenyMessage("secret")).build().http.denyResponse).toBe(true);
+    expect(new NetworkBuilder().http((h) => h).build().http.networkDenyMessage).toBeUndefined();
+    expect(new NetworkBuilder().http((h) => h.networkDenyMessage("keep")).http((h) => h).build().http.networkDenyMessage).toBe("keep");
   });
 });
 

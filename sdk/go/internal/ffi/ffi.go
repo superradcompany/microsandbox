@@ -1852,8 +1852,11 @@ type MountSpec struct {
 
 // HTTPConfig carries HTTP denial settings to the native SDK.
 type HTTPConfig struct {
-	DenyResponse bool   `json:"deny_response"`
-	DenyMessage  string `json:"deny_message,omitempty"`
+	DenyResponseFormat string `json:"deny_response_format,omitempty"`
+	DenyMessage        string `json:"deny_message,omitempty"`
+	DenyResponse       bool   `json:"deny_response"`
+	NetworkDenyMessage string `json:"network_deny_message,omitempty"`
+	SecretDenyMessage  string `json:"secret_deny_message,omitempty"`
 }
 
 // NetworkOptions is the JSON representation of the network config block.

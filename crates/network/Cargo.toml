@@ -33,6 +33,7 @@ engine = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:rustls-pki-types",
+    "dep:serde_json",
     "dep:socket2",
     "dep:smoltcp",
     "dep:system-configuration",
@@ -72,6 +73,7 @@ rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 rustls-pki-types = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 # Used for the `SO_LINGER(0)` (RST-on-drop) trick on rejected inbound
 # connections in `publisher.rs`. tokio's `TcpStream::set_linger` is
 # deprecated; `socket2::SockRef::from(&stream)` is the supported path.

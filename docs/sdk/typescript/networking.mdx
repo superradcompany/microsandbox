@@ -590,7 +590,7 @@ Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
 import { NetworkBuilder } from "microsandbox";
 
 const network = new NetworkBuilder()
-    .http((h) => h.denyResponse(true).denyMessage("Blocked: {host}"))
+    .http((h) => h.denyResponse(true).denyResponseFormat("json").networkDenyMessage("Request blocked."))
     .build();
 ```
 
@@ -1768,7 +1768,7 @@ Path to a PEM file with extra root CAs the proxy should trust only when the upst
 new HttpBuilder()
 ```
 
-Create HTTP settings with denial responses disabled. [`network.http()`](#network-http) supplies this builder automatically.
+Create HTTP settings with JSON denial responses enabled. [`network.http()`](#network-http) supplies this builder automatically.
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">denyResponse()</span>
 
@@ -1778,7 +1778,15 @@ Create HTTP settings with denial responses disabled. [`network.http()`](#network
 denyResponse(enabled: boolean): this
 ```
 
-Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS requires TLS interception. Enabling this requires a supporting local runtime; older runtimes and cloud reject it. See [denied HTTP requests](/networking/overview#what-a-denied-http-request-sees) for supported requests and examples.
+Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">denyResponseFormat()</span>
+
+```typescript
+denyResponseFormat(format: "text" | "json"): this
+```
+
+Choose `text` or `json` (default). JSON mode requires a supporting runtime.
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">denyMessage()</span>
 
@@ -1786,7 +1794,23 @@ Return `403 Forbidden` for denied HTTP/1.x requests. Default: `false`. HTTPS req
 denyMessage(message: string): this
 ```
 
-Set the response body, replacing `{host}` with the blocked hostname. Omission uses the built-in message; an empty string sends no body. Requires `denyResponse(true)`.
+Deprecated legacy text message with `{host}` substitution. Ignored in JSON mode; use `networkDenyMessage` there.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">networkDenyMessage()</span>
+
+```typescript
+networkDenyMessage(message: string): this
+```
+
+Set the network-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `denyResponse(true)` and JSON mode.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">secretDenyMessage()</span>
+
+```typescript
+secretDenyMessage(message: string): this
+```
+
+Set the secret-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `denyResponse(true)` and JSON mode.
 
 ## NetworkRateLimiterBuilder
 
@@ -1927,7 +1951,7 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | nat64Prefixes | `readonly string[]` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
-| http | `{ denyResponse: boolean; denyMessage?: string \| null }` | `denyResponse` defaults to `false`; when enabled, an omitted or `null` message uses the built-in body |
+| http | `{ denyResponse: boolean; denyResponseFormat: "text" \| "json"; denyMessage?: string \| null; networkDenyMessage?: string \| null; secretDenyMessage?: string \| null }` | `denyResponse` defaults to `true` and the format to `json`; when enabled, an omitted or `null` message uses the built-in message |
 
 ### NetworkProfile
 

@@ -18,6 +18,8 @@ use std::{
 use microsandbox_network::policy::{Action, Destination, Direction};
 use microsandbox_protocol::bootstrap::*;
 use microsandbox_runtime::launch::{LaunchCapabilities, LaunchConfig};
+#[cfg(feature = "net")]
+use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types::compat as types_compat;
 use microsandbox_types::{
     CpuPlacement, RootDisk, RootfsSource, TransparentHugePagePolicy, VolumeMount,
@@ -653,14 +655,19 @@ pub(crate) async fn validate_http_deny_response(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    if !config.spec.network.http.deny_response {
+    if !config.spec.network.enabled || !config.spec.network.http.deny_response {
         return Ok(());
     }
     let supported = bounded_probe(path, "__launch-protocol")
         .await
         .ok()
         .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| capabilities.http_deny_message);
+        .is_some_and(
+            |capabilities| match config.spec.network.http.deny_response_format {
+                HttpDenyResponseFormat::Text => capabilities.http_deny_message,
+                HttpDenyResponseFormat::Json => capabilities.http_deny_json,
+            },
+        );
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -1119,24 +1126,46 @@ mod tests {
             "../db/fixtures/config-0.6.18.json"
         ))
         .unwrap();
+        // A disabled network needs no response capability, even with the new defaults.
+        config.spec.network.enabled = false;
+        config.spec.network.http = Default::default();
+        validate_http_deny_response(&dir.path().join("no-probe"), &config)
+            .await
+            .unwrap();
+        config.spec.network.enabled = true;
+        config.spec.network.http.deny_response = false;
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Text;
         // Disabled responses must avoid probing, including on an old runtime.
         validate_http_deny_response(&dir.path().join("no-probe"), &config)
             .await
             .unwrap();
-        config.spec.network.http.deny_message = Some("dormant custom message".into());
+        config.spec.network.http.network_deny_message = Some("dormant custom message".into());
+        config.spec.network.http.secret_deny_message = Some("dormant secret message".into());
         validate_http_deny_response(&dir.path().join("no-probe"), &config)
             .await
             .unwrap();
         config.spec.network.http.deny_response = true;
+        let legacy = script(
+            dir.path(),
+            "legacy-denial",
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+        );
+        // New SDKs retain the old runtime contract in text mode.
+        config.spec.network.http.deny_message = Some("blocked {host}".into());
+        validate_http_deny_response(&legacy, &config).await.unwrap();
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Json;
         for response in [
             "exit 1",
             r#"printf '%s' '{"protocols":[2,1]}'"#,
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":false}'"#,
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":"true"}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":"true"}'"#,
         ] {
             let path = script(dir.path(), "unsupported-denial", response);
             for message in [None, Some(""), Some("blocked {host}")] {
-                config.spec.network.http.deny_message = message.map(str::to_owned);
+                config.spec.network.http.network_deny_message = message.map(str::to_owned);
                 let error = validate_http_deny_response(&path, &config)
                     .await
                     .unwrap_err();
@@ -1147,8 +1176,11 @@ mod tests {
         let path = script(
             dir.path(),
             "supports-denial",
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true,"http_deny_json":true}'"#,
         );
+        validate_http_deny_response(&path, &config).await.unwrap();
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Text;
         validate_http_deny_response(&path, &config).await.unwrap();
     }
 
@@ -1170,7 +1202,7 @@ mod tests {
         config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off);
         for response in [
             "exit 1",
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":true}'"#,
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":false}'"#,
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":"true"}'"#,
         ] {

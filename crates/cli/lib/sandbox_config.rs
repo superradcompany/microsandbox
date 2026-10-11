@@ -17,6 +17,7 @@ use microsandbox::sandbox::{
     SecretsConfigPatch, TlsConfigPatch,
 };
 use microsandbox_image::RegistryAuth;
+use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types_macros::ConfigPatch;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -413,7 +414,10 @@ struct NetworkConfigInput {
 #[serde(default, deny_unknown_fields)]
 struct HttpInput {
     deny_response: Option<bool>,
+    deny_response_format: Option<HttpDenyResponseFormat>,
     deny_message: Option<String>,
+    network_deny_message: Option<String>,
+    secret_deny_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, ConfigPatch)]
@@ -1767,8 +1771,17 @@ fn materialize_network_patch(
         if let Some(enabled) = http.deny_response {
             value = value.deny_response(enabled);
         }
+        if let Some(format) = http.deny_response_format {
+            value = value.deny_response_format(format);
+        }
         if let Some(message) = http.deny_message {
             value = value.deny_message(message);
+        }
+        if let Some(message) = http.network_deny_message {
+            value = value.network_deny_message(message);
+        }
+        if let Some(message) = http.secret_deny_message {
+            value = value.secret_deny_message(message);
         }
         patch = patch.http(value);
     }
@@ -2745,7 +2758,10 @@ network:
   max_tcp_connections: 64
   http:
     deny_response: true
-    deny_message: "Blocked: {host}"
+    deny_response_format: json
+    deny_message: "legacy {host}"
+    network_deny_message: "Blocked: {host}"
+    secret_deny_message: "Check secret access."
 secrets:
   TOKEN:
     value: "literal-test-value"
@@ -2780,8 +2796,20 @@ secrets:
         assert_eq!(config.spec.network.max_tcp_connections, Some(64));
         assert!(config.spec.network.http.deny_response);
         assert_eq!(
+            config.spec.network.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        assert_eq!(
             config.spec.network.http.deny_message.as_deref(),
+            Some("legacy {host}")
+        );
+        assert_eq!(
+            config.spec.network.http.network_deny_message.as_deref(),
             Some("Blocked: {host}")
+        );
+        assert_eq!(
+            config.spec.network.http.secret_deny_message.as_deref(),
+            Some("Check secret access.")
         );
         assert!(config.spec.network.strict);
         assert_eq!(config.spec.network.ports.len(), 0);

@@ -19,7 +19,10 @@ pub use microsandbox_utils::wake_pipe::WakePipe;
 use parking_lot::RwLock;
 
 use crate::addr::normalize_ip_addr;
-use crate::engine::http_deny::{self, DEFAULT_HTTP_DENY_MESSAGE};
+use crate::engine::http_deny::{
+    DEFAULT_HTTP_DENY_MESSAGE, http_forbidden_response, json_http_forbidden_response,
+    render_http_deny_message,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -173,14 +176,44 @@ impl SharedState {
         self.http.get().is_some_and(|http| http.deny_response)
     }
 
-    /// Render the HTTP/HTTPS deny body for `host`.
-    pub fn http_deny_body(&self, host: &str) -> String {
-        let template = self
-            .http
+    /// Whether JSON secret denials were explicitly enabled.
+    pub fn secret_deny_response_enabled(&self) -> bool {
+        self.http.get().is_some_and(|http| {
+            http.deny_response
+                && http.deny_response_format == microsandbox_types::HttpDenyResponseFormat::Json
+        })
+    }
+
+    /// Build a network denial using the selected wire contract.
+    pub fn network_denial_response(&self, host: &str) -> Vec<u8> {
+        if self.http.get().is_some_and(|http| {
+            http.deny_response_format == microsandbox_types::HttpDenyResponseFormat::Json
+        }) {
+            json_http_forbidden_response(self.network_deny_message(), host)
+        } else {
+            let template = self
+                .http
+                .get()
+                .and_then(|http| http.deny_message.as_deref())
+                .unwrap_or(DEFAULT_HTTP_DENY_MESSAGE);
+            http_forbidden_response(&render_http_deny_message(template, host))
+        }
+    }
+
+    /// Return the configured network-denial message without interpolation.
+    pub fn network_deny_message(&self) -> &str {
+        self.http
             .get()
-            .and_then(|http| http.deny_message.as_deref())
-            .unwrap_or(DEFAULT_HTTP_DENY_MESSAGE);
-        http_deny::render_http_deny_message(template, host)
+            .and_then(|http| http.network_deny_message.as_deref())
+            .unwrap_or(crate::engine::http_deny::NETWORK_JSON_DENY_MESSAGE)
+    }
+
+    /// Return the configured secret-denial message without interpolation.
+    pub fn secret_deny_message(&self) -> &str {
+        self.http
+            .get()
+            .and_then(|http| http.secret_deny_message.as_deref())
+            .unwrap_or(crate::engine::http_deny::SECRET_HTTP_DENY_MESSAGE)
     }
 
     /// Set NAT64 prefixes. Called once before policy evaluation starts.
@@ -348,6 +381,46 @@ pub(crate) fn normalize_hostname(domain: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_text_format_preserves_legacy_body_and_host_substitution() {
+        for (raw, host, expected) in [
+            (
+                r#"{"deny_response":true,"deny_response_format":"text"}"#,
+                "example.com",
+                "This host is not allowed by the sandbox network policy config.\n\n\
+                Note to agent: `example.com` is not in the allowed-host list. Ask the \
+                user to add it to the sandbox network allow list.\n",
+            ),
+            (
+                r#"{"deny_response":true,"deny_response_format":"text","deny_message":"blocked {host}"}"#,
+                "example.com",
+                "blocked example.com",
+            ),
+            (
+                r#"{"deny_response":true,"deny_response_format":"text","deny_message":""}"#,
+                "example.com",
+                "",
+            ),
+            (
+                r#"{"deny_response_format":"text","deny_message":"blocked {host}"}"#,
+                "  ",
+                "blocked this host",
+            ),
+        ] {
+            let state = SharedState::new(8);
+            state.set_http_config(serde_json::from_str(raw).unwrap());
+            assert!(state.http_deny_response_enabled());
+            assert!(!state.secret_deny_response_enabled());
+            let response = state.network_denial_response(host);
+            let response = std::str::from_utf8(&response).unwrap();
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+            assert!(headers.contains("Content-Type: text/plain; charset=utf-8\r\n"));
+            assert!(headers.contains(&format!("Content-Length: {}", expected.len())));
+            assert_eq!(body, expected);
+        }
+    }
 
     #[test]
     fn shared_state_queue_push_pop() {

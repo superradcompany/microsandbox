@@ -15,6 +15,7 @@ use percent_encoding::percent_decode;
 
 use super::config::SecretsConfigExt;
 use super::hpack::check_header_block;
+use crate::engine::http_deny::{classify_http_request, secret_http_forbidden_response};
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::secrets::config::{
@@ -117,6 +118,12 @@ pub struct SecretsHandler {
     unsupported_body_tail: Vec<u8>,
     /// HTTP/2 parser/rewriter state once an HTTP/2 preface is observed.
     http2_state: Option<Http2State>,
+    /// Saturating count used to avoid answering the wrong pipelined request.
+    http1_requests: u8,
+    /// Whether the first request can receive a normal HTTP/1 response body.
+    http1_response_allowed: bool,
+    /// Set only by an actual HTTP/1 placeholder violation, not parse failures.
+    http1_violation: bool,
 }
 
 /// HTTP request framing state for the guest→server byte stream.
@@ -734,6 +741,9 @@ impl SecretsHandler {
             http_pending: Vec::new(),
             unsupported_body_tail: Vec::new(),
             http2_state: None,
+            http1_requests: 0,
+            http1_response_allowed: false,
+            http1_violation: false,
         }
     }
 
@@ -831,14 +841,14 @@ impl SecretsHandler {
                     || !looks_like_http_request_prefix(&self.http_pending)
                 {
                     let pending = std::mem::take(&mut self.http_pending);
-                    let output = self.substitute_ready(&pending)?.into_owned();
+                    let output = self.substitute_headers(&pending)?.into_owned();
                     return Ok(Cow::Owned(output));
                 }
                 return Ok(Cow::Owned(Vec::new()));
             }
 
             let pending = std::mem::take(&mut self.http_pending);
-            let output = self.substitute_ready(&pending)?.into_owned();
+            let output = self.substitute_headers(&pending)?.into_owned();
             return Ok(Cow::Owned(output));
         }
 
@@ -857,7 +867,14 @@ impl SecretsHandler {
             return Ok(Cow::Owned(Vec::new()));
         }
 
-        self.substitute_ready(data)
+        self.substitute_headers(data)
+    }
+
+    /// Build a secret-policy denial only for the first recognized HTTP/1 request.
+    /// The relay must also ensure no upstream response has reached the guest.
+    pub(crate) fn http1_violation_response(&self, message: &str) -> Option<Vec<u8>> {
+        (self.http1_response_allowed && self.http1_violation)
+            .then(|| secret_http_forbidden_response(message, &self.sni))
     }
 
     fn scan_opaque<'a>(&mut self, data: &'a [u8]) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
@@ -926,6 +943,16 @@ impl SecretsHandler {
         let output = state.process(self, data)?;
         self.http2_state = Some(state);
         Ok(Cow::Owned(output))
+    }
+
+    fn substitute_headers<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> Result<Cow<'a, [u8]>, SecretViolationAction> {
+        self.http1_requests = self.http1_requests.saturating_add(1);
+        self.http1_response_allowed =
+            self.http1_requests == 1 && classify_http_request(data) == Some(true);
+        self.substitute_ready(data)
     }
 
     fn substitute_ready<'a>(
@@ -1500,7 +1527,7 @@ impl SecretsHandler {
     }
 
     fn consume_chunked_body_with_violation_detection(
-        &self,
+        &mut self,
         state: &mut ChunkedBodyState,
         data: &[u8],
     ) -> Result<Option<usize>, SecretViolationAction> {
@@ -1536,7 +1563,7 @@ impl SecretsHandler {
     }
 
     fn rewrite_chunked_body_part(
-        &self,
+        &mut self,
         state: &mut ChunkedRewriteState,
         data: &[u8],
     ) -> Result<ChunkedRewriteResult, SecretViolationAction> {
@@ -1642,13 +1669,17 @@ impl SecretsHandler {
     }
 
     fn apply_blocking_action(
-        &self,
+        &mut self,
         report: Option<SecretViolationReport>,
     ) -> Result<(), SecretViolationAction> {
         let Some(report) = report else {
             return Ok(());
         };
+
         let action = report.action;
+        self.http1_violation = matches!(report.protocol, RequestProtocol::Http1)
+            && matches!(report.method.as_deref(), Some(method) if method != "HEAD" && method != "CONNECT");
+
         self.log_violation(&report);
         Err(action.into_violation_action())
     }
@@ -1754,7 +1785,7 @@ impl SecretsHandler {
     /// retain encoded Basic-auth detection; the explicit location keeps it
     /// outside the ordinary substitutable header section.
     fn apply_chunked_metadata_policy(
-        &self,
+        &mut self,
         line: &[u8],
         location: RequestLocation,
     ) -> Result<(), SecretViolationAction> {
@@ -2467,7 +2498,7 @@ fn request_summary(headers: &str, protocol: RequestProtocol) -> RequestSummary {
 }
 
 fn http1_request_summary(headers: &str) -> RequestSummary {
-    let mut lines = headers.split("\r\n");
+    let mut lines = headers.split("\r\n").skip_while(|line| line.is_empty());
     let Some(request_line) = lines.next() else {
         return RequestSummary::default();
     };

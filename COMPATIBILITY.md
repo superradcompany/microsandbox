@@ -372,6 +372,8 @@ Strict hostname policy is enabled by default. The v0.6.0–v0.6.17 launch gate r
 
 Observable network behavior is an effective compatibility contract. It includes default MTU, sandbox-slot address derivation, IPv4 subnet sizing, guest and gateway offsets, IPv6 prefixes, deterministic MAC addresses, interface name `eth0`, `host.microsandbox.internal`, DNS UDP and TCP behavior, DNS-over-TLS, TLS interception and trust paths, published-port binding, TCP half-close, UDP peer lifetime, destination policy, and host-side secret placeholder substitution.
 
+Omitted HTTP denial settings now default to enabled + JSON, including in older payloads and saved configs. Denied requests may return `403` instead of a connection error; callers must check status. Set `deny_response: false` for silent closure or `deny_response_format: text` for legacy bodies and `{host}` substitution. JSON requires the `http_deny_json` runtime capability. Cloud behavior is unchanged. See [denial responses](docs/networking/overview.mdx#what-a-denied-http-request-sees) for message settings and protocol limits.
+
 Network idle sleep is bounded by the existing one-second cleanup deadline and any earlier stack or deferred-close deadline, with packet and proxy events still waking it immediately.
 
 Sources: [`crates/network/lib/lib.rs`](crates/network/lib/lib.rs), [`crates/network/lib/engine/network.rs`](crates/network/lib/engine/network.rs), and the remaining modules under [`crates/network/lib`](crates/network/lib).

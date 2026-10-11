@@ -353,9 +353,21 @@ impl JsNetworkBuilder {
             let prev = self.take_inner();
             self.inner = Some(prev.http(|h| h.deny_response(enabled)));
         }
+        if let Some(format) = returned.format {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.deny_response_format(format)));
+        }
         if let Some(message) = returned.message.clone() {
             let prev = self.take_inner();
             self.inner = Some(prev.http(|h| h.deny_message(message)));
+        }
+        if let Some(message) = returned.network_message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.network_deny_message(message)));
+        }
+        if let Some(message) = returned.secret_message.clone() {
+            let prev = self.take_inner();
+            self.inner = Some(prev.http(|h| h.secret_deny_message(message)));
         }
         Ok(self)
     }
