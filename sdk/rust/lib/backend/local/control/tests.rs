@@ -47,6 +47,7 @@ async fn database_identity_detects_replacement_but_not_ordinary_writes() {
 #[cfg(unix)]
 mod unix {
     use futures::FutureExt;
+    use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -216,10 +217,7 @@ mod unix {
         .insert(pools.write())
         .await
         .unwrap();
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(
-            &backend.config().run_dir(),
-            "control-fixture",
-        );
+        let paths = RuntimeSocketPaths::new(&backend.config().run_dir(), "control-fixture");
         let endpoint = if legacy {
             paths.legacy_control.clone()
         } else {
