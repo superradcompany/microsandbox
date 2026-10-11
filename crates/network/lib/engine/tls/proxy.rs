@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use super::sni;
 use super::state::TlsState;
-use crate::engine::http_deny::{classify_http_request, http_forbidden_response};
+use crate::engine::http_deny::classify_http_request;
 use crate::netstack::shared::SharedState;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::proxy::ResolvedOutboundProxy;
@@ -350,10 +350,9 @@ pub(crate) async fn serve_tls_deny(
         return Ok(());
     }
 
-    let body = shared.http_deny_body(sni_name);
     guest_tls
         .writer()
-        .write_all(&http_forbidden_response(&body))
+        .write_all(&shared.network_denial_response(sni_name))
         .map_err(io::Error::other)?;
     guest_tls.send_close_notify();
     flush_to_guest(&mut guest_tls, to_smoltcp, shared, &mut tls_buf).await
@@ -536,15 +535,21 @@ pub(crate) async fn intercept_relay(
     // In TLS 1.3, the client sends Finished + application data in the same
     // flight, so process_new_packets() during the handshake loop may have
     // already decrypted the first HTTP request into the plaintext buffer.
-    forward_plaintext(
+    if let Err(error) = forward_plaintext(
         &mut guest_tls,
         &mut server_tls,
         &mut secrets_handler,
         &shared,
         &mut plaintext_buf,
+        false,
     )
-    .await?;
+    .await
+    {
+        flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
+        return Err(error);
+    }
 
+    let mut upstream_response_started = false;
     let mut guest_eof = false;
     loop {
         tokio::select! {
@@ -574,14 +579,19 @@ pub(crate) async fn intercept_relay(
                     guest_tls
                         .process_new_packets()
                         .map_err(io::Error::other)?;
-                    forward_plaintext(
+                    if let Err(error) = forward_plaintext(
                         &mut guest_tls,
                         &mut server_tls,
                         &mut secrets_handler,
                         &shared,
                         &mut plaintext_buf,
+                        upstream_response_started,
                     )
-                    .await?;
+                    .await
+                    {
+                        flush_to_guest(&mut guest_tls, &to_smoltcp, &shared, &mut tls_buf).await?;
+                        return Err(error);
+                    }
                 }
             }
 
@@ -590,6 +600,7 @@ pub(crate) async fn intercept_relay(
                 match result {
                     Ok(0) => break,
                     Ok(n) => {
+                        upstream_response_started = true;
                         guest_tls
                             .writer()
                             .write_all(&server_buf[..n])
@@ -653,6 +664,7 @@ async fn forward_plaintext(
     secrets_handler: &mut SecretsHandler,
     shared: &SharedState,
     buf: &mut [u8],
+    upstream_response_started: bool,
 ) -> io::Result<()> {
     let mut wrote_plaintext = false;
 
@@ -678,9 +690,18 @@ async fn forward_plaintext(
                 }
             }
             Err(action) => {
-                // Secret policy rejected the request. Drop the connection.
+                // Stop upstream forwarding. Only answer before any upstream
+                // response bytes have reached the guest; the caller flushes
+                // the denial and close_notify before dropping the connection.
                 if matches!(action, SecretViolationAction::BlockAndTerminate) {
                     shared.trigger_termination();
+                } else if shared.secret_deny_response_enabled()
+                    && !upstream_response_started
+                    && let Some(response) =
+                        secrets_handler.http1_violation_response(shared.secret_deny_message())
+                {
+                    guest_tls.writer().write_all(&response)?;
+                    guest_tls.send_close_notify();
                 }
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -795,6 +816,7 @@ mod tests {
             let shared = SharedState::new(16);
             shared.set_http_config(microsandbox_types::HttpConfig {
                 deny_response: enabled,
+                deny_response_format: microsandbox_types::HttpDenyResponseFormat::Json,
                 ..Default::default()
             });
             serve_tls_deny(
@@ -885,7 +907,12 @@ mod tests {
         )
         .await;
         assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
-        assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
+        let text = std::str::from_utf8(&response).unwrap();
+        let (_, body) = text.split_once("\r\n\r\n").unwrap();
+        let error: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(error["code"], "network_policy_denied");
+        assert_eq!(error["domain"], "blocked.example");
+        assert_eq!(error["message"], "Request blocked by network policy.");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1059,6 +1086,167 @@ mod tests {
             }
         });
         (address, request_rx, server)
+    }
+
+    #[tokio::test]
+    async fn secret_denial_is_delivered_inside_the_existing_tls_connection() {
+        let check = async {
+            for (enabled, streamed, response_started) in [
+                (true, false, false),
+                (false, false, false),
+                (true, true, false),
+                (true, true, true),
+            ] {
+                let _ = rustls::crypto::ring::default_provider().install_default();
+                let mut secrets = host_bound_secret_config();
+                secrets.secrets[0].allowed_hosts = vec![HostPattern::Exact("github.com".into())];
+                let tls_state = test_tls_state(secrets);
+                let shared = Arc::new(SharedState::new(8));
+                shared.set_http_config(microsandbox_types::HttpConfig {
+                    deny_response: enabled,
+                    deny_response_format: microsandbox_types::HttpDenyResponseFormat::Json,
+                    ..Default::default()
+                });
+                let headers = b"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 8\r\n\r\n";
+                let early_response = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nhello";
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let upstream = listener.local_addr().unwrap();
+                let (headers_tx, headers_rx) = oneshot::channel();
+                let server = tokio::spawn(async move {
+                    let stream = accept_with_deadline(listener).await.unwrap();
+                    let mut stream = TlsAcceptor::from(upstream_server_config())
+                        .accept(stream)
+                        .await
+                        .unwrap();
+                    if streamed {
+                        let mut received = vec![0; headers.len()];
+                        stream.read_exact(&mut received).await.unwrap();
+                        assert_eq!(received, headers);
+                    }
+                    let _ = headers_tx.send(());
+                    if response_started {
+                        stream.write_all(early_response).await.unwrap();
+                        stream.flush().await.unwrap();
+                    }
+                    let mut rejected = Vec::new();
+                    match stream.read_to_end(&mut rejected).await {
+                        Ok(_) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                            ) => {}
+                        Err(error) => panic!("upstream read failed: {error}"),
+                    }
+                    assert!(
+                        rejected.is_empty(),
+                        "blocked TLS request bytes reached upstream"
+                    );
+                });
+                let (from_tx, from_rx) = mpsc::channel(8);
+                let (to_tx, mut to_rx) = mpsc::channel(8);
+                let mut client = guest_client(&tls_state);
+                send_client_tls_output(&mut client, &from_tx).await;
+                let relay = tokio::spawn(intercept_relay(
+                    "203.0.113.10:443".parse().unwrap(),
+                    UpstreamTcpTarget::direct(upstream),
+                    "example.com",
+                    true,
+                    Vec::new(),
+                    from_rx,
+                    to_tx,
+                    shared,
+                    tls_state,
+                    Arc::new(ProxyConnectState::new()),
+                    None,
+                    None,
+                ));
+                if streamed {
+                    complete_relay_handshake(&mut client, &from_tx, &mut to_rx).await;
+                    // Fragment the headers across TLS records before delivering the body.
+                    client.writer().write_all(&headers[..12]).unwrap();
+                    send_client_tls_output(&mut client, &from_tx).await;
+                    client.writer().write_all(&headers[12..]).unwrap();
+                    send_client_tls_output(&mut client, &from_tx).await;
+                    headers_rx.await.unwrap();
+                    if response_started {
+                        let mut received = Vec::new();
+                        while received.len() < early_response.len() {
+                            let bytes = to_rx.recv().await.unwrap();
+                            client.read_tls(&mut bytes.as_ref()).unwrap();
+                            client.process_new_packets().unwrap();
+                            let mut buf = [0; 1024];
+                            while let Ok(n) = client.reader().read(&mut buf) {
+                                if n == 0 {
+                                    break;
+                                }
+                                received.extend_from_slice(&buf[..n]);
+                            }
+                        }
+                        assert_eq!(received, early_response);
+                    }
+                    client.writer().write_all(b"$MSB_KEY").unwrap();
+                    send_client_tls_output(&mut client, &from_tx).await;
+                } else {
+                    // Coalesce the request with the guest's TLS Finished flight,
+                    // exercising plaintext already buffered during the handshake.
+                    while client.is_handshaking() {
+                        let bytes = to_rx.recv().await.unwrap();
+                        client.read_tls(&mut bytes.as_ref()).unwrap();
+                        client.process_new_packets().unwrap();
+                        if !client.is_handshaking() {
+                            client.writer().write_all(headers).unwrap();
+                            client.writer().write_all(b"$MSB_KEY").unwrap();
+                        }
+                        send_client_tls_output(&mut client, &from_tx).await;
+                    }
+                }
+                let mut response = Vec::new();
+                let mut clean_close = false;
+                while let Some(bytes) = to_rx.recv().await {
+                    client.read_tls(&mut bytes.as_ref()).unwrap();
+                    clean_close |= client.process_new_packets().unwrap().peer_has_closed();
+                    let mut buf = [0; 1024];
+                    loop {
+                        match client.reader().read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => response.extend_from_slice(&buf[..n]),
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(error) => panic!("denial TLS read failed: {error}"),
+                        }
+                    }
+                }
+                assert!(
+                    relay.await.unwrap().is_err(),
+                    "secret request must remain blocked"
+                );
+                server.await.unwrap();
+                if enabled && !response_started {
+                    assert!(
+                        response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"),
+                        "{response:?}"
+                    );
+                    let body = String::from_utf8(response).unwrap();
+                    let (_, json) = body.split_once("\r\n\r\n").unwrap();
+                    let error: serde_json::Value = serde_json::from_str(json).unwrap();
+                    assert_eq!(error["code"], "secret_policy_denied");
+                    assert_eq!(error["domain"], "example.com");
+                    assert!(!body.contains("real-secret-value") && !body.contains("$MSB_KEY"));
+                    assert!(
+                        clean_close,
+                        "guest must receive TLS close_notify after the denial"
+                    );
+                } else {
+                    assert!(
+                        response.is_empty(),
+                        "must not append a denial: {response:?}"
+                    );
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), check)
+            .await
+            .expect("TLS secret denial fixture timed out");
     }
 
     #[tokio::test]

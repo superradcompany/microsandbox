@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{
-    NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig, ScopedUpstreamCaCert,
-    ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
+    HttpDenyResponseFormat, NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig,
+    ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
 };
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
@@ -118,22 +118,42 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 
 impl HttpBuilder {
-    /// Create HTTP settings with denial responses disabled.
+    /// Create HTTP settings with JSON denial responses enabled.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Enable readable HTTP denial responses. Disabled by default.
+    /// Enable readable HTTP denial responses. Enabled by default locally.
     pub fn deny_response(mut self, enabled: bool) -> Self {
         self.config.deny_response = enabled;
         self
     }
 
-    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
-    /// Requires `deny_response(true)`. An empty message produces an empty body;
-    /// omission uses the default.
+    /// Choose the response format. Defaults to JSON.
+    pub fn deny_response_format(mut self, format: HttpDenyResponseFormat) -> Self {
+        self.config.deny_response_format = format;
+        self
+    }
+
+    /// Set the legacy text message, substituting `{host}`. Ignored in JSON mode.
+    /// Deprecated: prefer JSON mode and `network_deny_message` for new integrations.
     pub fn deny_message(mut self, message: impl Into<String>) -> Self {
         self.config.deny_message = Some(message.into());
+        self
+    }
+
+    /// Set the network-denial JSON `message`. Used as-is.
+    /// Requires `deny_response(true)` and JSON mode. An empty message preserves the code with an empty `message`;
+    /// omission uses the default.
+    pub fn network_deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.network_deny_message = Some(message.into());
+        self
+    }
+
+    /// Set the literal secret-denial JSON message. Requires `deny_response(true)` and JSON mode.
+    /// Omission uses the default; an empty string leaves `message` empty.
+    pub fn secret_deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.secret_deny_message = Some(message.into());
         self
     }
 

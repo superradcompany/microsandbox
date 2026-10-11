@@ -20,7 +20,7 @@ use super::connection::ProxyConnectState;
 #[cfg(test)]
 use super::connection::ProxyConnectStatus;
 use super::upstream::UpstreamTcpTarget;
-use crate::engine::http_deny::{classify_http_request, http_forbidden_response};
+use crate::engine::http_deny::classify_http_request;
 use crate::engine::secrets::config::SecretsConfigExt;
 use crate::engine::tls::proxy::TlsProxy;
 use crate::engine::tls::sni;
@@ -66,6 +66,13 @@ struct ConnectTarget {
     host: String,
     port: u16,
     expected_sni: Option<String>,
+}
+
+/// Buffered guest bytes and response progress during protocol classification.
+struct FirstFlight {
+    bytes: Vec<u8>,
+    is_tls: bool,
+    upstream_response_started: bool,
 }
 
 /// Per-connection TCP proxy task and the state it owns.
@@ -349,7 +356,12 @@ impl TcpProxy {
         let want_headers = enforce_http_authority
             || secrets.has_plain_http_candidates()
             || secrets.has_host_scoped_secrets();
-        let (initial_buf, is_tls) = if want_headers {
+
+        let FirstFlight {
+            bytes: initial_buf,
+            is_tls,
+            mut upstream_response_started,
+        } = if want_headers {
             classify_first_flight(
                 initial_buf,
                 &mut from_smoltcp,
@@ -362,7 +374,11 @@ impl TcpProxy {
             )
             .await?
         } else {
-            (initial_buf, false)
+            FirstFlight {
+                bytes: initial_buf,
+                is_tls: false,
+                upstream_response_started: false,
+            }
         };
 
         if let Some(tls_state) = tls_state.clone()
@@ -425,6 +441,13 @@ impl TcpProxy {
                     Err(action) => {
                         if matches!(action, SecretViolationAction::BlockAndTerminate) {
                             shared.trigger_termination();
+                        } else if shared.secret_deny_response_enabled()
+                            && !upstream_response_started
+                            && let Some(response) =
+                                h.http1_violation_response(shared.secret_deny_message())
+                        {
+                            let _ = to_smoltcp.send(Bytes::from(response)).await;
+                            shared.proxy_wake.wake();
                         }
                         return Ok(());
                     }
@@ -491,6 +514,12 @@ impl TcpProxy {
                                         if matches!(action, SecretViolationAction::BlockAndTerminate)
                                         {
                                             shared.trigger_termination();
+                                        } else if shared.secret_deny_response_enabled()
+                                            && !upstream_response_started
+                                            && let Some(response) = h.http1_violation_response(shared.secret_deny_message())
+                                        {
+                                            let _ = to_smoltcp.send(Bytes::from(response)).await;
+                                            shared.proxy_wake.wake();
                                         }
                                         break;
                                     }
@@ -526,6 +555,8 @@ impl TcpProxy {
                     match result {
                         Ok(0) => break, // Server closed connection.
                         Ok(n) => {
+                            upstream_response_started = true;
+
                             // A server-first byte means this is not an HTTP CONNECT
                             // tunnel to a proxy. Keep relaying normally afterward.
                             late_connect_state = None;
@@ -1058,9 +1089,8 @@ pub(crate) async fn deny_http_or_close(
     let answer = shared.http_deny_response_enabled() && first_flight_is_http(initial_buf);
     if answer {
         let host = denied_host_label(sni, initial_buf, guest_dst);
-        let body = shared.http_deny_body(&host);
         let _ = to_smoltcp
-            .send(Bytes::from(http_forbidden_response(&body)))
+            .send(Bytes::from(shared.network_denial_response(&host)))
             .await;
         shared.proxy_wake.wake();
     }
@@ -1145,7 +1175,8 @@ async fn classify_first_flight(
     want_headers: bool,
     max: usize,
     budget: Duration,
-) -> io::Result<(Vec<u8>, bool)> {
+) -> io::Result<FirstFlight> {
+    let mut upstream_response_started = false;
     let mut server_buf = vec![0u8; SERVER_READ_BUF_SIZE];
     let timeout_fut = tokio::time::sleep(budget);
     tokio::pin!(timeout_fut);
@@ -1166,44 +1197,47 @@ async fn classify_first_flight(
                 || buf.len() >= max
                 || buf.windows(4).any(|w| w == b"\r\n\r\n");
             if done {
-                return Ok((buf, is_tls));
+                break;
             }
         }
 
         tokio::select! {
             biased;
             _ = &mut timeout_fut => {
-                let is_tls = buf.first() == Some(&0x16);
-                return Ok((buf, is_tls));
+                break;
             }
             // Guest → buffer (not forwarded here; the caller replays it once the
             // handler is built, so substitution applies to the first flight too).
             guest = from_smoltcp.recv() => match guest {
                 Some(bytes) => buf.extend_from_slice(&bytes),
                 None => {
-                    let is_tls = buf.first() == Some(&0x16);
-                    return Ok((buf, is_tls));
+                    break;
                 }
             },
             // Server → guest: relay immediately so a server-first banner is never
             // held hostage by the peek.
             server = server_rx.read(&mut server_buf) => match server {
                 Ok(0) => {
-                    let is_tls = buf.first() == Some(&0x16);
-                    return Ok((buf, is_tls));
+                    break;
                 }
                 Ok(n) => {
                     let data = Bytes::copy_from_slice(&server_buf[..n]);
                     if to_smoltcp.send(data).await.is_err() {
-                        let is_tls = buf.first() == Some(&0x16);
-                        return Ok((buf, is_tls));
+                        break;
                     }
+                    upstream_response_started = true;
                     shared.proxy_wake.wake();
                 }
                 Err(e) => return Err(e),
             },
         }
     }
+
+    Ok(FirstFlight {
+        is_tls: buf.first() == Some(&0x16),
+        bytes: buf,
+        upstream_response_started,
+    })
 }
 
 /// Buffer a denied plaintext first flight through its HTTP headers, or until
@@ -1636,13 +1670,19 @@ mod tests {
 
     #[tokio::test]
     async fn domain_denial_joins_fragmented_request_without_dialing_upstream() {
-        for enabled in [false, true] {
+        for (enabled, host_header, expected_domain) in [
+            (false, "Host: blocked.example\r\n", "blocked.example"),
+            (true, "Host: blocked.example\r\n", "blocked.example"),
+            (true, "", "127.0.0.1"),
+        ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let dst = listener.local_addr().unwrap();
             let shared = Arc::new(shared_with("blocked.example", "127.0.0.1"));
             shared.set_http_config(microsandbox_types::HttpConfig {
                 deny_response: enabled,
-                deny_message: Some("blocked {host}".into()),
+                deny_response_format: HttpDenyResponseFormat::Json,
+                network_deny_message: Some("blocked {host}".into()),
+                ..Default::default()
             });
             let policy = Arc::new(NetworkPolicy {
                 default_egress: Action::Deny,
@@ -1658,7 +1698,7 @@ mod tests {
                 .await
                 .unwrap();
             from_tx
-                .send(Bytes::from_static(b"Host: blocked.example\r\n\r\n"))
+                .send(Bytes::from(format!("{host_header}\r\n")))
                 .await
                 .unwrap();
             drop(from_tx);
@@ -1682,7 +1722,13 @@ mod tests {
             if enabled {
                 let response = response.unwrap();
                 assert!(response.starts_with(b"HTTP/1.1 403 Forbidden\r\n"));
-                assert!(String::from_utf8_lossy(&response).contains("blocked.example"));
+                let text = std::str::from_utf8(&response).unwrap();
+                let (_, body) = text.split_once("\r\n\r\n").unwrap();
+                let error: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(error["code"], "network_policy_denied");
+                // Braces are literal; the destination is carried separately.
+                assert_eq!(error["message"], "blocked {host}");
+                assert_eq!(error["domain"], expected_domain);
             } else {
                 assert!(response.is_none(), "disabled responses must close silently");
             }
@@ -2073,6 +2119,7 @@ mod tests {
 
     // ── plain-HTTP secret substitution ────────────────────────────────────────
 
+    use microsandbox_types::HttpDenyResponseFormat;
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;

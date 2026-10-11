@@ -70,10 +70,14 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub max_inbound_tcp_connections: bool,
 
-    /// Readable HTTP denial responses and custom bodies are supported by the runtime.
-    /// Older runtimes omit this capability.
+    /// Legacy plain-text HTTP denials are supported.
     #[serde(default)]
     pub http_deny_message: bool,
+
+    /// JSON HTTP denials with separate network and secret messages are supported.
+    /// Older runtimes omit this capability.
+    #[serde(default)]
+    pub http_deny_json: bool,
 
     /// HTTP CONNECT outbound proxies are supported. Older runtimes omit this capability.
     #[serde(default)]

@@ -303,6 +303,7 @@ fn main() {
                     tcp_accept_queue_size: true,
                     max_inbound_tcp_connections: cfg!(feature = "net"),
                     http_deny_message: cfg!(feature = "net"),
+                    http_deny_json: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,

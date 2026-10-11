@@ -230,10 +230,16 @@ export type JsFsWriteSink = FsWriteSink
 export declare class HttpBuilder {
   /** Create default HTTP settings. */
   constructor()
-  /** Enable readable HTTP denial responses. Disabled by default. */
+  /** Enable readable HTTP denial responses. Enabled by default locally. */
   denyResponse(enabled: boolean): this
-  /** Set the body used when denyResponse is enabled, substituting `{host}`. */
+  /** Choose text or json (default). JSON requires a supporting runtime. */
+  denyResponseFormat(format: 'text' | 'json'): this
+  /** Deprecated: legacy text message with {host} substitution. Ignored in JSON mode. */
   denyMessage(message: string): this
+  /** Set the network-denial JSON message in JSON mode without interpolation. Requires denyResponse. */
+  networkDenyMessage(message: string): this
+  /** Set the literal secret-denial JSON message. Requires denyResponse and JSON mode. */
+  secretDenyMessage(message: string): this
 }
 export type JsHttpBuilder = HttpBuilder
 

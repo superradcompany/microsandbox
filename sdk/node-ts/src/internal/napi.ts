@@ -1047,7 +1047,12 @@ export interface NapiDnsConfig {
 
 export interface NapiHttpBuilder {
   denyResponse(enabled: boolean): this;
+  denyResponseFormat(format: 'text' | 'json'): this;
+  /** @deprecated Legacy text message with {host} substitution. */
   denyMessage(message: string): this;
+  networkDenyMessage(message: string): this;
+  /** Set the literal secret-denial JSON message. */
+  secretDenyMessage(message: string): this;
 }
 
 export interface NapiTlsBuilder {

@@ -113,7 +113,12 @@ async fn spawn_curl_sandbox(name: &str, port: u16) -> Sandbox {
 }
 
 /// Boot a curl sandbox with one body-injected secret and TLS interception on the fixture port.
-async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) -> Sandbox {
+async fn spawn_secret_curl_sandbox(
+    name: &str,
+    port: u16,
+    allowed_host: &str,
+    deny_response: bool,
+) -> Sandbox {
     let allowed_host = allowed_host.to_string();
     Sandbox::builder(name)
         .image(CURL_IMAGE)
@@ -129,6 +134,15 @@ async fn spawn_secret_curl_sandbox(name: &str, port: u16, allowed_host: &str) ->
         })
         .network(|n| {
             n.policy(NetworkPolicy::allow_all())
+                .http(|h| {
+                    let h = if deny_response {
+                        h
+                    } else {
+                        h.deny_response(false)
+                    };
+                    h.network_deny_message("network-only")
+                        .secret_deny_message("Check secret access for {host}.")
+                })
                 .tls(|t| t.intercepted_ports(vec![port]).verify_upstream(false))
         })
         .create()
@@ -422,7 +436,7 @@ async fn tls_intercept_substitutes_secret_for_host_alias() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let port = server.port();
     let name = "tls-intercept-secret-host-alias";
-    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal", false).await;
 
     let out = sb
         .shell(format!(
@@ -529,7 +543,7 @@ async fn tls_intercept_substitutes_secret_in_chunked_body() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let port = server.port();
     let name = "tls-intercept-secret-chunked-body";
-    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal", false).await;
 
     let out = sb
         .shell(format!(
@@ -570,7 +584,7 @@ async fn tls_intercept_substitutes_secret_in_large_content_length_body() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let port = server.port();
     let name = "tls-intercept-large-secret-cl";
-    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal", false).await;
 
     let out = sb
         .shell(format!(
@@ -612,7 +626,7 @@ async fn tls_intercept_substitutes_secret_in_large_chunked_body() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let port = server.port();
     let name = "tls-intercept-large-secret-chunked";
-    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal").await;
+    let sb = spawn_secret_curl_sandbox(name, port, "host.microsandbox.internal", false).await;
 
     let out = sb
         .shell(format!(
@@ -667,7 +681,7 @@ async fn tls_intercept_denies_secret_without_dns_pin() {
     let mut server = HostHttps::start().await.expect("https fixture");
     let port = server.port();
     let name = "tls-intercept-secret-dns-pin";
-    let sb = spawn_secret_curl_sandbox(name, port, "api.allowed.test").await;
+    let sb = spawn_secret_curl_sandbox(name, port, "api.allowed.test", false).await;
 
     let out = sb
         .shell(format!(
@@ -702,4 +716,47 @@ echo "status=$status"
     );
 
     teardown(sb, name).await;
+}
+
+// A real guest client must receive the complete JSON before the TLS proxy closes.
+#[msb_test]
+async fn tls_secret_denial_delivers_json_to_guest() {
+    for version in ["1.0", "1.1"] {
+        let mut server = HostHttps::start().await.expect("https fixture");
+        let port = server.port();
+        let name = "tls-secret-deny-json";
+        let sb = spawn_secret_curl_sandbox(name, port, "api.allowed.test", true).await;
+
+        let out = sb
+            .shell(format!(
+                r#"curl -k --http{version} -m 10 -sS -o /tmp/denial -w '%{{http_code}}\n' \
+  -H "Authorization: Bearer $API_KEY" \
+  https://host.microsandbox.internal:{port}/ && cat /tmp/denial"#
+            ))
+            .await
+            .expect("curl denied secret");
+
+        teardown(sb, name).await;
+        let stdout = out.stdout().expect("utf8 stdout");
+        let (code, body) = stdout.split_once('\n').expect("HTTP status and body");
+        assert_eq!(
+            code,
+            "403",
+            "stdout: {stdout}, stderr: {}",
+            out.stderr().unwrap_or_default()
+        );
+        let error: serde_json::Value = serde_json::from_str(body).expect("complete JSON body");
+        assert_eq!(
+            error,
+            serde_json::json!({
+                "code": "secret_policy_denied",
+                "message": "Check secret access for {host}.",
+                "domain": "host.microsandbox.internal"
+            })
+        );
+        let received = tokio::time::timeout(Duration::from_secs(5), server.received_request())
+            .await
+            .expect("upstream connection closes");
+        assert!(received.is_err(), "rejected request reached upstream");
+    }
 }

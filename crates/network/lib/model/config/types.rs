@@ -516,30 +516,82 @@ mod tests {
 
     #[test]
     fn http_config_uses_nested_wire_contract() {
-        for (raw, expected) in [
-            (r#"{}"#, None),
-            (r#"{"http":{}}"#, None),
-            (r#"{"http":{"deny_message":null}}"#, None),
-            (r#"{"http":{"deny_message":""}}"#, Some("")),
+        let defaults = NetworkConfig::default();
+        assert!(defaults.http.deny_response);
+        assert_eq!(
+            defaults.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        let wire = serde_json::to_value(&defaults).unwrap();
+        let restored: NetworkConfig = serde_json::from_value(wire).unwrap();
+        assert!(restored.http.deny_response);
+        assert_eq!(
+            restored.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        for (raw, enabled, format) in [
             (
-                r#"{"http":{"deny_message":"blocked {host}"}}"#,
-                Some("blocked {host}"),
+                r#"{}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{}}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{"deny_response":false}}"#,
+                false,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{"deny_response_format":"text"}}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Text,
             ),
         ] {
             let config: NetworkConfig = serde_json::from_str(raw).unwrap();
-            assert_eq!(config.http.deny_message.as_deref(), expected);
-            assert!(!config.http.deny_response);
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_str(raw).unwrap();
+            for http in [config.http, spec.http] {
+                assert_eq!(http.deny_response, enabled, "{raw}");
+                assert_eq!(http.deny_response_format, format, "{raw}");
+            }
+        }
+        for (raw, expected) in [
+            (r#"{}"#, None),
+            (r#"{"http":{}}"#, None),
+            (r#"{"http":{"network_deny_message":null}}"#, None),
+            (r#"{"http":{"network_deny_message":""}}"#, Some("")),
+            (
+                r#"{"http":{"network_deny_message":"blocked {host}"}}"#,
+                Some("blocked {host}"),
+            ),
+        ] {
+            let mut input: serde_json::Value = serde_json::from_str(raw).unwrap();
+            input["http"]["secret_deny_message"] = serde_json::json!("Check secret access.");
+            let config: NetworkConfig = serde_json::from_value(input).unwrap();
+            assert_eq!(config.http.network_deny_message.as_deref(), expected);
+            assert_eq!(
+                config.http.secret_deny_message.as_deref(),
+                Some("Check secret access.")
+            );
+            assert!(config.http.deny_response);
             let wire = serde_json::to_value(&config).unwrap();
             assert!(wire.get("http_deny_message").is_none());
             assert_eq!(
-                wire["http"].get("deny_message"),
+                wire["http"].get("network_deny_message"),
                 expected.map(serde_json::Value::from).as_ref()
             );
             let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
-            assert_eq!(spec.http.deny_message.as_deref(), expected);
+            assert_eq!(spec.http.network_deny_message.as_deref(), expected);
             let restored: NetworkConfig =
                 serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
-            assert_eq!(restored.http.deny_message.as_deref(), expected);
+            assert_eq!(restored.http.network_deny_message.as_deref(), expected);
+            assert_eq!(
+                restored.http.secret_deny_message.as_deref(),
+                Some("Check secret access.")
+            );
         }
     }
 
