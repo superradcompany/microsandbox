@@ -2144,31 +2144,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_stream_finishes_only_after_success_response() {
-        let (tx, rx) = mpsc::channel(1);
-        let response = FsResponse {
-            ok: true,
-            error: None,
-            data: None,
-        };
-        tx.send(AgentFrame::Control(
-            Message::with_payload(MessageType::FsResponse, 1, &response).unwrap(),
-        ))
-        .await
-        .unwrap();
-        drop(tx);
-        let mut stream = FsReadStream {
-            id: 1,
-            rx,
-            client: None,
-            close_handle: None,
-            finished: false,
-            bulk: None,
-            bulk_finish_seen: false,
-        };
+    async fn read_stream_requires_finish_for_bulk_success() {
+        for bulk in [false, true] {
+            let (tx, rx) = mpsc::channel(1);
+            let response = FsResponse {
+                ok: true,
+                error: None,
+                data: None,
+            };
+            tx.send(AgentFrame::Control(
+                Message::with_payload(MessageType::FsResponse, 1, &response).unwrap(),
+            ))
+            .await
+            .unwrap();
+            drop(tx);
 
-        assert!(stream.recv().await.unwrap().is_none());
-        assert!(stream.recv().await.unwrap().is_none());
+            let mut stream = FsReadStream {
+                id: 1,
+                rx,
+                client: None,
+                close_handle: None,
+                finished: false,
+                bulk: bulk.then(|| {
+                    BulkReceiveState::new(
+                        BulkKind::Filesystem,
+                        BulkFlow::GuestToHost,
+                        microsandbox_protocol::bulk::DEFAULT_BULK_RECORD_PAYLOAD,
+                        microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
+                        microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
+                    )
+                    .unwrap()
+                }),
+                bulk_finish_seen: false,
+            };
+
+            if bulk {
+                let error = stream.recv().await.unwrap_err();
+                assert!(error.to_string().contains("without an exact finish marker"));
+            } else {
+                assert!(stream.recv().await.unwrap().is_none());
+            }
+            assert!(stream.recv().await.unwrap().is_none());
+        }
     }
 }
 

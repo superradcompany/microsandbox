@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from microsandbox import FilesystemError, FsEntryKind
@@ -15,6 +17,8 @@ async def test_fs_file_directory_and_metadata_operations(sandbox_factory):
     await fs.mkdir("/tmp/py-sdk")
     await fs.write("/tmp/py-sdk/a.txt", b"alpha\n")
     assert await fs.read("/tmp/py-sdk/a.txt") == b"alpha\n"
+    with pytest.raises(FilesystemError, match="Is a directory"):
+        await asyncio.wait_for(fs.read("/tmp/py-sdk"), timeout=5)
     assert await fs.read_text("/tmp/py-sdk/a.txt") == "alpha\n"
     assert await fs.exists("/tmp/py-sdk/a.txt") is True
     assert await fs.exists("/tmp/py-sdk/missing.txt") is False
