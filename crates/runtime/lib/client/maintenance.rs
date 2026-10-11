@@ -1476,7 +1476,11 @@ mod tests {
         drop(creator);
         #[cfg(unix)]
         {
-            let socket = crate::ipc::RuntimeSocketPaths::new(&run_dir, "abandoned").legacy_agent;
+            // Historical v0.6.0 fixture (efaab0ec): spawn.rs uses the first 32 hex
+            // digits of SHA-256(name) under run/agent. vm.rs binds the relay before
+            // insert_run, leaving Starting without a run or modern lifecycle locks.
+            // Keep this independent of current path helpers so format drift fails.
+            let socket = run_dir.join("agent/20e7f550122ee415de2b6d761a474ea5.sock");
             std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
             let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
             assert!(

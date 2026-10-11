@@ -947,7 +947,7 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
                     ErrorKind::ConnectionRefused | ErrorKind::NotFound
                 ) || matches!(
                     error.raw_os_error(),
-                    Some(libc::ENOTSOCK | libc::EPROTOTYPE)
+                    Some(libc::ENOTSOCK | libc::EPROTOTYPE | libc::ELOOP | libc::ENOTDIR)
                 ) =>
             {
                 return Ok(false);
@@ -1033,6 +1033,15 @@ mod tests {
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
             std::fs::write(&path, b"stale artifact").unwrap();
+            assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
+            std::fs::remove_file(&path).unwrap();
+            // Final symlinks pass symlink_metadata; connect must reject their targets.
+            std::os::unix::fs::symlink(&path, &path).unwrap();
+            assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
+            std::fs::remove_file(&path).unwrap();
+            let non_directory = home.path().join("not-a-directory");
+            std::fs::write(&non_directory, b"file").unwrap();
+            std::os::unix::fs::symlink(non_directory.join("agent.sock"), &path).unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
         }
