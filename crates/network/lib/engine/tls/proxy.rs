@@ -67,8 +67,11 @@ pub(crate) struct TlsProxy {
 
 impl TlsProxy {
     /// Build a proxy for a newly established guest TLS connection.
+    /// `upstream_stream` is reused when present; otherwise, dial after policy checks.
+    /// Policy uses `guest_dst`; host connections use the resolved `connect_target`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        upstream_stream: Option<TcpStream>,
         guest_dst: SocketAddr,
         connect_target: UpstreamTcpTarget,
         from_smoltcp: mpsc::Receiver<Bytes>,
@@ -91,17 +94,11 @@ impl TlsProxy {
             strict,
             proxy_connect,
             outbound_proxy,
-            upstream_stream: None,
+            upstream_stream,
             expected_sni: None,
             via_connect: false,
             initial_buf: Vec::new(),
         }
-    }
-
-    /// Reuse an already connected upstream stream.
-    pub(crate) fn with_upstream(mut self, upstream_stream: TcpStream) -> Self {
-        self.upstream_stream = Some(upstream_stream);
-        self
     }
 
     /// Require the ClientHello SNI to match an HTTP CONNECT authority.
