@@ -48,6 +48,7 @@ use crate::bootstrap_fs::AgentBootstrapFs;
 use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::ipc::RuntimeSocketPaths;
 use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
@@ -464,7 +465,7 @@ type VmBuildOutput = (
 /// Public runtime endpoints held back until a restored guest is activated.
 struct RestoreEndpointPublication {
     agent_sock_path: PathBuf,
-    run_dir: PathBuf,
+    socket_paths: RuntimeSocketPaths,
     sandbox_name: String,
     control: super::control::ControlContext,
 }
@@ -523,24 +524,21 @@ impl RestoreEndpointPublication {
         relay.bind_public_endpoint()?;
 
         #[cfg(unix)]
-        if let Err(error) = crate::ipc::publish_legacy_agent_link(
-            &self.run_dir,
-            &self.sandbox_name,
-            &self.agent_sock_path,
-        ) {
-            let _ =
-                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+        if let Err(error) = self
+            .socket_paths
+            .publish_legacy_agent_link(&self.agent_sock_path)
+        {
+            let _ = self.socket_paths.remove_canonical_artifacts();
             return Err(error.into());
         }
 
         if let Err(error) = publish_control_endpoint(
             crate::control::control_socket_path_for(&self.agent_sock_path),
             self.control,
-            &self.run_dir,
+            &self.socket_paths,
             &self.sandbox_name,
         ) {
-            let _ =
-                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            let _ = self.socket_paths.remove_canonical_artifacts();
             return Err(error);
         }
         Ok(())
@@ -716,12 +714,9 @@ fn run(
         prepare_runtime_restore_namespace(&config.runtime_dir, config.vm.rootfs_vmdk.is_some())?;
     }
 
+    let socket_paths = RuntimeSocketPaths::new(&config.run_dir, &config.sandbox_name);
     #[cfg(unix)]
-    crate::ipc::prepare_canonical_socket_dir(
-        &config.run_dir,
-        &config.sandbox_name,
-        &config.agent_sock_path,
-    )?;
+    socket_paths.prepare_canonical_directory(&config.agent_sock_path)?;
 
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
@@ -808,11 +803,7 @@ fn run(
 
     #[cfg(unix)]
     if config.vm.checkpoint_restore.is_none()
-        && let Err(error) = crate::ipc::publish_legacy_agent_link(
-            &config.run_dir,
-            &config.sandbox_name,
-            &config.agent_sock_path,
-        )
+        && let Err(error) = socket_paths.publish_legacy_agent_link(&config.agent_sock_path)
     {
         if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
             tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
@@ -823,8 +814,7 @@ fn run(
         let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
         // Publication is no-replace. If it collided with another legacy
         // endpoint, clean only this runtime's canonical namespace.
-        let _ =
-            crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
+        let _ = socket_paths.remove_canonical_artifacts();
         return Err(error.into());
     }
 
@@ -881,6 +871,7 @@ fn run(
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
     let exit_run_dir = config.run_dir.clone();
+    let exit_socket_paths = socket_paths.clone();
     let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
@@ -956,8 +947,7 @@ fn run(
                 // restartable terminal state; on failure, leave the active row
                 // for dead-PID maintenance to retry after the process exits.
                 let bound_result = crate::ipc::remove_socket_pair(&exit_sock_path);
-                let owned_result =
-                    crate::ipc::remove_sandbox_socket_artifacts(&exit_run_dir, &exit_sandbox_name);
+                let owned_result = exit_socket_paths.remove_artifacts();
                 if let Err(error) = bound_result.and(owned_result) {
                     tracing::warn!(
                         sandbox = %exit_sandbox_name,
@@ -1097,8 +1087,7 @@ fn run(
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
-            let _ =
-                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            let _ = socket_paths.remove_artifacts();
             return Err(e);
         }
     };
@@ -1172,7 +1161,7 @@ fn run(
         if restored_agent.is_some() {
             Some(RestoreEndpointPublication {
                 agent_sock_path: config.agent_sock_path.clone(),
-                run_dir: config.run_dir.clone(),
+                socket_paths: socket_paths.clone(),
                 sandbox_name: config.sandbox_name.clone(),
                 control: context,
             })
@@ -1180,16 +1169,13 @@ fn run(
             if let Err(error) = publish_control_endpoint(
                 control_sock_path,
                 context,
-                &config.run_dir,
+                &socket_paths,
                 &config.sandbox_name,
             ) {
                 let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
                 // Preserve the colliding compatibility entry. It may belong
                 // to a still-live older runtime.
-                let _ = crate::ipc::remove_canonical_socket_artifacts(
-                    &config.run_dir,
-                    &config.sandbox_name,
-                );
+                let _ = socket_paths.remove_canonical_artifacts();
                 return Err(error);
             }
             None
@@ -1215,8 +1201,7 @@ fn run(
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
-            let _ =
-                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            let _ = socket_paths.remove_artifacts();
             return Err(e);
         }
     }
@@ -2788,37 +2773,33 @@ fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> 
 fn publish_control_endpoint(
     control_sock_path: PathBuf,
     context: super::control::ControlContext,
-    run_dir: &Path,
+    socket_paths: &RuntimeSocketPaths,
     sandbox_name: &str,
 ) -> RuntimeResult<()> {
     // Windows uses named pipes and has no legacy Unix socket link to publish.
     #[cfg(not(unix))]
-    let _ = (run_dir, sandbox_name);
+    let _ = (socket_paths, sandbox_name);
 
-    match super::control::spawn_control_listener(control_sock_path.clone(), context) {
-        Ok(()) => {
-            #[cfg(unix)]
-            if let Err(error) =
-                crate::ipc::publish_legacy_control_link(run_dir, sandbox_name, &control_sock_path)
-            {
-                if error.kind() == std::io::ErrorKind::InvalidInput {
-                    tracing::warn!(
-                        "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
-                    );
-                } else {
-                    return Err(error.into());
-                }
-            }
-        }
-        Err(error) => {
-            // Live control has historically been an optional capability. Keep
-            // ordinary launches running when the listener itself is unavailable.
-            tracing::warn!(
-                "failed to start runtime control listener at {}: {error}",
-                control_sock_path.display()
-            );
-        }
+    // Live control has historically been an optional capability. Keep ordinary
+    // launches running when the listener itself is unavailable.
+    if let Err(error) = super::control::spawn_control_listener(control_sock_path.clone(), context) {
+        tracing::warn!(
+            "failed to start runtime control listener at {}: {error}",
+            control_sock_path.display()
+        );
+        return Ok(());
     }
+
+    #[cfg(unix)]
+    if let Err(error) = socket_paths.publish_legacy_control_link(&control_sock_path) {
+        if error.kind() != std::io::ErrorKind::InvalidInput {
+            return Err(error.into());
+        }
+        tracing::warn!(
+            "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
+        );
+    }
+
     Ok(())
 }
 
