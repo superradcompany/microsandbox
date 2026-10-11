@@ -107,7 +107,9 @@ async fn check_connect(ipv6: bool, listening: bool) {
         None
     };
 
-    let _listeners = listening.then_some((v4, v6));
+    // Reserve the ports even when not listening. Depending on the host, a
+    // connection to a bound, non-listening socket is reset or stays pending.
+    let _listeners = (v4, v6);
 
     let config = NetworkConfig {
         policy: NetworkPolicy::allow_all(),
@@ -169,7 +171,9 @@ async fn check_connect(ipv6: bool, listening: bool) {
                 "guest connected before upstream: ipv6={ipv6}, state={:?}",
                 socket.state()
             );
-            if socket.state() == tcp::State::Closed {
+            if socket.state() == tcp::State::Closed
+                || started.elapsed() >= Duration::from_millis(250)
+            {
                 break;
             }
         } else {
