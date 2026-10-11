@@ -7083,8 +7083,7 @@ dependencies = [
 [[package]]
 name = "smoltcp"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f8b28ad56c6e35524a37dd492af5d1a47e31e1a4d175cd12f89c075f01980f"
+source = "git+https://github.com/superradcompany/smoltcp?rev=509a8fcae9a8aae7f1484b719a4fb29b0581ecc9#509a8fcae9a8aae7f1484b719a4fb29b0581ecc9"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",

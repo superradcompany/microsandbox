@@ -85,6 +85,7 @@ smoltcp = { workspace = true, optional = true, features = [
     "socket-dns",
     "socket-icmp",
     "socket-tcp",
+    "socket-tcp-pause-synack",
     "socket-udp",
 ] }
 thiserror = { workspace = true }
