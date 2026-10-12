@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::connection::ProxyConnectState;
 use super::proxy::{PEEK_BUDGET, PEEK_BUF_SIZE, deny_http_or_close, peek_for_http_request};
-use crate::engine::tls::proxy::{extract_sni_from_channel, serve_tls_deny};
+use crate::engine::tls::proxy::{read_client_hello, serve_tls_deny};
 use crate::engine::tls::state::TlsState;
 use crate::netstack::shared::SharedState;
 
@@ -92,10 +92,11 @@ async fn respond(
     // unless the name is bypassed (we cannot terminate TLS for it).
     let (sni_name, initial_buf) = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        extract_sni_from_channel(&mut from_smoltcp, Vec::new()),
+        read_client_hello(&mut from_smoltcp, Vec::new()),
     )
     .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "SNI extraction timed out"))??;
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "ClientHello timed out"))??;
+    let sni_name = sni_name.unwrap_or_else(|| guest_dst.ip().to_string());
     let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
     tracing::debug!(sni = %sni_name, dst = %guest_dst, "TLS egress denied by default policy");
     if tls.should_bypass(&sni_name) {

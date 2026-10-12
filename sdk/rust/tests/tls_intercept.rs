@@ -760,3 +760,68 @@ async fn tls_secret_denial_delivers_json_to_guest() {
         assert!(received.is_err(), "rejected request reached upstream");
     }
 }
+
+/// Adding an unrelated secret must not prevent HTTPS to a literal IP.
+#[msb_test]
+async fn tls_intercept_ip_destination_without_sni() {
+    for (verify_upstream, send_secret) in [(false, false), (true, false), (false, true)] {
+        let mut server = HostHttps::start().await.expect("https fixture");
+        let port = server.port();
+        let name = "tls-intercept-ip-destination";
+        let sb = Sandbox::builder(name)
+            .image(CURL_IMAGE)
+            .cpus(1)
+            .memory(256)
+            .user("0")
+            .replace()
+            .secret(|s| {
+                s.env("API_KEY")
+                    .value("real-secret")
+                    .allow("api.allowed.test")
+            })
+            .network(|n| {
+                n.policy(NetworkPolicy::allow_all()).tls(|t| {
+                    t.intercepted_ports(vec![port])
+                        .verify_upstream(verify_upstream)
+                })
+            })
+            .create()
+            .await
+            .expect("create sandbox");
+        let header = if send_secret {
+            "-H \"Authorization: Bearer $API_KEY\""
+        } else {
+            ""
+        };
+        let out = sb
+            .shell(format!(
+                r#"ip=$(awk '/^nameserver /{{print $2; exit}}' /etc/resolv.conf)
+curl -k --http1.1 -m 15 -sS -o /tmp/response -w '%{{http_code}}\n' --data 'probe' {header} https://$ip:{port}/
+"#
+            ))
+            .await
+            .expect("curl IP destination");
+        teardown(sb, name).await;
+        let status = out.stdout().unwrap_or_default();
+        if verify_upstream {
+            assert!(
+                !out.status().success,
+                "self-signed upstream must still be rejected"
+            );
+            assert_eq!(status.trim(), "000");
+        } else {
+            assert!(out.status().success, "{}", out.stderr().unwrap_or_default());
+            assert_eq!(status.trim(), if send_secret { "403" } else { "200" });
+        }
+        let received =
+            tokio::time::timeout(Duration::from_secs(2), server.received_request()).await;
+        if !verify_upstream && !send_secret {
+            assert!(received.expect("upstream request").is_ok());
+        } else if let Ok(Ok(request)) = received {
+            assert!(
+                request.headers.is_empty(),
+                "denied request reached upstream"
+            );
+        }
+    }
+}

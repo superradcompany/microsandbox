@@ -15,7 +15,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use super::sni;
 use super::state::TlsState;
 use crate::engine::http_deny::classify_http_request;
 use crate::netstack::shared::SharedState;
@@ -155,17 +154,20 @@ impl TlsProxy {
         } = self;
         let connect_dst = connect_target.primary();
 
-        // Buffer initial data to extract SNI from ClientHello. Timeout prevents a
+        // Buffer a complete ClientHello. Timeout prevents a
         // slow/malicious guest from holding a proxy slot indefinitely.
         let sni_name = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            extract_sni_from_channel(&mut from_smoltcp, initial_buf),
+            read_client_hello(&mut from_smoltcp, initial_buf),
         )
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "SNI extraction timed out"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "ClientHello timed out"))?;
         let (sni_name, initial_buf) = sni_name?;
 
+        // Without SNI, authenticate the original destination IP, never a cached
+        // DNS name or the host-side address used for gateway forwarding.
         // Canonicalize so byte equality against rule destinations works.
+        let sni_name = sni_name.unwrap_or_else(|| guest_dst.ip().to_string());
         let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
 
         if let Some(expected) = expected_sni.as_deref()
@@ -616,42 +618,45 @@ pub(crate) async fn intercept_relay(
     Ok(())
 }
 
-/// Buffer channel data until a complete ClientHello with SNI is received.
-///
-/// `seed` carries bytes already read from the channel before this call
-/// (e.g. bytes trailing a CONNECT request). Pass an empty `Vec` when no
-/// bytes have been pre-consumed.
-pub(crate) async fn extract_sni_from_channel(
+/// Read a validated ClientHello, preserving its bytes for the TLS relay.
+/// A complete hello without SNI is distinct from malformed or incomplete TLS.
+pub(crate) async fn read_client_hello(
     from_smoltcp: &mut mpsc::Receiver<Bytes>,
     seed: Vec<u8>,
-) -> io::Result<(String, Vec<u8>)> {
+) -> io::Result<(Option<String>, Vec<u8>)> {
     let mut initial_buf = seed;
-    initial_buf.reserve(CLIENT_HELLO_BUF_SIZE.saturating_sub(initial_buf.len()));
+    let mut acceptor = rustls::server::Acceptor::default();
+    let mut consumed = 0;
     loop {
-        if let Some(name) = sni::extract_sni(&initial_buf) {
-            return Ok((name, initial_buf));
-        }
-        if initial_buf.len() >= CLIENT_HELLO_BUF_SIZE {
+        if initial_buf.len() > CLIENT_HELLO_BUF_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "ClientHello too large or no SNI found",
+                "ClientHello too large",
             ));
+        }
+        while consumed < initial_buf.len() {
+            let read = acceptor.read_tls(&mut &initial_buf[consumed..])?;
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "incomplete ClientHello",
+                ));
+            }
+            consumed += read;
+            match acceptor.accept() {
+                Ok(Some(accepted)) => {
+                    let name = accepted.client_hello().server_name().map(str::to_owned);
+                    return Ok((name, initial_buf));
+                }
+                Ok(None) => {}
+                Err((error, _)) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
+            }
         }
         let data = from_smoltcp
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"))?;
         initial_buf.extend_from_slice(&data);
-
-        if let Some(name) = sni::extract_sni(&initial_buf) {
-            return Ok((name, initial_buf));
-        }
-        if initial_buf.len() >= CLIENT_HELLO_BUF_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "ClientHello too large or no SNI found",
-            ));
-        }
     }
 }
 
@@ -972,6 +977,51 @@ mod tests {
                 require_tls_identity: true,
             }],
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn client_hello_preserves_fragmented_records_with_and_without_sni() {
+        for name in ["example.com", "192.0.2.1", "2001:db8::1"] {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth();
+            let mut client = rustls::ClientConnection::new(
+                Arc::new(config),
+                ServerName::try_from(name.to_owned()).unwrap(),
+            )
+            .unwrap();
+            let mut hello = Vec::new();
+            client.write_tls(&mut hello).unwrap();
+            // Fragment the handshake over TLS records as well as channel messages.
+            let mut wire = Vec::new();
+            for fragment in hello[5..].chunks(31) {
+                wire.extend_from_slice(&hello[..3]);
+                wire.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+                wire.extend_from_slice(fragment);
+            }
+            let (tx, mut rx) = mpsc::channel(wire.len());
+            for fragment in wire.chunks(7) {
+                tx.send(Bytes::copy_from_slice(fragment)).await.unwrap();
+            }
+            drop(tx);
+            let (sni, buffered) = read_client_hello(&mut rx, Vec::new()).await.unwrap();
+            assert_eq!(sni.as_deref(), (name == "example.com").then_some(name));
+            assert_eq!(buffered, wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn client_hello_rejects_invalid_and_truncated_tls() {
+        for wire in [
+            b"GET / HTTP/1.1\r\n\r\n".to_vec(),
+            vec![0x16, 3, 1, 0, 10, 1],
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(Bytes::from(wire)).await.unwrap();
+            drop(tx);
+            assert!(read_client_hello(&mut rx, Vec::new()).await.is_err());
         }
     }
 
