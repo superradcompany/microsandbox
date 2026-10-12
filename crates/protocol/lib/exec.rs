@@ -5,6 +5,20 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Window charge for each output chunk, bounding even very small writes.
+pub const EXEC_OUTPUT_EVENT_OVERHEAD: u32 = 256;
+
+/// Minimum output window; permits at least one full guest read plus its metadata.
+pub const MIN_EXEC_OUTPUT_WINDOW: u32 = 64 * 1024;
+
+/// In-flight stdin bytes for an execution that negotiated output flow control.
+/// Keeping input bounded leaves the connection available for output credits.
+pub const EXEC_STDIN_WINDOW: u32 = 64 * 1024;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -45,6 +59,12 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
+
+    /// Optional generation-10 output window, shared by stdout and stderr.
+    /// Each chunk costs its payload length plus `EXEC_OUTPUT_EVENT_OVERHEAD`.
+    /// Omission preserves unthrottled output for older SDKs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_window: Option<u32>,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -205,6 +225,20 @@ pub struct ExecResize {
 pub struct ExecSignal {
     /// The signal number to send (e.g. 15 for SIGTERM).
     pub signal: i32,
+}
+
+/// Cumulative stdin bytes consumed by the child, for generation-10 flow control.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecStdinCredit {
+    /// Bytes written to the child's stdin since this execution started.
+    pub consumed: u64,
+}
+
+/// Cumulative output credit returned after the SDK consumes queued chunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecOutputCredit {
+    /// Payload bytes plus per-chunk overhead consumed since this exec started.
+    pub consumed: u64,
 }
 
 //--------------------------------------------------------------------------------------------------

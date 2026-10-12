@@ -49,13 +49,29 @@ There are two related values to preserve:
 | Known-operation availability gate | Minimum of host generation and ready-frame generation | Minimum of generation 1 and ready-frame generation |
 | Generation emitted in native/encoded envelopes | Host's existing `PROTOCOL_VERSION` | Generation 1 |
 
-The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant remains 9 and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
+The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant is 10 (execution output credit) and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
 
 Known message types have an introduction generation in `MessageType::min_protocol_version()`. `AgentProtocol::prepare` checks availability before admitting native or encoded sends. An unsupported known operation returns the shared client's unsupported-operation category without sending it or closing unrelated streams. Dynamic names and raw bytes remain available to callers who deliberately own their protocol interpretation.
 
 Rust callers inspect `client.ready().negotiated_version`, `client.ready().supports(message_type)`, `client.ready().wire_format`, and `client.ready().ready_bytes()`. Callers retaining only a generation can use `AgentProtocol::ensure_version_compat_for`. TypeScript exposes the corresponding `client.ready.negotiatedVersion`, `supports(wireName)`, `wireFormat`, and `readyBytes`. The package READMEs contain the complete previous-to-current API mappings; the active shared client does not return the old agent-specific unsupported-operation fields.
 
 Generation labels must be checked against actual historical agents. The current introduction map gates filesystem operations at generation 2. The retained v0.5.0 live evidence shows a generation-1 agent that accepts the tested raw filesystem stat operation while the checked path refuses it. That discrepancy remains an unresolved compatibility case; neither the introduction table nor a successful exec test proves every historical filesystem workflow works. Releases before v0.6.0 are outside this change's compatibility target.
+
+### Execution output credit (generation 10)
+
+`core.exec.output.credit` returns cumulative consumed output bytes, including a
+256-byte charge per stdout/stderr chunk. An optional `output_window` in
+`core.exec.request` opts into this contract; omission keeps historical behavior
+for old SDKs and the unlimited default. New SDKs send this field and credits only
+when `exec.buffer_bytes` is set and generation 10 is negotiated. Against older
+guests they preserve historical buffering and warn only if a configured bound
+cannot be enforced; no restart or refusal is required.
+Negotiated executions also bound stdin to 64 KiB and return cumulative
+`core.exec.stdin.credit` after writing to the child. This prevents queued stdin
+from blocking the output-credit messages needed to advance a full-duplex command.
+A duplicate acknowledgement returns no extra capacity, and backwards or unsent
+offsets are rejected. Guest output readers wait independently of the control
+loop. Terminal events remain ordered after all output.
 
 ### Bootstrap and shutdown
 

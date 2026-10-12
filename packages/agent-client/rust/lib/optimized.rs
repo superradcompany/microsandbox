@@ -646,6 +646,24 @@ impl AgentClient {
         self.write_frame_owned(id, flags, body).await
     }
 
+    /// Send a typed message through the writer, committing a reservation at admission.
+    ///
+    /// `admitted` runs synchronously immediately before enqueueing the frame. If this
+    /// future is cancelled beforehand, the callback is dropped without being called.
+    /// After admission, cancellation does not retract the queued frame.
+    pub async fn send_with_admission<T: Serialize>(
+        &self,
+        id: u32,
+        t: MessageType,
+        payload: &T,
+        admitted: impl FnOnce(),
+    ) -> AgentClientResult<()> {
+        self.ensure_version_compat(t)?;
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
+        self.write_frame_admitted(id, t.flags(), body, admitted)
+            .await
+    }
+
     /// Sends one generation-8 raw bulk record on an existing correlation.
     pub async fn send_bulk(&self, record: BulkRecord) -> AgentClientResult<()> {
         self.ensure_bulk_supported()?;
@@ -741,14 +759,27 @@ impl AgentClient {
 
     /// Write a single framed message to the socket, taking ownership of the body.
     async fn write_frame_owned(&self, id: u32, flags: u8, body: Vec<u8>) -> AgentClientResult<()> {
+        self.write_frame_admitted(id, flags, body, || {}).await
+    }
+
+    async fn write_frame_admitted(
+        &self,
+        id: u32,
+        flags: u8,
+        body: Vec<u8>,
+        admitted: impl FnOnce(),
+    ) -> AgentClientResult<()> {
         let (ack, written) = oneshot::channel();
-        self.writer
-            .send(WriterCommand {
-                frame: WriterFrame::Control(RawFrame { id, flags, body }),
-                ack,
-            })
+        let slot = self
+            .writer
+            .reserve()
             .await
             .map_err(|_| AgentClientError::Closed)?;
+        admitted();
+        slot.send(WriterCommand {
+            frame: WriterFrame::Control(RawFrame { id, flags, body }),
+            ack,
+        });
         written.await.map_err(|_| AgentClientError::Closed)?
     }
 }
@@ -1658,6 +1689,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            output_window: None,
         };
         let (id, _rx) = client
             .stream(MessageType::ExecRequest, &request)
@@ -1874,6 +1906,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            output_window: None,
         };
         let (_id, mut rx) = client
             .stream(MessageType::ExecRequest, &request)

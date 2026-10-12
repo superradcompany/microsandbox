@@ -7,6 +7,13 @@ keywords: ["Go SDK", "Go execution", "microsandbox execution"]
 
 Non-zero exit codes are returned in [`ExecOutput`](#execoutput), not as Go errors. See [Commands](/sandboxes/commands) for usage examples.
 
+## Output buffering
+
+Output buffering is unlimited by default; with a configured limit, unread output
+can pause a command until you read more.
+See [Slow output readers](/sandboxes/commands#slow-output-readers) for streaming
+and collection guidance.
+
 ## Sandbox
 
 The exec entry points live on [`*Sandbox`](/sdk/go/sandbox#sandbox).

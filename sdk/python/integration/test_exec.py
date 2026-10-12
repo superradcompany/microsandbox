@@ -7,7 +7,14 @@ import signal
 
 import pytest
 
-from microsandbox import ExecEventType, ExecTimeoutError, MicrosandboxError, Stdin
+from microsandbox import (
+    BackendKind,
+    ExecEventType,
+    ExecTimeoutError,
+    MicrosandboxError,
+    Stdin,
+    backend_scope,
+)
 
 
 @pytest.mark.asyncio
@@ -206,3 +213,64 @@ async def test_rlimits_reject_raw_dicts(sandbox_factory):
             "true",
             rlimits=[{"resource": "cpu", "soft": 1, "hard": 1}],
         )
+
+
+@pytest.mark.asyncio
+async def test_exec_stream_backpressure_preserves_output(sandbox_factory, tmp_path, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text('{"exec":{"buffer_bytes":65536}}')
+    monkeypatch.setenv("MSB_CONFIG_PATH", str(config))
+    with backend_scope(BackendKind.LOCAL):
+        sandbox = await sandbox_factory("py-sdk-backpressure")
+    command = (
+        "head -c 16777216 /dev/zero; "
+        "head -c 16777216 /dev/zero >&2; touch /tmp/output-complete"
+    )
+    handle = await sandbox.exec_stream("sh", ["-c", command])
+    started = await asyncio.wait_for(handle.recv(), 5)
+    assert started.event_type is ExecEventType.STARTED
+
+    # Leave enough time for this finite producer to finish without backpressure.
+    # It must instead remain alive and wait for the reader.
+    await asyncio.sleep(5)
+    probe = await sandbox.exec(
+        "sh", ["-c", f"test -d /proc/{started.pid} && test ! -e /tmp/output-complete"], timeout=3
+    )
+    assert probe.exit_code == 0
+
+    async def consume():
+        sizes = {ExecEventType.STDOUT: 0, ExecEventType.STDERR: 0}
+        codes = []
+        async for event in handle:
+            if event.event_type in sizes:
+                assert not any(event.data)
+                sizes[event.event_type] += len(event.data)
+            elif event.event_type is ExecEventType.EXITED:
+                codes.append(event.code)
+        return sizes, codes
+
+    sizes, codes = await asyncio.wait_for(consume(), 30)
+    assert sizes == {ExecEventType.STDOUT: 16777216, ExecEventType.STDERR: 16777216}
+    assert codes == [0]
+    assert (await sandbox.exec("test", ["-e", "/tmp/output-complete"])).exit_code == 0
+
+    # A large pending stdin write must not trap the output credits behind it.
+    handle = await sandbox.exec_stream("cat", stdin=Stdin.pipe())
+    assert (await asyncio.wait_for(handle.recv(), 5)).event_type is ExecEventType.STARTED
+    sink = handle.take_stdin()
+
+    async def write():
+        for _ in range(1024):
+            await sink.write(bytes(65536))
+        await sink.close()
+
+    writer = asyncio.create_task(write())
+    try:
+        await asyncio.sleep(1)
+        assert not writer.done()
+        (sizes, codes), _ = await asyncio.wait_for(asyncio.gather(consume(), writer), 60)
+        assert sizes == {ExecEventType.STDOUT: 67108864, ExecEventType.STDERR: 0}
+        assert codes == [0]
+    finally:
+        writer.cancel()
+        await asyncio.gather(writer, return_exceptions=True)
