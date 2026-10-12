@@ -332,7 +332,8 @@ msb create python --name agent \
 
 For HTTPS to an IP address, clients usually omit SNI. Interception uses the
 original destination IP for the certificate and policy checks. Self-signed
-upstreams still need an explicitly trusted CA or a scoped verification override;
+upstreams still need a trusted CA and a certificate valid for the requested IP,
+or a scoped verification override;
 `curl -k` inside the guest only disables verification of the guest-facing certificate.
 
 Skipping verification is similar to using `curl -k`. Use it only for hosts you control and only when a trusted CA is not available.

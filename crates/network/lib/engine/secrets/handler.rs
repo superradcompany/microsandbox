@@ -2662,8 +2662,12 @@ fn is_http_token_byte(byte: u8) -> bool {
 }
 
 fn authority_matches_sni(authority: &str, sni: &str) -> bool {
-    authority_hostname(authority)
-        .is_some_and(|hostname| hostname.eq_ignore_ascii_case(sni.trim_end_matches('.')))
+    authority_hostname(authority).is_some_and(|hostname| {
+        if let Ok(address) = sni.parse::<IpAddr>() {
+            return hostname.parse::<IpAddr>().is_ok_and(|host| host == address);
+        }
+        hostname.eq_ignore_ascii_case(sni.trim_end_matches('.'))
+    })
 }
 
 fn authority_hostname(authority: &str) -> Option<&str> {
@@ -6039,6 +6043,34 @@ mod tests {
                 .unwrap()
                 .contains("real-secret")
         );
+    }
+
+    #[test]
+    fn tls_ip_authority_compares_addresses_without_allowing_hostname_fronting() {
+        let shared = SharedState::new(16);
+        let config = SecretsConfig::default();
+        for (identity, authority, allowed) in [
+            ("2001:db8::1", "[2001:db8::1]:443", true),
+            ("2001:db8::1", "[2001:0db8:0:0:0:0:0:1]:443", true),
+            ("2001:db8::1", "[2001:db8::2]:443", false),
+            ("2001:db8::1", "example.com", false),
+            ("192.0.2.1", "192.0.2.1:443", true),
+            ("192.0.2.1", "192.0.2.2", false),
+            ("192.0.2.1", "example.com", false),
+            ("example.com", "192.0.2.1", false),
+        ] {
+            let ip = identity
+                .parse()
+                .unwrap_or_else(|_| "192.0.2.1".parse().unwrap());
+            cache_host(&shared, "example.com", "192.0.2.1".parse().unwrap());
+            let mut handler = SecretsHandler::new_tls_intercepted(&config, identity, ip, &shared);
+            let request = format!("GET / HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+            assert_eq!(
+                handler.substitute(request.as_bytes()).is_ok(),
+                allowed,
+                "identity={identity}, authority={authority}"
+            );
+        }
     }
 
     #[test]
