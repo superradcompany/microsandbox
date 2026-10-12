@@ -648,6 +648,13 @@ pub struct SandboxOpts {
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
     /// `ENV[:OPTIONS]@HOST[,HOST...]`.
+    ///
+    /// OPTIONS are comma-separated: `no-headers`, `headers=[FIELD,...]`,
+    /// `query`, `body`, `passthrough=HOST`, or `passthrough=[HOST,...]`.
+    /// Headers are substituted by default; query and body substitution are off.
+    /// `headers=*` selects all headers. Passthrough sends the placeholder unchanged.
+    ///
+    /// Example: `--secret 'GH_TOKEN:passthrough=api.anthropic.com@github.com,api.github.com'`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,

@@ -1565,6 +1565,7 @@ jobs:
 
       - name: CI helper and snapshot runner unit tests
         run: |
+          python3 -m unittest discover -s scripts/ci -p test_install.py
           python3 -m unittest discover -s scripts/ci -p test_bump_version.py
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py

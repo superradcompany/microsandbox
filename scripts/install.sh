@@ -9,6 +9,10 @@ set -eu
 
 GITHUB_REPO="superradcompany/microsandbox"
 INSTALL_DIR="${MSB_HOME:-$HOME/.microsandbox}"
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$(pwd -P)/$INSTALL_DIR" ;;
+esac
 BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib"
 LOCAL_BIN_DIR="$HOME/.local/bin"

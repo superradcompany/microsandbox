@@ -22,6 +22,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use microsandbox_db::DbWriteConnection;
+use microsandbox_db::entity::sandbox::SandboxStatus;
 use microsandbox_db::entity::{
     maintenance_lease as lease_entity, run as run_entity, sandbox as sandbox_entity,
 };
@@ -34,6 +35,7 @@ use sea_orm::{
 #[cfg(test)]
 use sea_orm::{DbBackend, Statement};
 
+use crate::ipc::SandboxSocketPaths;
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -76,7 +78,7 @@ const MAX_TERMINAL_EPHEMERAL_ROWS: u64 = 250;
 struct LifecycleSandbox {
     id: i32,
     name: String,
-    status: sandbox_entity::SandboxStatus,
+    status: SandboxStatus,
     ephemeral: bool,
 }
 
@@ -231,9 +233,9 @@ pub async fn run_sandbox_lifecycle_maintenance(
     // runtime died (dead PID) as terminal.
     let active = lifecycle_sandboxes()
         .filter(sandbox_entity::Column::Status.is_in([
-            sandbox_entity::SandboxStatus::Starting,
-            sandbox_entity::SandboxStatus::Running,
-            sandbox_entity::SandboxStatus::Draining,
+            SandboxStatus::Starting,
+            SandboxStatus::Running,
+            SandboxStatus::Draining,
         ]))
         .order_by_asc(sandbox_entity::Column::Id)
         .limit(limits.max_stale_active)
@@ -261,10 +263,10 @@ pub async fn run_sandbox_lifecycle_maintenance(
     if !report.timed_out {
         let candidates = lifecycle_sandboxes()
             .filter(sandbox_entity::Column::Ephemeral.eq(true))
-            .filter(sandbox_entity::Column::Status.is_in([
-                sandbox_entity::SandboxStatus::Stopped,
-                sandbox_entity::SandboxStatus::Crashed,
-            ]))
+            .filter(
+                sandbox_entity::Column::Status
+                    .is_in([SandboxStatus::Stopped, SandboxStatus::Crashed]),
+            )
             .order_by_asc(sandbox_entity::Column::Id)
             .limit(limits.max_terminal_ephemeral)
             .into_model::<LifecycleSandbox>()
@@ -301,11 +303,11 @@ pub async fn active_sandboxes_for_schema_rollback<C: ConnectionTrait>(
 ) -> RuntimeResult<Vec<ActiveSandbox>> {
     let sandboxes = lifecycle_sandboxes()
         .filter(sandbox_entity::Column::Status.is_in([
-            sandbox_entity::SandboxStatus::Created,
-            sandbox_entity::SandboxStatus::Starting,
-            sandbox_entity::SandboxStatus::Running,
-            sandbox_entity::SandboxStatus::Draining,
-            sandbox_entity::SandboxStatus::Paused,
+            SandboxStatus::Created,
+            SandboxStatus::Starting,
+            SandboxStatus::Running,
+            SandboxStatus::Draining,
+            SandboxStatus::Paused,
         ]))
         .order_by_asc(sandbox_entity::Column::Name)
         .into_model::<LifecycleSandbox>()
@@ -420,7 +422,8 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
         return Ok(CleanupOutcome::SkippedLivePid);
     }
 
-    if let Err(err) = remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name) {
+    let dir = sandboxes_dir.join(&sandbox.name);
+    if let Err(err) = SandboxSocketPaths::new(run_dir, &dir, &sandbox.name).remove_artifacts() {
         tracing::warn!(
             sandbox = %sandbox.name,
             error = %err,
@@ -433,7 +436,6 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
     // DB row remains and the cleanup remains visible/retryable. Missing
     // directories count as success so a crash between directory removal and
     // row deletion is repaired by the next pass.
-    let dir = sandboxes_dir.join(&sandbox.name);
     if let Err(err) = remove_dir_if_exists(&dir) {
         tracing::warn!(
             sandbox = %sandbox.name,
@@ -449,10 +451,9 @@ async fn cleanup_terminal_ephemeral_sandbox_inner(
     let rows = sandbox_entity::Entity::delete_many()
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Ephemeral.eq(true))
-        .filter(sandbox_entity::Column::Status.is_in([
-            sandbox_entity::SandboxStatus::Stopped,
-            sandbox_entity::SandboxStatus::Crashed,
-        ]))
+        .filter(
+            sandbox_entity::Column::Status.is_in([SandboxStatus::Stopped, SandboxStatus::Crashed]),
+        )
         .exec(db)
         .await?
         .rows_affected;
@@ -786,9 +787,7 @@ async fn reconcile_stale_active(
     };
     if !matches!(
         sandbox.status,
-        sandbox_entity::SandboxStatus::Starting
-            | sandbox_entity::SandboxStatus::Running
-            | sandbox_entity::SandboxStatus::Draining
+        SandboxStatus::Starting | SandboxStatus::Running | SandboxStatus::Draining
     ) {
         return Ok(false);
     }
@@ -799,15 +798,21 @@ async fn reconcile_stale_active(
         .order_by_desc(run_entity::Column::StartedAt)
         .one(db)
         .await?;
+    let socket_paths = SandboxSocketPaths::in_sandboxes_dir(run_dir, sandboxes_dir, &sandbox.name);
 
-    // With neither creator nor runtime ownership, Starting without an active run is abandoned.
+    // Older Unix runtimes can own an endpoint without holding either lock.
     // Preserve the config (including pending restore intent) while publishing its terminal state.
     let Some(run) = run else {
+        #[cfg(unix)]
+        if sandbox.status == SandboxStatus::Starting && socket_paths.may_be_live().await? {
+            return Ok(false);
+        }
+
         if matches!(
             sandbox.status,
-            sandbox_entity::SandboxStatus::Starting | sandbox_entity::SandboxStatus::Draining
+            SandboxStatus::Starting | SandboxStatus::Draining
         ) {
-            remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name)?;
+            socket_paths.remove_artifacts()?;
             let now = chrono::Utc::now().naive_utc();
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
             let result = terminal_sandbox_update(db)
@@ -837,7 +842,7 @@ async fn reconcile_stale_active(
     // Runtime artifacts are part of reaping this specific dead process. Do
     // this before the terminal transition so a failure leaves the row in the
     // active maintenance query and therefore retryable.
-    remove_runtime_socket_artifacts(run_dir, sandboxes_dir, &sandbox.name)?;
+    socket_paths.remove_artifacts()?;
 
     let now = chrono::Utc::now().naive_utc();
     let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
@@ -863,9 +868,9 @@ async fn reconcile_stale_active(
         .col_expr(sandbox_entity::Column::UpdatedAt, Expr::value(now))
         .filter(sandbox_entity::Column::Id.eq(sandbox.id))
         .filter(sandbox_entity::Column::Status.is_in([
-            sandbox_entity::SandboxStatus::Starting,
-            sandbox_entity::SandboxStatus::Running,
-            sandbox_entity::SandboxStatus::Draining,
+            SandboxStatus::Starting,
+            SandboxStatus::Running,
+            SandboxStatus::Draining,
         ]))
         .exec(db)
         .await?;
@@ -874,41 +879,21 @@ async fn reconcile_stale_active(
 }
 
 fn stale_runtime_terminal_state(
-    status: sandbox_entity::SandboxStatus,
-) -> (sandbox_entity::SandboxStatus, run_entity::TerminationReason) {
+    status: SandboxStatus,
+) -> (SandboxStatus, run_entity::TerminationReason) {
     match status {
         // Draining means a stop/drain request was already accepted. If the
         // owning runtime is now gone, the lifecycle reached its requested
         // terminal state even when the original observer could not reap it.
-        sandbox_entity::SandboxStatus::Draining => (
-            sandbox_entity::SandboxStatus::Stopped,
+        SandboxStatus::Draining => (
+            SandboxStatus::Stopped,
             run_entity::TerminationReason::ShutdownRequested,
         ),
         _ => (
-            sandbox_entity::SandboxStatus::Crashed,
+            SandboxStatus::Crashed,
             run_entity::TerminationReason::InternalError,
         ),
     }
-}
-
-fn remove_runtime_socket_artifacts(
-    run_dir: &Path,
-    sandboxes_dir: &Path,
-    name: &str,
-) -> std::io::Result<()> {
-    #[cfg(not(unix))]
-    let _ = sandboxes_dir;
-
-    let canonical_result = crate::ipc::remove_sandbox_socket_artifacts(run_dir, name);
-
-    #[cfg(unix)]
-    let fallback_result = crate::ipc::remove_socket_pair(
-        &sandboxes_dir.join(name).join("runtime").join("agent.sock"),
-    );
-    #[cfg(not(unix))]
-    let fallback_result = Ok(());
-
-    canonical_result.and(fallback_result)
 }
 
 /// Whether the sandbox has any run that is still Running with a live PID.
@@ -922,11 +907,8 @@ async fn has_live_active_run(db: &DbWriteConnection, sandbox_id: i32) -> Runtime
 }
 
 /// Whether a sandbox status is terminal (eligible for ephemeral cleanup).
-fn is_terminal(status: sandbox_entity::SandboxStatus) -> bool {
-    matches!(
-        status,
-        sandbox_entity::SandboxStatus::Stopped | sandbox_entity::SandboxStatus::Crashed
-    )
+fn is_terminal(status: SandboxStatus) -> bool {
+    matches!(status, SandboxStatus::Stopped | SandboxStatus::Crashed)
 }
 
 /// Best-effort liveness probe for a PID. Zombies are treated as dead because
@@ -988,27 +970,11 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_works_without_active_config_and_preserves_schema() {
         let (dir, db) = test_db().await;
-        let stopped = insert_sandbox(
-            &db,
-            "historical-persistent",
-            sandbox_entity::SandboxStatus::Draining,
-            false,
-        )
-        .await;
-        let ephemeral = insert_sandbox(
-            &db,
-            "historical-ephemeral",
-            sandbox_entity::SandboxStatus::Stopped,
-            true,
-        )
-        .await;
-        let stale = insert_sandbox(
-            &db,
-            "historical-stale",
-            sandbox_entity::SandboxStatus::Draining,
-            false,
-        )
-        .await;
+        let stopped =
+            insert_sandbox(&db, "historical-persistent", SandboxStatus::Draining, false).await;
+        let ephemeral =
+            insert_sandbox(&db, "historical-ephemeral", SandboxStatus::Stopped, true).await;
+        let stale = insert_sandbox(&db, "historical-stale", SandboxStatus::Draining, false).await;
         db.execute_raw(Statement::from_string(
             DbBackend::Sqlite,
             "ALTER TABLE sandbox DROP COLUMN active_config".to_owned(),
@@ -1027,7 +993,7 @@ mod tests {
             .unwrap()
             .col_expr(
                 sandbox_entity::Column::Status,
-                Expr::value(sandbox_entity::SandboxStatus::Stopped),
+                Expr::value(SandboxStatus::Stopped),
             )
             .filter(sandbox_entity::Column::Id.eq(stopped))
             .exec(&db)
@@ -1062,7 +1028,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.status, sandbox_entity::SandboxStatus::Stopped);
+        assert_eq!(row.status, SandboxStatus::Stopped);
         let versions = |rows: Vec<sea_orm::QueryResult>| {
             rows.into_iter()
                 .map(|row| row.try_get::<String>("", "version").unwrap())
@@ -1087,7 +1053,7 @@ mod tests {
     async fn insert_sandbox(
         db: &DbWriteConnection,
         name: &str,
-        status: sandbox_entity::SandboxStatus,
+        status: SandboxStatus,
         ephemeral: bool,
     ) -> i32 {
         let now = chrono::Utc::now().naive_utc();
@@ -1124,7 +1090,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn status_of(db: &DbWriteConnection, id: i32) -> Option<sandbox_entity::SandboxStatus> {
+    async fn status_of(db: &DbWriteConnection, id: i32) -> Option<SandboxStatus> {
         sandbox_entity::Entity::find_by_id(id)
             .one(db)
             .await
@@ -1137,13 +1103,13 @@ mod tests {
         sandboxes_dir: &Path,
         run_dir: &Path,
         name: &str,
-    ) -> crate::ipc::SandboxSocketPaths {
-        let paths = crate::ipc::sandbox_socket_paths(run_dir, name);
+    ) -> crate::ipc::RuntimeSocketPaths {
+        let paths = crate::ipc::RuntimeSocketPaths::new(run_dir, name);
         std::fs::create_dir_all(&paths.canonical_dir).unwrap();
         let _agent = std::os::unix::net::UnixListener::bind(&paths.agent).unwrap();
         let _control = std::os::unix::net::UnixListener::bind(&paths.control).unwrap();
-        crate::ipc::publish_legacy_agent_link(run_dir, name, &paths.agent).unwrap();
-        crate::ipc::publish_legacy_control_link(run_dir, name, &paths.control).unwrap();
+        paths.publish_legacy_agent_link(&paths.agent).unwrap();
+        paths.publish_legacy_control_link(&paths.control).unwrap();
 
         let fallback = sandboxes_dir.join(name).join("runtime").join("agent.sock");
         std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
@@ -1157,7 +1123,7 @@ mod tests {
     #[cfg(unix)]
     fn assert_socket_artifacts_absent(
         sandboxes_dir: &Path,
-        paths: &crate::ipc::SandboxSocketPaths,
+        paths: &crate::ipc::RuntimeSocketPaths,
         name: &str,
     ) {
         let fallback_agent = sandboxes_dir.join(name).join("runtime").join("agent.sock");
@@ -1182,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_removes_terminal_ephemeral_row_and_dir() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(&db, "eph", sandbox_entity::SandboxStatus::Stopped, true).await;
+        let id = insert_sandbox(&db, "eph", SandboxStatus::Stopped, true).await;
         let sandbox_dir = dir.path().join("eph");
         std::fs::create_dir_all(&sandbox_dir).unwrap();
         let run_dir = dir.path().join("run");
@@ -1204,13 +1170,7 @@ mod tests {
     #[cfg(unix)]
     async fn cleanup_does_not_cross_a_live_lifecycle_owner() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(
-            &db,
-            "successor",
-            sandbox_entity::SandboxStatus::Stopped,
-            true,
-        )
-        .await;
+        let id = insert_sandbox(&db, "successor", SandboxStatus::Stopped, true).await;
         let run_dir = dir.path().join("run");
         let paths = seed_socket_artifacts(dir.path(), &run_dir, "successor");
         let _owner = crate::ipc::acquire_lifecycle_guard(&run_dir, "successor").unwrap();
@@ -1230,7 +1190,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_skips_persistent() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(&db, "keep", sandbox_entity::SandboxStatus::Stopped, false).await;
+        let id = insert_sandbox(&db, "keep", SandboxStatus::Stopped, false).await;
 
         let outcome =
             cleanup_terminal_ephemeral_sandbox(&db, dir.path(), &dir.path().join("run"), id)
@@ -1244,7 +1204,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_skips_non_terminal() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(&db, "run", sandbox_entity::SandboxStatus::Running, true).await;
+        let id = insert_sandbox(&db, "run", SandboxStatus::Running, true).await;
 
         let outcome =
             cleanup_terminal_ephemeral_sandbox(&db, dir.path(), &dir.path().join("run"), id)
@@ -1258,7 +1218,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_skips_when_run_pid_is_live() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(&db, "live", sandbox_entity::SandboxStatus::Stopped, true).await;
+        let id = insert_sandbox(&db, "live", SandboxStatus::Stopped, true).await;
         // The current process is unquestionably alive.
         insert_run(
             &db,
@@ -1280,7 +1240,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_second_call_is_no_op() {
         let (dir, db) = test_db().await;
-        let id = insert_sandbox(&db, "eph", sandbox_entity::SandboxStatus::Stopped, true).await;
+        let id = insert_sandbox(&db, "eph", SandboxStatus::Stopped, true).await;
 
         assert_eq!(
             cleanup_terminal_ephemeral_sandbox(&db, dir.path(), &dir.path().join("run"), id)
@@ -1397,11 +1357,9 @@ mod tests {
     #[tokio::test]
     async fn active_sandboxes_include_non_terminal_rows_with_pid() {
         let (_dir, db) = test_db().await;
-        let running =
-            insert_sandbox(&db, "run", sandbox_entity::SandboxStatus::Running, false).await;
+        let running = insert_sandbox(&db, "run", SandboxStatus::Running, false).await;
         insert_run(&db, running, Some(DEAD_PID), run_entity::RunStatus::Running).await;
-        let stopped =
-            insert_sandbox(&db, "stop", sandbox_entity::SandboxStatus::Stopped, false).await;
+        let stopped = insert_sandbox(&db, "stop", SandboxStatus::Stopped, false).await;
         insert_run(
             &db,
             stopped,
@@ -1427,19 +1385,13 @@ mod tests {
         let run_dir = dir.path().join("run");
 
         // Persistent Running sandbox with a dead PID should become Crashed.
-        let dead = insert_sandbox(&db, "dead", sandbox_entity::SandboxStatus::Running, false).await;
+        let dead = insert_sandbox(&db, "dead", SandboxStatus::Running, false).await;
         insert_run(&db, dead, Some(DEAD_PID), run_entity::RunStatus::Running).await;
         #[cfg(unix)]
         let dead_sockets = seed_socket_artifacts(dir.path(), &run_dir, "dead");
 
         // A booting sandbox whose runtime died before readiness should also become Crashed.
-        let starting = insert_sandbox(
-            &db,
-            "starting",
-            sandbox_entity::SandboxStatus::Starting,
-            false,
-        )
-        .await;
+        let starting = insert_sandbox(&db, "starting", SandboxStatus::Starting, false).await;
         insert_run(
             &db,
             starting,
@@ -1449,13 +1401,7 @@ mod tests {
         .await;
 
         // Persistent Draining sandbox with a dead PID completed a requested stop.
-        let draining = insert_sandbox(
-            &db,
-            "draining",
-            sandbox_entity::SandboxStatus::Draining,
-            false,
-        )
-        .await;
+        let draining = insert_sandbox(&db, "draining", SandboxStatus::Draining, false).await;
         insert_run(
             &db,
             draining,
@@ -1467,19 +1413,14 @@ mod tests {
         let draining_sockets = seed_socket_artifacts(dir.path(), &run_dir, "draining");
 
         // Draining without an active run should also settle as Stopped.
-        let draining_no_run = insert_sandbox(
-            &db,
-            "draining-no-run",
-            sandbox_entity::SandboxStatus::Draining,
-            false,
-        )
-        .await;
+        let draining_no_run =
+            insert_sandbox(&db, "draining-no-run", SandboxStatus::Draining, false).await;
         #[cfg(unix)]
         let draining_no_run_sockets =
             seed_socket_artifacts(dir.path(), &run_dir, "draining-no-run");
 
         // Ephemeral Stopped sandbox should be removed in phase 2.
-        let eph = insert_sandbox(&db, "eph", sandbox_entity::SandboxStatus::Stopped, true).await;
+        let eph = insert_sandbox(&db, "eph", SandboxStatus::Stopped, true).await;
         std::fs::create_dir_all(dir.path().join("eph")).unwrap();
 
         let report = run_sandbox_lifecycle_maintenance(
@@ -1494,21 +1435,12 @@ mod tests {
         assert_eq!(report.reconciled, 4);
         assert_eq!(report.removed, 1);
         assert_eq!(report.errors, 0);
-        assert_eq!(
-            status_of(&db, dead).await,
-            Some(sandbox_entity::SandboxStatus::Crashed)
-        );
-        assert_eq!(
-            status_of(&db, starting).await,
-            Some(sandbox_entity::SandboxStatus::Crashed)
-        );
-        assert_eq!(
-            status_of(&db, draining).await,
-            Some(sandbox_entity::SandboxStatus::Stopped)
-        );
+        assert_eq!(status_of(&db, dead).await, Some(SandboxStatus::Crashed));
+        assert_eq!(status_of(&db, starting).await, Some(SandboxStatus::Crashed));
+        assert_eq!(status_of(&db, draining).await, Some(SandboxStatus::Stopped));
         assert_eq!(
             status_of(&db, draining_no_run).await,
-            Some(sandbox_entity::SandboxStatus::Stopped)
+            Some(SandboxStatus::Stopped)
         );
         assert!(status_of(&db, eph).await.is_none());
         assert!(!dir.path().join("eph").exists());
@@ -1524,13 +1456,7 @@ mod tests {
     async fn starting_without_run_is_reaped_only_after_creator_releases_transition() {
         let (dir, db) = test_db().await;
         let run_dir = dir.path().join("run");
-        let id = insert_sandbox(
-            &db,
-            "abandoned",
-            sandbox_entity::SandboxStatus::Starting,
-            false,
-        )
-        .await;
+        let id = insert_sandbox(&db, "abandoned", SandboxStatus::Starting, false).await;
         let model = lifecycle_sandboxes()
             .filter(sandbox_entity::Column::Id.eq(id))
             .into_model::<LifecycleSandbox>()
@@ -1546,20 +1472,100 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            status_of(&db, id).await,
-            Some(sandbox_entity::SandboxStatus::Starting)
-        );
+        assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Starting));
         drop(creator);
+        #[cfg(unix)]
+        {
+            // Historical v0.6.0 fixture (efaab0ec): spawn.rs uses the first 32 hex
+            // digits of SHA-256(name) under run/agent. vm.rs binds the relay before
+            // insert_run, leaving Starting without a run or modern lifecycle locks.
+            // Keep this independent of current path helpers so format drift fails.
+            let socket = run_dir.join("agent/20e7f550122ee415de2b6d761a474ea5.sock");
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            assert!(
+                !reconcile_stale_active(&db, dir.path(), &run_dir, &model)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Starting));
+            assert!(
+                socket.exists(),
+                "maintenance must preserve the live legacy endpoint"
+            );
+            drop(listener);
+            // macOS may defer teardown while a probe connection is queued.
+            std::fs::remove_file(&socket).unwrap();
+        }
         assert!(
             reconcile_stale_active(&db, dir.path(), &run_dir, &model)
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            status_of(&db, id).await,
-            Some(sandbox_entity::SandboxStatus::Crashed)
-        );
+        assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Crashed));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uncertain_endpoint_permissions_preserve_starting_sandbox() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses filesystem permission checks; this needs an unprivileged runner.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping permission-denial test as root");
+            return;
+        }
+        for deny_metadata in [true, false] {
+            let (dir, db) = test_db().await;
+            let run_dir = dir.path().join("run");
+            let sandbox_dir = dir.path().join("uncertain");
+            let paths = SandboxSocketPaths::new(&run_dir, &sandbox_dir, "uncertain");
+            std::fs::create_dir_all(&paths.runtime.canonical_dir).unwrap();
+            std::fs::write(&paths.runtime.agent, b"preserve me").unwrap();
+            let fallback_dir = paths.fallback_agent.parent().unwrap();
+            std::fs::create_dir_all(fallback_dir).unwrap();
+            let _listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
+            let id = insert_sandbox(&db, "uncertain", SandboxStatus::Starting, false).await;
+            let model = lifecycle_sandboxes()
+                .filter(sandbox_entity::Column::Id.eq(id))
+                .into_model::<LifecycleSandbox>()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let restricted = if deny_metadata {
+                fallback_dir
+            } else {
+                &paths.fallback_agent
+            };
+            let permissions = std::fs::metadata(restricted).unwrap().permissions();
+            std::fs::set_permissions(restricted, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            let result = reconcile_stale_active(&db, dir.path(), &run_dir, &model).await;
+
+            // Restore access before assertions so failures do not prevent temp-dir cleanup.
+            if restricted.exists() {
+                std::fs::set_permissions(restricted, permissions).unwrap();
+            }
+            let Err(RuntimeError::Io(error)) = result else {
+                panic!("expected endpoint permission error, got {result:?}");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            let message = error.to_string();
+            let operation = if deny_metadata {
+                "inspect runtime endpoint"
+            } else {
+                "connect to runtime endpoint"
+            };
+            assert!(message.contains(operation), "missing operation: {message}");
+            assert!(
+                message.contains(&paths.fallback_agent.display().to_string()),
+                "missing endpoint: {message}"
+            );
+            assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Starting));
+            assert_eq!(std::fs::read(&paths.runtime.agent).unwrap(), b"preserve me");
+            assert!(paths.fallback_agent.exists());
+        }
     }
 
     #[tokio::test]
@@ -1568,7 +1574,7 @@ mod tests {
             let (dir, db) = test_db().await;
             let run_dir = dir.path().join("run");
             let name = "publishing";
-            let id = insert_sandbox(&db, name, sandbox_entity::SandboxStatus::Stopped, true).await;
+            let id = insert_sandbox(&db, name, SandboxStatus::Stopped, true).await;
             let sandbox_dir = dir.path().join(name);
             std::fs::create_dir_all(&sandbox_dir).unwrap();
             let marker = sandbox_dir.join("snapshot-cursor");
@@ -1602,10 +1608,7 @@ mod tests {
             .unwrap();
             assert_eq!(outcome, CleanupOutcome::SkippedActive);
             assert_eq!(std::fs::read(&marker).unwrap(), b"publication in progress");
-            assert_eq!(
-                status_of(&db, id).await,
-                Some(sandbox_entity::SandboxStatus::Stopped)
-            );
+            assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Stopped));
             #[cfg(unix)]
             assert!(agent_socket.exists());
 

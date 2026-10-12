@@ -77,6 +77,8 @@ struct FirstFlight {
 
 /// Per-connection TCP proxy task and the state it owns.
 pub(crate) struct TcpProxy {
+    /// Already-open host socket, reused instead of dialing `connect_target`.
+    upstream: Option<TcpStream>,
     guest_dst: SocketAddr,
     connect_target: UpstreamTcpTarget,
     from_smoltcp: mpsc::Receiver<Bytes>,
@@ -141,8 +143,11 @@ impl ConnectTarget {
 
 impl TcpProxy {
     /// Build a proxy for a newly established guest TCP connection.
+    /// `upstream` is reused when present; otherwise, dial after policy checks.
+    /// Policy uses `guest_dst`; host connections use the resolved `connect_target`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        upstream: Option<TcpStream>,
         guest_dst: SocketAddr,
         connect_target: UpstreamTcpTarget,
         from_smoltcp: mpsc::Receiver<Bytes>,
@@ -156,6 +161,7 @@ impl TcpProxy {
         outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> Self {
         Self {
+            upstream,
             guest_dst,
             connect_target,
             from_smoltcp,
@@ -188,6 +194,7 @@ impl TcpProxy {
     /// Drive the TCP proxy to completion, returning operational failures.
     async fn try_run(self) -> io::Result<()> {
         let Self {
+            upstream,
             guest_dst,
             connect_target,
             mut from_smoltcp,
@@ -332,7 +339,7 @@ impl TcpProxy {
                 strict,
                 proxy_connect,
                 outbound_proxy,
-                None,
+                upstream,
             )
             .await;
         }
@@ -341,9 +348,14 @@ impl TcpProxy {
         // server-first protocol (SSH, SMTP, a database) sends nothing until it has
         // seen the server's banner; with the socket already open we can relay that
         // banner while we wait, instead of burning the peek budget pre-connect.
-        let stream = connect_target
-            .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
-            .await?;
+        let stream = match upstream {
+            Some(stream) => stream,
+            None => {
+                connect_target
+                    .connect(&proxy_connect, &shared, outbound_proxy.as_deref())
+                    .await?
+            }
+        };
         let connect_dst = stream.peer_addr().unwrap_or(connect_target.primary());
         let (mut server_rx, mut server_tx) = stream.into_split();
 
@@ -610,6 +622,7 @@ pub fn spawn_tcp_proxy(
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 ) {
     let proxy = TcpProxy::new(
+        None,
         guest_dst,
         UpstreamTcpTarget::direct(connect_dst),
         from_smoltcp,
@@ -778,6 +791,7 @@ async fn handle_connect_tunnel(
     let expected_sni = connect_req.target.expected_sni.clone();
 
     TlsProxy::new(
+        Some(proxy_stream),
         tls_guest_dst,
         proxy_target,
         from_smoltcp,
@@ -787,12 +801,9 @@ async fn handle_connect_tunnel(
         network_policy,
         strict,
         proxy_connect,
-        // Unused: `upstream_stream` is already `Some` below, so the
-        // outbound proxy (already applied when dialing `proxy_stream`
-        // above) is never consulted again.
+        // The outbound proxy was already applied to the supplied stream.
         None,
     )
-    .with_upstream(proxy_stream)
     .with_expected_sni(expected_sni)
     .with_initial_buf(tls_seed)
     .try_run()
@@ -1703,6 +1714,7 @@ mod tests {
                 .unwrap();
             drop(from_tx);
             TcpProxy::new(
+                None,
                 dst,
                 UpstreamTcpTarget::direct(dst),
                 from_rx,
@@ -2369,6 +2381,7 @@ mod tests {
         drop(from_tx);
 
         TcpProxy::new(
+            None,
             server_addr,
             UpstreamTcpTarget::direct(server_addr),
             from_rx,
@@ -2492,6 +2505,7 @@ mod tests {
         }
 
         let proxy = TcpProxy::new(
+            None,
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -2759,6 +2773,7 @@ mod tests {
         drop(from_tx);
 
         TcpProxy::new(
+            None,
             dst,
             UpstreamTcpTarget::direct(dst),
             from_rx,
@@ -2800,6 +2815,7 @@ mod tests {
         drop(from_tx);
 
         let result = TcpProxy::new(
+            None,
             dst,
             UpstreamTcpTarget::direct(dst),
             from_rx,
@@ -2902,6 +2918,7 @@ mod tests {
         drop(from_tx);
 
         TcpProxy::new(
+            None,
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -2975,6 +2992,7 @@ mod tests {
         drop(from_tx);
 
         TcpProxy::new(
+            None,
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,
@@ -3079,6 +3097,7 @@ mod tests {
         drop(from_tx);
 
         TcpProxy::new(
+            None,
             addr,
             UpstreamTcpTarget::direct(addr),
             from_rx,

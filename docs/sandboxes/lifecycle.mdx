@@ -589,6 +589,8 @@ Use these states to display status or decide what to do next.
 | **Stopped** | The VM is off. Configuration and sandbox state are preserved for a later start. |
 | **Crashed** | The VM exited unexpectedly and can be started again. |
 
+Local status checks and startup maintenance mark abandoned starts as `Crashed`. If a runtime may still be active or the check times out, the sandbox stays `Starting` until a later check.
+
 ## Names, handles, and concurrent callers
 
 A name identifies the sandbox currently saved under it. An SDK handle identifies one specific sandbox. If that sandbox is removed and its name is reused, the old handle will not act on the replacement.

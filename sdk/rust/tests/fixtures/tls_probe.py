@@ -44,6 +44,7 @@ try:
     try:
         client.do_handshake()
     except ssl.SSLWantReadError:
+        # Expected: MemoryBIO has the ClientHello ready, with no peer input yet.
         pass
     hello = outgoing.read()
     assert hello and hello[0] == 22

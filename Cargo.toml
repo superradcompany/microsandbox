@@ -150,7 +150,8 @@ serde_ignored = "0.1"
 serde_json = "1.0"
 serde-saphyr = { version = "1.0.1", default-features = false, features = ["deserialize"] }
 sha2 = "0.11.0"
-smoltcp = { version = "0.14", default-features = false }
+# Temporary scheduling fix for smoltcp-rs/smoltcp#1214, based on v0.14.0.
+smoltcp = { git = "https://github.com/superradcompany/smoltcp", rev = "509a8fcae9a8aae7f1484b719a4fb29b0581ecc9", default-features = false }
 socket2 = "0.6"
 strum = { version = "0.28", features = ["derive"] }
 tar = "0.4"

@@ -20,6 +20,7 @@ use microsandbox_image::{
     CachedImageMetadata, Digest, GlobalCache, PullOptions, PullProgress, PullProgressSender,
     PullResult, Reference, Registry, RootfsMaterialization, ext4, tree,
 };
+use microsandbox_runtime::ipc::SandboxSocketPaths;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 use tokio::sync::Mutex;
 
@@ -1758,6 +1759,7 @@ impl LocalBackend {
         if !config.replace_existing {
             return Self::check_create_target(pools, &config.spec.name, sandbox_dir).await;
         }
+        let socket_paths = SandboxSocketPaths::new(run_dir, sandbox_dir, &config.spec.name);
         let existing = microsandbox_db::catalog::sandbox_query(pools.read())
             .await?
             .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
@@ -1806,7 +1808,17 @@ impl LocalBackend {
                 )));
             }
 
-            microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, &config.spec.name)?;
+            // Recheck under this lifecycle guard: reconciliation released its guard,
+            // and legacy runtimes do not participate in lifecycle locking.
+            #[cfg(unix)]
+            if model.status == SandboxStatus::Starting && socket_paths.may_be_live().await? {
+                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                    "cannot replace sandbox {:?}: a runtime endpoint may still be live",
+                    config.spec.name
+                )));
+            }
+
+            socket_paths.runtime.remove_artifacts()?;
             remove_dir_if_exists(sandbox_dir)?;
 
             sandbox_entity::Entity::delete_by_id(model.id)
@@ -1822,13 +1834,14 @@ impl LocalBackend {
             std::time::Duration::from_secs(5),
         )
         .await?;
-        if sandbox_runtime_endpoint_is_live(run_dir, sandbox_dir, &config.spec.name)? {
+        #[cfg(unix)]
+        if socket_paths.may_be_live().await? {
             return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                "cannot replace sandbox {:?}: an untracked runtime endpoint is still live",
+                "cannot replace sandbox {:?}: an untracked runtime endpoint may still be live",
                 config.spec.name
             )));
         }
-        microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, &config.spec.name)?;
+        socket_paths.runtime.remove_artifacts()?;
         remove_dir_if_exists(sandbox_dir)?;
         Ok(())
     }
@@ -2238,51 +2251,6 @@ fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
     microsandbox_runtime::ipc::sandbox_transition_lock_path(run_dir, name)
 }
 
-/// Probe every backward-compatible Unix endpoint before recovering an
-/// untracked namespace. A successful connection is direct evidence that an
-/// older runtime (which predates lifecycle locks) still owns the name.
-#[cfg(unix)]
-fn sandbox_runtime_endpoint_is_live(
-    run_dir: &Path,
-    sandbox_dir: &Path,
-    name: &str,
-) -> std::io::Result<bool> {
-    let paths = microsandbox_runtime::ipc::sandbox_socket_paths(run_dir, name);
-    let fallback_agent = sandbox_dir.join("runtime").join("agent.sock");
-    let fallback_control = microsandbox_runtime::ipc::control_socket_path_for(&fallback_agent);
-    for path in [
-        paths.agent,
-        paths.control,
-        paths.legacy_agent,
-        paths.legacy_control,
-        fallback_agent,
-        fallback_control,
-    ] {
-        if std::fs::symlink_metadata(&path).is_err() {
-            continue;
-        }
-        match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(_) => return Ok(true),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                ) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(not(unix))]
-fn sandbox_runtime_endpoint_is_live(
-    _run_dir: &Path,
-    _sandbox_dir: &Path,
-    _name: &str,
-) -> std::io::Result<bool> {
-    Ok(false)
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -2301,11 +2269,11 @@ mod tests {
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
+    #[cfg(unix)]
+    use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    #[cfg(unix)]
-    use super::sandbox_runtime_endpoint_is_live;
     use super::{ChildStageGuard, sandbox_entity, sandbox_label_entity};
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
@@ -2854,26 +2822,6 @@ mod tests {
         drop(guard);
 
         assert!(stage.exists());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn untracked_runtime_probe_detects_listener_removal() {
-        let temp = tempfile::Builder::new()
-            .prefix("msb-untracked")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let run_dir = temp.path().join("run");
-        let sandbox_dir = temp.path().join("sandboxes").join("worker");
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "worker");
-        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&paths.legacy_agent).unwrap();
-
-        assert!(sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
-        drop(listener);
-        // Remove the endpoint before probing: macOS may defer listener teardown.
-        std::fs::remove_file(&paths.legacy_agent).unwrap();
-        assert!(!sandbox_runtime_endpoint_is_live(&run_dir, &sandbox_dir, "worker").unwrap());
     }
 
     fn test_config(name: impl Into<String>) -> SandboxConfig {
@@ -3646,6 +3594,72 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_preserves_live_legacy_runtime() {
+        for tracked in [false, true] {
+            let temp = tempfile::tempdir_in("/tmp").unwrap();
+            let pools = open_test_pools(&temp.path().join("test.db")).await;
+            let run_dir = temp.path().join("run");
+            let sandbox_dir = temp.path().join("sandboxes/legacy");
+            fs::create_dir_all(&sandbox_dir).unwrap();
+            let marker = sandbox_dir.join("state");
+            fs::write(&marker, b"runtime state").unwrap();
+            let mut config = test_config("legacy");
+            config.replace_existing = true;
+            let sandbox_id = if tracked {
+                Some(
+                    LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
+                        .await
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let socket = RuntimeSocketPaths::new(&run_dir, "legacy").legacy_agent;
+            fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let _transition = LocalBackend::acquire_sandbox_transition_guard(&run_dir, "legacy")
+                .await
+                .unwrap();
+
+            let error =
+                LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
+                    .await
+                    .expect_err("replacement must preserve a live legacy runtime");
+            assert!(matches!(
+                error,
+                crate::MicrosandboxError::SandboxStillRunning(_)
+            ));
+            assert!(socket.exists());
+            assert_eq!(fs::read(&marker).unwrap(), b"runtime state");
+            if let Some(id) = sandbox_id {
+                let model = sandbox_entity::Entity::find_by_id(id)
+                    .one(pools.read())
+                    .await
+                    .unwrap()
+                    .expect("replacement must preserve the sandbox row");
+                assert_eq!(model.status, SandboxStatus::Starting);
+            }
+
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+            LocalBackend::prepare_create_target(&pools, &config, &sandbox_dir, &run_dir)
+                .await
+                .unwrap();
+            assert!(!sandbox_dir.exists());
+            if let Some(id) = sandbox_id {
+                assert!(
+                    sandbox_entity::Entity::find_by_id(id)
+                        .one(pools.read())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_prepare_create_target_force_replaces_stopped_sandbox_state() {
         #[cfg(unix)]
@@ -3674,22 +3688,12 @@ mod tests {
         let run_dir = temp.path().join("run");
         #[cfg(unix)]
         let socket_paths = {
-            let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "replaceable");
+            let paths = RuntimeSocketPaths::new(&run_dir, "replaceable");
             fs::create_dir_all(&paths.canonical_dir).unwrap();
             fs::write(&paths.agent, b"stale").unwrap();
             fs::write(&paths.control, b"stale").unwrap();
-            microsandbox_runtime::ipc::publish_legacy_agent_link(
-                &run_dir,
-                "replaceable",
-                &paths.agent,
-            )
-            .unwrap();
-            microsandbox_runtime::ipc::publish_legacy_control_link(
-                &run_dir,
-                "replaceable",
-                &paths.control,
-            )
-            .unwrap();
+            paths.publish_legacy_agent_link(&paths.agent).unwrap();
+            paths.publish_legacy_control_link(&paths.control).unwrap();
             paths
         };
         LocalBackend::prepare_create_target(&pools, &forced, &sandbox_dir, &run_dir)

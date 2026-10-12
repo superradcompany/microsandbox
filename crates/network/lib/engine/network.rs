@@ -789,6 +789,14 @@ fn host_has_ipv6_route() -> bool {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "network/test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "network/tcp_connect_tests.rs"]
+mod tcp_connect_tests;
+
+#[cfg(test)]
 #[path = "network/published_ports_tests.rs"]
 mod published_ports_tests;
 

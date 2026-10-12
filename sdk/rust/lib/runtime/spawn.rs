@@ -67,6 +67,7 @@ use microsandbox_protocol::{
     },
     exec::ExecRlimit,
 };
+use microsandbox_runtime::ipc::SandboxSocketPaths;
 use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
@@ -2211,25 +2212,25 @@ fn sandbox_agent_socket_path_candidates_with_roots(
     sandboxes_dir: &Path,
     name: &str,
 ) -> Vec<PathBuf> {
-    let primary = microsandbox_runtime::ipc::canonical_agent_endpoint(run_dir, name);
-
     // New clients prefer the canonical per-sandbox endpoint, then the flat
     // legacy path used by older runtimes, and finally the pre-hash in-sandbox
     // fallback retained for unusually deep homes. Windows named pipes did not
     // change layout, so the canonical endpoint is the only candidate there.
     #[cfg(unix)]
     let candidates = {
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(run_dir, name);
+        let paths = SandboxSocketPaths::in_sandboxes_dir(run_dir, sandboxes_dir, name);
         vec![
-            primary,
-            paths.legacy_agent,
-            in_sandbox_agent_socket_path(sandboxes_dir, name),
+            paths.runtime.agent,
+            paths.runtime.legacy_agent,
+            paths.fallback_agent,
         ]
     };
     #[cfg(not(unix))]
     let candidates = {
         let _ = sandboxes_dir;
-        vec![primary]
+        vec![microsandbox_runtime::ipc::canonical_agent_endpoint(
+            run_dir, name,
+        )]
     };
 
     candidates
@@ -2244,11 +2245,14 @@ fn launch_agent_socket_path(
 ) -> MicrosandboxResult<PathBuf> {
     #[cfg(unix)]
     if contract.patch < 9 {
-        let paths =
-            microsandbox_runtime::ipc::sandbox_socket_paths(&local.config().run_dir(), name);
+        let paths = SandboxSocketPaths::in_sandboxes_dir(
+            &local.config().run_dir(),
+            &local.sandboxes_dir(),
+            name,
+        );
         return resolve_sandbox_agent_socket_path_from_candidates(vec![
-            paths.legacy_agent,
-            in_sandbox_agent_socket_path(&local.sandboxes_dir(), name),
+            paths.runtime.legacy_agent,
+            paths.fallback_agent,
         ]);
     }
     #[cfg(not(unix))]
@@ -2421,14 +2425,6 @@ fn probe_agent_pipe_server(pipe_path: &Path) -> std::io::Result<AgentPipeProbe> 
     }
 }
 
-// The legacy `<sandboxes>/<name>/runtime/agent.sock` fallback only exists for
-// backward compatibility with the pre-hash Unix layout; Windows never shipped a
-// different agent-pipe scheme, so this is Unix-only.
-#[cfg(unix)]
-fn in_sandbox_agent_socket_path(sandboxes_dir: &Path, name: &str) -> PathBuf {
-    sandboxes_dir.join(name).join("runtime").join("agent.sock")
-}
-
 /// Remove every Unix runtime socket artifact deterministically owned by a sandbox.
 pub(crate) fn remove_sandbox_socket_artifacts_for(
     local: &LocalBackend,
@@ -2447,21 +2443,8 @@ pub(crate) fn remove_sandbox_socket_artifacts_at(
     sandboxes_dir: &Path,
     name: &str,
 ) -> MicrosandboxResult<()> {
-    let canonical_result =
-        microsandbox_runtime::ipc::remove_sandbox_socket_artifacts(run_dir, name);
+    SandboxSocketPaths::in_sandboxes_dir(run_dir, sandboxes_dir, name).remove_artifacts()?;
 
-    #[cfg(unix)]
-    let fallback_result = microsandbox_runtime::ipc::remove_socket_pair(
-        &in_sandbox_agent_socket_path(sandboxes_dir, name),
-    );
-
-    #[cfg(not(unix))]
-    let fallback_result: std::io::Result<()> = {
-        let _ = sandboxes_dir;
-        Ok(())
-    };
-
-    canonical_result.and(fallback_result)?;
     Ok(())
 }
 
@@ -3343,6 +3326,8 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
+    #[cfg(unix)]
+    use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use microsandbox_runtime::launch::{
         CheckpointRestoreConfig, LaunchConfig, RootfsUpperLayerConfig,
     };
@@ -4790,7 +4775,7 @@ mod tests {
             .unwrap();
         let run_dir = temp.path().join("run");
         let sandboxes_dir = temp.path().join("sandboxes");
-        let paths = microsandbox_runtime::ipc::sandbox_socket_paths(&run_dir, "old-runtime");
+        let paths = RuntimeSocketPaths::new(&run_dir, "old-runtime");
         std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
         let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_agent).unwrap();
 
