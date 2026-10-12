@@ -1951,7 +1951,21 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | nat64Prefixes | `readonly string[]` | NAT64 `/96` prefixes for policy classification. Defaults to `64:ff9b::/96` |
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
-| http | `{ denyResponse: boolean; denyResponseFormat: "text" \| "json"; denyMessage?: string \| null; networkDenyMessage?: string \| null; secretDenyMessage?: string \| null }` | `denyResponse` defaults to `true` and the format to `json`; when enabled, an omitted or `null` message uses the built-in message |
+
+#### http
+
+```typescript
+http: {
+  denyResponse: boolean;
+  denyResponseFormat: "text" | "json";
+  denyMessage?: string | null;
+  networkDenyMessage?: string | null;
+  secretDenyMessage?: string | null;
+}
+```
+
+`denyResponse` defaults to `true` and the format to `json`. When enabled, an omitted
+or `null` message uses the built-in message. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 ### NetworkProfile
 
