@@ -35,7 +35,7 @@ use sea_orm::{
 #[cfg(test)]
 use sea_orm::{DbBackend, Statement};
 
-use crate::ipc::SandboxSocketPaths;
+use crate::ipc::{SandboxLifecycleGuard, SandboxSocketPaths};
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -346,6 +346,21 @@ pub async fn cleanup_terminal_ephemeral_sandbox(
     sandbox_id: i32,
 ) -> RuntimeResult<CleanupOutcome> {
     cleanup_terminal_ephemeral_sandbox_inner(db, sandboxes_dir, run_dir, sandbox_id, false).await
+}
+
+/// Remove terminal ephemeral state while the caller holds this sandbox's lifecycle guard.
+///
+/// The guard must belong to `sandbox_id` in `run_dir` and stay held throughout cleanup.
+/// Startup rollback uses this to avoid releasing ownership between reconciliation and
+/// deletion. Snapshot-lineage and terminal-state checks still apply.
+pub async fn cleanup_terminal_ephemeral_sandbox_guarded(
+    db: &DbWriteConnection,
+    sandboxes_dir: &Path,
+    run_dir: &Path,
+    sandbox_id: i32,
+    _guard: &SandboxLifecycleGuard,
+) -> RuntimeResult<CleanupOutcome> {
+    cleanup_terminal_ephemeral_sandbox_inner(db, sandboxes_dir, run_dir, sandbox_id, true).await
 }
 
 /// Remove a terminal ephemeral sandbox while its runtime still owns the

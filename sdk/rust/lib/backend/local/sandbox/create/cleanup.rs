@@ -11,6 +11,7 @@ use crate::backend::Backend;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::runtime::ProcessHandle;
 use crate::runtime::spawn::EnsuredNamedVolumes;
+use crate::sandbox::SandboxConfig;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -28,6 +29,9 @@ struct CleanupState {
     _transition: SandboxTransitionGuard,
     volumes: Arc<EnsuredNamedVolumes>,
     has_owned_volumes: bool,
+    owns_staging: bool,
+    ephemeral: bool,
+    returned_error: bool,
     process: Option<Arc<Mutex<ProcessHandle>>>,
 }
 
@@ -38,26 +42,35 @@ struct CleanupState {
 impl CreationCleanup {
     pub(super) fn new(
         backend: Arc<dyn Backend>,
-        name: String,
+        config: &SandboxConfig,
         transition: SandboxTransitionGuard,
         volumes: Arc<EnsuredNamedVolumes>,
-        has_owned_volumes: bool,
         child_stage: Option<&mut ChildStageGuard>,
     ) -> Self {
+        let has_owned_volumes = config
+            .spec
+            .mounts
+            .iter()
+            .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
+        let owns_staging = (has_owned_volumes || config.spec.lifecycle.ephemeral)
+            && child_stage.as_ref().is_some_and(|stage| stage.armed);
         let cleanup = Self {
             state: Some(CleanupState {
                 backend,
-                name,
+                name: config.spec.name.clone(),
                 _transition: transition,
                 volumes,
                 has_owned_volumes,
+                owns_staging,
+                ephemeral: config.spec.lifecycle.ephemeral,
+                returned_error: false,
                 process: None,
             }),
         };
         // Transfer before the next await, not just on a returned error: cancellation
         // while an insert commits must not let a synchronous stage destructor bypass
         // this cleanup's final writer-side catalog and runtime-ownership checks.
-        if has_owned_volumes && let Some(stage) = child_stage {
+        if owns_staging && let Some(stage) = child_stage {
             stage.disarm();
         }
         cleanup
@@ -74,12 +87,31 @@ impl CreationCleanup {
         self.state.take();
     }
 
+    /// Record the future's outcome synchronously before dropping the cleanup guard.
+    /// A returned startup error keeps diagnostics; only a dropped pending create is cancelled.
+    pub(super) fn complete<T>(
+        &mut self,
+        result: crate::MicrosandboxResult<T>,
+    ) -> crate::MicrosandboxResult<T> {
+        if result.is_ok() {
+            self.disarm();
+        } else if let Some(state) = &mut self.state {
+            state.returned_error = true;
+        }
+        result
+    }
+
     /// Finish ordinary owned-create failures before the caller's runtime can exit.
     /// Keep the state armed across the await so cancellation still delegates to Drop.
     pub(super) async fn finish_owned_failure(
         &mut self,
         error: crate::MicrosandboxError,
     ) -> crate::MicrosandboxError {
+        // Once ordinary failure handling begins, even cancellation during that cleanup
+        // must preserve its existing diagnostics policy.
+        if let Some(state) = &mut self.state {
+            state.returned_error = true;
+        }
         if let Some(state) = &self.state
             && state.has_owned_volumes
         {
@@ -117,14 +149,21 @@ impl CleanupState {
             .await?;
         // Keep the same lifecycle guard through reconciliation. Dropping and reopening
         // it can race a fork that briefly retains the original open file description.
+        let remove_ephemeral = self.ephemeral && !self.returned_error;
         if let Some(model) = model {
             local
-                .rollback_failed_startup_guarded(pools.write(), model.id, &self.volumes, &guard)
+                .rollback_failed_startup_guarded(
+                    pools.write(),
+                    model.id,
+                    &self.volumes,
+                    remove_ephemeral,
+                    &guard,
+                )
                 .await?;
         } else {
             crate::runtime::rollback_created_named_volumes(local, &self.volumes).await;
         }
-        if self.has_owned_volumes {
+        if self.has_owned_volumes || self.owns_staging || remove_ephemeral {
             // Rollback can retain a recoverable stopped row, or remove the row when
             // one-shot named volumes were created. Prove which outcome committed before
             // deleting anything, while still excluding both runtimes and replacements.
@@ -137,7 +176,16 @@ impl CleanupState {
                 // name. Remove its root disk/staging too, or the directory alone would
                 // prevent an immediate retry. External bind/named storage is not beneath it.
                 // A cancelled formatter only owns its unique sibling temporary directory.
-                crate::sandbox::remove_dir_if_exists(&local.sandboxes_dir().join(&self.name))?;
+                let directory = local.sandboxes_dir().join(&self.name);
+                if remove_ephemeral {
+                    microsandbox_runtime::ipc::SandboxSocketPaths::new(
+                        &local.config().run_dir(),
+                        &directory,
+                        &self.name,
+                    )
+                    .remove_artifacts()?;
+                }
+                crate::sandbox::remove_dir_if_exists(&directory)?;
             }
         }
         Ok(())
@@ -236,7 +284,13 @@ mod tests {
                 .image(rootfs.clone())
                 .volume("/bind", |mount| {
                     // Bind roots refuse symlinks, and /tmp is one on macOS.
-                    mount.bind(rootfs.canonicalize().unwrap())
+                    #[cfg(unix)]
+                    let bind_root = rootfs.canonicalize().unwrap();
+                    // Windows TempDir already has an absolute path. canonicalize
+                    // adds a verbatim prefix that the mount wire syntax rejects.
+                    #[cfg(not(unix))]
+                    let bind_root = rootfs.clone();
+                    mount.bind(bind_root)
                 })
                 .volume("/shared", |mount| mount.named("shared"))
                 .volume("/owned", |mount| mount.owned())
@@ -280,17 +334,13 @@ mod tests {
                     .await
                     .unwrap(),
             );
-            let cleanup =
-                CreationCleanup::new(
-                    self.backend.clone(),
-                    self.config.spec.name.clone(),
-                    transition,
-                    volumes,
-                    self.config.spec.mounts.iter().any(|mount| {
-                        matches!(mount, microsandbox_types::VolumeMount::Owned { .. })
-                    }),
-                    child_stage,
-                );
+            let cleanup = CreationCleanup::new(
+                self.backend.clone(),
+                &self.config,
+                transition,
+                volumes,
+                child_stage,
+            );
             crate::runtime::owned_volumes::prepare(
                 &self.sandbox_dir,
                 &self.config.spec.mounts,
@@ -694,14 +744,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let cleanup = CreationCleanup::new(
-            backend.clone(),
-            config.spec.name.clone(),
-            transition,
-            volumes,
-            false,
-            None,
-        );
+        let cleanup = CreationCleanup::new(backend.clone(), &config, transition, volumes, None);
         let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
             .await
             .unwrap();
@@ -766,5 +809,250 @@ mod tests {
             runs.iter()
                 .all(|run| run.status == run_entity::RunStatus::Terminated)
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_ephemeral_cleanup_waits_for_exit_and_allows_same_name_recreation() {
+        for owned in [false, true] {
+            for named in [false, true] {
+                let mut fixture = OwnedFixture::new("cancelled-ephemeral").await;
+                fixture.config.spec.lifecycle.ephemeral = true;
+                if !owned {
+                    fixture.config.spec.mounts.retain(|mount| {
+                        !matches!(mount, microsandbox_types::VolumeMount::Owned { .. })
+                    });
+                }
+                if named {
+                    fixture.config.spec.mounts.push(
+                        MountBuilder::new("/created")
+                            .named_with("created", |volume| volume.ensure_exists())
+                            .build()
+                            .unwrap(),
+                    );
+                }
+                let cleanup = fixture.arm().await;
+                let pools = fixture.backend.db().await.unwrap();
+                let id = LocalBackend::insert_starting_sandbox_record(
+                    pools.write(),
+                    &fixture.config,
+                    None,
+                )
+                .await
+                .unwrap();
+                let runtime = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+                    &fixture.backend.config().run_dir(),
+                    &fixture.config.spec.name,
+                )
+                .unwrap()
+                .unwrap();
+                drop(cleanup);
+
+                assert!(
+                    microsandbox_runtime::ipc::try_acquire_transition_guard(
+                        &fixture.backend.config().run_dir(),
+                        &fixture.config.spec.name,
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert!(fixture.sandbox_dir.join("upper.ext4").exists());
+                assert!(
+                    sandbox_entity::Entity::find_by_id(id)
+                        .one(pools.write())
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                drop(runtime);
+
+                // Acquiring the name proves old cleanup is finished, without sleeping
+                // or launching another VM that could conceal a missing cleanup sweep.
+                let _transition = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    LocalBackend::acquire_sandbox_transition_guard(
+                        &fixture.backend.config().run_dir(),
+                        &fixture.config.spec.name,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    sandbox_entity::Entity::find_by_id(id)
+                        .one(pools.write())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(!fixture.sandbox_dir.exists());
+                assert!(!fixture.backend.volume_path("created").exists());
+                fixture.assert_preserved();
+                LocalBackend::prepare_create_target(
+                    pools,
+                    &fixture.config,
+                    &fixture.sandbox_dir,
+                    &fixture.backend.config().run_dir(),
+                )
+                .await
+                .unwrap();
+                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+                    .await
+                    .unwrap();
+                std::fs::create_dir_all(&fixture.sandbox_dir).unwrap();
+                std::fs::write(fixture.sandbox_dir.join("replacement"), b"new create").unwrap();
+                assert_eq!(
+                    std::fs::read(fixture.sandbox_dir.join("replacement")).unwrap(),
+                    b"new create"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_returned_failure_preserves_diagnostics_and_success_disarms_cleanup() {
+        for success in [false, true] {
+            let mut fixture = OwnedFixture::new("ephemeral-outcome").await;
+            fixture.config.spec.lifecycle.ephemeral = true;
+            let mut cleanup = fixture.arm().await;
+            let pools = fixture.backend.db().await.unwrap();
+            let id =
+                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+                    .await
+                    .unwrap();
+            std::fs::create_dir_all(fixture.sandbox_dir.join("logs")).unwrap();
+            let log = fixture.sandbox_dir.join("logs/runtime.log");
+            std::fs::write(&log, b"boot failure diagnostics").unwrap();
+            let result = if success {
+                Ok(())
+            } else {
+                Err(crate::MicrosandboxError::Custom("boot failure".into()))
+            };
+            assert_eq!(cleanup.complete(result).is_ok(), success);
+            drop(cleanup);
+            let _transition = tokio::time::timeout(
+                Duration::from_secs(30),
+                LocalBackend::acquire_sandbox_transition_guard(
+                    &fixture.backend.config().run_dir(),
+                    &fixture.config.spec.name,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let row = sandbox_entity::Entity::find_by_id(id)
+                .one(pools.write())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                row.status,
+                if success {
+                    SandboxStatus::Starting
+                } else {
+                    SandboxStatus::Stopped
+                }
+            );
+            assert_eq!(std::fs::read(log).unwrap(), b"boot failure diagnostics");
+            assert!(fixture.sandbox_dir.join("upper.ext4").exists());
+            fixture.assert_preserved();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_ephemeral_cleanup_keeps_failed_removal_retryable() {
+        let mut fixture = OwnedFixture::new("ephemeral-delete-retry").await;
+        fixture.config.spec.lifecycle.ephemeral = true;
+        let mut cleanup = fixture.arm().await;
+        let pools = fixture.backend.db().await.unwrap();
+        let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+            .await
+            .unwrap();
+        // A regular file in place of the private directory deterministically rejects
+        // remove_dir_all on every host, without permission-dependent root-user behavior.
+        std::fs::remove_dir_all(&fixture.sandbox_dir).unwrap();
+        std::fs::write(&fixture.sandbox_dir, b"removal blocked").unwrap();
+        let state = cleanup.state.take().unwrap();
+        assert!(state.cleanup().await.is_err());
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.write())
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            SandboxStatus::Stopped
+        );
+        assert_eq!(
+            std::fs::read(&fixture.sandbox_dir).unwrap(),
+            b"removal blocked"
+        );
+        std::fs::remove_file(&fixture.sandbox_dir).unwrap();
+        state.cleanup().await.unwrap();
+        assert!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.write())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture.assert_preserved();
+    }
+
+    #[tokio::test]
+    async fn cancelled_ephemeral_cleanup_waits_for_inflight_catalog_commit() {
+        for committed in [false, true] {
+            let mut fixture = OwnedFixture::new("ephemeral-commit-race").await;
+            fixture.config.spec.lifecycle.ephemeral = true;
+            fixture
+                .config
+                .spec
+                .mounts
+                .retain(|mount| !matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
+            let mut stage = ChildStageGuard::new(fixture.sandbox_dir.clone());
+            let cleanup = fixture.arm_with_stage(Some(&mut stage)).await;
+            assert!(
+                !stage.armed,
+                "asynchronous cleanup owns staging until the catalog settles"
+            );
+            let pools = fixture.backend.db().await.unwrap();
+            if committed {
+                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+                    .await
+                    .unwrap();
+            }
+            let writer_gate = pools.write().inner().begin().await.unwrap();
+            drop(cleanup);
+            drop(stage);
+            assert!(fixture.sandbox_dir.join("upper.ext4").exists());
+            assert!(
+                microsandbox_runtime::ipc::try_acquire_transition_guard(
+                    &fixture.backend.config().run_dir(),
+                    &fixture.config.spec.name,
+                )
+                .unwrap()
+                .is_none()
+            );
+            writer_gate.rollback().await.unwrap();
+            let _transition = tokio::time::timeout(
+                Duration::from_secs(30),
+                LocalBackend::acquire_sandbox_transition_guard(
+                    &fixture.backend.config().run_dir(),
+                    &fixture.config.spec.name,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!fixture.sandbox_dir.exists());
+            assert!(
+                sandbox_entity::Entity::find()
+                    .filter(sandbox_entity::Column::Name.eq(&fixture.config.spec.name))
+                    .one(pools.write())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            fixture.assert_preserved();
+        }
     }
 }
