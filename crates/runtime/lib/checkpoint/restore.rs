@@ -81,6 +81,14 @@ struct CheckpointMemoryRestore {
 //--------------------------------------------------------------------------------------------------
 
 impl PreparedCheckpointRestore {
+    pub(crate) fn recover_windows_periodic_pit(&mut self, divisor: u32) -> Result<(), String> {
+        self.execution = self
+            .execution
+            .clone()
+            .recover_windows_periodic_pit(divisor)?;
+        Ok(())
+    }
+
     /// Captured additional block devices in transport order, including unmapped ones.
     pub(crate) fn additional_blocks(&self) -> Vec<(&str, &msb_krun::BlockDeviceState)> {
         let mut blocks: Vec<_> = self

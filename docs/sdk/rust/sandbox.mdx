@@ -3251,3 +3251,17 @@ Point-in-time resource usage snapshot.
 | `Paused` | VM is paused |
 | `Stopped` | VM shut down; configuration persisted; can be restarted |
 | `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nested_virt(enabled: bool)` controls nested virtualization for a local sandbox. Omit it to use the runtime default. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for platform support and restore requirements.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::Sandbox;
+
+Sandbox::builder("nested").image("alpine").nested_virt(true).create().await?;
+```
+
+</Accordion>

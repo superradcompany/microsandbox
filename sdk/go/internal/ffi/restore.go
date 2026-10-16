@@ -19,6 +19,7 @@ type RestoreOptions struct {
 	CreationProgress            uint64               `json:"creation_progress,omitempty"`
 	Forked                      bool                 `json:"forked,omitempty"`
 	DiskOnly                    bool                 `json:"disk_only,omitempty"`
+	RecoverWindowsPeriodicPIT   *uint32              `json:"recover_windows_periodic_pit,omitempty"`
 	SnapshotBase                string               `json:"snapshot_base,omitempty"`
 	User                        string               `json:"user,omitempty"`
 	LogLevel                    string               `json:"log_level,omitempty"`

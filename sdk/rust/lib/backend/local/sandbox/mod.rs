@@ -1965,6 +1965,7 @@ mod tests {
         let pools = backend.db().await.unwrap();
         let mut config = test_config("abandoned");
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            legacy_windows_pit_divisor: None,
             memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),

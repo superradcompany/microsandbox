@@ -198,6 +198,8 @@ export interface NapiSandboxBuilderSetters {
   placementProfile(profile: string): this;
   memory(mib: number): this;
   maxMemory(mib: number): this;
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this;
   thp(policy: "always" | "madvise" | "never"): this;
   logLevel(level: string): this;
   quietLogs(): this;
@@ -290,6 +292,8 @@ export interface NapiRestoreBuilderSetters {
   /** @deprecated Use cowMemory() instead. */
   forked(): this;
   diskOnly(): this;
+  /** Recover missing Windows PIT state using a known periodic reload (1..65536). */
+  recoverWindowsPeriodicPit(divisor: number): this;
   snapshotBase(base: string): this;
   logLevel(level: string): this;
   user(user: string): this;

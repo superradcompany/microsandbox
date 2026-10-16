@@ -3361,3 +3361,15 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 ### InstallOptions
 
 See [Runtime setup](/sdk/setup#customize-installation) for the setup-only `InstallOptions` type.
+
+## Nested virtualization
+
+`WithNestedVirt(enabled bool)` controls nested virtualization for a local sandbox. Omit it to use the runtime default. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for platform support and restore requirements.
+
+<Accordion title="Example">
+
+```go
+sandbox, err := microsandbox.CreateSandbox(ctx, "nested", microsandbox.WithImage("alpine"), microsandbox.WithNestedVirt(true))
+```
+
+</Accordion>

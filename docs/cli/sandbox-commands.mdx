@@ -70,6 +70,7 @@ Common flags:
 | `--max-cpus` | Boot-time maximum possible virtual CPUs for future resize capacity |
 | `-m`, `--memory` | Memory limit, such as `512M` or `1G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory, such as `2G` or `8G` |
+| `--nested-virt`, `--nested-virt=false` | Enable or disable nested virtualization for local sandboxes. Omission enables nesting where the host supports it and disables it elsewhere on current runtimes; older runtimes keep their existing behavior. Explicit settings require a runtime that can honor them. Linux ARM64 and Windows ARM64 nesting are not currently supported. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots). |
 | `--thp` | Guest transparent huge-page policy: `always`, `madvise` (default), or `never` |
 | `--guest-clock` | `sync` (default) follows host time; `off` stops host clock updates after boot. Local-only. See [guest clock](/sandboxes/snapshots#keep-the-guest-clock) |
 | `--root-disk` | OCI root storage, such as `8G`, `tmpfs:2G`, `flat:8G,clone=auto`, or `./rootfs.qcow2:format=qcow2,fstype=ext4` |

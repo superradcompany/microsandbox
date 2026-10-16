@@ -24,6 +24,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "cpu_placement",
     "placement_profile",
     "thp",
+    "nested_virt",
     "workdir",
     "shell",
     "security",
@@ -212,6 +213,7 @@ pub(crate) fn restore_builder_from_args(
             "cow_memory",
             "forked",
             "disk_only",
+            "recover_windows_periodic_pit",
             "snapshot_base",
             "log_level",
             "user",
@@ -310,6 +312,9 @@ pub(crate) fn restore_builder_from_args(
     // Both spellings enable the same opt-in policy, like the CLI flags.
     if extract_opt::<bool>(kwargs, "cow_memory")?.unwrap_or(false) || legacy_cow.unwrap_or(false) {
         builder = builder.cow_memory();
+    }
+    if let Some(divisor) = extract_opt::<u32>(kwargs, "recover_windows_periodic_pit")? {
+        builder = builder.recover_windows_periodic_pit(divisor);
     }
     if extract_opt::<bool>(kwargs, "disk_only")?.unwrap_or(false) {
         builder = builder.disk_only();
@@ -502,6 +507,9 @@ pub fn sandbox_builder_from_args(
     }
     if let Some(placement_profile) = extract_opt::<String>(kwargs, "placement_profile")? {
         builder = builder.placement_profile(placement_profile);
+    }
+    if let Some(enabled) = extract_opt::<bool>(kwargs, "nested_virt")? {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(thp) = extract_opt::<String>(kwargs, "thp")? {
         let policy = thp

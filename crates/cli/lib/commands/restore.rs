@@ -37,6 +37,10 @@ pub struct RestoreArgs {
     /// Cold-boot only the captured disk, without restoring processes or RAM.
     #[arg(long)]
     pub disk_only: bool,
+    /// Recover a known periodic PIT in an older Windows snapshot (reload divisor 1..=65536).
+    /// Starts a fresh timer phase; validate guest clocks and recapture after recovery.
+    #[arg(long, conflicts_with = "disk_only", value_parser = clap::value_parser!(u32).range(1..=65536))]
+    pub recover_windows_periodic_pit: Option<u32>,
     /// Exact base snapshot or archive for a dependent export.
     #[arg(long)]
     pub snapshot_base: Option<String>,
@@ -222,6 +226,12 @@ pub async fn run(
     }
     if args.cow_mem || args.forked {
         builder = builder.cow_memory();
+    }
+    if let Some(divisor) = args.recover_windows_periodic_pit {
+        ui::warn(
+            "recovering a legacy Windows timer with a fresh phase; verify the guest clock and take a new full snapshot",
+        );
+        builder = builder.recover_windows_periodic_pit(divisor);
     }
     if args.disk_only {
         builder = builder.disk_only();

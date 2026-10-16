@@ -196,6 +196,15 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Recover missing legacy Windows PIT state using a known periodic reload (1..=65536).
+    /// Starts a fresh timer period; validate the guest and capture a new snapshot afterward.
+    #[napi(js_name = "recoverWindowsPeriodicPit")]
+    pub fn recover_windows_periodic_pit(&mut self, divisor: f64) -> Result<&Self> {
+        let divisor = crate::numeric::uint32(divisor, "divisor")?;
+        self.inner = Some(self.take_inner()?.recover_windows_periodic_pit(divisor));
+        Ok(self)
+    }
+
     /// @deprecated Use cowMemory() instead.
     #[napi]
     pub fn forked(&mut self) -> Result<&Self> {

@@ -106,6 +106,16 @@ impl RestoreBuilder {
         self
     }
 
+    /// Recover an older Windows x86 full snapshot using a known periodic PIT reload divisor.
+    ///
+    /// The divisor must be 1..=65536. The missing timer phase and other PIT channels cannot
+    /// be recovered; channel 0 starts a fresh periodic cycle. Use only when the saved guest
+    /// is known to use that configuration, validate its clocks, then capture a new snapshot.
+    pub fn recover_windows_periodic_pit(mut self, divisor: u32) -> Self {
+        self.inner.config.legacy_windows_pit_divisor = Some(divisor);
+        self
+    }
+
     /// Set the unique destination sandbox name.
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.inner.config.spec.name = Some(name.into());

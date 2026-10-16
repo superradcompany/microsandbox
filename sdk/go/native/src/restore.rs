@@ -38,6 +38,7 @@ struct RestoreOptions {
     forked: bool,
     #[serde(default)]
     disk_only: bool,
+    recover_windows_periodic_pit: Option<u32>,
     snapshot_base: Option<String>,
     user: Option<String>,
     log_level: Option<String>,
@@ -125,6 +126,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     if opts.forked {
         builder = builder.cow_memory();
+    }
+    if let Some(divisor) = opts.recover_windows_periodic_pit {
+        builder = builder.recover_windows_periodic_pit(divisor);
     }
     if opts.disk_only {
         builder = builder.disk_only();

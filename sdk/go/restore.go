@@ -36,8 +36,11 @@ type RestoreConfig struct {
 	// Forked enables copy-on-write restore memory.
 	//
 	// Deprecated: use CowMemory instead.
-	Forked                      bool
-	SnapshotDiskOnly            bool
+	Forked           bool
+	SnapshotDiskOnly bool
+	// RecoverWindowsPeriodicPIT supplies a known reload (1..65536) for legacy Windows snapshots.
+	// Recovery starts a fresh period; validate the guest and recapture afterward.
+	RecoverWindowsPeriodicPIT   *uint32
 	SnapshotBase                string
 	User                        string
 	LogLevel                    LogLevel
@@ -76,6 +79,12 @@ func RestoreSandbox[T SnapshotSeed](ctx context.Context, snapshot T, name string
 // WithRestoreConfig replaces the restore configuration.
 func WithRestoreConfig(config RestoreConfig) RestoreOption {
 	return func(o *RestoreConfig) { *o = config }
+}
+
+// WithRecoverWindowsPeriodicPIT explicitly supplies the missing periodic timer reload.
+// The original timer phase cannot be recovered; validate the guest and recapture afterward.
+func WithRecoverWindowsPeriodicPIT(divisor uint32) RestoreOption {
+	return func(o *RestoreConfig) { o.RecoverWindowsPeriodicPIT = &divisor }
 }
 
 // WithRestoreCPUs selects CPUs; full execution restore requires the captured count.
@@ -216,7 +225,8 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
 		// Keep the native wire spelling stable across SDK/runtime versions.
 		Forked: config.CowMemory || config.Forked, DiskOnly: config.SnapshotDiskOnly,
-		SnapshotBase: config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
+		RecoverWindowsPeriodicPIT: config.RecoverWindowsPeriodicPIT,
+		SnapshotBase:              config.SnapshotBase, User: config.User, LogLevel: string(config.LogLevel),
 		ExternalMountPolicy:         string(config.ExternalMountPolicy),
 		DangerouslyInheritResources: config.DangerouslyInheritResources,
 		AllowMissingResources:       config.AllowMissingResources,

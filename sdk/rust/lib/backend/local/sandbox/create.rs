@@ -294,7 +294,15 @@ impl LocalBackend {
                 &materialized.manifest.root_disk,
             )?;
             image_operations.push(materialized.cache_operation);
-            if let Some(restore) = materialized.checkpoint_restore {
+            if config.legacy_windows_pit_divisor.is_some()
+                && materialized.checkpoint_restore.is_none()
+            {
+                return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                    "periodic PIT recovery requires a full execution snapshot".into(),
+                ));
+            }
+            if let Some(mut restore) = materialized.checkpoint_restore {
+                restore.legacy_windows_pit_divisor = config.legacy_windows_pit_divisor;
                 let state = match &materialized.manifest.state {
                     crate::snapshot::SnapshotState::Checkpoint(state) => state,
                     crate::snapshot::SnapshotState::File(_) => {
@@ -391,10 +399,16 @@ impl LocalBackend {
         let _branch_pin = if let Some(source) = config.branch_source.take() {
             tokio::fs::create_dir(&sandbox_dir).await?;
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            Some(
+            let pin =
                 crate::sandbox::branch::capture_child(self, &mut config, &source, &sandbox_dir)
-                    .await?,
-            )
+                    .await?;
+
+            // Capture resolves automatic nesting to its actual execution mode. Recheck
+            // managed policy before publishing or launching the child, as for archives.
+            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
+            launch_contract::validate_runtime_config(&config, self.config()).await?;
+
+            Some(pin)
         } else {
             None
         };
@@ -407,7 +421,7 @@ impl LocalBackend {
             let root_layout = snapshot_root_layout_from_config(&config)?;
             match config.snapshot_restore_mode {
                 SnapshotRestoreMode::Full => {
-                    let materialized = crate::snapshot::materialize_checkpoint_for_child(
+                    let mut materialized = crate::snapshot::materialize_checkpoint_for_child(
                         &source,
                         &sandbox_dir,
                         &root_layout,
@@ -415,6 +429,8 @@ impl LocalBackend {
                         self.config().fs_state_limit(),
                     )
                     .await?;
+                    materialized.restore.legacy_windows_pit_divisor =
+                        config.legacy_windows_pit_divisor;
                     config.checkpoint_restore = Some(materialized.restore);
                     crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
                     config.snapshot_upper_layers = materialized.upper_layers;
@@ -2497,6 +2513,84 @@ mod tests {
         assert!(backend.db.get().is_none());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsupported_nesting_preserves_replace_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+
+        let temp = tempfile::Builder::new()
+            .prefix("msb-nesting")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("home");
+        let runtime = temp.path().join("msb");
+        let firmware = temp.path().join("libkrunfw");
+        fs::write(&runtime, r#"#!/bin/sh
+case "$1" in
+--version) printf 'msb 0.6.18';;
+__launch-protocol) printf '%s' '{"protocols":[2,1],"nested_virt":true,"nested_virt_supported":false}';;
+*) exit 1;;
+esac
+"#).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(&firmware, b"not loaded before host validation").unwrap();
+        let managed = serde_json::from_value(serde_json::json!({
+            "paths": {"msb": runtime, "libkrunfw": firmware}
+        }))
+        .unwrap();
+        let sources = BackendConfig::new(GlobalConfigPatch::new().home(home), managed);
+        let backend = Arc::new(LocalBackend::from_backend_config(
+            sources
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            crate::backend::BackendSelectionSource::Programmatic,
+            None,
+        ));
+        let pools = backend.db().await.unwrap();
+        let config =
+            test_config_with_rootfs("retained", RootfsSource::oci("missing.invalid/image"));
+        let id = LocalBackend::insert_sandbox_record_with_status(
+            pools.write(),
+            &config,
+            SandboxStatus::Stopped,
+        )
+        .await
+        .unwrap();
+        let directory = backend.sandboxes_dir().join("retained");
+        fs::create_dir_all(&directory).unwrap();
+        let marker = directory.join("keep");
+        fs::write(&marker, b"existing sandbox state").unwrap();
+        let root = temp.path().join("rootfs");
+        fs::create_dir(&root).unwrap();
+        let builder = crate::Sandbox::builder("retained")
+            .image(root)
+            .nested_virt(true)
+            .replace();
+
+        let error = backend
+            .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
+            .await
+            .err()
+            .expect("unsupported nesting must reject before replacement");
+
+        assert!(
+            error
+                .to_string()
+                .contains("nested virtualization is unavailable"),
+            "{error}"
+        );
+        assert_eq!(fs::read(marker).unwrap(), b"existing sandbox state");
+        assert!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[test]
     fn archive_child_stage_guard_removes_uncommitted_storage() {
         let directory = tempdir().unwrap();
@@ -2620,6 +2714,7 @@ mod tests {
         }
         let mut config = builder.build().await.unwrap();
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            legacy_windows_pit_divisor: None,
             memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),
@@ -3152,6 +3247,7 @@ mod tests {
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config_with_rootfs("pending", bind_rootfs(temp.path().to_path_buf()));
         config.checkpoint_restore = Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+            legacy_windows_pit_divisor: None,
             memory_descriptor: false,
             network_gateway_mac: None,
             external_mount_policy: Default::default(),

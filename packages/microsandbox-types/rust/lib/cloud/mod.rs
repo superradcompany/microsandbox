@@ -476,6 +476,7 @@ impl CloudSandboxSpec {
             cpu_placement: CpuPlacement::Inherit,
             placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
+            nested_virt: None,
         };
 
         // Fields not present on `CloudNetworkSpec` are defaulted here, listed

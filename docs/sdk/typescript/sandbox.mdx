@@ -3229,3 +3229,15 @@ Current lifecycle state of a sandbox. String literal type.
 | `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nestedVirt(enabled: boolean)` controls nested virtualization for a local sandbox. Omit it to use the runtime default. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for platform support and restore requirements.
+
+<Accordion title="Example">
+
+```typescript
+const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
+```
+
+</Accordion>

@@ -1107,6 +1107,7 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
+    nested_virt: Option<bool>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2449,6 +2450,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(placement_profile) = opts.placement_profile {
                 builder = builder.placement_profile(placement_profile);
+            }
+            if let Some(enabled) = opts.nested_virt {
+                builder = builder.nested_virt(enabled);
             }
             if let Some(thp) = opts.thp {
                 let policy = thp

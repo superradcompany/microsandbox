@@ -125,6 +125,7 @@ pub(crate) enum SnapshotRestoreMode {
 /// Explicit resource choices that must not be silently replaced during deferred archive restore.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RestoreOverrideIntent {
+    pub(crate) nested_virt: bool,
     pub(crate) cpus: bool,
     pub(crate) max_cpus: bool,
     pub(crate) memory: bool,
@@ -289,6 +290,10 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_restore_mode: SnapshotRestoreMode,
 
+    /// Explicit one-shot recovery intent, never inherited by a later restore.
+    #[serde(skip)]
+    pub(crate) legacy_windows_pit_divisor: Option<u32>,
+
     /// Explicit failure policy for external resources during full execution restore.
     #[serde(default)]
     pub(crate) external_mount_policy: microsandbox_types::ExternalMountRestorePolicy,
@@ -365,6 +370,7 @@ impl SandboxConfigPatch {
             cpu_placement,
             placement_profile,
             thp,
+            nested_virt,
             shell,
             workdir,
             outbound_proxy,
@@ -389,6 +395,10 @@ impl SandboxConfigPatch {
         }
         if let Some(thp) = thp {
             resources.thp_mut(*thp);
+        }
+
+        if let Some(enabled) = nested_virt {
+            resources.set_nested_virt_mut(*enabled);
         }
 
         let mut runtime = SandboxRuntimeOptionsPatch::new();
@@ -620,6 +630,7 @@ impl SandboxConfig {
             config.forked = false;
         }
         config.snapshot_restore_mode = SnapshotRestoreMode::Full;
+        config.legacy_windows_pit_divisor = None;
         config.restore_resources = Default::default();
         config.resumed_from_full_snapshot = false;
         #[cfg(feature = "local")]
@@ -1105,6 +1116,7 @@ impl Default for SandboxConfig {
                     cpu_placement: Default::default(),
                     placement_profile: None,
                     thp: TransparentHugePagePolicy::Madvise,
+                    nested_virt: None,
                 },
                 runtime: SandboxRuntimeOptions {
                     log_level: default_log_level(),
@@ -1145,6 +1157,7 @@ impl Default for SandboxConfig {
             branch_memory: None,
             forked: false,
             snapshot_restore_mode: SnapshotRestoreMode::Full,
+            legacy_windows_pit_divisor: None,
             external_mount_policy: microsandbox_types::ExternalMountRestorePolicy::Strict,
             restore_resources: Default::default(),
             resumed_from_full_snapshot: false,
@@ -1938,6 +1951,7 @@ mod tests {
                 cpu_placement: Default::default(),
                 placement_profile: None,
                 thp: TransparentHugePagePolicy::Madvise,
+                nested_virt: None,
             },
             runtime: SandboxRuntimeOptions {
                 workdir: Some("/app".into()),
@@ -2226,6 +2240,7 @@ mod tests {
                 },
                 snapshot_restore_mode: restore_mode,
                 checkpoint_restore: Some(CheckpointRestoreConfig {
+                    legacy_windows_pit_divisor: None,
                     memory_descriptor: false,
                     network_gateway_mac: None,
                     external_mount_policy: Default::default(),
@@ -2724,6 +2739,56 @@ mod layering_tests {
     }
 
     #[test]
+    fn nested_virt_obeys_config_precedence_and_serializes_false() {
+        use serde_json::json;
+
+        let default = serde_json::to_value(crate::SandboxConfig::default()).unwrap();
+        assert!(
+            default["resources"]
+                .as_object()
+                .unwrap()
+                .get("nested_virt")
+                .is_none()
+        );
+
+        for (user, requested, managed, expected) in [
+            (None, None, None, None),
+            (None, Some(false), None, Some(false)),
+            (Some(true), None, None, Some(true)),
+            (Some(true), Some(false), None, Some(false)),
+            (Some(false), Some(true), Some(false), Some(false)),
+        ] {
+            let layers = BackendConfig::new(
+                user.map(|enabled| {
+                    serde_json::from_value(json!({"sandbox_defaults": {"nested_virt": enabled}}))
+                        .unwrap()
+                })
+                .unwrap_or_default(),
+                managed
+                    .map(|enabled| {
+                        serde_json::from_value(
+                            json!({"sandbox_defaults": {"nested_virt": enabled}}),
+                        )
+                        .unwrap()
+                    })
+                    .unwrap_or_default(),
+            );
+            let mut options = SandboxConfigPatch::new();
+            options.spec.resources.nested_virt = requested.map(Some);
+            let config = layers
+                .sandbox_layers()
+                .base(Default::default())
+                .options(options)
+                .build()
+                .into_config();
+            assert_eq!(config.spec.resources.nested_virt, expected);
+            let restored: crate::SandboxConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(restored.spec.resources.nested_virt, expected);
+        }
+    }
+
+    #[test]
     fn sandbox_source_field_matrix() {
         use serde_json::{Value, json};
 
@@ -2770,6 +2835,12 @@ mod layering_tests {
                 "sandbox_defaults.placement_profile",
                 "spec.resources.placement_profile",
                 json!("latency"),
+                true,
+            ),
+            (
+                "sandbox_defaults.nested_virt",
+                "spec.resources.nested_virt",
+                json!(false),
                 true,
             ),
             (
@@ -2979,6 +3050,7 @@ mod layering_tests {
             "spec.resources.cpu_placement" => value(&patch.spec.resources.cpu_placement),
             "spec.resources.placement_profile" => value(&patch.spec.resources.placement_profile),
             "spec.resources.thp" => value(&patch.spec.resources.thp),
+            "spec.resources.nested_virt" => value(&patch.spec.resources.nested_virt),
             "spec.runtime.shell" => value(&patch.spec.runtime.shell),
             "spec.runtime.workdir" => value(&patch.spec.runtime.workdir),
             "spec.runtime.metrics_sample_interval_ms" => {

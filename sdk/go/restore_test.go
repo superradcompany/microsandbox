@@ -13,7 +13,7 @@ import (
 func TestRestoreDestinationControlsPreserveExplicitValues(t *testing.T) {
 	var config RestoreConfig
 	for _, option := range []RestoreOption{
-		WithRestoreCPUs(2), WithRestoreMemory(512),
+		WithRestoreCPUs(2), WithRestoreMemory(512), WithRecoverWindowsPeriodicPIT(4773),
 		WithRestoreNetworkPolicy(NetworkPolicy.FromProfiles(NetworkProfilePublic)),
 		WithRestoreMaxConnections(0), WithRestoreDisableNetwork(),
 		WithRestoreSecurityProfile(SecurityProfileDefault),
@@ -34,7 +34,8 @@ func TestRestoreDestinationControlsPreserveExplicitValues(t *testing.T) {
 	}
 	for field, want := range map[string]any{
 		"cpus": float64(2), "memory_mib": float64(512), "max_connections": float64(0),
-		"disable_network": true, "security_profile": "default",
+		"recover_windows_periodic_pit": float64(4773),
+		"disable_network":              true, "security_profile": "default",
 		"max_duration_secs": float64(0), "idle_timeout_secs": float64(2),
 	} {
 		if got[field] != want {

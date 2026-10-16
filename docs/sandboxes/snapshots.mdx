@@ -17,6 +17,48 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 | **Disk** | Files and owned volumes | Boots a new VM |
 | **Full** | Disk, memory, and running processes | Resumes execution |
 
+Local snapshot capture requests allow up to 30 minutes for the runtime reply,
+including storage publication and source recovery. Windows and macOS fork captures
+use the same budget. Large captures or busy hosts can exceed the shorter deadline
+used by ordinary control operations. A capture request is never automatically retried after an uncertain timeout.
+
+## Nested VM snapshots
+
+A full snapshot of a local sandbox with nested virtualization enabled saves the running
+inner VM as well as the outer sandbox. Restore resumes the inner workload; a fork creates
+an independent copy of its captured state. Disk-only snapshots still boot a new VM.
+
+| Host platform | Nested virtualization and full snapshots |
+| --- | --- |
+| Linux x86-64, Intel or AMD | Supported with host nesting support |
+| Windows x86-64, Intel or AMD | Supported with Windows Hypervisor Platform nesting support |
+| Apple Silicon macOS | Supported with Hypervisor.framework nesting support |
+| Linux ARM64 | Not currently supported |
+| Windows ARM64 | Not currently supported |
+
+Nesting defaults to on where the host supports it and off elsewhere. Override it with the sandbox's `nested_virt` setting
+(or `nestedVirt` in TypeScript), the CLI's `--nested-virt`, or
+`sandbox_defaults.nested_virt` in [global configuration](/configuration#sandbox_defaults).
+The host must expose nested virtualization and the guest kernel must include KVM support.
+An explicit enable fails startup on an unsupported host. This restriction
+does not affect ordinary ARM64 sandboxes or their snapshots.
+
+Intel Windows additionally requires Hyper-V enlightened VMCS support. The runtime
+requests it automatically, and the matching Windows guest firmware uses it. Full
+snapshots reject an active Intel nested VM that uses ordinary VMCS state. Older
+nested Windows snapshots using ordinary VMCS state must be captured again. See
+[Windows timer recovery](#recover-missing-windows-timer-state) for timer-state compatibility
+and explicit recovery options.
+
+Restore preserves the captured nesting setting and checks backend compatibility. It cannot
+change a nested snapshot into a non-nested sandbox or migrate between host architectures
+or hypervisor backends. Qualification covers a running inner Linux VM through restore,
+forks, second-generation snapshots, and archive export/import on Linux and Windows
+x86-64 and qualified Apple Silicon macOS.
+It does not guarantee
+cross-host migration, external mount recovery, or restoration of network connections.
+Use matching runtime and guest firmware builds that include nested snapshot support.
+
 ## Disk snapshots
 
 Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped persistent source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
@@ -405,6 +447,64 @@ msb snap restore worker:snap --name rebooted --disk-only
 </CodeGroup>
 
 Snapshots with a tmpfs root cannot be restored disk-only.
+
+### Recapture an older Windows nested snapshot
+
+Windows nested snapshots created before enlightened VMCS support cannot resume
+with the new runtime. Use disk-only restore to boot a separate sandbox with the
+updated runtime and firmware:
+
+```bash
+msb snapshot restore worker:old --name recovered --disk-only
+```
+
+This preserves the saved disk contents, but does not preserve running processes,
+RAM, or the inner VM's execution state. Writes still buffered in captured RAM are
+not recovered by disk-only restore. Start your application and nested VM again
+in `recovered`, verify they are working, then create a new full snapshot. Any
+managed jobs started with detached exec must finish before full capture:
+
+```bash
+msb snapshot create upgraded --from-sandbox recovered --full
+msb snapshot restore recovered:upgraded --name verified
+```
+
+Keep the original snapshot until you have verified the new one. Merely capturing
+an old, still-running sandbox again does not enable enlightened VMCS; it must boot
+with the updated runtime. This recovery path requires a disk-backed root and the
+snapshot's base image, and any external mounts must be supplied again. Normal full
+restore never silently falls back to restarting from disk.
+
+### Recover missing Windows timer state
+
+New Windows x86 full snapshots save the emulated PIT timer, including its remaining
+period and partially written settings. Older snapshots did not save this state.
+Normal restore refuses those snapshots with recovery instructions, because restoring
+a stopped timer can freeze the guest clock and make commands hang.
+
+The safest recovery is the disk-only restart described above. If you know the
+original guest used a periodic channel-0 PIT and know its reload value, you can
+explicitly supply that value while restoring its running state:
+
+```bash
+msb snapshot restore worker:old --name recovered --recover-windows-periodic-pit 4773
+```
+
+`4773` is an example for a known 250 Hz PIT configuration, **not a universal default**.
+The reload must be between 1 and 65536. Recovery starts a fresh timer period; the
+original phase, partially written settings, and other PIT channels cannot be
+reconstructed. Do not use it when those settings are unknown or exact timer
+continuity matters. Verify commands, sleeps, and your application, then capture a
+new full snapshot and test restoring it without the recovery option. Keep the
+original until you have verified the replacement.
+
+The equivalent SDK options are Rust `.recover_windows_periodic_pit(divisor)`,
+Python `recover_windows_periodic_pit=divisor`, Node
+`.recoverWindowsPeriodicPit(divisor)`, and Go
+`WithRecoverWindowsPeriodicPIT(divisor)`. They apply only to local Windows x86
+full restores and cannot be combined with disk-only restore. CPU, frequency,
+topology, and nested-state compatibility checks still apply. Older nested
+snapshots without enlightened VMCS state still require a disk-only restart.
 
 ### Keep the guest clock
 

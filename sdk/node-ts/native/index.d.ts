@@ -826,6 +826,8 @@ export declare class RestoreBuilder {
   snapshotBase(base: string): this
   /** Cold-boot only the disk state carried by a full snapshot. */
   diskOnly(): this
+  /** Recover missing Windows PIT state using a known periodic reload (1..65536). */
+  recoverWindowsPeriodicPit(divisor: number): this
   /** @deprecated Use cowMemory() instead. */
   forked(): this
   /** Restore a full snapshot with private copy-on-write memory. */
@@ -1283,6 +1285,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */

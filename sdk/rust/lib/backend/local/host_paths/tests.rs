@@ -657,6 +657,7 @@ fn restored_bind_check_retains_captured_transport_and_optional_backing() {
     let check = |filename: Option<&str>, policy, require_backing| {
         let mut config = bind_config(link.clone(), false);
         config.checkpoint_restore = Some(CheckpointRestoreConfig {
+            legacy_windows_pit_divisor: None,
             external_mount_policy: policy,
             external_mounts: vec![ExternalMountRestoreBinding {
                 require_backing,

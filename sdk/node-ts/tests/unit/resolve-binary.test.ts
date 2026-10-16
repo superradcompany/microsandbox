@@ -38,6 +38,9 @@ function run(cwd: string, argv?: string): string | null {
   // Use actual Node argv/cwd rather than changing the Vitest process globals.
   if (argv) writeFileSync(argv, code);
   const args = argv ? [argv] : ["--input-type=module", "-e", code];
+  // Keep missing-package cases inside the fixture instead of letting Bun
+  // auto-install a real platform package into its shared cache.
+  if (process.versions.bun) args.unshift("--no-install");
   const result = spawnSync(process.execPath, args, { cwd, encoding: "utf8", timeout: 30000 });
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
@@ -47,7 +50,11 @@ function run(cwd: string, argv?: string): string | null {
 describe("SDK packaged binary resolver", () => {
   const names = ["ordinary", "hash#name", "percent%name", "encoded%2Fname", "encoded%23name", "space name", "中文", ...(process.platform === "win32" ? [] : ["query?name"])];
   for (const fallback of ["cwd", "argv"] as const) {
-    it.each(names)(`${fallback} resolves the exact package in %s`, (name) => {
+    // Bun cannot load an entrypoint containing '?', before our resolver runs.
+    // Node covers that argv case; Bun still covers '?' in the cwd fallback.
+    const supportedNames = process.versions.bun && fallback === "argv"
+      ? names.filter((name) => name !== "query?name") : names;
+    it.each(supportedNames)(`${fallback} resolves the exact package in %s`, (name) => {
       const consumer = join(root, name);
       mkdirSync(consumer);
       const expected = platformPackage(consumer);

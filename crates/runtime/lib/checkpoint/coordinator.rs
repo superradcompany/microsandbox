@@ -775,6 +775,11 @@ impl CheckpointCoordinator {
         record_integrity: bool,
         guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        // The backend owns execution-state support. Refuse unsupported captures
+        // before preparing storage, flushing the guest, or pausing the source.
+        vm.validate_execution_state_capture()
+            .map_err(CheckpointFailure::before_pause)?;
+
         // All RAM captures pass through this executor-owned method. Consume the construction
         // handoff before either durable or local capture can publish a newer token. Dirty
         // tracking has run since the pristine mapping was installed, not since this adoption.
@@ -1359,7 +1364,7 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
         inventory: &[(u32, String)],
-        resources: Vec<ResourceDescriptor>,
+        mut resources: Vec<ResourceDescriptor>,
         pause_generation: u64,
         staging: &Path,
         final_path: &Path,
@@ -1565,6 +1570,9 @@ impl CheckpointCoordinator {
             ));
         }
         let execution_bytes = execution.encode().map_err(CheckpointFailure::resumable)?;
+        if execution.nested_enabled() {
+            resources.push(super::execution::nested_execution_resource());
+        }
         let execution_id = if local {
             put_local_object(staging, &execution_bytes).map_err(CheckpointFailure::resumable)?
         } else {

@@ -286,6 +286,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Expose hardware virtualization capabilities to the guest.
+    pub nested_virt: bool,
+
     /// Host control over the guest wall clock during boot, restore, and resume.
     pub guest_clock: microsandbox_types::GuestClockPolicy,
 
@@ -1862,7 +1865,7 @@ fn build_vm(
         .checkpoint_restore
         .as_ref()
         .map(|restore| {
-            let prepared = if restore.local_branch {
+            let mut prepared = if restore.local_branch {
                 crate::checkpoint::PreparedCheckpointRestore::open_local(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
@@ -1879,6 +1882,11 @@ fn build_vm(
             .map_err(|error| {
                 RuntimeError::Custom(format!("prepare checkpoint restore: {error}"))
             })?;
+            if let Some(divisor) = restore.legacy_windows_pit_divisor {
+                prepared
+                    .recover_windows_periodic_pit(divisor)
+                    .map_err(RuntimeError::Custom)?;
+            }
             prepared
                 .validate_geometry(vm)
                 .map_err(RuntimeError::Custom)?;
@@ -1906,7 +1914,8 @@ fn build_vm(
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
-                .balloon_stats_interval(balloon_stats_interval);
+                .balloon_stats_interval(balloon_stats_interval)
+                .nested_virt(vm.nested_virt);
             if let Some(targets) = host_placement.vcpu_targets {
                 let affinity = targets
                     .iter()

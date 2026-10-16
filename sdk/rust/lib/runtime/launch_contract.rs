@@ -10,7 +10,7 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime},
 };
 
@@ -41,6 +41,8 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig, config::Global
 
 static CONTRACTS: LazyLock<Mutex<HashMap<PathBuf, CachedContract>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static CAPABILITIES: LazyLock<Mutex<HashMap<PathBuf, CachedCapabilities>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VERSION_OUTPUT: u64 = 4096;
 
@@ -70,6 +72,12 @@ struct CachedContract {
     identity: FileIdentity,
     contract: LaunchContract,
     // Retain the object so deleting/replacing a path cannot recycle its file ID.
+    _file: File,
+}
+
+struct CachedCapabilities {
+    identity: FileIdentity,
+    capabilities: Arc<LaunchCapabilities>,
     _file: File,
 }
 
@@ -218,7 +226,13 @@ impl LaunchContract {
             return self.to_previous_version(launch);
         }
 
-        let value = serde_json::to_value(launch)?;
+        let mut value = serde_json::to_value(launch)?;
+        if !launch.nested_virt.unwrap_or(false) {
+            value
+                .as_object_mut()
+                .expect("launch config object")
+                .remove("nested_virt");
+        }
         #[cfg(feature = "net")]
         let value = {
             let mut value = value;
@@ -237,7 +251,55 @@ impl LaunchContract {
         Ok(value)
     }
 
+    /// Negotiate automatic nesting and explicit off without changing older launcher semantics.
+    pub(crate) async fn encode_for_runtime(
+        self,
+        path: &Path,
+        launch: &LaunchConfig,
+    ) -> MicrosandboxResult<Value> {
+        let mut value = self.encode(launch)?;
+        if launch
+            .checkpoint_restore
+            .as_ref()
+            .is_some_and(|restore| restore.legacy_windows_pit_divisor.is_some())
+            && !capabilities(path).await?.windows_pit_recovery
+        {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "Windows PIT recovery",
+            )));
+        }
+        if launch.nested_virt == Some(true) {
+            validate_nested_host(capabilities(path).await?.as_ref())?;
+        }
+
+        if self.machine && launch.nested_virt != Some(true) {
+            let capabilities = capabilities(path).await?;
+            if !capabilities.protocols.contains(&2) {
+                if launch.nested_virt.is_none() {
+                    return Ok(value);
+                }
+                return Err(MicrosandboxError::Runtime(upgrade_required(
+                    "nested virtualization policy",
+                )));
+            }
+
+            if launch.nested_virt == Some(false) && capabilities.nested_virt {
+                value["nested_virt"] = false.into();
+            } else if launch.nested_virt.is_none() && capabilities.nested_virt_auto {
+                value["nested_virt_auto"] = true.into();
+            }
+        }
+
+        Ok(value)
+    }
+
     fn to_previous_version(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
+        if launch.nested_virt == Some(true)
+            || (launch.nested_virt == Some(false)
+                && cfg!(all(target_os = "linux", target_arch = "x86_64")))
+        {
+            return unsupported("nested virtualization policy");
+        }
         if launch.execution != microsandbox_runtime::launch::ExecutionIntent::Boot {
             return unsupported("execution restore");
         }
@@ -262,7 +324,13 @@ impl LaunchContract {
         }
         let mut value = serde_json::to_value(launch)?;
         let fields = value.as_object_mut().expect("launch config object");
-        for key in ["execution", "checkpoint_restore", "memory_cache_dir"] {
+        for key in [
+            "execution",
+            "checkpoint_restore",
+            "memory_cache_dir",
+            "nested_virt",
+            "nested_virt_auto",
+        ] {
             fields.remove(key);
         }
         let rootfs = fields["rootfs"].as_object_mut().expect("rootfs object");
@@ -432,6 +500,8 @@ impl LaunchContract {
             cpu_placement: resources.cpu_placement,
             placement_profile_name: resources.placement_profile.clone(),
             thp: resources.thp,
+            nested_virt: resources.nested_virt,
+            nested_virt_auto: None,
             guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
             vsock: config.spec.vsock.routes.clone(),
             owned_volumes: config
@@ -562,10 +632,43 @@ pub(crate) async fn validate_runtime_config(
     })?;
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
-        Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
+        #[cfg(feature = "embed-binaries")]
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt == Some(true) =>
+        {
+            // Keep first-use installation working, but discover host support
+            // before replacement can remove the existing sandbox.
+            crate::setup::ensure_runtime(
+                global,
+                crate::setup::InstallOptions {
+                    source: crate::setup::InstallSource::EmbeddedArchive,
+                    ..Default::default()
+                },
+            )
+            .await?
+        }
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt != Some(true) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     let contract = resolve(&runtime.msb_path).await?;
+    if let Some(divisor) = config.legacy_windows_pit_divisor {
+        if !cfg!(all(target_os = "windows", target_arch = "x86_64"))
+            || !(1..=65536).contains(&divisor)
+            || config.snapshot_restore_mode == crate::sandbox::config::SnapshotRestoreMode::DiskOnly
+        {
+            return Err(MicrosandboxError::InvalidConfig("periodic PIT recovery requires a Windows x86 full restore and a divisor between 1 and 65536".into()));
+        }
+        if !capabilities(&runtime.msb_path).await?.windows_pit_recovery {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                "Windows PIT recovery",
+            )));
+        }
+    }
+    validate_nested_virt(&runtime.msb_path, config, contract).await?;
     contract.validate_launch_intent(config)?;
     #[cfg(feature = "net")]
     validate_http_deny_response(&runtime.msb_path, config).await?;
@@ -679,6 +782,67 @@ pub(crate) async fn validate_http_deny_response(
     Ok(())
 }
 
+/// Refuse runtimes that would ignore the requested hardware virtualization policy.
+pub(crate) async fn validate_nested_virt(
+    path: &Path,
+    config: &SandboxConfig,
+    contract: LaunchContract,
+) -> MicrosandboxResult<()> {
+    let Some(enabled) = config.spec.resources.nested_virt else {
+        return Ok(());
+    };
+    // Legacy encoding cannot carry an explicit enable, including wrappers around
+    // new runtimes. Never infer support from historical VMX exposure.
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) && !enabled {
+        return Ok(());
+    }
+
+    if let Ok(capabilities) = capabilities(path).await
+        && capabilities.protocols.contains(&2)
+        && capabilities.nested_virt
+    {
+        if enabled {
+            validate_nested_host(&capabilities)?;
+        }
+        if !contract.machine {
+            return unsupported("nested virtualization policy through a legacy runtime or wrapper");
+        }
+        return Ok(());
+    }
+    if !enabled
+        && contract.machine
+        && probe(path)
+            .await
+            .is_ok_and(|version| version >= Version::new(0, 7, 7))
+    {
+        // v0.7.7 masks VMX/SVM even without the new toggle; its reader omits false.
+        return Ok(());
+    }
+    Err(MicrosandboxError::Runtime(upgrade_required(
+        "nested virtualization policy",
+    )))
+}
+
+fn validate_nested_host(capabilities: &LaunchCapabilities) -> MicrosandboxResult<()> {
+    if !capabilities.protocols.contains(&2) || !capabilities.nested_virt {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "nested virtualization policy",
+        )));
+    }
+    match capabilities.nested_virt_supported {
+        Some(true) => Ok(()),
+        Some(false) => Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(
+                "nested virtualization is unavailable on this host or backend".into(),
+            ),
+        )),
+        None => Err(MicrosandboxError::Runtime(upgrade_required(
+            "nested virtualization host validation",
+        ))),
+    }
+}
+
 /// Probe guest clock support only when the caller turns host synchronization off.
 /// Runtimes that predate the capability would otherwise reject the launch field late.
 pub(crate) async fn validate_guest_clock(
@@ -763,13 +927,56 @@ async fn require_capability(
     advertised: impl FnOnce(&LaunchCapabilities) -> bool,
     feature: &str,
 ) -> MicrosandboxResult<()> {
-    let output = bounded_probe(path, "__launch-protocol").await?;
-    let supported = serde_json::from_slice::<LaunchCapabilities>(&output)
-        .is_ok_and(|capabilities| capabilities.protocols.contains(&2) && advertised(&capabilities));
+    let capabilities = capabilities(path).await?;
+    let supported = capabilities.protocols.contains(&2) && advertised(&capabilities);
     if !supported {
         return Err(MicrosandboxError::Runtime(upgrade_required(feature)));
     }
     Ok(())
+}
+
+// Cache successful discovery for unchanged native executables. Wrappers can
+// switch their target without changing identity.
+async fn capabilities(path: &Path) -> MicrosandboxResult<Arc<LaunchCapabilities>> {
+    let path = std::fs::canonicalize(path)?;
+    let file = File::open(&path)?;
+    let identity = FileIdentity::capture(&file)?;
+    let mut magic = [0; 2];
+    let wrapper = (&file).read(&mut magic)? == 2 && magic == *b"#!";
+    if wrapper {
+        return Ok(Arc::new(serde_json::from_slice(
+            &bounded_probe(&path, "__launch-protocol").await?,
+        )?));
+    }
+    {
+        let cached = CAPABILITIES.lock().await;
+        if let Some(entry) = cached.get(&path).filter(|entry| entry.identity == identity) {
+            return Ok(entry.capabilities.clone());
+        }
+    }
+    let capabilities = Arc::new(serde_json::from_slice::<LaunchCapabilities>(
+        &bounded_probe(&path, "__launch-protocol").await?,
+    )?);
+    if FileIdentity::capture(&File::open(&path)?)? != identity
+        || FileIdentity::capture(&file)? != identity
+    {
+        return Err(MicrosandboxError::Runtime(
+            "runtime executable changed during capability discovery".into(),
+        ));
+    }
+    let mut cached = CAPABILITIES.lock().await;
+    if cached.len() >= 64 {
+        cached.clear();
+    }
+    cached.insert(
+        path,
+        CachedCapabilities {
+            identity,
+            capabilities: capabilities.clone(),
+            _file: file,
+        },
+    );
+    Ok(capabilities)
 }
 
 async fn probe(path: &Path) -> MicrosandboxResult<Version> {
@@ -1182,6 +1389,228 @@ mod tests {
         config.spec.network.http.deny_response_format =
             microsandbox_types::HttpDenyResponseFormat::Text;
         validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pit_recovery_requires_runtime_support_and_retains_the_explicit_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        for supported in [false, true] {
+            let path = script(
+                dir.path(),
+                &format!("pit-{supported}"),
+                &format!(
+                    "printf '%s' '{{\"protocols\":[2,1],\"windows_pit_recovery\":{supported}}}'"
+                ),
+            );
+            for divisor in [None, Some(4773)] {
+                let launch = LaunchConfig {
+                    checkpoint_restore: Some(
+                        microsandbox_runtime::launch::CheckpointRestoreConfig {
+                            legacy_windows_pit_divisor: divisor,
+                            ..Default::default()
+                        },
+                    ),
+                    ..Default::default()
+                };
+                let result = contract.encode_for_runtime(&path, &launch).await;
+                if divisor.is_some() && !supported {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("Windows PIT recovery")
+                    );
+                } else {
+                    let payload = result.unwrap();
+                    if let Some(divisor) = divisor {
+                        assert_eq!(
+                            payload["checkpoint_restore"]["legacy_windows_pit_divisor"],
+                            divisor
+                        );
+                    } else {
+                        assert!(
+                            payload["checkpoint_restore"]
+                                .get("legacy_windows_pit_divisor")
+                                .is_none()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_virt_requires_a_runtime_that_honors_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_enabled = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        for version in ["0.6.0", "0.6.18", "0.7.7"] {
+            let capabilities = if version == "0.7.7" {
+                r#"printf '%s' '{"protocols":[2,1]}'"#
+            } else {
+                "exit 1"
+            };
+            let path = script(
+                dir.path(),
+                version,
+                &format!(
+                    r#"case "$1" in --version) printf 'msb {version}';; *) {capabilities};; esac"#
+                ),
+            );
+            // Machine runtimes are identified by embedded binary metadata;
+            // the shell fixture only models their capability/version responses.
+            let contract = if version == "0.7.7" {
+                LaunchContract {
+                    patch: 18,
+                    machine: true,
+                }
+            } else {
+                resolve(&path).await.unwrap()
+            };
+            for requested in [None, Some(false), Some(true)] {
+                let mut config = crate::test_support::fixtures::decode(include_str!(
+                    "../db/fixtures/config-0.6.0.json"
+                ))
+                .unwrap();
+                config.spec.resources.nested_virt = requested;
+                let expected = requested.is_none()
+                    || requested == Some(false) && (!legacy_enabled || version == "0.7.7");
+                let result = validate_nested_virt(&path, &config, contract).await;
+                assert_eq!(result.is_ok(), expected, "{version}: {requested:?}");
+                if expected {
+                    contract.validate_launch_intent(&config).unwrap();
+                    let payload = contract
+                        .encode_for_runtime(
+                            &path,
+                            &LaunchConfig {
+                                nested_virt: config.spec.resources.nested_virt,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    assert!(payload.get("nested_virt").is_none());
+                    assert!(payload.get("nested_virt_auto").is_none());
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("nested virtualization policy")
+                    );
+                }
+            }
+        }
+
+        let path = script(
+            dir.path(),
+            "nested-supported",
+            r#"printf '%s' '{"protocols":[2,1],"nested_virt":true,"nested_virt_auto":true,"nested_virt_supported":true}'"#,
+        );
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        for requested in [None, Some(false), Some(true)] {
+            let mut config = crate::test_support::fixtures::decode(include_str!(
+                "../db/fixtures/config-0.6.0.json"
+            ))
+            .unwrap();
+            config.spec.resources.nested_virt = requested;
+            validate_nested_virt(&path, &config, contract)
+                .await
+                .unwrap();
+            let payload = LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .encode_for_runtime(
+                &path,
+                &LaunchConfig {
+                    nested_virt: requested,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                payload.get("nested_virt"),
+                requested.map(serde_json::Value::Bool).as_ref()
+            );
+            assert_eq!(
+                payload.get("nested_virt_auto"),
+                requested
+                    .is_none()
+                    .then_some(&serde_json::Value::Bool(true))
+            );
+        }
+
+        // A capable runtime behind a legacy wrapper still cannot receive a
+        // policy that its selected wire contract discards.
+        let legacy = LaunchContract {
+            machine: false,
+            ..contract
+        };
+        for enabled in [false, true] {
+            let mut config = SandboxConfig::default();
+            config.spec.resources.nested_virt = Some(enabled);
+            let expected = !enabled && !legacy_enabled;
+
+            assert_eq!(
+                validate_nested_virt(&path, &config, legacy).await.is_ok(),
+                expected,
+                "legacy wrapper: {enabled}",
+            );
+            assert_eq!(
+                legacy
+                    .encode_for_runtime(
+                        &path,
+                        &LaunchConfig {
+                            nested_virt: Some(enabled),
+                            ..Default::default()
+                        }
+                    )
+                    .await
+                    .is_ok(),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_nesting_rejects_unsupported_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SandboxConfig::default();
+        config.spec.resources.nested_virt = Some(true);
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        for (host_support, expected) in [
+            (
+                ",\"nested_virt_supported\":false",
+                "nested virtualization is unavailable",
+            ),
+            ("", "nested virtualization host validation"),
+        ] {
+            let path = script(
+                dir.path(),
+                "unsupported-host",
+                &format!(r#"printf '%s' '{{"protocols":[2,1],"nested_virt":true{host_support}}}'"#),
+            );
+            let error = validate_nested_virt(&path, &config, contract)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[cfg(unix)]
@@ -2162,6 +2591,7 @@ mod protocol {
         let config = LaunchConfig {
             execution: ExecutionIntent::Restore,
             checkpoint_restore: Some(microsandbox_runtime::launch::CheckpointRestoreConfig {
+                legacy_windows_pit_divisor: None,
                 closure: "/tmp/checkpoint".into(),
                 checkpoint_root: "blake3:root".into(),
                 checkpoint_id: "saved".into(),

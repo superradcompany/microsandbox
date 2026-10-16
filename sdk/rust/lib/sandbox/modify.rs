@@ -1125,7 +1125,7 @@ pub(crate) async fn control_checkpoint_create(
         ));
     }
     let response = session
-        .request(&CreateCheckpoint(request))
+        .capture(&CreateCheckpoint(request))
         .await
         .map_err(crate::MicrosandboxError::ControlClient)?;
     checkpoint_response(response)
@@ -1163,7 +1163,7 @@ pub(crate) async fn control_disk_checkpoint_create(
         guest_flush: capture_flush_policy(Some(capabilities), guest_flush, true)?,
     };
     let response = session
-        .request(&CreateDiskCheckpoint(request))
+        .capture(&CreateDiskCheckpoint(request))
         .await
         .map_err(crate::MicrosandboxError::ControlClient)?;
     Ok(microsandbox_runtime::control::DiskCheckpointControlState {
@@ -3290,6 +3290,13 @@ mod tests {
                     } else {
                         assert_eq!(request["op"], "checkpoint_create");
                         assert_eq!(request["record_integrity"], label == "second");
+                        if label == "first" {
+                            // A valid capture can outlast the short control-operation deadline.
+                            // Start virtual time only after real socket and database setup.
+                            tokio::time::pause();
+                            tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+                            tokio::time::resume();
+                        }
                         serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
                             "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
                             "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096

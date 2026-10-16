@@ -147,6 +147,9 @@ impl SnapshotBackend for CloudBackend {
         reference: SnapshotReference,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move {
+            if config.legacy_windows_pit_divisor.is_some() {
+                return Err(MicrosandboxError::local_only(Operation::SnapshotOps));
+            }
             config.snapshot_reference = Some(reference);
             Ok(())
         })
