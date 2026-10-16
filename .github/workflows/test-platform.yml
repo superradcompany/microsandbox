@@ -68,7 +68,7 @@ jobs:
       # discovers build/ in CI, so unit tests no longer repeat the release/LTO
       # msb, agentd, and libkrunfw build.
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-${{ inputs.target }}
           path: build/
@@ -89,7 +89,7 @@ jobs:
 
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Test workspace
         run: cargo +stable test --workspace --exclude microsandbox-agentd

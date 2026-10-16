@@ -98,13 +98,13 @@ jobs:
           shared-key: release-runtime-${{ inputs.target }}
 
       - name: Download kernel bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.firmware_artifact }}
           path: vendor/libkrunfw/
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.agentd_artifact }}
           path: build/
@@ -140,7 +140,7 @@ jobs:
         run: python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
 
       - name: Upload runtime artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: runtime-${{ inputs.target }}
           path: |
@@ -181,7 +181,7 @@ jobs:
           cargo build --release -p microsandbox-metrics-collector --target ${{ inputs.rust_target }}
 
       - name: Upload metrics artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: metrics-${{ inputs.target }}
           path: target/${{ inputs.rust_target }}/release/msb-metrics.exe
@@ -210,7 +210,7 @@ jobs:
           shared-key: release-go-${{ inputs.target }}
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: runtime-${{ inputs.target }}
           path: build/
@@ -226,7 +226,7 @@ jobs:
           cargo build --release -p microsandbox-go --target ${{ inputs.rust_target }}
 
       - name: Upload Go FFI artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-ffi-${{ inputs.target }}
           path: target/${{ inputs.rust_target }}/release/microsandbox_go_ffi.dll
@@ -254,14 +254,14 @@ jobs:
           cache-targets: true
           shared-key: release-node-${{ inputs.target }}
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: sdk/node-ts/package-lock.json
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: runtime-${{ inputs.target }}
           path: build/
@@ -284,7 +284,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ inputs.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-${{ inputs.npm_dir }}
           path: |
@@ -315,7 +315,7 @@ jobs:
           shared-key: release-python-${{ inputs.target }}
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: runtime-${{ inputs.target }}
           path: build/
@@ -337,7 +337,7 @@ jobs:
           args: --release --out dist --target ${{ inputs.rust_target }}
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-sdk-${{ inputs.target }}
           path: sdk/python/dist/*.whl
@@ -349,19 +349,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: runtime-${{ inputs.target }}
           path: bundle/runtime/
 
       - name: Download metrics artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: metrics-${{ inputs.target }}
           path: bundle/metrics/
 
       - name: Download Go FFI artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: go-ffi-${{ inputs.target }}
           path: bundle/go/
@@ -380,7 +380,7 @@ jobs:
           cp bundle/go/microsandbox_go_ffi.dll artifacts/${{ inputs.go_bundle_name }}
 
       - name: Upload platform artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ inputs.target }}
           path: artifacts/

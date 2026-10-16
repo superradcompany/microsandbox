@@ -59,7 +59,7 @@ jobs:
         uses: ./.github/actions/cache-libkrunfw-kernel
 
       - name: Upload kernel source archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs/*.tar.gz
@@ -92,7 +92,7 @@ jobs:
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs
@@ -103,7 +103,7 @@ jobs:
         run: make -j$(nproc)
 
       - name: Upload firmware
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-aarch64
           path: |
@@ -136,7 +136,7 @@ jobs:
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-source
           path: vendor/libkrunfw/tarballs
@@ -147,7 +147,7 @@ jobs:
         run: make -j$(nproc)
 
       - name: Upload firmware
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: firmware-x86_64
           path: |
@@ -180,7 +180,7 @@ jobs:
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: target/aarch64-unknown-linux-musl/release/agentd
@@ -209,7 +209,7 @@ jobs:
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: target/x86_64-unknown-linux-musl/release/agentd
@@ -350,7 +350,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
@@ -388,7 +388,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-x86_64
           path: vendor/libkrunfw/kernel.c
@@ -422,7 +422,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: build/agentd
@@ -453,7 +453,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/agentd
@@ -529,7 +529,7 @@ jobs:
       # -- agentd (macOS: download prebuilt Linux artifact) --
       - name: Download agentd (macOS)
         if: matrix.os == 'darwin'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: build/
@@ -562,7 +562,7 @@ jobs:
 
       - name: Download kernel.c (macOS)
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && matrix.os == 'darwin'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/
@@ -609,7 +609,7 @@ jobs:
         run: codesign --entitlements msb-entitlements.plist --force -s - build/msb
 
       # -- Node SDK --
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -626,7 +626,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
@@ -638,7 +638,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -663,7 +663,7 @@ jobs:
           before-script-linux: dnf install -y libcap-ng-devel
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-sdk-${{ matrix.target }}
           path: sdk/python/dist/*.whl
@@ -706,7 +706,7 @@ jobs:
           cp "build/$go_ffi_file" "artifacts/$bundle_name"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: artifacts/
@@ -764,13 +764,13 @@ jobs:
           cache-bin: false
 
       - name: Download kernel.c
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.kernel_artifact }}
           path: vendor/libkrunfw/
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.agentd_artifact }}
           path: build/
@@ -827,7 +827,7 @@ jobs:
           Copy-Item target\${{ matrix.rust_target }}\release\microsandbox_go_ffi.dll build\microsandbox_go_ffi.dll -Force
 
       # -- Node SDK --
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -849,7 +849,7 @@ jobs:
         run: node scripts/prepare-platform-package.mjs ${{ matrix.npm_dir }}
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-${{ matrix.npm_dir }}
           path: |
@@ -861,7 +861,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -883,7 +883,7 @@ jobs:
           args: --release --out dist --target ${{ matrix.rust_target }}
 
       - name: Upload Python SDK wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-sdk-${{ matrix.target }}
           path: sdk/python/dist/*.whl
@@ -905,7 +905,7 @@ jobs:
           Copy-Item build\microsandbox_go_ffi.dll "artifacts\libmicrosandbox_go_ffi-windows-$goArch.dll" -Force
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ matrix.target }}
           path: artifacts/
@@ -934,20 +934,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-artifacts
           pattern: release-*
           merge-multiple: true
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: node-artifacts
           pattern: node-sdk-*
 
       - name: Download Python SDK wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: python-artifacts
           pattern: python-sdk-*
@@ -977,7 +977,7 @@ jobs:
           python3 -m unittest scripts.ci.test_publish_crates
           python3 scripts/ci/publish-crates.py --validate-only
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -1046,7 +1046,7 @@ jobs:
         run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" cleanup
 
       - name: Upload validation manifest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-validation
           path: release-validation/manifest.json
@@ -1067,7 +1067,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-artifacts
           pattern: release-*
@@ -1273,13 +1273,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: node-artifacts
           pattern: node-sdk-*
@@ -1416,7 +1416,7 @@ jobs:
         with:
           ref: main
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: needs.npm-publish.result == 'success'
         with:
           node-version: 22
@@ -1476,7 +1476,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -1539,10 +1539,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Download Python SDK wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           pattern: python-sdk-*
@@ -1581,7 +1581,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download per-platform release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release-dl
           pattern: release-*
@@ -1659,7 +1659,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.artifact }}
           path: release-artifacts
@@ -1694,7 +1694,7 @@ jobs:
           echo "${{ steps.push.outputs.digest }}" > /tmp/digests/${{ matrix.arch }}.txt
 
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-digest-${{ matrix.arch }}
           path: /tmp/digests/${{ matrix.arch }}.txt
@@ -1711,7 +1711,7 @@ jobs:
       packages: write
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: digests
           pattern: docker-digest-*

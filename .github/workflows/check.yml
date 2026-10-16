@@ -114,7 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
       - name: Check release note contracts
@@ -161,7 +161,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-aarch64
           path: vendor/libkrunfw/kernel.c
@@ -201,7 +201,7 @@ jobs:
           make -j$(nproc)
 
       - name: Upload kernel.c
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kernel-c-x86_64
           path: vendor/libkrunfw/kernel.c
@@ -237,7 +237,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-aarch64-linux-musl
           path: build/agentd
@@ -270,7 +270,7 @@ jobs:
           cp target/x86_64-unknown-linux-musl/ci/agentd build/agentd
 
       - name: Upload agentd
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/agentd
@@ -309,7 +309,7 @@ jobs:
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/
@@ -341,7 +341,7 @@ jobs:
 
       # mold keeps uncached workspace links fast.
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Build msb
         run: |
@@ -357,7 +357,7 @@ jobs:
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
       - name: Upload runtime artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -384,19 +384,19 @@ jobs:
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Build Go FFI
         run: cargo build --profile ci -p microsandbox-go
 
       - name: Upload Go FFI artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-ffi-linux-x86_64
           path: target/ci/libmicrosandbox_go_ffi.so
@@ -422,18 +422,18 @@ jobs:
           cache-bin: false
           cache-targets: true
 
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-nextest@0.9.143
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Install build dependencies
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/
@@ -450,7 +450,7 @@ jobs:
             --archive-file artifacts/rust-integration-tests.tar.zst
 
       - name: Upload nextest archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-integration-tests-linux-x86_64
           path: artifacts/rust-integration-tests.tar.zst
@@ -554,13 +554,13 @@ jobs:
           shared-key: windows-quality-${{ matrix.target }}
 
       - name: Download kernel.c
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.kernel_artifact }}
           path: vendor/libkrunfw/
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.agentd_artifact }}
           path: build/
@@ -734,13 +734,13 @@ jobs:
           shared-key: windows-build-${{ matrix.target }}-${{ matrix.component }}
 
       - name: Download kernel.c
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.kernel_artifact }}
           path: vendor/libkrunfw/
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.agentd_artifact }}
           path: build/
@@ -847,7 +847,7 @@ jobs:
         run: scripts/ci/install-apt-packages.sh musl-tools libcap-ng-dev
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -861,7 +861,7 @@ jobs:
           cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl -- -D warnings
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Clippy
         run: cargo +stable clippy --workspace --exclude microsandbox-agentd -- -D warnings
@@ -904,9 +904,9 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
@@ -914,7 +914,7 @@ jobs:
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -943,7 +943,7 @@ jobs:
           npm test
 
       - name: Upload Node SDK artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-linux-x86_64
           path: |
@@ -962,7 +962,7 @@ jobs:
       # Artifact-only SDK jobs need the workspace dependency beside sdk/node-ts
       # so npm's existing workspace link resolves to the tested build.
       - name: Upload shared types artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-sdk-shared-types
           path: |
@@ -991,9 +991,9 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -1002,7 +1002,7 @@ jobs:
         run: scripts/ci/install-apt-packages.sh libcap-ng-dev
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -1026,7 +1026,7 @@ jobs:
           mold -run uv run --no-sync maturin build --profile ci --out dist
 
       - name: Upload Python wheel
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-wheel-linux-x86_64
           path: sdk/python/dist/*.whl
@@ -1041,13 +1041,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Download Python wheel
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-wheel-linux-x86_64
           path: sdk/python/dist/
@@ -1083,7 +1083,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
@@ -1102,13 +1102,13 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/
@@ -1144,7 +1144,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
         with:
           ruby-version: "4.0"
 
@@ -1161,13 +1161,13 @@ jobs:
           cache-targets: true
 
       - name: Set up mold
-        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # 2.41.0
+        uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-x86_64-linux-musl
           path: build/
@@ -1271,12 +1271,12 @@ jobs:
         run: rustup target add x86_64-pc-windows-gnu
 
       - name: Download agentd
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: agentd-${{ matrix.agentd }}-linux-musl
           path: build/
 
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
         if: "!contains(matrix.platform, 'mingw')"
         with:
           ruby-version: ${{ matrix.ruby }}
@@ -1311,7 +1311,7 @@ jobs:
           done
 
       - name: Upload the staged extension
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ruby-extension-${{ matrix.platform }}-${{ matrix.ruby }}
           # Preserve the Ruby version directory when merging the artifacts.
@@ -1347,7 +1347,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
         with:
           ruby-version: "4.0"
 
@@ -1355,7 +1355,7 @@ jobs:
         run: gem install rake rake-compiler --no-document
 
       - name: Download the staged extensions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: ruby-extension-${{ matrix.platform }}-*
           path: sdk/ruby/lib/microsandbox/
@@ -1391,7 +1391,7 @@ jobs:
 
             puts "platform gem spec OK: #{File.basename(path)}"'
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ruby-sdk-${{ matrix.platform }}
           path: sdk/ruby/pkg/*.gem
@@ -1420,11 +1420,11 @@ jobs:
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
-      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1
         with:
           ruby-version: ${{ matrix.ruby }}
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ruby-sdk-${{ matrix.platform }}
 
@@ -1446,7 +1446,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ruby-sdk-x86_64-linux-gnu
 
@@ -1472,13 +1472,13 @@ jobs:
           cache: false
 
       - name: Download runtime artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Go FFI artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: go-ffi-linux-x86_64
           path: build/
@@ -1510,7 +1510,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download candidate runtime
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -1549,7 +1549,7 @@ jobs:
         run: scripts/ci/clean-runner-disk.sh
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
@@ -1616,7 +1616,7 @@ jobs:
 
       - name: Upload snapshot smoke reports and logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: snapshot-branch-smoke-linux-x86_64
           # Keep text evidence, not the potentially large guest RAM/disk artifacts.
@@ -1650,19 +1650,19 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-nextest@0.9.143
 
       # -- Download pre-built artifacts --
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download nextest archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: rust-integration-tests-linux-x86_64
           path: build/
@@ -1727,7 +1727,7 @@ jobs:
 
       - name: Upload managed-job integration results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: managed-job-integration-results
           path: build/managed-job-integration-results/
@@ -1747,7 +1747,7 @@ jobs:
 
       - name: Upload historical catalog results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: catalog-history-results
           path: build/catalog-history-results/*.log
@@ -1768,7 +1768,7 @@ jobs:
 
       - name: Upload checkpoint lifecycle results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: checkpoint-integration-results
           path: build/checkpoint-integration-results/
@@ -1819,24 +1819,24 @@ jobs:
       - name: Clean runner disk
         run: bash .ci-source/scripts/ci/clean-runner-disk.sh
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Node SDK artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: node-sdk-linux-x86_64
           path: sdk/node-ts/
 
       - name: Download shared types artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: node-sdk-shared-types
           path: packages/microsandbox-types/typescript/
@@ -1949,7 +1949,7 @@ jobs:
       - name: Clean runner disk
         run: scripts/ci/clean-runner-disk.sh
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           # Persistent runners already retain a bounded local cache. Restoring a
           # multi-GB Actions cache here can exhaust the shared disk before tests.
@@ -1957,13 +1957,13 @@ jobs:
           cache-dependency-glob: "sdk/python/uv.lock"
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Python wheel
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-wheel-linux-x86_64
           path: sdk/python/dist/
@@ -1999,7 +1999,7 @@ jobs:
 
       - name: Upload Python managed-job regression results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: python-managed-job-results
           path: build/python-managed-job-results/
@@ -2028,14 +2028,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
           python-version: "3.10"
 
       - name: Download Python wheel
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: python-wheel-linux-x86_64
           path: sdk/python/dist/
@@ -2099,13 +2099,13 @@ jobs:
 
       # -- Download pre-built artifacts (msb + libkrunfw + cdylib all in build/) --
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: msb-linux-x86_64
           path: build/
 
       - name: Download Go FFI artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: go-ffi-linux-x86_64
           path: build/
