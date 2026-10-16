@@ -3202,3 +3202,148 @@ fn dax_namespace_change_keeps_mapping(replace: bool, fail_refresh: bool) {
     .unwrap();
     assert!(seen.lock().unwrap().is_empty());
 }
+
+#[test]
+fn incremental_quota_refunds_truncation_and_retains_open_unlinked_bytes() {
+    let temp = TempDir::new();
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(4),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    let (entry, handle, _) = fs
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let write = |bytes: &[u8]| {
+        let mut source = SourceReader {
+            bytes: bytes.to_vec(),
+            pos: 0,
+        };
+        fs.write(
+            context(),
+            entry.inode,
+            handle,
+            &mut source,
+            bytes.len() as u32,
+            0,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    };
+    write(b"abcd");
+    let (_, truncated, _) = fs
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR | LINUX_O_TRUNC) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(fs.quota.as_ref().unwrap().used(), 0);
+    fs.release(
+        context(),
+        entry.inode,
+        0,
+        truncated.unwrap(),
+        false,
+        false,
+        None,
+    )
+    .unwrap();
+    write(b"abcd");
+    let dir_handle = fs
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap()
+        .0
+        .unwrap();
+    fs.readdir(context(), ROOT_INODE, dir_handle, 4096, 0)
+        .unwrap();
+    fs.unlink(context(), ROOT_INODE, c"quota").unwrap();
+    assert_eq!(fs.quota.as_ref().unwrap().used(), 4);
+    fs.release(context(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    assert_eq!(fs.quota.as_ref().unwrap().used(), 4);
+    fs.releasedir(context(), ROOT_INODE, 0, dir_handle).unwrap();
+    assert_eq!(fs.quota.as_ref().unwrap().used(), 0);
+}
+
+#[test]
+fn incremental_quota_closed_file_snapshot_preserves_pin_and_charges() {
+    let temp = TempDir::new();
+    let config = PassthroughConfig {
+        root_dir: temp.path.clone(),
+        inject_init: false,
+        quota_bytes: Some(8),
+        ..Default::default()
+    };
+    let source = PassthroughFs::new(config.clone()).unwrap();
+    source.init(FsOptions::empty()).unwrap();
+    let (entry, handle, _) = source
+        .create(
+            context(),
+            ROOT_INODE,
+            c"quota",
+            S_IFREG | 0o644,
+            false,
+            (LINUX_O_CREAT | LINUX_O_RDWR) as u32,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+    let handle = handle.unwrap();
+    let mut bytes = SourceReader {
+        bytes: b"abcd".to_vec(),
+        pos: 0,
+    };
+    source
+        .write(
+            context(),
+            entry.inode,
+            handle,
+            &mut bytes,
+            4,
+            0,
+            None,
+            false,
+            false,
+            0,
+        )
+        .unwrap();
+    source
+        .release(context(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    let state = source.capture_state().unwrap();
+    let restored = PassthroughFs::new(config).unwrap();
+    restored.init(FsOptions::empty()).unwrap();
+    restored.restore_state(&state).unwrap();
+    assert_eq!(restored.quota.as_ref().unwrap().used(), 4);
+    restored
+        .open(
+            context(),
+            entry.inode,
+            false,
+            (LINUX_O_RDWR | LINUX_O_TRUNC) as u32,
+        )
+        .unwrap();
+    assert_eq!(restored.quota.as_ref().unwrap().used(), 0);
+}

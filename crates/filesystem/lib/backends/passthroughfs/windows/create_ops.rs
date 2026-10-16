@@ -26,8 +26,18 @@ impl PassthroughFs {
 
         self.quota_ensure_baseline();
 
-        let options = open_options_from_flags(flags, true)?;
-        let file = if flags & LINUX_O_TRUNC as u32 != 0 && self.safe_metadata(&path).is_ok() {
+        let account_truncate = flags & LINUX_O_TRUNC as u32 != 0
+            && self.quota.as_ref().is_some_and(|quota| quota.incremental());
+        let create_flags = if account_truncate {
+            flags & !(LINUX_O_TRUNC as u32)
+        } else {
+            flags
+        };
+        let options = open_options_from_flags(create_flags, true)?;
+        let file = if !account_truncate
+            && flags & LINUX_O_TRUNC as u32 != 0
+            && self.safe_metadata(&path).is_ok()
+        {
             let data = self.intern_path(path.clone())?;
             self.resize_inode(data.inode, || options.open(&path).map_err(host_error))?
         } else {
@@ -35,8 +45,18 @@ impl PassthroughFs {
         };
 
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-        let metadata = self.safe_metadata(&path)?;
         let data = self.intern_path(path.clone())?;
+        if account_truncate {
+            self.resize_inode(data.inode, || {
+                self.quota_mutate(
+                    data.inode,
+                    &file,
+                    |_| 0,
+                    |_| file.set_len(0).map_err(host_error),
+                )
+            })?;
+        }
+        let metadata = file.metadata().map_err(host_error)?;
         if let Err(error) = self.set_virtual_metadata(
             data.as_ref(),
             ctx.uid,
@@ -132,29 +152,29 @@ impl PassthroughFs {
 
         self.quota_ensure_baseline();
 
-        let mut file = StdOpenOptions::new()
+        let file = StdOpenOptions::new()
             .write(true)
             .create_new(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
             .map_err(host_error)?;
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-        if let Err(error) = self.quota_charge_file_to(&file, linkname.to_bytes().len() as u64) {
-            let _ = std::fs::remove_file(&path);
-            return Err(error);
-        }
-        if let Err(error) = file.write_all(linkname.to_bytes()).map_err(host_error) {
-            let _ = std::fs::remove_file(&path);
+        let data = self.intern_path(path.clone())?;
+        if let Err(error) = self.quota_mutate(
+            data.inode,
+            &file,
+            |_| linkname.to_bytes().len() as u64,
+            |_| (&file).write_all(linkname.to_bytes()).map_err(host_error),
+        ) {
+            let _ = self.unlink_file(&path);
             return Err(error);
         }
 
         let metadata = self.safe_metadata(&path)?;
-        let data = self.intern_path(path)?;
         if let Err(error) =
             self.set_virtual_metadata(data.as_ref(), ctx.uid, ctx.gid, S_IFLNK | 0o777, 0)
         {
-            let _ = std::fs::remove_file(data.path());
-            self.remove_inode_path(&data.path());
+            let _ = self.unlink_file(&data.path());
             return Err(error);
         }
 

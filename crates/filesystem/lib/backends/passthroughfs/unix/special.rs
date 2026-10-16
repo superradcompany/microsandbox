@@ -102,8 +102,13 @@ pub(crate) fn do_fallocate(
         return Err(platform::erofs());
     }
 
-    let handles = fs.handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    let data = fs
+        .handles
+        .read()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(platform::ebadf)?;
     #[cfg(target_os = "macos")]
     if data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
         return Err(platform::ebadf());
@@ -113,81 +118,84 @@ pub(crate) fn do_fallocate(
     let f = data.file.write().unwrap();
     let fd = f.as_raw_fd();
 
-    // Quota: a non-hole-punching fallocate reserves space and may grow the
-    // file. Charge the growth past EOF before allocating. Hole-punching frees
-    // space, so it is never charged.
-    const FALLOC_FL_PUNCH_HOLE: u32 = 0x02;
-    if mode & FALLOC_FL_PUNCH_HOLE == 0 {
-        fs.quota_charge_to(fd, offset.saturating_add(length))?;
-    }
-
     #[cfg(target_os = "linux")]
-    {
+    return fs.quota_fallocate(data.inode, &f, mode, offset, length, |_| {
         let ret = unsafe { libc::fallocate64(fd, mode as i32, offset as i64, length as i64) };
         if ret < 0 {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
-    }
+        Ok(())
+    });
 
     #[cfg(target_os = "macos")]
-    {
-        // macOS only supports the default "allocate space" mode here.
-        if mode != 0 {
-            return Err(platform::linux_error(io::Error::from_raw_os_error(
-                libc::EOPNOTSUPP,
-            )));
-        }
+    fs.quota_mutate(
+        data.inode,
+        &f,
+        |_| offset.saturating_add(length),
+        |_| {
+            #[cfg(target_os = "macos")]
+            {
+                // macOS only supports the default "allocate space" mode here.
+                if mode != 0 {
+                    return Err(platform::linux_error(io::Error::from_raw_os_error(
+                        libc::EOPNOTSUPP,
+                    )));
+                }
 
-        // In the default mode `fallocate(2)` says the file size "will be
-        // changed if offset+size is greater than the file size". macOS has no
-        // way to reserve blocks for a range inside the file (`F_PEOFPOSMODE`
-        // only allocates past EOF), so the part of the range that ends inside
-        // the file is left alone and only the tail past EOF is reserved and
-        // then made visible with ftruncate. A host process that grows the
-        // file between this fstat and the ftruncate can still lose that
-        // growth; a guest writer cannot, because the guest kernel holds the
-        // inode lock for the whole fallocate.
-        let new_size = offset
-            .checked_add(length)
-            .ok_or_else(|| platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)))
-            .and_then(|size| {
-                i64::try_from(size).map_err(|_| {
-                    platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
-                })
-            })?;
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut st) } < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        if new_size <= st.st_size {
-            return Ok(());
-        }
+                // In the default mode `fallocate(2)` says the file size "will be
+                // changed if offset+size is greater than the file size". macOS has no
+                // way to reserve blocks for a range inside the file (`F_PEOFPOSMODE`
+                // only allocates past EOF), so the part of the range that ends inside
+                // the file is left alone and only the tail past EOF is reserved and
+                // then made visible with ftruncate. A host process that grows the
+                // file between this fstat and the ftruncate can still lose that
+                // growth; a guest writer cannot, because the guest kernel holds the
+                // inode lock for the whole fallocate.
+                let new_size = offset
+                    .checked_add(length)
+                    .ok_or_else(|| {
+                        platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
+                    })
+                    .and_then(|size| {
+                        i64::try_from(size).map_err(|_| {
+                            platform::linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW))
+                        })
+                    })?;
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstat(fd, &mut st) } < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                if new_size <= st.st_size {
+                    return Ok(());
+                }
 
-        let mut store = libc::fstore_t {
-            fst_flags: libc::F_ALLOCATECONTIG,
-            fst_posmode: libc::F_PEOFPOSMODE,
-            fst_offset: 0,
-            fst_length: new_size - st.st_size,
-            fst_bytesalloc: 0,
-        };
+                let mut store = libc::fstore_t {
+                    fst_flags: libc::F_ALLOCATECONTIG,
+                    fst_posmode: libc::F_PEOFPOSMODE,
+                    fst_offset: 0,
+                    fst_length: new_size - st.st_size,
+                    fst_bytesalloc: 0,
+                };
 
-        let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) };
-        if ret < 0 {
-            // Try non-contiguous allocation.
-            store.fst_flags = libc::F_ALLOCATEALL;
-            let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) };
-            if ret < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
+                let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) };
+                if ret < 0 {
+                    // Try non-contiguous allocation.
+                    store.fst_flags = libc::F_ALLOCATEALL;
+                    let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &mut store) };
+                    if ret < 0 {
+                        return Err(platform::linux_error(io::Error::last_os_error()));
+                    }
+                }
+
+                let ret = unsafe { libc::ftruncate(fd, new_size) };
+                if ret < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
             }
-        }
 
-        let ret = unsafe { libc::ftruncate(fd, new_size) };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-    }
-
-    Ok(())
+            Ok(())
+        },
+    )
 }
 
 /// Reposition read/write file offset (seek for sparse files).
@@ -245,31 +253,42 @@ pub(crate) fn do_copyfilerange(
     #[cfg(target_os = "linux")]
     {
         let handles = fs.handles.read().unwrap();
-        let data_in = handles.get(&handle_in).ok_or_else(platform::ebadf)?;
-        let data_out = handles.get(&handle_out).ok_or_else(platform::ebadf)?;
+        let data_in = handles
+            .get(&handle_in)
+            .cloned()
+            .ok_or_else(platform::ebadf)?;
+        let data_out = handles
+            .get(&handle_out)
+            .cloned()
+            .ok_or_else(platform::ebadf)?;
+        drop(handles);
         let f_in = data_in.file.read().unwrap();
         let f_out = data_out.file.read().unwrap();
 
-        // Quota: the copy may grow the destination past EOF.
-        fs.quota_charge_to(f_out.as_raw_fd(), offset_out.saturating_add(len))?;
+        fs.quota_mutate(
+            data_out.inode,
+            &f_out,
+            |_| offset_out.saturating_add(len),
+            |_| {
+                let mut off_in = offset_in as i64;
+                let mut off_out = offset_out as i64;
 
-        let mut off_in = offset_in as i64;
-        let mut off_out = offset_out as i64;
-
-        let ret = unsafe {
-            libc::copy_file_range(
-                f_in.as_raw_fd(),
-                &mut off_in,
-                f_out.as_raw_fd(),
-                &mut off_out,
-                len as usize,
-                flags as u32,
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
-        Ok(ret as usize)
+                let ret = unsafe {
+                    libc::copy_file_range(
+                        f_in.as_raw_fd(),
+                        &mut off_in,
+                        f_out.as_raw_fd(),
+                        &mut off_out,
+                        len as usize,
+                        flags as u32,
+                    )
+                };
+                if ret < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                Ok(ret as usize)
+            },
+        )
     }
 
     #[cfg(target_os = "macos")]

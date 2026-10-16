@@ -7,6 +7,8 @@
 mod external;
 mod owned;
 pub(crate) mod quota;
+mod quota_legacy;
+mod quota_mobility;
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) mod window;
 

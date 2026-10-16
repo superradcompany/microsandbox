@@ -290,15 +290,23 @@ impl DynFileSystem for PassthroughFs {
         // host-file lock (another alias may already be operating on this file).
         let state = self.dax_files.get(&handle.file.lock().unwrap())?;
         let _operation = state.operation.lock().unwrap_or_else(|p| p.into_inner());
-        let old_len = self.inode_metadata(&data)?.len();
         let file = handle.file.lock().unwrap();
-        let offset = if handle.flags & LINUX_O_APPEND as u32 != 0 {
-            file.metadata().map_err(host_error)?.len()
-        } else {
-            offset
-        };
-        self.quota_charge_growth(old_len, offset.saturating_add(size as u64))?;
-        let result = r.read_to(&file, size as usize, offset).map_err(host_error);
+        let append = handle.flags & LINUX_O_APPEND as u32 != 0;
+        let result = self.quota_mutate(
+            inode,
+            &file,
+            |before| {
+                if append {
+                    before.saturating_add(size as u64)
+                } else {
+                    offset.saturating_add(size as u64)
+                }
+            },
+            |before| {
+                r.read_to(&file, size as usize, if append { before } else { offset })
+                    .map_err(host_error)
+            },
+        );
         // Even a failed write may have extended the file before reporting an
         // error. Keep existing DAX readers coherent in either case.
         drop(file);
@@ -377,6 +385,7 @@ impl DynFileSystem for PassthroughFs {
         };
         drop(handles);
         if result.is_ok() {
+            self.quota_reconcile_inode(inode);
             self.reap_owned_inode(inode);
         }
         result
@@ -558,8 +567,12 @@ impl DynFileSystem for PassthroughFs {
 
     fn releasedir(&self, _ctx: Context, inode: u64, _flags: u32, handle: u64) -> io::Result<()> {
         let mut handles = self.dir_handles.write().unwrap();
+        let mut released = None;
         let result = match handles.remove(&handle) {
-            Some(data) if data.inode == inode => Ok(()),
+            Some(data) if data.inode == inode => {
+                released = Some(data);
+                Ok(())
+            }
             Some(data) => {
                 handles.insert(handle, data);
                 Err(linux_error(LINUX_EBADF))
@@ -567,6 +580,22 @@ impl DynFileSystem for PassthroughFs {
             None => Err(linux_error(LINUX_EBADF)),
         };
         drop(handles);
+        if self.quota.is_some()
+            && let Some(released) = released
+        {
+            // Directory snapshots retain inode identities after namespace unlink.
+            // Reclaim only the entries released here, after dropping the table lock.
+            let ids = released
+                .snapshot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|entries| entries.iter().map(|entry| entry.inode).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for id in ids {
+                self.quota_reconcile_inode(id);
+            }
+        }
         if result.is_ok() && self.cfg.owned_checkpoint.is_some() {
             let ids = self
                 .inodes
