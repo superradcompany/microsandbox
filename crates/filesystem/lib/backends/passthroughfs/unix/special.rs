@@ -210,7 +210,13 @@ pub(crate) fn do_lseek(
     let f = data.file.write().unwrap();
     let fd = f.as_raw_fd();
 
-    let ret = unsafe { libc::lseek(fd, offset as i64, whence as i32) };
+    // FUSE uses Linux whence values; macOS reverses SEEK_DATA and SEEK_HOLE.
+    let host_whence = match whence {
+        3 => libc::SEEK_DATA,
+        4 => libc::SEEK_HOLE,
+        _ => whence as i32,
+    };
+    let ret = unsafe { libc::lseek(fd, offset as i64, host_whence) };
     if ret < 0 {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
