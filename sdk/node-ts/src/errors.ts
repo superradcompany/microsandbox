@@ -1,3 +1,5 @@
+import type { ResourceResizeStatus } from "./modify.js";
+
 export type MicrosandboxErrorCode =
   | "io"
   | "http"
@@ -20,6 +22,7 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "stopTimeout"
+  | "resizeTimeout"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -172,6 +175,20 @@ export class ExecTimeoutError extends MicrosandboxError {
 export class StopTimeoutError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("stopTimeout", message, options);
+  }
+}
+
+/**
+ * A live resize did not converge before its deadline; the host still enforces the target.
+ * `status` is the last observed resize status, empty when no read completed before the deadline.
+ */
+export class ResizeTimeoutError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly status: ResourceResizeStatus[] = [],
+    options?: ErrorOptions,
+  ) {
+    super("resizeTimeout", message, options);
   }
 }
 

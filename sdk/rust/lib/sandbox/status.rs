@@ -26,3 +26,12 @@ pub enum SandboxStatus {
     /// The sandbox exited after a failure.
     Crashed,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// True for statuses where the VM is live and accepts control requests.
+pub(super) fn running_status(status: SandboxStatus) -> bool {
+    matches!(status, SandboxStatus::Running | SandboxStatus::Draining)
+}
