@@ -177,6 +177,33 @@ func TestModifyRequestJSONSecretSources(t *testing.T) {
 	}
 }
 
+// Repeated removals reach the native patch as given, so the Rust planner
+// refuses them; configured secrets are keyed by name, one spec each.
+func TestModifyRequestJSONSecretNamesAreNotDeduped(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Secrets: map[string]SecretModifySpec{
+			"DB_PASS": {},
+			"API_KEY": {},
+		},
+		SecretsRemove: []string{"OLD", "OLD"},
+	})
+
+	patch := out["patch"].(map[string]any)
+	secrets := patch["secrets"].([]any)
+	if len(secrets) != 2 {
+		t.Fatalf("expected 2 secrets; got %d", len(secrets))
+	}
+	for i, name := range []string{"API_KEY", "DB_PASS"} {
+		if got := secrets[i].(map[string]any)["name"]; got != name {
+			t.Fatalf("secrets[%d] name = %v; want %s", i, got, name)
+		}
+	}
+	remove := patch["secrets_remove"].([]any)
+	if len(remove) != 2 || remove[0] != "OLD" || remove[1] != "OLD" {
+		t.Fatalf("secrets_remove = %v", remove)
+	}
+}
+
 func TestModifyRequestJSONSecretMutualExclusion(t *testing.T) {
 	for _, spec := range []SecretModifySpec{
 		{Env: "HOST_VAR", Value: "sk_test_123"},

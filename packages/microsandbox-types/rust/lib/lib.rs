@@ -14,6 +14,8 @@ mod guest_flush;
 pub mod helpers;
 pub mod modify;
 mod registry;
+#[doc(hidden)]
+pub mod secret_plan;
 pub mod snapshot;
 mod validation;
 
@@ -27,15 +29,18 @@ pub mod typescript;
 pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
-    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount,
+    CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudCreateSandboxRequest, CloudCreateSandboxResponse,
+    CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
+    CloudHostPattern, CloudMessageResponse, CloudModificationRejection, CloudNetworkSpec,
+    CloudPaginated, CloudPatch, CloudPullPolicy, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxComputeResources, CloudSandboxModificationApplyRequest,
+    CloudSandboxModificationPlanRequest, CloudSandboxResources, CloudSandboxRuntimeOptions,
+    CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason, CloudSecretApplyEntry,
+    CloudSecretEntry, CloudSecretMaterial, CloudSecretPlanEntry, CloudSecretSource,
+    CloudSecretValue, CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
+    CloudViolationAction, CloudVolumeMount,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};

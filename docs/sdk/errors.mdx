@@ -330,6 +330,12 @@ On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox. On C
 
 After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if you still need confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
 
+## Modification not confirmed
+
+On Cloud, a `modify` apply that did not complete as asked fails with `ModificationNotConfirmedError` in TypeScript and Python, `MicrosandboxError::ModificationNotConfirmed` in Rust, and `ErrModificationNotConfirmed` in Go. The change may be saved without being in effect on the running sandbox, or its result is unknown. The message reads `the change did not complete as asked: <cause>`, where the cause says which is known and, when sending the same change again retries it, says so. If another change arrived in between, the resend overwrites it.
+
+A running or failed Cloud sandbox answers each live change with `live` or this error. A change reads `next start` only when the sandbox is stopped or the next-start policy is used. Until the server knows the result, usually within seconds, starting the sandbox is refused. Local sandboxes never return this error.
+
 ## Sandbox start failures
 
 When a sandbox process exits before the agent relay is ready, creation returns or raises an SDK error. Rust exposes a structured `BootStart` payload with the failure stage and underlying message.

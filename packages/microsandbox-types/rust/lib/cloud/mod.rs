@@ -9,6 +9,9 @@
 //! evolve independently. Missing fields keep their documented defaults; known
 //! fields and enum variants are still validated. Acceptance of a request does
 //! not imply support for settings unknown to the receiving server.
+//!
+//! Modification requests are the exception: they refuse unknown fields, so a
+//! server never applies part of a change.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -23,10 +26,17 @@ use crate::domain::{
 };
 use crate::{TypesError, TypesResult};
 
+mod modify;
 mod secrets;
 mod snapshots;
 mod specs;
 
+pub use modify::{
+    CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_NOT_CONFIRMED, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudModificationRejection,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest,
+    CloudSecretApplyEntry, CloudSecretMaterial, CloudSecretPlanEntry, CloudSecretValue,
+};
 pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
 };

@@ -833,6 +833,20 @@ mod command_tests {
     }
 
     #[test]
+    fn unconfirmed_modification_prints_display_and_exits_one() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        }
+        .into();
+
+        assert_eq!(render_anyhow_error(&error), 1);
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
+    }
+
+    #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,

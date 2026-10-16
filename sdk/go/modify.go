@@ -148,7 +148,8 @@ type SandboxModificationPlan struct {
 
 // PlannedChange is one planned modification entry. Kind is "config" or
 // "secret"; secret entries carry Name/BeforeRef/AfterRef/AllowHosts while
-// config entries carry Before/After.
+// config entries carry Before/After. Disposition is "live", "next start",
+// "requires restart", or "unsupported".
 type PlannedChange struct {
 	Kind        string   `json:"kind"`
 	Field       string   `json:"field"`

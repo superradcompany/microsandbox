@@ -4,7 +4,7 @@ description: Resize a running sandbox and update its configuration without repla
 icon: "pen-to-square"
 ---
 
-<Tooltip tip="modify and live resize are not yet available on microsandbox cloud; create a replacement sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 You do not need to replace a running sandbox just because its workload changes. `modify` can resize the VM, update host-side metadata, rotate existing secrets, and change the defaults used by future commands while the sandbox stays up.
 
@@ -26,6 +26,8 @@ When a change takes effect depends on the setting:
 | Named volumes, mount tmpfs, and user disk images | Outside `modify` | Capacity is managed where the storage is defined |
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
+
+On microsandbox cloud, `modify` changes secrets only. A secret's value, allowed hosts, and removal can apply live; any other secret change applies at the next start, so use the next-start policy, then stop and start the sandbox. The restart policy cannot apply those changes on cloud. On a running sandbox, a live change reads `live` or fails with a [not-confirmed error](/sdk/errors#modification-not-confirmed); it reads `next start` only when the sandbox is stopped or the next-start policy is used.
 
 <span id="modify-a-running-sandbox" />
 
@@ -384,7 +386,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. If the new secret requires TLS identity while interception is off, the plan also enables `tls`, which needs the same restart or next start. Existing secrets configured with `require_tls_identity(false)` continue to rotate live over plain HTTP without enabling interception. Removing a secret does not require recreating the sandbox, and removing every TLS-dependent secret leaves interception on. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
+Adding a new secret or changing its guest-visible placeholder requires a restart because existing processes cannot receive a new placeholder. If the new secret requires TLS identity while interception is off, the plan on a local sandbox also enables `tls`, which needs the same restart or next start. Existing secrets configured with `require_tls_identity(false)` continue to rotate live over plain HTTP without enabling interception. Removing a secret does not require recreating the sandbox, and on a local sandbox, removing every TLS-dependent secret leaves interception on. See [Secrets](/sandboxes/secrets) for sources, host allow lists, and storage behavior.
 
 <span id="root-disk-growth" />
 

@@ -565,7 +565,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def modify(
@@ -1448,7 +1448,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 modify(...)

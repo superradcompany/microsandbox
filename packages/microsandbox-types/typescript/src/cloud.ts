@@ -4,6 +4,7 @@ import type {
   EnvVar,
   HandoffInit,
   HostPermissions,
+  ModificationPolicy,
   MountOptions,
   NetworkPolicy,
   OwnedVolumeStorage,
@@ -992,6 +993,111 @@ export type CloudSnapshotOperationStatus =
   | "failed";
 
 export type CloudSnapshotKind = "disk";
+
+export type CloudSandboxModificationPlanRequest = {
+  /**
+   * Policy the plan is classified under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Secret changes, in patch order.
+   */
+  secrets?: Array<CloudSecretPlanEntry>;
+  /**
+   * Names of secrets to remove.
+   */
+  secrets_remove?: Array<string>;
+};
+
+export type CloudSecretPlanEntry = {
+  /**
+   * Name of the secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * New secret material: provided when the secret is added or rotated, absent for a
+   * metadata-only change.
+   */
+  material: CloudSecretMaterial;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretMaterial = { "type": "provided" } | { "type": "absent" };
+
+export type CloudSandboxModificationApplyRequest = {
+  /**
+   * Policy the change is applied under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Secret changes, in patch order.
+   */
+  secrets?: Array<CloudSecretApplyEntry>;
+  /**
+   * Names of secrets to remove.
+   */
+  secrets_remove?: Array<string>;
+};
+
+export type CloudSecretApplyEntry = {
+  /**
+   * Name of the secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * New secret value. Present when the secret is added or rotated.
+   */
+  value?: CloudSecretValue | null;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretValue = string;
 
 export type CloudPaginated<T> = {
   /**

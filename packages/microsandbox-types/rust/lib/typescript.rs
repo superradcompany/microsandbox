@@ -18,12 +18,14 @@ use crate::{
     CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
     CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
     CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlanRequest,
     CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
+    CloudSandboxStatusReason, CloudSecretApplyEntry, CloudSecretEntry, CloudSecretMaterial,
+    CloudSecretPlanEntry, CloudSecretSource, CloudSecretValue, CloudSecretsConfig, CloudSnapshot,
+    CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation, CloudSnapshotOperation,
+    CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction, CloudVolumeMount,
+    Destination, DestinationGroup, Direction, EnvVar, HandoffInit, HostPermissions,
+    ModificationPolicy, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
     SandboxLogLevel, SandboxPolicy, SecretSubstitution, SecurityProfile, StatVirtualization,
 };
 
@@ -55,6 +57,7 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "SecretSubstitution",
     "SecurityProfile",
     "StatVirtualization",
+    "ModificationPolicy",
 ];
 
 /// Snapshot schema type names the cloud twins may reference. Filtered into the
@@ -160,6 +163,7 @@ pub fn domain_declarations() -> Vec<String> {
         Destination::decl(&cfg),
         DestinationGroup::decl(&cfg),
         PortRange::decl(&cfg),
+        ModificationPolicy::decl(&cfg),
     ]
 }
 
@@ -215,6 +219,12 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudSnapshotOperation::decl(&cfg),
         CloudSnapshotOperationStatus::decl(&cfg),
         CloudSnapshotKind::decl(&cfg),
+        CloudSandboxModificationPlanRequest::decl(&cfg),
+        CloudSecretPlanEntry::decl(&cfg),
+        CloudSecretMaterial::decl(&cfg),
+        CloudSandboxModificationApplyRequest::decl(&cfg),
+        CloudSecretApplyEntry::decl(&cfg),
+        CloudSecretValue::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -339,5 +349,28 @@ mod tests {
         assert!(snapshot.contains("export type SnapshotManifest"));
         assert!(snapshot.contains("export type SnapshotState"));
         assert!(!snapshot.contains("export type Manifest"));
+    }
+
+    #[test]
+    fn secret_plan_is_not_user_api() {
+        for (file, rendered) in [
+            ("domain.ts", render_domain()),
+            ("snapshot.ts", render_snapshot()),
+            ("cloud.ts", render_cloud()),
+        ] {
+            for name in [
+                "SecretPlanInput",
+                "SecretPlanOutput",
+                "SecretPlanStatus",
+                "SecretPlanCapability",
+                "SecretSettings",
+                "RunningSecret",
+                "DesiredSecret",
+                "DesiredMaterial",
+                "SecretAspect",
+            ] {
+                assert!(!rendered.contains(name), "{file} names {name}");
+            }
+        }
     }
 }
