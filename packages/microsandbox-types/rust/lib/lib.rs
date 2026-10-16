@@ -14,6 +14,7 @@ mod guest_flush;
 pub mod helpers;
 pub mod modify;
 mod registry;
+mod secret;
 pub mod snapshot;
 mod validation;
 
@@ -68,6 +69,7 @@ pub use modify::{
     SecretModificationPatch, SecretPlannedChange, SecretSource,
 };
 pub use registry::RegistryAuth;
+pub use secret::SecretValue;
 pub use snapshot::manifest::Manifest as SnapshotManifest;
 pub use snapshot::{
     DiskCompactionDiskResult, DiskCompactionResult, DiskCompactionTarget,
