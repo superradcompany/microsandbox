@@ -288,7 +288,7 @@ fn test_hook_before_dispatch_can_deny() {
         errno: LINUX_EACCES,
     });
     let sb = DualFsTestSandbox::with_hooks(vec![denier]);
-    // before_dispatch fires right before the backend call. This should deny lookup.
+    // before_dispatch fires right before the backend call. This should hide_path lookup.
     let result = sb.lookup_root("anything");
     DualFsTestSandbox::assert_errno(result, LINUX_EACCES);
 }

@@ -84,4 +84,5 @@ tracing-subscriber.workspace = true
 windows-sys = { version = "0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
+microsandbox-types = { workspace = true, features = ["test-support"] }
 test-utils.workspace = true

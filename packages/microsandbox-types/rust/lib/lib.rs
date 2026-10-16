@@ -17,6 +17,9 @@ mod registry;
 pub mod snapshot;
 mod validation;
 
+#[cfg(feature = "test-support")]
+pub mod fixtures;
+
 #[cfg(feature = "ts")]
 pub mod typescript;
 
@@ -74,6 +77,7 @@ pub use snapshot::{
     ExternalMountRestorePolicy, ExternalMountWarning,
 };
 pub use validation::{
-    MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name, validate_hostname,
-    validate_sandbox_name,
+    MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, hostname_from_sandbox_name,
+    reject_writable_path_patterns, validate_hide_path_list, validate_hide_path_pattern,
+    validate_hostname, validate_sandbox_name,
 };

@@ -1,7 +1,7 @@
 //! Lifecycle hooks for DualFs dispatch pipeline.
 //!
 //! Hooks observe and influence dispatch without doing filesystem work.
-//! They run at defined pipeline points and can add hints, deny operations,
+//! They run at defined pipeline points and can add hints, hide_path operations,
 //! or short-circuit responses.
 
 use std::{collections::HashMap, io, time::Duration};
@@ -21,7 +21,7 @@ use crate::{Entry, OpenOptions, stat64};
 /// All methods default to `Continue` / no-op. Implement only the methods you need.
 #[allow(unused_variables)]
 pub trait DualDispatchHook: Send + Sync {
-    // ── Decision phases (can deny or short-circuit) ──
+    // ── Decision phases (can hide_path or short-circuit) ──
 
     /// Before namespace resolution.
     fn before_resolve(&self, ctx: &mut HookCtx) -> HookDecision {
@@ -43,7 +43,7 @@ pub trait DualDispatchHook: Send + Sync {
         HookDecision::Continue
     }
 
-    /// Before backend dispatch. Last chance to deny or short-circuit.
+    /// Before backend dispatch. Last chance to hide_path or short-circuit.
     fn before_dispatch(&self, ctx: &mut HookCtx, step: &DispatchStep) -> HookDecision {
         HookDecision::Continue
     }

@@ -8,6 +8,10 @@ mod test_dax;
 mod test_dir_ops;
 mod test_file_ops;
 mod test_flag_translation;
+mod test_hide_path;
+#[cfg(target_os = "macos")]
+mod test_hide_path_macos;
+mod test_hide_path_perf;
 mod test_host_permissions;
 mod test_init_binary;
 mod test_kill_priv;

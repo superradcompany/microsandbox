@@ -1298,6 +1298,8 @@ struct MountSpec {
     nodev: bool,
     size_mib: Option<u32>,
     quota_mib: Option<u32>,
+    #[serde(default)]
+    hide_path: Vec<String>,
     /// Per-mount stat-virtualization policy ("strict" | "relaxed" | "off").
     /// Only valid for bind / named mounts.
     stat_virtualization: Option<String>,
@@ -2098,6 +2100,18 @@ fn volume_mount(
     let quota_mib = m.quota_mib;
     let override_uid = m.override_uid;
     let override_gid = m.override_gid;
+    let hide_path = m.hide_path.clone();
+    for pattern in &hide_path {
+        microsandbox_types::validate_hide_path_pattern(pattern)
+            .map_err(|err| FfiError::invalid_argument(err.to_string()))?;
+    }
+    // Reject hide_path on anything that is not a bind mount before the owned-mount
+    // early return below, which would otherwise drop it silently.
+    if !hide_path.is_empty() && bind.is_none() {
+        return Err(FfiError::invalid_argument(
+            "hide_path is only valid for bind mounts",
+        ));
+    }
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
 
@@ -2214,6 +2228,13 @@ fn volume_mount(
             "override_uid/override_gid are only valid for bind or named mounts",
         ));
     }
+    // A path pattern (`sub/.env`) is matched against the entry's mount-relative
+    // path, so a writable guest can rename an ancestor directory to launder it.
+    // The shared validator rejects it in step with the Rust SDK and the runtime.
+    if !readonly {
+        microsandbox_types::reject_writable_path_patterns(&hide_path)
+            .map_err(|err| FfiError::invalid_argument(err.to_string()))?;
+    }
 
     let mb = microsandbox::sandbox::MountBuilder::new(guest_path);
     Ok({
@@ -2223,6 +2244,9 @@ fn volume_mount(
             let mut b = mb.bind(host);
             if let Some(quota) = quota_mib {
                 b = b.quota(quota);
+            }
+            if !hide_path.is_empty() {
+                b = b.hide_path(hide_path.clone());
             }
             b
         } else if let Some(ref name) = named {
@@ -8093,6 +8117,60 @@ mod tests {
     }
 
     #[test]
+    fn mount_spec_parses_hide_path_list() {
+        let spec: MountSpec =
+            serde_json::from_str(r#"{"bind":"/host/data","hide_path":[".env","sub/secret"]}"#)
+                .unwrap();
+
+        assert_eq!(spec.bind.as_deref(), Some("/host/data"));
+        assert_eq!(spec.hide_path, vec![".env", "sub/secret"]);
+    }
+
+    #[test]
+    fn apply_volume_rejects_hide_path_with_wire_separator() {
+        for bad in [",", ":", "\n"] {
+            let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+            let spec = MountSpec {
+                bind: Some("/host/data".to_string()),
+                hide_path: vec![format!("a{bad}b")],
+                ..Default::default()
+            };
+
+            let err = match apply_volume(builder, "/data", &spec) {
+                Ok(_) => panic!("hide-path pattern {bad:?} should be rejected"),
+                Err(err) => err,
+            };
+            assert!(
+                err.message.contains("must not contain"),
+                "pattern {bad:?} got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn apply_volume_rejects_hide_path_with_surrounding_whitespace() {
+        for bad in [" .env", ".env ", " !secret"] {
+            let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+            let spec = MountSpec {
+                bind: Some("/host/data".to_string()),
+                hide_path: vec![bad.to_string()],
+                ..Default::default()
+            };
+
+            let err = match apply_volume(builder, "/data", &spec) {
+                Ok(_) => panic!("hide-path pattern {bad:?} should be rejected"),
+                Err(err) => err,
+            };
+            assert!(
+                err.message.contains("leading or trailing whitespace"),
+                "pattern {bad:?} got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
     fn branch_many_request_carries_disk_volumes() {
         let request: BranchManyRequest = serde_json::from_str(
             r#"{"names":["a"],"volumes":{"/data":{"disk":"/images/seed.img","fstype":"ext4","readonly":true}}}"#,
@@ -8166,6 +8244,164 @@ mod tests {
                 "{payload}"
             );
         }
+    }
+
+    #[test]
+    fn apply_volume_rejects_empty_hide_path() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            bind: Some("/host/data".to_string()),
+            hide_path: vec![String::new()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("empty hide-path pattern should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("must not be empty"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn apply_volume_rejects_hide_path_on_named_mount() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            named: Some("vol".to_string()),
+            hide_path: vec![".env".to_string()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("hide_path on a named mount should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message
+                .contains("hide_path is only valid for bind mounts"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn apply_volume_rejects_hide_path_on_owned_mount() {
+        let spec: MountSpec =
+            serde_json::from_str(r#"{"owned":"dir","hide_path":[".env"]}"#).unwrap();
+
+        let err = match volume_mount("/data", &spec) {
+            Ok(_) => panic!("hide_path on an owned mount should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message
+                .contains("hide_path is only valid for bind mounts"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn apply_volume_rejects_writable_path_hide_path_pattern() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            bind: Some("/host/data".to_string()),
+            hide_path: vec!["sub/secret".to_string()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("path hide_path on a writable mount should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("path pattern"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn apply_volume_rejects_hide_path_with_leading_hash() {
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        let spec = MountSpec {
+            bind: Some("/host/data".to_string()),
+            hide_path: vec!["#secret".to_string()],
+            ..Default::default()
+        };
+
+        let err = match apply_volume(builder, "/data", &spec) {
+            Ok(_) => panic!("leading-# hide_path should be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("must not start with '#'"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn hide_path_pattern_fixture_dispositions_match_go_native_validator() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            pattern: String,
+            readonly: bool,
+            expect: String,
+        }
+
+        let cases: Vec<Case> =
+            serde_json::from_str(microsandbox_types::fixtures::HIDE_PATH_FIXTURE_JSON)
+                .expect("parse hide-path fixture");
+        assert!(!cases.is_empty(), "fixture must not be empty");
+
+        for case in cases {
+            let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+            let spec = MountSpec {
+                bind: Some("/host/data".to_string()),
+                readonly: case.readonly,
+                hide_path: vec![case.pattern.clone()],
+                ..Default::default()
+            };
+            let result = apply_volume(builder, "/data", &spec);
+            match case.expect.as_str() {
+                "accept" => assert!(
+                    result.is_ok(),
+                    "expected accept for pattern {:?} readonly={}: {:?}",
+                    case.pattern,
+                    case.readonly,
+                    result.err().map(|err| err.message)
+                ),
+                "reject" => assert!(
+                    result.is_err(),
+                    "expected reject for pattern {:?} readonly={}",
+                    case.pattern,
+                    case.readonly
+                ),
+                other => panic!("unknown fixture expectation {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn apply_volume_allows_readonly_path_hide_path_and_writable_name_only_hide_path() {
+        let readonly = MountSpec {
+            bind: Some("/host/data".to_string()),
+            readonly: true,
+            hide_path: vec!["sub/secret".to_string()],
+            ..Default::default()
+        };
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        apply_volume(builder, "/data", &readonly)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+
+        let name_only = MountSpec {
+            bind: Some("/host/data".to_string()),
+            hide_path: vec![".env".to_string(), "node_modules/".to_string()],
+            ..Default::default()
+        };
+        let builder = microsandbox::sandbox::SandboxBuilder::new("test").image("alpine");
+        apply_volume(builder, "/data", &name_only)
+            .unwrap_or_else(|error| panic!("{}", error.message));
     }
 
     #[test]

@@ -62,11 +62,12 @@ pub struct InstallArgs {
     pub memory: Option<String>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
+    /// OPTIONS may include repeatable `hide-path=<pattern>` for directory bind mounts.
     #[arg(short, long)]
     pub volume: Vec<String>,
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
-    /// OPTIONS may include `quota=<size>`.
+    /// OPTIONS may include `quota=<size>` and repeatable `hide-path=<pattern>`.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 

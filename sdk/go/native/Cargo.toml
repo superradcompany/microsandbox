@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
 microsandbox = { workspace = true, default-features = true, features = ["net", "ssh"] }
+microsandbox-types.workspace = true
 microsandbox-network.workspace = true
 ipnetwork.workspace = true
 tokio.workspace = true
@@ -24,6 +25,9 @@ libc.workspace = true
 base64.workspace = true
 cap-std.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+microsandbox-types = { workspace = true, features = ["test-support"] }
 
 [build-dependencies]
 cbindgen = "0.29"

@@ -343,7 +343,7 @@ fn clone_handle_file(fs: &PassthroughFs, handle: u64, writable: bool) -> io::Res
 pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-    let path = inode::vol_path(data.dev, data.ino);
+    let path = platform::vol_path(data.dev, data.ino);
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -365,7 +365,7 @@ fn set_symlink_times_macos(
 ) -> io::Result<()> {
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-    let path = inode::vol_path(data.dev, data.ino);
+    let path = platform::vol_path(data.dev, data.ino);
     let ret = unsafe {
         libc::utimensat(
             libc::AT_FDCWD,

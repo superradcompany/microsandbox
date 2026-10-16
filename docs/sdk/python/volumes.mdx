@@ -236,6 +236,7 @@ def bind(
     host_permissions: HostPermissions | None = None,
     uid: int | None = None,
     gid: int | None = None,
+    hide_path: list[str] | None = None,
 ) -> MountConfig
 ```
 
@@ -291,6 +292,10 @@ Mount a host directory into the sandbox. Changes in the guest are reflected on t
   <div className="msb-param">
     <div className="msb-param-key"><code>gid</code><span className="msb-type">int | None</span></div>
     <div className="msb-param-desc">Guest gid fallback for host files without a per-file stat override; set together with <code>uid</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>hide_path</code><span className="msb-type">list[str] | None</span></div>
+    <div className="msb-param-desc">Host-side hide-path list of gitignore-style patterns. Directory bind mounts only; path patterns require a read-only mount. See <a href="#mountconfig">MountConfig.hide_path</a>.</div>
   </div>
 </div>
 
@@ -838,6 +843,14 @@ Frozen dataclass representing a mount configuration. Build one with a [mount fac
 | host_permissions | [`HostPermissions`](#hostpermissions)` \| None` | `None` | Per-mount host-permission policy (virtiofs-backed only) |
 | override_uid | `int \| None` | `None` | Guest uid fallback for host files without a per-file override; set through factory `uid=` with `gid=` |
 | override_gid | `int \| None` | `None` | Guest gid fallback for host files without a per-file override; set through factory `gid=` with `uid=` |
+
+#### <span className="msb-recv">config.</span><span className="msb-hn">hide_path</span>
+
+<Tooltip tip="On microsandbox cloud, bind-mount hide-path lists are not supported; a non-empty hide-path list is rejected at creation."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+`list[str] | None`
+
+Host-side hide-path list of gitignore-style patterns (e.g. `.env`, `sub/secret`). Matching entries are invisible to the guest (ENOENT) and writes to them are forbidden (EACCES). Set through [`Volume.bind(hide_path=...)`](#volume-bind). Directory bind mounts only; a host file bind has no namespace to filter and rejects them. A path pattern (`sub/secret`) requires a read-only mount, since a writable guest could rename an ancestor directory to bypass it; name-only and directory-only (`node_modules/`) patterns are valid on any mount. Empty patterns, wire separators (`,`, `:`, newline, NUL), a leading `#` (escape it as `\#`), surrounding whitespace, `.`/`..` components, and repeated or leading `./`/`//` separators are rejected at serialization time with `ValueError`.
 
 ### MountKind
 

@@ -209,8 +209,8 @@ mod restore_warnings;
 mod stop;
 #[cfg(feature = "local")]
 pub(crate) use external_mounts::{
-    external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
-    resolve_external_mounts,
+    external_bind_guest_paths, require_guest_mounts, require_preserved_bind_hide_path,
+    require_preserved_inherited_bind_hide_path, require_recorded_mounts, resolve_external_mounts,
 };
 #[cfg(feature = "local")]
 pub use modify::{

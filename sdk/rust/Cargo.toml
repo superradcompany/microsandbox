@@ -125,6 +125,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+microsandbox-types = { workspace = true, features = ["test-support"] }
 h2 = "0.4"
 http = "1"
 microsandbox-db.workspace = true

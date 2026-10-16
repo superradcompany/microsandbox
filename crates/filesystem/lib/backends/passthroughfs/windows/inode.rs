@@ -224,10 +224,53 @@ impl PassthroughFs {
         Ok(data)
     }
 
+    /// Re-apply the directory-only hide-path rule to an inode's live path.
+    ///
+    /// Windows inodes cache a path and are not revalidated against the live
+    /// filesystem. A host writer could replace an allowed file at a
+    /// directory-only-denied name with a directory after lookup vouched for it;
+    /// an inode-scoped mutation must not then act on the hidden replacement.
+    /// The synthetic mount root and init inode, and pinned (`retained`) objects,
+    /// are exempt. Fails closed: an unreadable live path is treated as a
+    /// directory.
+    pub(super) fn reject_dir_only_denied_live_path(&self, inode: u64) -> io::Result<()> {
+        // The synthetic inodes (`ROOT_INODE`, `INIT_INODE`) are never path-backed
+        // namespace entries. Exempting them keeps an unknown-inode `EBADF` from
+        // shadowing `do_setattr`'s own handling (e.g. `EACCES` for `INIT_INODE`).
+        if inode <= INIT_INODE || !self.hide_path.has_dir_only_patterns() {
+            return Ok(());
+        }
+        let data = self.inode(inode)?;
+        if data.retained.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        let path = data.path();
+        let is_dir = self
+            .safe_metadata(&path)
+            .map(|metadata| metadata.file_type().is_dir())
+            .unwrap_or(true);
+        if self.hide_path_matches_path(&path, is_dir) {
+            return Err(linux_error(LINUX_ENOENT));
+        }
+        Ok(())
+    }
+
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {
         let name = validate_component(name)?;
-        let parent = self.inode(parent)?;
-        Ok(parent.path().join(name))
+        let data = self.inode(parent)?;
+        // Windows inodes cache a path and are never revalidated against the live
+        // filesystem. A host writer can replace an allowed file with a directory
+        // at a directory-only-denied name after lookup vouched for it; re-apply
+        // the rule to the parent's live path so the stale inode cannot anchor a
+        // read or write inside the now-hidden directory. The mount root is never
+        // denied.
+        if parent != ROOT_INODE
+            && self.hide_path.has_dir_only_patterns()
+            && self.hide_path_matches_path(&data.path(), true)
+        {
+            return Err(linux_error(LINUX_ENOENT));
+        }
+        Ok(data.path().join(name))
     }
 
     pub(super) fn entry_for_path(&self, path: PathBuf) -> io::Result<Entry> {
@@ -242,6 +285,32 @@ impl PassthroughFs {
         }
 
         let path = self.child_path(parent, name)?;
+
+        // A dir-only hide-path pattern (`node_modules/`) needs the child's type.
+        // Resolve it from the same metadata used to build the returned entry, so
+        // a concurrent file-to-directory replacement cannot skip the rule. If the
+        // child cannot be stat'ed, treat it as a directory so a dir-only rule
+        // still hides it rather than being skipped on a transient stat failure.
+        if self.hide_path.has_dir_only_patterns() {
+            let metadata = self.safe_metadata(&path);
+            let is_dir = metadata
+                .as_ref()
+                .map(|m| m.file_type().is_dir())
+                .unwrap_or(true);
+            if self.hide_path_matches_name(parent, name, is_dir) {
+                return Err(linux_error(LINUX_ENOENT));
+            }
+            let metadata = metadata?;
+            let data = self.intern_path(path)?;
+            return self.entry_from_metadata(&metadata, data.as_ref());
+        }
+
+        // Name-only and path-only patterns do not depend on the entry type, so
+        // they are decided before the path is interned.
+        if self.hide_path_matches_name(parent, name, false) {
+            return Err(linux_error(LINUX_ENOENT));
+        }
+
         self.entry_for_path(path)
     }
 

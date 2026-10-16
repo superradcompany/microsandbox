@@ -813,6 +813,45 @@ Direct forking keeps its existing behavior for unavailable resources. Disk-only 
 
 </Accordion>
 
+### Hide-path policy durability
+
+A bind mount's host-side [`hide-path`](/sandboxes/volumes#hide-path-pattern) list is captured in the snapshot. On restore the destination hide-path list is compared with the captured one and must be at least as strict: a restore that drops or weakens any captured pattern is refused with an explicit error. Re-declare the same (or a stricter) list on the destination mount:
+
+<CodeGroup>
+```typescript TypeScript
+const child = await Sandbox.restore("worker:snap")
+    .name("child")
+    .volume("/work", v => v.bind("/host/project").hidePath([".env"]))
+    .restore();
+```
+
+```rust Rust
+let child = Sandbox::restore("worker:snap")
+    .name("child")
+    .volume("/work", |v| v.bind("/host/project").hide_path([".env"]))
+    .restore()
+    .await?;
+```
+
+```python Python
+from microsandbox import Sandbox, Volume
+
+child = await Sandbox.restore(
+    "worker:snap",
+    name="child",
+    volumes={"/work": Volume.bind("/host/project", hide_path=[".env"])},
+)
+```
+
+```bash CLI
+msb snap restore worker:snap --name child -v /host/project:/work:hide-path=.env
+```
+</CodeGroup>
+
+Snapshots written before hide-path capture, and snapshots whose mounts carry no hide-path list, record no captured policy. Restore treats that as unknown and continues, so older snapshots keep restoring as before. A disk-only restore that boots fresh still enforces the destination hide-path list on the new mount. Conversely, a hide-path-bearing snapshot marks its policy as must-understand, so an SDK or CLI that predates bind hide-path refuses to restore it rather than silently dropping the policy.
+
+Direct forking children do not inherit host binds by default: when a child does not inherit resources it must re-declare a hide-path-bearing bind with a hide-path list at least as strict as the source's. Restoring on the same host with inherited resources reconnects the source mount and keeps its hide-path list.
+
 ### Validate mounts
 
 Full restore and forking validate captured filesystem identities. Strict is the default; relaxed mode accepts supported differences and reports warnings:

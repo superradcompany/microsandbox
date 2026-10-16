@@ -483,6 +483,16 @@ export declare class MountBuilder {
    */
   quota(mib: number): this
   /**
+   * Hide host paths matching gitignore-style patterns from the guest.
+   *
+   * Matching entries are invisible (ENOENT) and writes to them are forbidden
+   * (EACCES). Patterns are relative to the mount root. Valid only for directory
+   * bind mounts; a host file bind has no namespace to reject them.
+   * A path pattern (`sub/secret`) requires a read-only mount, since a writable
+   * guest could rename an ancestor directory to bypass it.
+   */
+  hidePath(patterns: Array<string>): this
+  /**
    * Set the guest stat virtualization policy.
    *
    * Accepts `"strict"`, `"relaxed"`, or `"off"`. Valid only for bind and
@@ -2959,6 +2969,7 @@ export interface VolumeMount {
   ownedKind?: string
   sizeMib?: number
   quotaMib?: number
+  hidePath?: Array<string>
   format?: string
   fstype?: string
   /**

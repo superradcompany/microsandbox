@@ -1,3 +1,7 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 import {
   GiB,
@@ -368,7 +372,88 @@ describe("MountBuilder", () => {
     const builder = new MountBuilder("/data").bind("/host/with,comma");
     expect(() => builder.build()).toThrow(/must not contain ','/);
   });
+
+  it("propagates hidePath on a bind mount", () => {
+    const m = new MountBuilder("/data")
+      .bind("/host/data")
+      // Path patterns (`sub/secret`) require a read-only mount.
+      .readonly()
+      .hidePath([".env", "sub/secret"])
+      .build();
+    expect(m).toMatchObject({
+      kind: "bind",
+      hidePath: [".env", "sub/secret"],
+    });
+  });
+
+  it("omits hidePath when not set", () => {
+    const m = new MountBuilder("/data").bind("/host/data").build();
+    expect(m.hidePath).toBeUndefined();
+  });
+
+  it("rejects hidePath on a named mount at build time", () => {
+    const builder = new MountBuilder("/cache").named("v1").hidePath([".env"]);
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects hidePath patterns with forbidden separators", () => {
+    const builder = new MountBuilder("/data").bind("/host").hidePath(["a,b"]);
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("rejects empty, whitespace, and leading-# hidePath patterns", () => {
+    for (const bad of ["", " .env", ".env ", "#secret"]) {
+      const builder = new MountBuilder("/data").bind("/host").hidePath([bad]);
+      expect(() => builder.build(), JSON.stringify(bad)).toThrow(InvalidConfigError);
+    }
+  });
+
+  it("rejects a path hidePath pattern on a writable mount", () => {
+    const builder = new MountBuilder("/data").bind("/host").hidePath(["sub/secret"]);
+    expect(() => builder.build()).toThrow(InvalidConfigError);
+  });
+
+  it("matches the shared hidePath fixture dispositions", () => {
+    const cases = hide_pathFixtureCases();
+    expect(cases.length).toBeGreaterThan(0);
+
+    for (const c of cases) {
+      const builder = new MountBuilder("/data").bind("/host");
+      if (c.readonly) {
+        builder.readonly();
+      }
+      builder.hidePath([c.pattern]);
+
+      const label = JSON.stringify(c);
+      if (c.expect === "accept") {
+        expect(() => builder.build(), label).not.toThrow();
+      } else if (c.expect === "reject") {
+        expect(() => builder.build(), label).toThrow();
+      } else {
+        throw new Error(`unknown fixture expectation ${c.expect}`);
+      }
+    }
+  });
 });
+
+function hide_pathFixtureCases(): Array<{ pattern: string; readonly: boolean; expect: string }> {
+  // Anchor to the workspace root (the nearest ancestor Cargo.toml declaring
+  // `[workspace]`) so a nested checkout with its own copy cannot be picked up
+  // and the fixture path has a single definition.
+  const relative = "packages/microsandbox-types/rust/tests/fixtures/hide_path/patterns.json";
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const manifest = resolve(dir, "Cargo.toml");
+    if (existsSync(manifest) && readFileSync(manifest, "utf8").includes("[workspace]")) {
+      return JSON.parse(readFileSync(resolve(dir, relative), "utf8"));
+    }
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error("workspace root (Cargo.toml with [workspace]) not found");
+    }
+    dir = parent;
+  }
+}
 
 describe("PatchBuilder", () => {
   it("collects patches in declaration order", () => {

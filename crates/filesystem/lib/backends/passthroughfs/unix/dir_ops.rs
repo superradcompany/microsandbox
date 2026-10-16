@@ -57,14 +57,21 @@ pub(crate) fn do_readdir(
     offset: u64,
 ) -> io::Result<Vec<DirEntry<'static>>> {
     let handles = fs.dir_handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    // The handle must belong to the requested directory: a mismatched nodeid
+    // would otherwise reconstruct hide_path paths (and `init.krun` injection) from the
+    // wrong inode while still reading this handle's fd. Mirrors the Windows
+    // backend, which rejects the same mismatch with EBADF.
+    let data = handles
+        .get(&handle)
+        .filter(|data| data.inode == inode)
+        .ok_or_else(platform::ebadf)?;
 
     let mut snapshot_lock = data.snapshot.lock().unwrap();
     if snapshot_lock.is_none() {
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -85,14 +92,21 @@ pub(crate) fn do_readdir_for_each(
     add_entry: &mut AddDirEntry<'_>,
 ) -> io::Result<()> {
     let handles = fs.dir_handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    // The handle must belong to the requested directory: a mismatched nodeid
+    // would otherwise reconstruct hide_path paths (and `init.krun` injection) from the
+    // wrong inode while still reading this handle's fd. Mirrors the Windows
+    // backend, which rejects the same mismatch with EBADF.
+    let data = handles
+        .get(&handle)
+        .filter(|data| data.inode == inode)
+        .ok_or_else(platform::ebadf)?;
 
     let mut snapshot_lock = data.snapshot.lock().unwrap();
     if snapshot_lock.is_none() {
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -153,14 +167,21 @@ pub(crate) fn do_readdirplus_for_each(
     add_entry: &mut AddDirEntryPlus<'_>,
 ) -> io::Result<()> {
     let handles = fs.dir_handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    // The handle must belong to the requested directory: a mismatched nodeid
+    // would otherwise reconstruct hide_path paths (and `init.krun` injection) from the
+    // wrong inode while still reading this handle's fd. Mirrors the Windows
+    // backend, which rejects the same mismatch with EBADF.
+    let data = handles
+        .get(&handle)
+        .filter(|data| data.inode == inode)
+        .ok_or_else(platform::ebadf)?;
 
     let mut snapshot_lock = data.snapshot.lock().unwrap();
     if snapshot_lock.is_none() {
         #[allow(clippy::readonly_write_lock)]
         let file = data.file.write().unwrap();
         let inject_init = fs.injects_init() && inode == 1;
-        *snapshot_lock = Some(build_snapshot(file.as_raw_fd(), inject_init)?);
+        *snapshot_lock = Some(build_snapshot(fs, inode, file.as_raw_fd(), inject_init)?);
     }
 
     let snapshot = snapshot_lock.as_ref().unwrap();
@@ -293,8 +314,58 @@ fn no_lookup_entry() -> Entry {
 }
 
 /// Build a point-in-time directory snapshot with stable synthetic offsets.
-fn build_snapshot(fd: i32, inject_init: bool) -> io::Result<DirSnapshot> {
+fn build_snapshot(
+    fs: &PassthroughFs,
+    parent: u64,
+    fd: i32,
+    inject_init: bool,
+) -> io::Result<DirSnapshot> {
     let mut entries = read_dir_entries(fd)?;
+
+    // When a path pattern (interior `/`) is active, resolve the parent's
+    // mount-relative components once so they aren't reconstructed (an inode
+    // table walk on Linux, an `F_GETPATH` syscall on macOS) for every entry in
+    // the directory. Fail closed: an unresolvable parent path under active path
+    // patterns denies the whole directory, matching the per-name behavior.
+    let parent_components = if fs.hide_path.needs_path_reconstruction() {
+        let root = fs.hide_path_root();
+        match inode::parent_path_components(&fs.inodes, parent, root) {
+            Some(components) => Some(components),
+            None => {
+                return Ok(DirSnapshot {
+                    entries: Vec::new(),
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    // Filter out entries matching the hide-path list.
+    //
+    // A path pattern matches the whole mount-relative path, so fold when this
+    // directory or any ancestor folds; a basename pattern only depends on this
+    // directory's own case behavior.
+    let case_insensitive = if fs.hide_path.needs_path_reconstruction() {
+        fs.hide_path_pattern_case_insensitive(parent)
+    } else {
+        fs.hide_path_case_insensitive_from_fd(fd)
+    };
+    entries.retain(|entry| {
+        // A dir-only pattern (`node_modules/`) can only be enforced with a known
+        // type. When the filesystem did not report one and the `fstatat` fallback
+        // also failed, treat the entry as a directory so the rule still hides it
+        // (fail closed) instead of leaving it visible.
+        let is_dir = entry.file_type == platform::DIRENT_DIR
+            || (entry.file_type == platform::DIRENT_UNKNOWN
+                && fs.hide_path.has_dir_only_patterns());
+        !fs.hide_path_matches_name_in_dir(
+            parent_components.as_deref(),
+            &entry.name,
+            is_dir,
+            case_insensitive,
+        )
+    });
 
     if inject_init
         && !entries
@@ -314,6 +385,20 @@ fn build_snapshot(fd: i32, inject_init: bool) -> io::Result<DirSnapshot> {
     }
 
     Ok(DirSnapshot { entries })
+}
+
+/// Resolve the dirent type of `name` within directory `dirfd`. If the
+/// filesystem did not supply one (`DT_UNKNOWN`), use `fstatat` without
+/// following symlinks so a dir-only hide-path pattern still hides directories.
+fn resolve_dirent_type(dirfd: i32, d_type: u32, name: &[u8]) -> u32 {
+    if d_type != libc::DT_UNKNOWN as u32 {
+        return d_type;
+    }
+    std::ffi::CString::new(name)
+        .ok()
+        .and_then(|c| platform::fstatat_nofollow(dirfd, &c).ok())
+        .map(|st| platform::dirent_type_from_mode(platform::mode_file_type(st.st_mode)))
+        .unwrap_or(libc::DT_UNKNOWN as u32)
 }
 
 /// Read all directory entries from a file descriptor on Linux.
@@ -351,11 +436,15 @@ fn read_dir_entries(fd: i32) -> io::Result<Vec<PassthroughDirEntry>> {
                 .position(|&b| b == 0)
                 .unwrap_or(name_slice.len());
 
+            // When the filesystem did not supply a dirent type, resolve it via
+            // `fstatat` to support dir-only hide-path patterns.
+            let file_type = resolve_dirent_type(fd, d_type, &name_slice[..name_len]);
+
             entries.push(PassthroughDirEntry {
                 inode: d_ino,
                 name: name_slice[..name_len].to_vec(),
                 offset: 0,
-                file_type: d_type,
+                file_type,
             });
 
             pos += d_reclen as usize;
@@ -404,11 +493,16 @@ fn read_dir_entries(fd: i32) -> io::Result<Vec<PassthroughDirEntry>> {
         let name =
             unsafe { std::slice::from_raw_parts(entry.d_name.as_ptr() as *const u8, name_len) };
 
+        // When the filesystem did not supply a dirent type, resolve it via
+        // `fstatat` to support dir-only hide-path patterns.
+        let file_type =
+            resolve_dirent_type(unsafe { libc::dirfd(dirp) }, entry.d_type as u32, name);
+
         entries.push(PassthroughDirEntry {
             inode: entry.d_ino,
             name: name.to_vec(),
             offset: 0,
-            file_type: entry.d_type as u32,
+            file_type,
         });
     }
 

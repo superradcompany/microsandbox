@@ -132,6 +132,18 @@ mod tests {
         )
     }
 
+    /// Number of applied migrations from the newest down to (and including) the
+    /// guest clock marker. Keeps the downgrade test independent of markers added
+    /// after this one.
+    fn steps_to_guest_clock() -> u32 {
+        let all = Migrator::migrations();
+        let index = all
+            .iter()
+            .position(|migration| migration.name() == Migration.name())
+            .expect("guest clock migration is listed");
+        (all.len() - index) as u32
+    }
+
     #[tokio::test]
     async fn guest_clock_downgrade_refuses_lossy_or_invalid_configs_without_mutation() {
         let sync = config(Some(GuestClockPolicy::Sync));
@@ -150,7 +162,7 @@ mod tests {
                 let db = database(desired, Some(active)).await;
                 let before = saved_state(&db).await;
 
-                let error = Migrator::down(&db, Some(1)).await.unwrap_err();
+                let error = Migration.down(&SchemaManager::new(&db)).await.unwrap_err();
 
                 let message = error.to_string();
                 assert!(
@@ -175,12 +187,13 @@ mod tests {
                 let db = database(&raw, active).await;
                 let before = saved_state(&db).await;
 
-                Migrator::down(&db, Some(1)).await.unwrap();
+                let steps = steps_to_guest_clock();
+                Migrator::down(&db, Some(steps)).await.unwrap();
 
                 let after = saved_state(&db).await;
                 assert_eq!(after.0, before.0);
                 assert_eq!(after.1, before.1);
-                assert_eq!(after.2.len() + 1, before.2.len());
+                assert_eq!(before.2.len() - after.2.len(), steps as usize);
                 assert!(!after.2.iter().any(|id| id == Migration.name()));
 
                 Migrator::up(&db, None).await.unwrap();
