@@ -371,6 +371,7 @@ git diff origin/main..HEAD --name-status
 
 ## Documentation And Examples
 
+- For changes under `docs/`, read [the Microsandbox docs skill](.agents/skills/microsandbox-docs/SKILL.md) for page structure, examples, version labels, and validation.
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
 - Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
 - Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
