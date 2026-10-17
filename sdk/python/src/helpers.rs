@@ -1404,6 +1404,15 @@ fn apply_patch(
 // Functions: Network
 //--------------------------------------------------------------------------------------------------
 
+/// Convert exactly the SDK's `NetworkPolicy` value, never a `Network` config.
+pub(crate) fn network_policy_value(obj: &Bound<'_, PyAny>) -> PyResult<NetworkPolicy> {
+    let net = PyDict::new(obj.py());
+    net.set_item("custom_policy", config_dict(obj, "NetworkPolicy")?)?;
+    parse_network_policy(&net)?.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("NetworkPolicy produced no network policy")
+    })
+}
+
 fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolicy>> {
     // Parse bulk deny-Domain rules up-front so PyValueError propagates
     // cleanly rather than being swallowed inside the builder closure.

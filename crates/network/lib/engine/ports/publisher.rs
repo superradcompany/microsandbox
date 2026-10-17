@@ -27,7 +27,8 @@ use tokio::sync::mpsc;
 
 use crate::config::{ConnectionLimit, PortProtocol, PublishedPort, TcpAcceptQueueSize};
 use crate::netstack::shared::SharedState;
-use crate::policy::{NetworkPolicy, Protocol};
+use crate::policy::Protocol;
+use crate::policy::handle::PolicyHandle;
 use crate::tcp::deferred_close::DeferredClose;
 use crate::udp::relay::{construct_udp_response, extract_udp_payload};
 
@@ -194,7 +195,7 @@ impl PortPublisher {
         gateway_ipv6: Option<Ipv6Addr>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
-        policy: Arc<NetworkPolicy>,
+        policy: PolicyHandle,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) -> Self {
@@ -570,7 +571,7 @@ impl PortPublisher {
         ephemeral_port: Arc<AtomicU16>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
-        policy: Arc<NetworkPolicy>,
+        policy: PolicyHandle,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) {
@@ -751,7 +752,7 @@ async fn tcp_listener_task(
     backlog: TcpAcceptQueueSize,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
-    policy: Arc<NetworkPolicy>,
+    policy: PolicyHandle,
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
     let listener = bind_listener(bind_addr, backlog)?;
@@ -761,7 +762,9 @@ async fn tcp_listener_task(
         let (stream, peer) = listener.accept().await?;
 
         // Policy gate: peer source IP and the guest's listening port.
-        let action = policy.evaluate_ingress(peer, guest_port, Protocol::Tcp, &shared);
+        let action = policy
+            .load()
+            .evaluate_ingress(peer, guest_port, Protocol::Tcp, &shared);
         if action.is_deny() {
             tracing::debug!(
                 peer = %peer,
@@ -793,7 +796,7 @@ async fn udp_listener_task(
     mut outbound_rx: mpsc::Receiver<PublishedUdpOutbound>,
     peers: Arc<Mutex<PublishedUdpPeers>>,
     ephemeral_port: Arc<AtomicU16>,
-    policy: Arc<NetworkPolicy>,
+    policy: PolicyHandle,
     shared: Arc<SharedState>,
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
@@ -806,7 +809,7 @@ async fn udp_listener_task(
         tokio::select! {
             inbound = socket.recv_from(&mut buf) => {
                 let (n, peer) = inbound?;
-                let action = policy.evaluate_ingress(peer, guest_port, Protocol::Udp, &shared);
+                let action = policy.load().evaluate_ingress(peer, guest_port, Protocol::Udp, &shared);
                 if action.is_deny() {
                     tracing::debug!(
                         peer = %peer,
@@ -1147,6 +1150,7 @@ fn write_host_data(socket: &mut tcp::Socket<'_>, relay: &mut InboundRelay) {
 
 #[cfg(test)]
 mod tests {
+    use crate::policy::NetworkPolicy;
     use smoltcp::iface::Config;
     use smoltcp::phy::{Loopback, Medium};
     use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
@@ -1378,7 +1382,7 @@ mod tests {
                 None,
                 [2, 0, 0, 0, 0, 1],
                 [2, 0, 0, 0, 0, 2],
-                Arc::new(NetworkPolicy::default()),
+                PolicyHandle::new(NetworkPolicy::default()),
                 Arc::new(SharedState::new(4)),
                 &tokio::runtime::Handle::current(),
             );
@@ -1691,7 +1695,7 @@ mod tests {
                 None,
                 [2, 0, 0, 0, 0, 1],
                 [2, 0, 0, 0, 0, 2],
-                Arc::new(NetworkPolicy::default()),
+                PolicyHandle::new(NetworkPolicy::default()),
                 h.shared.clone(),
                 &tokio::runtime::Handle::current(),
             );
@@ -1939,6 +1943,58 @@ mod tests {
                 Err(_) => panic!("timed out after {} of {depth} connections", held.len()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_policy_set_after_the_listener_starts_decides_its_next_inbound_connection() {
+        use tokio::io::AsyncReadExt;
+
+        let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let policy = PolicyHandle::new(NetworkPolicy::allow_all());
+        let (inbound_tx, mut inbound_rx) = mpsc::channel(4);
+        tokio::spawn(tcp_listener_task(
+            bind_addr,
+            TcpAcceptQueueSize::DEFAULT,
+            8080,
+            inbound_tx,
+            policy.clone(),
+            Arc::new(SharedState::new(4)),
+        ));
+        let mut first = None;
+        for _ in 0..100 {
+            if let Ok(stream) = TcpStream::connect(bind_addr).await {
+                first = Some(stream);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(first.is_some(), "the listener never came up");
+        let handed = tokio::time::timeout(Duration::from_secs(2), inbound_rx.recv()).await;
+        assert!(
+            matches!(handed, Ok(Some(_))),
+            "the open policy did not hand the connection on"
+        );
+
+        policy.set(NetworkPolicy::none());
+        let mut second = TcpStream::connect(bind_addr).await.unwrap();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), second.read(&mut byte))
+            .await
+            .expect("a denied connection was left open");
+
+        assert!(
+            matches!(read, Err(_) | Ok(0)),
+            "a denied connection read {read:?}"
+        );
+        assert!(
+            inbound_rx.try_recv().is_err(),
+            "a denied connection reached the guest"
+        );
     }
 
     /// Accept-queue depth the kernel actually applied to a listening socket.

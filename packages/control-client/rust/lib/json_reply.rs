@@ -139,6 +139,7 @@ pub(crate) fn capabilities(value: &JsonValue) -> Option<RuntimeCapabilities> {
         cpu_resize: value.get("cpu_resize")?.as_bool()?,
         memory_resize: value.get("memory_resize")?.as_bool()?,
         secrets_update: value.get("secrets_update")?.as_bool()?,
+        network_policy_update: optional("network_policy_update")?,
         checkpoint_create: optional("checkpoint_create")?,
         disk_checkpoint_create: optional("disk_checkpoint_create")?,
     })

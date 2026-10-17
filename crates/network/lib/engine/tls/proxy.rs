@@ -168,6 +168,9 @@ impl TlsProxy {
         let has_sni = sni_name.is_some();
         let sni_name = sni_name.unwrap_or_else(|| guest_dst.ip().to_string());
         let sni_name = sni_name.trim_end_matches('.').to_ascii_lowercase();
+        if has_sni {
+            proxy_connect.record_hostname(&sni_name);
+        }
 
         if let Some(expected) = expected_sni.as_deref()
             && !sni_name.eq_ignore_ascii_case(expected.trim_end_matches('.'))
@@ -1124,6 +1127,7 @@ mod tests {
             .unwrap();
             let (from_tx, from_rx) = mpsc::channel(8);
             let (to_tx, mut to_rx) = mpsc::channel(8);
+            let proxy_connect = Arc::new(ProxyConnectState::new());
             let proxy = TlsProxy::new(
                 None,
                 address,
@@ -1134,7 +1138,7 @@ mod tests {
                 state,
                 Arc::new(NetworkPolicy::none().allow_domain("example.com").unwrap()),
                 true,
-                Arc::new(ProxyConnectState::new()),
+                proxy_connect.clone(),
                 None,
             );
             let relay = tokio::spawn(proxy.try_run());
@@ -1148,6 +1152,14 @@ mod tests {
             while to_rx.recv().await.is_some() {}
             relay.await.unwrap().unwrap();
             server.await.unwrap().unwrap();
+
+            // A later policy change judges this connection by its address and the DNS cache;
+            // a recorded name would replace that check with one against the address's text.
+            assert_eq!(
+                proxy_connect.hostname(),
+                None,
+                "a connection that presented no server name recorded one"
+            );
         };
         tokio::time::timeout(Duration::from_secs(5), check)
             .await

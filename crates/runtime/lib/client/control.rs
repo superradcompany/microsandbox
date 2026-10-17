@@ -135,6 +135,13 @@ pub enum ControlRequest {
         changes: Vec<SecretLiveChange>,
     },
 
+    /// Replace the running sandbox's network policy: new flows are evaluated against it and
+    /// open flows it denies are ended.
+    NetworkPolicyUpdate {
+        /// The complete policy to enforce from now on.
+        policy: microsandbox_types::NetworkPolicy,
+    },
+
     /// Produce one same-epoch full checkpoint and return the source to its prior running
     /// state after root-last publication.
     CheckpointCreate {
@@ -219,6 +226,9 @@ pub struct ControlResponse {
     /// Explicit disk-compaction result or dry-run projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<crate::checkpoint::DiskCompactionResult>,
+    /// The network policy was replaced.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network_policy_updated: bool,
     /// Whether the request was accepted.
     pub ok: bool,
 
@@ -336,6 +346,10 @@ pub struct ControlCapabilities {
 
     /// Live secret rotation, removal, and allowed-host updates are available.
     pub secrets_update: bool,
+
+    /// The running sandbox's network policy can be replaced.
+    #[serde(default)]
+    pub network_policy_update: bool,
 
     /// Same-epoch composite checkpoint capture is available.
     #[serde(default)]
@@ -528,6 +542,7 @@ mod tests {
                 cpu_resize: true,
                 memory_resize: false,
                 secrets_update: true,
+                network_policy_update: false,
                 checkpoint_create: true,
                 disk_checkpoint_create: true,
                 branch_create: true,

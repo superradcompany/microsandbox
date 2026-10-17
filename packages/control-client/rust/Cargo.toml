@@ -28,4 +28,5 @@ zeroize.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
+microsandbox-types.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt-multi-thread", "time", "test-util"] }

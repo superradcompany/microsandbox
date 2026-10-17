@@ -36,6 +36,8 @@ pub struct RuntimeControlExecutor {
     vm: msb_krun::VmControl,
     #[cfg(feature = "net")]
     secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
+    #[cfg(feature = "net")]
+    network_policy: Option<microsandbox_network::policy::handle::PolicyHandle>,
     state: Mutex<ExecutorState>,
 }
 
@@ -67,6 +69,9 @@ impl RuntimeControlExecutor {
         vm: msb_krun::VmControl,
         #[cfg(feature = "net")] secrets: Option<
             microsandbox_network::secrets::handle::SecretsHandle,
+        >,
+        #[cfg(feature = "net")] network_policy: Option<
+            microsandbox_network::policy::handle::PolicyHandle,
         >,
         runtime_dir: &Path,
         vm_config: &VmConfig,
@@ -119,6 +124,8 @@ impl RuntimeControlExecutor {
             vm,
             #[cfg(feature = "net")]
             secrets,
+            #[cfg(feature = "net")]
+            network_policy,
             state: Mutex::new(ExecutorState {
                 runtime_boot_id,
                 revision: 0,
@@ -345,6 +352,7 @@ impl RuntimeControlExecutor {
                 | ControlRequest::RootDiskGrow { .. }
                 | ControlRequest::CpuTarget { .. }
                 | ControlRequest::SecretsUpdate { .. }
+                | ControlRequest::NetworkPolicyUpdate { .. }
                 | ControlRequest::CheckpointCreate { .. }
                 | ControlRequest::DiskCheckpointCreate { .. }
                 | ControlRequest::BranchCreate { .. }
@@ -676,6 +684,7 @@ impl RuntimeControlExecutor {
                     cpu_resize: self.vm.cpu_resize_supported(),
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
+                    network_policy_update: self.network_policy_update_supported(),
                     checkpoint_create: true,
                     disk_checkpoint_create: true,
                     branch_create: cfg!(any(unix, windows)),
@@ -704,6 +713,9 @@ impl RuntimeControlExecutor {
             }
             ControlRequest::CpuState => cpu(self.vm.cpu_state()),
             ControlRequest::SecretsUpdate { changes } => self.handle_secrets_update(changes),
+            ControlRequest::NetworkPolicyUpdate { policy } => {
+                self.handle_network_policy_update(policy)
+            }
             ControlRequest::CheckpointCreate { .. }
             | ControlRequest::DiskCheckpointCreate { .. }
             | ControlRequest::BranchCreate { .. }
@@ -717,6 +729,46 @@ impl RuntimeControlExecutor {
                 unreachable!("checkpoint requests are handled by the executor lifecycle path")
             }
         }
+    }
+
+    fn network_policy_update_supported(&self) -> bool {
+        #[cfg(feature = "net")]
+        {
+            self.network_policy.is_some()
+        }
+        #[cfg(not(feature = "net"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "net")]
+    fn handle_network_policy_update(
+        &self,
+        policy: microsandbox_types::NetworkPolicy,
+    ) -> ControlResponse {
+        let response = super::handler::apply_network_policy(self.network_policy.as_ref(), policy);
+        ControlResponse {
+            ok: response.json.ok,
+            error: response.json.error,
+            error_code: match response.framed {
+                super::handler::Reply::Error(error) => Some(error.code),
+                _ => None,
+            },
+            network_policy_updated: response.json.ok,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    fn handle_network_policy_update(
+        &self,
+        _policy: microsandbox_types::NetworkPolicy,
+    ) -> ControlResponse {
+        control_error(
+            "network_support_unavailable",
+            "this runtime was built without network support",
+        )
     }
 
     fn secrets_update_supported(&self) -> bool {

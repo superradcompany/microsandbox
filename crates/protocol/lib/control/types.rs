@@ -64,6 +64,9 @@ pub struct RuntimeCapabilities {
     pub memory_resize: bool,
     /// Host secret changes are available.
     pub secrets_update: bool,
+    /// The running sandbox's network policy can be replaced.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network_policy_update: bool,
     /// Same-epoch full checkpoint capture is available.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub checkpoint_create: bool,
@@ -193,6 +196,14 @@ pub struct PauseState {
     /// Why full capture cannot use this pause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_unavailable: Option<String>,
+}
+
+/// Replace the running sandbox's network policy. New flows are evaluated against it, and open
+/// flows it denies are ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPolicyUpdate {
+    /// The complete policy to enforce from now on.
+    pub policy: microsandbox_types::NetworkPolicy,
 }
 
 /// Grow the owned root disk and its mounted filesystem.
