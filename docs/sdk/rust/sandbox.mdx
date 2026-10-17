@@ -2040,7 +2040,7 @@ Builder for planning or applying sandbox configuration changes.
 async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 ```
 
-Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect.
+Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect; if the sandbox cannot start with them, the previous config is restored, the sandbox is started again, and `apply()` returns an error.
 
 A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
 
@@ -2314,6 +2314,40 @@ Declare the desired state of one secret via a [`SecretPatchBuilder`](#secretpatc
   <div className="msb-param">
     <div className="msb-param-key"><code>f</code><span className="msb-type">FnOnce(SecretPatchBuilder)</span></div>
     <div className="msb-param-desc">Closure declaring the secret's desired state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">modification.</span><span className="msb-hn">mount()</span>
+
+```rust
+fn mount(self, mount: VolumeMount) -> Self
+```
+
+Add a volume mount, or replace the mount already at its guest path. Mounts are fixed when the VM boots, so a running sandbox needs [`next_start()`](#modification-next_start) or [`restart()`](#modification-restart). A named volume must already exist, so creation settings such as a quota are rejected. Private (owned) volumes cannot be added, and an existing one cannot be replaced.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>mount</code><span className="msb-type">VolumeMount</span></div>
+    <div className="msb-param-desc">A mount built with <code>MountBuilder</code>. Relative host paths resolve against the caller's working directory.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">modification.</span><span className="msb-hn">remove_mount()</span>
+
+```rust
+fn remove_mount(self, guest: impl Into<String>) -> Self
+```
+
+Remove the mount at a guest path. A path with no mount is a conflict, and so is a private (owned) volume, since removing it would delete its data. Restart-backed like [`mount()`](#modification-mount).
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>guest</code><span className="msb-type">impl Into&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Guest path of the mount to remove.</div>
   </div>
 </div>
 

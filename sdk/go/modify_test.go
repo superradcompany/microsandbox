@@ -271,6 +271,194 @@ func TestParseModificationPlan(t *testing.T) {
 	}
 }
 
+func TestModifyRequestJSONMounts(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Mounts: map[string]MountConfig{
+			// Entries serialize in guest-path order.
+			"/tmp/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 64, Noexec: true}),
+			"/data":        Mount.Named("shared", MountOptions{Readonly: true}),
+			"/code": Mount.Bind("/srv/code", MountOptions{
+				StatVirtualization: StatVirtualizationRelaxed,
+				Owner:              &MountOwner{UID: 1000, GID: 1000},
+				QuotaMiB:           512,
+			}),
+			"/disk": Mount.Disk("/srv/data.qcow2", DiskOptions{Fstype: "ext4"}),
+		},
+		MountsRemove: []string{"/old"},
+	})
+
+	patch := out["patch"].(map[string]any)
+	mounts := patch["mounts"].([]any)
+	if len(mounts) != 4 {
+		t.Fatalf("expected 4 mounts; got %d", len(mounts))
+	}
+	want := []string{"/code", "/data", "/disk", "/tmp/scratch"}
+	for i, guest := range want {
+		if got := mounts[i].(map[string]any)["guest"]; got != guest {
+			t.Fatalf("mounts[%d] guest = %v; want %s", i, got, guest)
+		}
+	}
+
+	bind := mounts[0].(map[string]any)
+	options := bind["options"].(map[string]any)
+	if bind["type"] != "Bind" || bind["host"] != "/srv/code" || bind["quota_mib"] != float64(512) ||
+		bind["stat_virtualization"] != "relaxed" || options["override_uid"] != float64(1000) {
+		t.Fatalf("bind mount = %v", bind)
+	}
+	named := mounts[1].(map[string]any)
+	if named["type"] != "Named" || named["name"] != "shared" ||
+		named["options"].(map[string]any)["readonly"] != true {
+		t.Fatalf("named mount = %v", named)
+	}
+	disk := mounts[2].(map[string]any)
+	if disk["type"] != "DiskImage" || disk["format"] != "Qcow2" || disk["fstype"] != "ext4" {
+		t.Fatalf("disk mount = %v", disk)
+	}
+	tmpfs := mounts[3].(map[string]any)
+	if tmpfs["type"] != "Tmpfs" || tmpfs["size_mib"] != float64(64) ||
+		tmpfs["options"].(map[string]any)["noexec"] != true {
+		t.Fatalf("tmpfs mount = %v", tmpfs)
+	}
+
+	removals := patch["mounts_remove"].([]any)
+	if len(removals) != 1 || removals[0] != "/old" {
+		t.Fatalf("mounts_remove = %v", removals)
+	}
+}
+
+func TestModifyRequestJSONOmitsEmptyMounts(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{Mounts: map[string]MountConfig{}})
+	patch := out["patch"].(map[string]any)
+	for _, key := range []string{"mounts", "mounts_remove"} {
+		if _, present := patch[key]; present {
+			t.Fatalf("expected %s omitted; got %v", key, patch)
+		}
+	}
+}
+
+func TestModifyRequestRejectsOwnedMount(t *testing.T) {
+	_, err := buildModifyRequestJSON(ModifyOptions{
+		Mounts: map[string]MountConfig{"/scratch": Mount.Owned(OwnedVolumeOptions{})},
+	})
+	if err == nil || !strings.Contains(err.Error(), "/scratch") {
+		t.Fatalf("expected owned mount rejection naming /scratch; got %v", err)
+	}
+}
+
+func TestCheckModifyMountsSkipsNativeLibraryWithoutMounts(t *testing.T) {
+	if err := checkModifyMounts(ModifyOptions{Env: map[string]string{"A": "1"}}); err != nil {
+		t.Fatalf("checkModifyMounts: %v", err)
+	}
+}
+
+func TestModifyRequestDiskFormatInference(t *testing.T) {
+	cases := []struct{ host, format, want string }{
+		{"/srv/a.qcow2", "", "Qcow2"},
+		{"/srv/a.vmdk", "", "Vmdk"},
+		{"/srv/a.img", "", "Raw"},
+		{"/srv/a", "", "Raw"},
+		// Extension matching is case-sensitive, as in the core builder.
+		{"/srv/a.QCOW2", "", "Raw"},
+		// A bare dotfile has no extension.
+		{"/srv/.qcow2", "", "Raw"},
+		{"/srv/a.img", "qcow2", "Qcow2"},
+		{"/srv/a.qcow2", "raw", "Raw"},
+	}
+	for _, c := range cases {
+		got, err := diskImageFormat(c.format, c.host)
+		if err != nil || got != c.want {
+			t.Errorf("diskImageFormat(%q, %q) = %q, %v; want %q", c.format, c.host, got, err, c.want)
+		}
+	}
+}
+
+func TestModifyRequestRejectsUnknownDiskFormat(t *testing.T) {
+	for _, format := range []string{"QCOW2", "iso"} {
+		_, err := buildModifyRequestJSON(ModifyOptions{
+			Mounts: map[string]MountConfig{"/disk": Mount.Disk("/srv/a.img", DiskOptions{Format: format})},
+		})
+		if err == nil || !strings.Contains(err.Error(), "/disk") ||
+			!strings.Contains(err.Error(), "unknown disk image format: "+format) {
+			t.Fatalf("format %q: expected a rejection naming /disk; got %v", format, err)
+		}
+	}
+}
+
+func TestModifyRequestRejectsOptionsThatDoNotFitTheMountKind(t *testing.T) {
+	cases := map[string]MountConfig{
+		"bind size":    {kind: MountKindBind, Bind: "/srv", SizeMiB: 64},
+		"bind format":  {kind: MountKindBind, Bind: "/srv", Format: "raw"},
+		"named fstype": {kind: MountKindNamed, Named: "v", Fstype: "ext4"},
+		"tmpfs stat":   {kind: MountKindTmpfs, Tmpfs: true, StatVirtualization: StatVirtualizationRelaxed},
+		"tmpfs perms":  {kind: MountKindTmpfs, Tmpfs: true, HostPermissions: HostPermissionsMirror},
+		"tmpfs owner":  {kind: MountKindTmpfs, Tmpfs: true, Owner: &MountOwner{UID: 1, GID: 1}},
+		"tmpfs quota":  {kind: MountKindTmpfs, Tmpfs: true, QuotaMiB: 64},
+		"disk quota":   {kind: MountKindDisk, Disk: "/srv/a.img", QuotaMiB: 64},
+		"disk stat":    {kind: MountKindDisk, Disk: "/srv/a.img", StatVirtualization: StatVirtualizationOff},
+	}
+	for name, mount := range cases {
+		_, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": mount}})
+		if err == nil || !strings.Contains(err.Error(), `"/m"`) {
+			t.Errorf("%s: expected a rejection naming /m; got %v", name, err)
+		}
+	}
+
+}
+
+func TestModifyRequestAcceptsOnlyPlainNamedMounts(t *testing.T) {
+	plain := map[string]MountConfig{
+		"factory":       Mount.Named("v", MountOptions{}),
+		"existing":      Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "existing", Kind: "dir"}),
+		"ensure-exists": Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "ensure-exists"}),
+	}
+	configured := map[string]MountConfig{
+		"create": Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Mode: "create"}),
+		"disk":   Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{Kind: "disk", SizeMiB: 64}),
+		"quota":  Mount.NamedWith("v", MountOptions{}, NamedVolumeOptions{QuotaMiB: 64}),
+	}
+
+	for name, mount := range plain {
+		_, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": mount}})
+
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	for name, mount := range configured {
+		_, err := buildModifyRequestJSON(ModifyOptions{Mounts: map[string]MountConfig{"/m": mount}})
+
+		if err == nil || !strings.Contains(err.Error(), "modify does not create or configure named volumes") {
+			t.Errorf("%s: expected a refusal; got %v", name, err)
+		}
+	}
+}
+
+func TestCheckModifyMountsRefusesAnOlderNativeLibrary(t *testing.T) {
+	original := modifyMountsSupported
+	t.Cleanup(func() { modifyMountsSupported = original })
+	modifyMountsSupported = func() (bool, error) { return false, nil }
+
+	mount := map[string]MountConfig{"/scratch": Mount.Tmpfs(TmpfsOptions{SizeMiB: 64})}
+	for _, opts := range []ModifyOptions{
+		{Mounts: mount},
+		{MountsRemove: []string{"/old"}},
+		{Env: map[string]string{"A": "1"}, Mounts: mount},
+	} {
+		err := checkModifyMounts(opts)
+		if err == nil || !strings.Contains(err.Error(), "does not support modifying mounts") {
+			t.Fatalf("expected an older-library refusal for %+v; got %v", opts, err)
+		}
+	}
+	if err := checkModifyMounts(ModifyOptions{Env: map[string]string{"A": "1"}}); err != nil {
+		t.Fatalf("ordinary modify refused: %v", err)
+	}
+
+	modifyMountsSupported = func() (bool, error) { return true, nil }
+	if err := checkModifyMounts(ModifyOptions{Mounts: mount}); err != nil {
+		t.Fatalf("supported library refused: %v", err)
+	}
+}
+
 func TestModifyPortWireDefaultsAndExplicitRemoval(t *testing.T) {
 	out := marshalModifyRequest(t, ModifyOptions{
 		Ports:       []PortBinding{{HostPort: 8080, GuestPort: 80}},

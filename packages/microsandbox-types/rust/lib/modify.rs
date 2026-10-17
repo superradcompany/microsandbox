@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::domain::{
-    EnvVar, PortProtocol, PublishedPortSpec, SecretSubstitution, SecretViolationAction,
+    EnvVar, PortProtocol, PublishedPortSpec, SecretSubstitution, SecretViolationAction, VolumeMount,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -87,6 +87,18 @@ pub struct SandboxModificationPatch {
     /// `secrets` never means removal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets_remove: Vec<String>,
+
+    /// Volume mounts to add. A mount at a guest path that already has one
+    /// replaces it. Mounts are fixed when the VM boots, so a change needs a
+    /// restart or the next start. Sandbox-owned volumes are created with the
+    /// sandbox and are rejected here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<VolumeMount>,
+
+    /// Guest paths whose mounts are removed. A path with no mount, or with a
+    /// sandbox-owned volume, is a conflict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts_remove: Vec<String>,
 }
 
 /// Host endpoint identifying a published port independently of its guest destination.

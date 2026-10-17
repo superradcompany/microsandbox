@@ -21,9 +21,10 @@ When a change takes effect depends on the setting:
 | Existing secret material or removal | Live | Adding a secret or changing its placeholder needs a restart |
 | Environment and workdir | Future execs | Processes that are already running keep their current values |
 | `max_cpus` and `max_memory` | Restart or next start | These ceilings are fixed when the VM boots |
+| Mounts (bind, directory, file, disk image, named volume) | Restart or next start | Adding at a guest path that already has a mount replaces it. Private volumes (`--mount-owned`) cannot be added or removed |
 | Root disk size | Live, restart or next start | Managed and flat ext4 roots grow only; tmpfs changes on boot |
 | Published TCP/UDP ports | Restart or next start | Add, update, or explicitly remove individual host endpoints |
-| Named volumes, mount tmpfs, and user disk images | Outside `modify` | Capacity is managed where the storage is defined |
+| Named volume, tmpfs, and user disk image capacity | Outside `modify` | Capacity is managed where the storage is defined |
 
 The default policy applies only changes that can complete without restarting. If a patch contains one restart-required change, microsandbox rejects the whole patch and the old configuration stays intact.
 
@@ -491,7 +492,7 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-`--next-start` saves the desired configuration without touching the running VM. `--restart` stops and starts the sandbox only when the patch needs it. The default policy does neither and rejects restart-required changes.
+`--next-start` saves the desired configuration without touching the running VM. `--restart` stops and starts the sandbox only when the patch needs it; if the sandbox cannot start with the changes, its previous configuration is restored and it is started again. The default policy does neither and rejects restart-required changes. On a running sandbox that has no recorded active configuration (one started by an older release), `--next-start` cannot stage removing the last reference to a named volume; use `--restart` or stop the sandbox first.
 
 Root disk resizing remains conservative: managed and flat OCI disks grow only, tmpfs can grow or shrink at the next boot, and user-supplied disk images are never resized by microsandbox. Named volume and mount capacity is managed where that storage is defined. See [Volumes](/sandboxes/volumes) and [Images](/images/overview) for the storage model.
 

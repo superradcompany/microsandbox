@@ -11,6 +11,7 @@ import {
 } from "./compact.js";
 import {
   modificationPlanFromJson,
+  assertModifyMountsSupported,
   modifyOptionsToNapi,
   type ModifyOptions,
   type SandboxModificationPlan,
@@ -133,6 +134,7 @@ export class SandboxHandle {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    assertModifyMountsSupported(opts);
     if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
       throw new Error("published-port modification requires an updated native library");
     }
