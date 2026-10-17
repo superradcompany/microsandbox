@@ -354,47 +354,43 @@ impl LocalBackend {
         }
 
         self.invalidate_control_session(model.id);
-        let mut pids = Vec::new();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let departing = process_exit::RuntimeExit::capture(
-            pid,
-            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
-        )?;
-        if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
-            Self::kill_pid(pid)?;
-            pids.push(pid);
-        }
-
-        if !pids.is_empty() {
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            let poll_interval = Duration::from_millis(50);
-            while start.elapsed() < timeout {
-                if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
-                    break;
-                }
-                tokio::time::sleep(poll_interval).await;
+        let all_dead = {
+            let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            if let Some(departing) = self.signal_runtime(name, pid, libc::SIGKILL)? {
+                tokio::time::timeout_at(exit_deadline, async {
+                    while !departing.has_exited()? {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Ok::<_, std::io::Error>(())
+                })
+                .await
+                .map_err(|_| {
+                    crate::MicrosandboxError::Runtime(format!(
+                        "sandbox {name:?} runtime has not finished releasing resources after kill"
+                    ))
+                })??;
             }
-        }
-
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(departing) = departing {
-            tokio::time::timeout_at(exit_deadline, async {
-                while !departing.has_exited()? {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+            true
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let all_dead = {
+            let signaled_pid = pid.filter(|p| Self::pid_is_alive(*p));
+            if let Some(pid) = signaled_pid {
+                Self::kill_pid(pid)?;
+                let timeout = Duration::from_secs(5);
+                let start = std::time::Instant::now();
+                let poll_interval = Duration::from_millis(50);
+                while start.elapsed() < timeout {
+                    if Self::pid_has_exited(pid) {
+                        break;
+                    }
+                    tokio::time::sleep(poll_interval).await;
                 }
-                Ok::<_, std::io::Error>(())
-            })
-            .await
-            .map_err(|_| {
-                crate::MicrosandboxError::Runtime(format!(
-                    "sandbox {name:?} runtime has not finished releasing resources after kill"
-                ))
-            })??;
-        }
+            }
+            signaled_pid.is_none_or(Self::pid_has_exited)
+        };
+
         if all_dead {
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
@@ -443,13 +439,38 @@ impl LocalBackend {
             Ok(())
         }
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
             if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
                 Self::drain_pid(pid)?;
             }
             Ok(())
         }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.signal_runtime(name, pid, libc::SIGUSR1)?;
+            Ok(())
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn signal_runtime(
+        &self,
+        name: &str,
+        pid: Option<i32>,
+        signal: libc::c_int,
+    ) -> MicrosandboxResult<Option<process_exit::RuntimeExit>> {
+        let departing = process_exit::RuntimeExit::capture(
+            pid,
+            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
+        )?;
+        if let (Some(_), Some(proven)) =
+            (pid.filter(|p| Self::pid_is_alive(*p)), departing.as_ref())
+        {
+            proven.send_signal(signal)?;
+        }
+        Ok(departing)
     }
 
     /// Local lifecycle: remove a stopped sandbox by name.
@@ -1166,7 +1187,7 @@ impl LocalBackend {
     }
 
     /// Trigger the legacy drain path (SIGUSR1).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     fn drain_pid(pid: i32) -> MicrosandboxResult<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid),
@@ -2529,5 +2550,317 @@ mod tests {
         // Cleanup the live process.
         unsafe { libc::kill(live_pid, libc::SIGKILL) };
         waiter.join().unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn lifecycle_signal_child() {
+        use std::io::Read;
+        if std::env::var_os("MSB_LIFECYCLE_SIGNAL_CHILD").is_none() {
+            return;
+        }
+        // A stray SIGUSR1 must terminate this child.
+        unsafe {
+            libc::signal(libc::SIGUSR1, libc::SIG_DFL);
+            let empty: libc::sigset_t = std::mem::zeroed();
+            libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+        }
+        println!("ready");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut byte = [0];
+        let _ = std::io::stdin().read_exact(&mut byte);
+        std::process::exit(0);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn backend_with_stale_running_pid(
+        home: &std::path::Path,
+        name: &str,
+        pid: i32,
+    ) -> (Arc<LocalBackend>, i32) {
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(home)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let run_dir = backend.config().run_dir();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        drop(microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, name).unwrap());
+        let pools = backend.db().await.unwrap();
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &test_config(name))
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(pid)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+        (backend, id)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn recorded_sandbox_status(backend: &LocalBackend, id: i32) -> SandboxStatus {
+        let pools = backend.db().await.unwrap();
+        sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn kill_sandbox_spares_unrelated_recycled_pid() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let mut innocent_command = Command::new(std::env::current_exe().unwrap());
+        innocent_command
+            .args([
+                "--exact",
+                "backend::local::sandbox::tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut innocent = scopeguard::guard(innocent_command.spawn().unwrap(), |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        {
+            use std::io::BufRead;
+            let mut output = std::io::BufReader::new(innocent.stdout.take().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(output.read_line(&mut line).unwrap(), 0);
+                if line.trim() == "ready" {
+                    break;
+                }
+            }
+        }
+        let (backend, id) =
+            backend_with_stale_running_pid(home.path(), "stale", innocent.id() as i32).await;
+        backend.kill_sandbox("stale", None).await.unwrap();
+        assert!(
+            LocalBackend::pid_is_alive(innocent.id() as i32),
+            "a PID the backend cannot prove is the runtime must not receive SIGKILL"
+        );
+        assert_eq!(
+            recorded_sandbox_status(&backend, id).await,
+            SandboxStatus::Stopped
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn drain_sandbox_spares_unrelated_recycled_pid() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let mut innocent_command = Command::new(std::env::current_exe().unwrap());
+        innocent_command
+            .args([
+                "--exact",
+                "backend::local::sandbox::tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut innocent = scopeguard::guard(innocent_command.spawn().unwrap(), |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        {
+            use std::io::BufRead;
+            let mut output = std::io::BufReader::new(innocent.stdout.take().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(output.read_line(&mut line).unwrap(), 0);
+                if line.trim() == "ready" {
+                    break;
+                }
+            }
+        }
+        let (backend, id) =
+            backend_with_stale_running_pid(home.path(), "stale", innocent.id() as i32).await;
+        backend.drain_sandbox("stale", None).await.unwrap();
+        assert!(
+            LocalBackend::pid_is_alive(innocent.id() as i32),
+            "a PID the backend cannot prove is the runtime must not receive SIGUSR1"
+        );
+        assert_eq!(
+            recorded_sandbox_status(&backend, id).await,
+            SandboxStatus::Draining
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn kill_sandbox_still_kills_a_proven_runtime() {
+        use std::io::BufRead;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::Stdio;
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let name = "live";
+        let run_dir = backend.config().run_dir();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let guard = microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, name).unwrap();
+        let guard_fd = guard.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "backend::local::sandbox::tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(guard_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        {
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(output.read_line(&mut line).unwrap(), 0);
+                if line.trim() == "ready" {
+                    break;
+                }
+            }
+        }
+        let pools = backend.db().await.unwrap();
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &test_config(name))
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(child.id() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+        backend.kill_sandbox(name, None).await.unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "the proven runtime must still receive the kill signal"
+        );
+        assert_eq!(
+            recorded_sandbox_status(&backend, id).await,
+            SandboxStatus::Stopped
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn drain_sandbox_still_drains_a_proven_runtime() {
+        use std::io::BufRead;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::process::Stdio;
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let name = "live";
+        let run_dir = backend.config().run_dir();
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let guard = microsandbox_runtime::ipc::acquire_lifecycle_guard(&run_dir, name).unwrap();
+        let guard_fd = guard.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "backend::local::sandbox::tests::lifecycle_signal_child",
+                "--nocapture",
+            ])
+            .env("MSB_LIFECYCLE_SIGNAL_CHILD", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(guard_fd, libc::F_DUPFD_CLOEXEC, 200);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, microsandbox_runtime::vm::LIFECYCLE_LOCK_FD) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = scopeguard::guard(command.spawn().unwrap(), |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+        {
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(output.read_line(&mut line).unwrap(), 0);
+                if line.trim() == "ready" {
+                    break;
+                }
+            }
+        }
+        let pools = backend.db().await.unwrap();
+        let id = LocalBackend::insert_sandbox_record(pools.write(), &test_config(name))
+            .await
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(child.id() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+        backend.drain_sandbox(name, None).await.unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGUSR1),
+            "the proven runtime must still receive the drain signal"
+        );
+        assert_eq!(
+            recorded_sandbox_status(&backend, id).await,
+            SandboxStatus::Draining
+        );
     }
 }
