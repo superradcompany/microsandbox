@@ -1,0 +1,29 @@
+{
+  "groups": [
+    {
+      "id": "networking",
+      "x86_64": {"CONFIG_WIREGUARD": "y", "CONFIG_IP_ADVANCED_ROUTER": "y", "CONFIG_IP_MULTIPLE_TABLES": "y", "CONFIG_IPV6_MULTIPLE_TABLES": "y", "CONFIG_MACVLAN": "y", "CONFIG_IPVLAN": "y"},
+      "aarch64": {"CONFIG_WIREGUARD": "y", "CONFIG_IP_ADVANCED_ROUTER": "y", "CONFIG_IP_MULTIPLE_TABLES": "y", "CONFIG_IPV6_MULTIPLE_TABLES": "y", "CONFIG_MACVLAN": "y", "CONFIG_IPVLAN": "y"}
+    },
+    {
+      "id": "protected-files",
+      "x86_64": {"CONFIG_FS_ENCRYPTION": "y", "CONFIG_FS_VERITY": "y"},
+      "aarch64": {"CONFIG_FS_ENCRYPTION": "y", "CONFIG_FS_VERITY": "y"}
+    },
+    {
+      "id": "desktop-buffers",
+      "x86_64": {"CONFIG_UDMABUF": "y"},
+      "aarch64": {"CONFIG_UDMABUF": "y"}
+    },
+    {
+      "id": "tracing",
+      "x86_64": {"CONFIG_FTRACE": "y"},
+      "aarch64": {"CONFIG_FTRACE": "y"}
+    },
+    {
+      "id": "compressed-memory",
+      "x86_64": {"CONFIG_ZRAM": "y"},
+      "aarch64": {"CONFIG_ZRAM": "y"}
+    }
+  ]
+}

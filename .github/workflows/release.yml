@@ -12,6 +12,9 @@ on:
       - .github/workflows/release-macos.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
+      - scripts/ci/kernel_variants.py
+      - scripts/ci/kernel-variant-profiles.json
+      - scripts/ci/test_kernel_variants.py
       - scripts/ci/publish-crates.py
       - scripts/ci/test_publish_crates.py
       - scripts/ci/validate-release-artifacts.py
@@ -44,6 +47,49 @@ permissions:
   contents: read
 
 jobs:
+  variant-plan:
+    name: Plan kernel variants
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      masks: ${{ steps.plan.outputs.masks }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check profile helper
+        run: python3 -m unittest discover -s scripts/ci -p test_kernel_variants.py
+
+      - name: Select combinations
+        id: plan
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == push && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "masks=$(python3 -c 'import json; print(json.dumps(list(range(32))))')" >> "${GITHUB_OUTPUT}"
+          else
+            echo 'masks=[31]' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create draft release for variant builds
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing=$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [[ "${existing}" == false ]]; then
+            echo "A published release already exists for ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          if [[ "${existing}" != true ]]; then
+            prerelease=()
+            if [[ "${GITHUB_REF_NAME}" =~ -(rc|alpha|beta|dev) ]]; then
+              prerelease=(--prerelease)
+            fi
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --draft \
+              --title "${GITHUB_REF_NAME}" \
+              --notes 'Release build in progress.' \
+              "${prerelease[@]}"
+          fi
+
   # Fetch and verify the large kernel archive once, then fan it out to both
   # firmware architectures over GitHub's artifact network.
   kernel-sources:
@@ -311,6 +357,203 @@ jobs:
       metrics_asset: msb-metrics-windows-aarch64.exe
       libkrunfw_asset: libkrunfw-windows-aarch64.dll
       go_bundle_name: libmicrosandbox_go_ffi-windows-arm64.dll
+
+  variant-kernels:
+    name: Variant kernel (${{ matrix.arch }}, ${{ matrix.mask }})
+    needs: [variant-plan, kernel-sources]
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        arch: [x86_64, aarch64]
+        mask: ${{ fromJSON(needs.variant-plan.outputs.masks) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - name: Install firmware build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc cpio python3-pyelftools
+
+      - name: Restore kernel source archive
+        uses: ./.github/actions/cache-libkrunfw-kernel
+
+      - name: Apply selected groups
+        run: python3 scripts/ci/kernel_variants.py prepare --mask "${{ matrix.mask }}" --arch "${{ matrix.arch }}"
+
+      - name: Build libkrunfw
+        working-directory: vendor/libkrunfw
+        run: make -j"$(nproc)"
+
+      - name: Verify resolved config and build outputs
+        env:
+          ARCH: ${{ matrix.arch }}
+          MASK: ${{ matrix.mask }}
+        run: |
+          manifest="manifest-linux-${ARCH}-m$(printf '%02d' "${MASK}").json"
+          python3 scripts/ci/kernel_variants.py verify --mask "${MASK}" --arch "${ARCH}" > "${manifest}"
+          cat "${manifest}"
+
+      - name: Stage PR link inputs
+        if: github.event_name == 'pull_request'
+        env:
+          ARCH: ${{ matrix.arch }}
+          MASK: ${{ matrix.mask }}
+        run: |
+          mkdir variant-input
+          cp vendor/libkrunfw/kernel.c variant-input/kernel.c
+          cp "manifest-linux-${ARCH}-m$(printf '%02d' "${MASK}").json" variant-input/kernel-manifest.json
+
+      - name: Share PR link inputs
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: variant-input
+          key: variant-pr-${{ github.sha }}-${{ matrix.arch }}-${{ matrix.mask }}
+          enableCrossOsArchive: true
+
+      - name: Stage and upload kernel and Linux library
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.arch }}
+          MASK: ${{ matrix.mask }}
+        run: |
+          suffix="m$(printf '%02d' "${MASK}")"
+          manifest="manifest-linux-${ARCH}-${suffix}.json"
+          kernel="kernel-${ARCH}-${suffix}.c"
+          library="libkrunfw-linux-${ARCH}-${suffix}.so"
+          cp vendor/libkrunfw/kernel.c "${kernel}"
+          cp "vendor/libkrunfw/libkrunfw.so.${LIBKRUNFW_VERSION}" "${library}"
+          gh release upload "${GITHUB_REF_NAME}" --clobber "${kernel}" "${library}" "${manifest}"
+
+  variant-links:
+    name: Variant library (${{ matrix.platform.target }}, ${{ matrix.mask }})
+    needs: [variant-plan, variant-kernels]
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        mask: ${{ fromJSON(needs.variant-plan.outputs.masks) }}
+        platform:
+          - target: darwin-aarch64
+            arch: aarch64
+            runner: macos-14
+            library: libkrunfw.5.dylib
+          - target: windows-x86_64
+            arch: x86_64
+            runner: windows-latest
+            library: libkrunfw.dll
+            vs_arch: amd64
+          - target: windows-aarch64
+            arch: aarch64
+            runner: windows-11-arm
+            library: libkrunfw.dll
+            vs_arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - name: Restore PR link inputs
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: variant-input
+          key: variant-pr-${{ github.sha }}-${{ matrix.platform.arch }}-${{ matrix.mask }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Download matching kernel bundle
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCH: ${{ matrix.platform.arch }}
+          MASK: ${{ matrix.mask }}
+        run: |
+          suffix="m$(printf '%02d' "${MASK}")"
+          mkdir variant-input
+          release_id=$(gh release view "${GITHUB_REF_NAME}" --json databaseId --jq .databaseId)
+          assets=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq ".[] | select(.name == \"kernel-${ARCH}-${suffix}.c\" or .name == \"manifest-linux-${ARCH}-${suffix}.json\") | [.id, .name] | @tsv")
+          test "$(printf '%s\n' "${assets}" | wc -l | tr -d ' ')" = 2
+          while IFS=$'\t' read -r asset_id name; do
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "variant-input/${name}"
+          done <<< "${assets}"
+          cp "variant-input/kernel-${ARCH}-${suffix}.c" vendor/libkrunfw/kernel.c
+
+      - name: Stage PR kernel bundle
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: cp variant-input/kernel.c vendor/libkrunfw/kernel.c
+
+      - name: Link macOS library
+        if: runner.os == 'macOS'
+        run: cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o vendor/libkrunfw/libkrunfw.5.dylib vendor/libkrunfw/kernel.c
+
+      - name: Link Windows library
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\vendor\libkrunfw\scripts\build-windows.ps1 `
+            -SkipKernelBundle `
+            -AbiVersion ${{ env.LIBKRUNFW_ABI }} `
+            -Architecture ${{ matrix.platform.vs_arch }} `
+            -HostArchitecture ${{ matrix.platform.vs_arch }} `
+            -Output libkrunfw.dll `
+            -ImportLibrary libkrunfw.lib
+
+      - name: Verify linked library
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.platform.target }}
+          ARCH: ${{ matrix.platform.arch }}
+          MASK: ${{ matrix.mask }}
+          LIBRARY: ${{ matrix.platform.library }}
+        run: |
+          suffix="m$(printf '%02d' "${MASK}")"
+          python=python3
+          if [[ "${RUNNER_OS}" == Windows ]]; then python=python; fi
+          manifest="manifest-${TARGET}-${suffix}.json"
+          kernel_manifest="variant-input/manifest-linux-${ARCH}-${suffix}.json"
+          if [[ "${GITHUB_EVENT_NAME}" == pull_request ]]; then
+            kernel_manifest=variant-input/kernel-manifest.json
+          fi
+          "${python}" scripts/ci/kernel_variants.py record-link \
+            --target "${TARGET}" \
+            --kernel-manifest "${kernel_manifest}" \
+            --kernel-bundle vendor/libkrunfw/kernel.c \
+            --library "vendor/libkrunfw/${LIBRARY}" > "${manifest}"
+          cat "${manifest}"
+
+      - name: Upload linked library
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.platform.target }}
+          MASK: ${{ matrix.mask }}
+          LIBRARY: ${{ matrix.platform.library }}
+        run: |
+          suffix="m$(printf '%02d' "${MASK}")"
+          manifest="manifest-${TARGET}-${suffix}.json"
+          python=python3
+          if [[ "${RUNNER_OS}" == Windows ]]; then python=python; fi
+          asset=$("${python}" -c 'import json, sys; print(json.load(open(sys.argv[1]))["library_asset"])' "${manifest}")
+          cp "vendor/libkrunfw/${LIBRARY}" "${asset}"
+          gh release upload "${GITHUB_REF_NAME}" --clobber "${asset}" "${manifest}"
 
   # ---------------------------------------------------------------------------
   # Legacy tag-release graph. Keep this disabled as an in-file rollback
@@ -921,6 +1164,8 @@ jobs:
       - darwin-aarch64
       - windows-x86_64
       - windows-aarch64
+      - variant-kernels
+      - variant-links
     runs-on: ubuntu-latest
     steps:
       - name: Assert every platform build succeeded
@@ -930,6 +1175,11 @@ jobs:
           test "${{ needs.darwin-aarch64.result }}" = success
           test "${{ needs.windows-x86_64.result }}" = success
           test "${{ needs.windows-aarch64.result }}" = success
+          test "${{ needs.variant-kernels.result }}" = success
+          if [[ "${GITHUB_EVENT_NAME}" == pull_request ]] || \
+             [[ "${GITHUB_EVENT_NAME}" == push && "${GITHUB_REF}" == refs/tags/v* ]]; then
+            test "${{ needs.variant-links.result }}" = success
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -1052,7 +1302,7 @@ jobs:
           path: release-validation/manifest.json
 
   # ---------------------------------------------------------------------------
-  # Assemble: collect all artifacts, generate checksums, create GitHub release
+  # Assemble baseline assets into the draft release after every build passes.
   # ---------------------------------------------------------------------------
   assemble:
     name: Assemble Release
@@ -1096,23 +1346,45 @@ jobs:
             });
             require('node:fs').writeFileSync(`${process.env.RUNNER_TEMP}/release-notes.md`, body);
 
-      - name: Create GitHub Release
+      - name: Add baseline assets to draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Auto-prerelease for rc / alpha / beta / dev tags so consumers
-          # querying /releases/latest (e.g. install.microsandbox.dev) don't
-          # accidentally promote them. Matches v0.5.0-rc-1, v1.2.3-rc1,
-          # v1.0.0-alpha.4, etc.
-          PRERELEASE=""
-          if [[ "${{ github.ref_name }}" =~ -(rc|alpha|beta|dev) ]]; then
-            PRERELEASE="--prerelease"
-          fi
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --notes-file "$RUNNER_TEMP/release-notes.md" \
-            $PRERELEASE \
-            release-artifacts/*
+          gh release edit "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+          gh release upload "${GITHUB_REF_NAME}" --clobber release-artifacts/*
+
+  publish-release:
+    name: Publish complete release
+    needs: assemble
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate variant index and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir variant-manifests
+          release_id=$(gh release view "${GITHUB_REF_NAME}" --json databaseId --jq .databaseId)
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[] | select(.name | startswith("manifest-") and endswith(".json")) | [.id, .name] | @tsv' |
+            while IFS=$'\t' read -r asset_id name; do
+              gh api -H 'Accept: application/octet-stream' \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" > "variant-manifests/${name}"
+            done
+          python3 scripts/ci/kernel_variants.py index --manifests variant-manifests > kernel-variants.json
+          gh release upload "${GITHUB_REF_NAME}" --clobber kernel-variants.json scripts/ci/kernel-variant-profiles.json
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+            --jq '.[] | select(.name | startswith("kernel-") and endswith(".c")) | .id' |
+            while read -r asset_id; do
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+            done
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
 
   # ---------------------------------------------------------------------------
   # Sync mintlify branch to the released commit
@@ -1129,7 +1401,7 @@ jobs:
   # ---------------------------------------------------------------------------
   sync-mintlify:
     name: Sync mintlify branch
-    needs: assemble
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1190,7 +1462,7 @@ jobs:
   # ---------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew Formula
-    needs: assemble
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -1231,7 +1503,7 @@ jobs:
   # ---------------------------------------------------------------------------
   update-winget:
     name: Update winget package
-    needs: assemble
+    needs: publish-release
     if: >-
       github.event_name == 'push'
       && startsWith(github.ref, 'refs/tags/v')
@@ -1260,7 +1532,7 @@ jobs:
   # ---------------------------------------------------------------------------
   npm-publish:
     name: Publish npm packages
-    needs: release-ready
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1509,7 +1781,7 @@ jobs:
   # ---------------------------------------------------------------------------
   crates-publish:
     name: Publish crates
-    needs: release-ready
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -1527,7 +1799,7 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish Python SDK
-    needs: release-ready
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1570,7 +1842,7 @@ jobs:
   # ---------------------------------------------------------------------------
   go-sdk-tag:
     name: Tag Go SDK module
-    needs: assemble
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -1636,7 +1908,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-build:
     name: Docker (${{ matrix.arch }})
-    needs: release-ready
+    needs: publish-release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.runner }}
     permissions:

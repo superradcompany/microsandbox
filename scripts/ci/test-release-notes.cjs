@@ -112,7 +112,7 @@ test('the real sync PR producer remains excluded, without excluding lookalikes',
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test('release workflow backfills included PRs before generating and publishing its body', async () => {
+test('release workflow backfills included PRs before adding final notes to the draft', async () => {
   const prs = [pull(11, 'feat: snapshots'), pull(12, 'sync mintlify to v0.7.3', {
     user: { login: 'github-actions[bot]' }, base: { ref: 'mintlify' }, head: { ref: 'mintlify-sync-v0.7.3' },
   })];
@@ -132,7 +132,7 @@ test('release workflow backfills included PRs before generating and publishing i
     assert.equal(release.jobs.assemble.permissions['pull-requests'], 'write',
       'release backfilling needs permission to label pull requests');
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-    let published = false;
+    let prepared = false;
     for (const step of release.jobs.assemble.steps) {
       if (step.uses?.startsWith('actions/github-script@')) {
         await new AsyncFunction('require', 'github', 'context', 'process', step.with.script)(
@@ -140,16 +140,17 @@ test('release workflow backfills included PRs before generating and publishing i
           { env: { ...process.env, GITHUB_REF_NAME: 'v1.0.0', RUNNER_TEMP: directory } },
         );
       }
-      if (step.run?.includes('gh release create')) {
-        assert.equal(generations, 2, 'release must backfill and regenerate before publishing');
+      if (step.run?.includes('gh release edit') && step.run?.includes('--notes-file')) {
+        assert.equal(generations, 2, 'release must backfill and regenerate before final notes');
         const args = shell(step.run, directory).find(args => args[0] === 'release');
-        assert.ok(args.includes('--notes-file'), 'publish the prepared body');
+        assert.ok(args.includes('--notes-file'), 'use the prepared body');
         assert.equal(readFileSync(args[args.indexOf('--notes-file') + 1], 'utf8'), '## Features\n* snapshots\n');
         assert.ok(!args.includes('--generate-notes'));
-        published = true;
+        prepared = true;
       }
     }
-    assert.ok(published);
+    assert.ok(prepared);
+    assert.equal(release.jobs['publish-release'].needs, 'assemble');
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
