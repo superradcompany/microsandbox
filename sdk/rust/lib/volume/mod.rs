@@ -688,13 +688,19 @@ pub(crate) async fn list_local(backend: Arc<dyn Backend>) -> MicrosandboxResult<
         .collect())
 }
 
-/// Local remove path. Deletes the DB record first, then the directory.
+/// Local remove path. Keeps the DB record until the directory is removed.
 #[cfg(feature = "local")]
 pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> MicrosandboxResult<()> {
     let local_backend = backend
         .as_local()
         .ok_or_else(|| MicrosandboxError::local_only(Operation::VolumeRemove))?;
+    // The name now reaches the lock-file path before a DB lookup. Preserve the
+    // previous not-found result for names that could never be stored as volumes.
+    if validate_volume_name(name).is_err() {
+        return Err(MicrosandboxError::VolumeNotFound(name.into()));
+    }
     let pools = local_backend.db().await?;
+    let _name_lock = lock_volume_name(local_backend, name).await?;
 
     let model = volume_entity::Entity::find()
         .filter(volume_entity::Column::Name.eq(name))
@@ -702,18 +708,17 @@ pub(crate) async fn remove_local(backend: Arc<dyn Backend>, name: &str) -> Micro
         .await?
         .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.into()))?;
     let handle = VolumeHandle::from_local_model(backend.clone(), model);
-    let _name_lock = lock_volume_name(local_backend, name).await?;
     let _disk_lock = lock_disk_volume_for_remove(&handle)?;
     ensure_volume_not_referenced_by_active_sandbox(pools.read(), name).await?;
-
-    volume_entity::Entity::delete_by_id(handle.local().expect("local handle").db_id)
-        .exec(pools.write())
-        .await?;
 
     let path = local_backend.volume_path(name);
     if path.exists() {
         tokio::fs::remove_dir_all(&path).await?;
     }
+
+    volume_entity::Entity::delete_by_id(handle.local().expect("local handle").db_id)
+        .exec(pools.write())
+        .await?;
 
     Ok(())
 }
@@ -967,6 +972,54 @@ mod tests {
     use crate::sandbox::{HostPermissions, MountOptions, SandboxStatus, StatVirtualization};
 
     use super::*;
+
+    #[cfg(feature = "local")]
+    #[tokio::test]
+    async fn failed_directory_removal_keeps_volume_available_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = Arc::new(
+            crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let backend: Arc<dyn Backend> = local.clone();
+        create_local(
+            backend.clone(),
+            VolumeConfig {
+                name: "retryable".into(),
+                kind: VolumeKind::Directory,
+                quota_mib: None,
+                capacity_mib: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let path = local.volume_path("retryable");
+        let parked = temp.path().join("parked-volume");
+        std::fs::write(path.join("marker"), b"volume data").unwrap();
+        std::fs::rename(&path, &parked).unwrap();
+        // A regular file at the volume path makes remove_dir_all fail on every OS.
+        std::fs::write(&path, b"blocked").unwrap();
+
+        assert!(remove_local(backend.clone(), "retryable").await.is_err());
+        assert!(get_local(backend.clone(), "retryable").await.is_ok());
+        assert_eq!(
+            std::fs::read(parked.join("marker")).unwrap(),
+            b"volume data"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(&parked, &path).unwrap();
+        remove_local(backend.clone(), "retryable").await.unwrap();
+        assert!(!path.exists());
+        assert!(matches!(
+            get_local(backend, "retryable").await,
+            Err(MicrosandboxError::VolumeNotFound(_))
+        ));
+    }
 
     #[cfg(feature = "local")]
     #[tokio::test(flavor = "current_thread")]
