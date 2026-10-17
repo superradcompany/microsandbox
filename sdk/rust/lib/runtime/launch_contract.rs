@@ -113,6 +113,23 @@ impl LaunchContract {
             .await?;
         }
 
+        if self.machine
+            && matches!(
+                network.outbound_proxy,
+                Some(microsandbox_network::OutboundProxy::HttpConnect {
+                    credentials: Some(_),
+                    ..
+                })
+            )
+        {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.http_connect_proxy_auth,
+                "HTTP CONNECT proxy authentication",
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -1049,6 +1066,69 @@ mod tests {
             .unwrap();
         legacy
             .require_network_capabilities(&absent, &tuned)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn http_connect_credentials_require_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let network: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "proxy-user",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
+                }
+            }
+        }))
+        .unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        // A runtime that supports HTTP CONNECT but not its credentials would drop
+        // them and connect unauthenticated, so the launch must be refused.
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":false}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-http-connect-auth", response);
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP CONNECT"), "{error}");
+            assert!(error.to_string().contains("upgrade msb"), "{error}");
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-http-connect-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &network)
+            .await
+            .unwrap();
+
+        // An unauthenticated HTTP CONNECT proxy must not require the auth capability.
+        let plain: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {"protocol": "http_connect", "address": "127.0.0.1:3128"}
+        }))
+        .unwrap();
+        let without_auth = script(
+            dir.path(),
+            "http-connect-without-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&without_auth, &plain)
             .await
             .unwrap();
     }

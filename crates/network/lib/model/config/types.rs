@@ -635,6 +635,42 @@ mod tests {
     }
 
     #[test]
+    fn http_connect_credentials_round_trip_through_wire_network_spec() {
+        use crate::proxy::{OutboundProxyBuilder, OutboundProxyConfig};
+
+        let config = NetworkConfig {
+            outbound_proxy: Some(
+                OutboundProxyBuilder::new()
+                    .http_connect("127.0.0.1:3128")
+                    .credentials(
+                        "sandbox",
+                        microsandbox_types::SecretSource::env("HTTP_CONNECT_PASSWORD"),
+                    )
+                    .build()
+                    .unwrap(),
+            ),
+            ..NetworkConfig::default()
+        };
+
+        let wire: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(
+            wire.outbound_proxy,
+            Some(microsandbox_types::OutboundProxy::HttpConnect {
+                address: "127.0.0.1:3128".to_string(),
+                credentials: Some(microsandbox_types::HttpConnectCredentials {
+                    username: "sandbox".to_string(),
+                    password: microsandbox_types::SecretSource::env("HTTP_CONNECT_PASSWORD"),
+                }),
+            })
+        );
+
+        let round_tripped: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+        assert_eq!(round_tripped.outbound_proxy, config.outbound_proxy);
+    }
+
+    #[test]
     fn socks4_proxy_user_id_round_trips_through_wire_network_spec() {
         let config = NetworkConfig {
             outbound_proxy: Some(OutboundProxy::Socks4 {

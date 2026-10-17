@@ -87,10 +87,10 @@ pub use sandbox::{
 };
 #[cfg(feature = "net")]
 pub use sandbox::{
-    DnsConfigPatch, HostPattern, InterfaceOverridesPatch, Nameserver, NetworkAction, NetworkPolicy,
-    NetworkProfile, NetworkRateLimiterConfigPatch, NetworkRule, OutboundProxy, PublishedPort,
-    SecretSubstitution, SecretViolationAction, SecretsConfigPatch, Socks5Credentials,
-    TlsConfigPatch,
+    DnsConfigPatch, HostPattern, HttpConnectCredentials, InterfaceOverridesPatch, Nameserver,
+    NetworkAction, NetworkPolicy, NetworkProfile, NetworkRateLimiterConfigPatch, NetworkRule,
+    OutboundProxy, PublishedPort, SecretSubstitution, SecretViolationAction, SecretsConfigPatch,
+    Socks5Credentials, TlsConfigPatch,
 };
 pub use sandbox::{
     ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,

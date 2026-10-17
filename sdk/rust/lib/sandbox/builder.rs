@@ -4936,6 +4936,38 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[tokio::test]
+    async fn test_builder_sets_http_connect_credentials() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .proxy(|p| {
+                p.http_connect("127.0.0.1:3128").credentials(
+                    "sandbox",
+                    SecretSource::Env {
+                        var: "HTTP_CONNECT_PASSWORD".into(),
+                    },
+                )
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let network = config.local_network_config().unwrap();
+        let json = serde_json::to_value(network.outbound_proxy).unwrap();
+        assert_eq!(json["protocol"], "http_connect");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(
+            json["credentials"]["password"]["var"],
+            "HTTP_CONNECT_PASSWORD"
+        );
+        assert!(json["credentials"].get("value").is_none());
+        // The password stays a source reference; no plaintext under the nested
+        // password object either.
+        assert!(json["credentials"]["password"].get("value").is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
     async fn test_builder_sets_socks4_outbound_proxy_with_user_id() {
         let config = SandboxBuilder::new("test")
             .image("alpine")

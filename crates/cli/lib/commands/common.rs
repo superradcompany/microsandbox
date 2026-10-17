@@ -594,6 +594,24 @@ pub struct SandboxOpts {
     )]
     pub socks5_password_env: Option<String>,
 
+    /// Username for HTTP CONNECT proxy authentication.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "USERNAME",
+        requires_all = ["proxy", "http_connect_password_env"]
+    )]
+    pub http_connect_username: Option<String>,
+
+    /// Host environment variable containing the HTTP CONNECT proxy password.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        requires_all = ["proxy", "http_connect_username"]
+    )]
+    pub http_connect_password_env: Option<String>,
+
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
     #[cfg(feature = "net")]
@@ -742,6 +760,8 @@ impl SandboxOpts {
             if self.socks4_user_id.is_some()
                 || self.socks5_username.is_some()
                 || self.socks5_password_env.is_some()
+                || self.http_connect_username.is_some()
+                || self.http_connect_password_env.is_some()
             {
                 anyhow::bail!("proxy authentication flags require --proxy");
             }
@@ -749,7 +769,7 @@ impl SandboxOpts {
         };
 
         match raw.parse::<OutboundProxy>()? {
-            OutboundProxy::HttpConnect { address } => {
+            OutboundProxy::HttpConnect { address, .. } => {
                 if self.socks4_user_id.is_some()
                     || self.socks5_username.is_some()
                     || self.socks5_password_env.is_some()
@@ -759,16 +779,38 @@ impl SandboxOpts {
                     );
                 }
 
-                Ok(Some(
-                    OutboundProxyBuilder::new()
-                        .http_connect(address.to_string())
-                        .build()?,
-                ))
+                let proxy = OutboundProxyBuilder::new().http_connect(address.to_string());
+                let proxy = match (
+                    self.http_connect_username.as_deref(),
+                    self.http_connect_password_env.as_deref(),
+                ) {
+                    (Some(username), Some(password_env)) => {
+                        proxy.credentials(username, microsandbox::SecretSource::env(password_env))
+                    }
+                    (Some(_), None) => {
+                        anyhow::bail!(
+                            "--http-connect-username requires --http-connect-password-env"
+                        )
+                    }
+                    (None, Some(_)) => {
+                        anyhow::bail!(
+                            "--http-connect-password-env requires --http-connect-username"
+                        )
+                    }
+                    (None, None) => proxy,
+                };
+                Ok(Some(proxy.build()?))
             }
             OutboundProxy::Socks4 { address, .. } => {
                 if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
                     anyhow::bail!(
                         "--socks5-username and --socks5-password-env require a socks5:// proxy"
+                    );
+                }
+                if self.http_connect_username.is_some() || self.http_connect_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "--http-connect-username and --http-connect-password-env require an http:// proxy"
                     );
                 }
 
@@ -782,6 +824,12 @@ impl SandboxOpts {
             OutboundProxy::Socks5 { address, .. } => {
                 if self.socks4_user_id.is_some() {
                     anyhow::bail!("--socks4-user-id requires a socks4:// proxy");
+                }
+                if self.http_connect_username.is_some() || self.http_connect_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "--http-connect-username and --http-connect-password-env require an http:// proxy"
+                    );
                 }
 
                 let proxy = OutboundProxyBuilder::new().socks5(address.to_string());
@@ -1139,6 +1187,8 @@ impl SandboxOpts {
             || self.socks4_user_id.is_some()
             || self.socks5_username.is_some()
             || self.socks5_password_env.is_some()
+            || self.http_connect_username.is_some()
+            || self.http_connect_password_env.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -4164,6 +4214,41 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn outbound_proxy_builds_http_connect_environment_credentials() {
+        let opts = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            http_connect_username: Some("sandbox".into()),
+            http_connect_password_env: Some("HTTP_CONNECT_PASSWORD".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert_eq!(json["protocol"], "http_connect");
+        assert_eq!(json["address"], "127.0.0.1:3128");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(
+            json["credentials"]["password"]["var"],
+            "HTTP_CONNECT_PASSWORD"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_without_credentials_omits_the_wire_field() {
+        let opts = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert!(json.get("credentials").is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn outbound_proxy_rejects_protocol_specific_auth_on_the_wrong_protocol() {
         let socks4 = SandboxOpts {
             proxy: Some("socks4://127.0.0.1:1080".into()),
@@ -4190,6 +4275,34 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires a socks4:// proxy")
+        );
+
+        let http_on_socks = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            http_connect_username: Some("sandbox".into()),
+            http_connect_password_env: Some("HTTP_CONNECT_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            http_on_socks
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("require an http:// proxy")
+        );
+
+        let socks_on_http = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks_on_http
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("SOCKS authentication flags cannot be used with an http:// proxy")
         );
     }
 

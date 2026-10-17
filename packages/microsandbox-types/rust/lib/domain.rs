@@ -717,6 +717,9 @@ pub enum OutboundProxy {
     HttpConnect {
         /// Proxy socket address.
         address: String,
+        /// Optional username/password authentication configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<HttpConnectCredentials>,
     },
 
     /// A SOCKS4 proxy at the given `IP:port` address.
@@ -736,6 +739,21 @@ pub enum OutboundProxy {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credentials: Option<Socks5Credentials>,
     },
+}
+
+/// Environment-backed username/password credentials for an HTTP CONNECT proxy.
+///
+/// This durable configuration contains only the host-side password source.
+/// The resolved password is carried by the private launch contract instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct HttpConnectCredentials {
+    /// HTTP CONNECT authentication username.
+    pub username: String,
+
+    /// Host-side source for the HTTP CONNECT authentication password.
+    pub password: SecretSource,
 }
 
 /// Environment-backed username/password credentials for a SOCKS5 proxy.
