@@ -4,6 +4,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use super::LocalBackend;
+use crate::MicrosandboxResult;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -100,8 +103,30 @@ impl RuntimeExit {
 }
 
 //--------------------------------------------------------------------------------------------------
-// Functions
+// Local backend signal dispatch
 //--------------------------------------------------------------------------------------------------
+
+impl LocalBackend {
+    /// Captures the runtime exit barrier and signals it only when the catalog
+    /// PID is proven to still be that runtime.
+    pub(super) fn signal_runtime(
+        &self,
+        name: &str,
+        pid: Option<i32>,
+        signal: libc::c_int,
+    ) -> MicrosandboxResult<Option<RuntimeExit>> {
+        let departing = RuntimeExit::capture(
+            pid,
+            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
+        )?;
+        if let (Some(_), Some(proven)) =
+            (pid.filter(|p| Self::pid_is_alive(*p)), departing.as_ref())
+        {
+            proven.send_signal(signal)?;
+        }
+        Ok(departing)
+    }
+}
 
 fn lifecycle_fd_unreadable(error: &std::io::Error) -> bool {
     matches!(
