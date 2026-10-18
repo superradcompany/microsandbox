@@ -6,7 +6,9 @@ use std::time::Duration;
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, HardwareAddress, IpAddress, IpCidr, Ipv4Packet, UdpPacket,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
@@ -58,6 +60,154 @@ fn published_ports_work_without_host_routes() {
             }
         }
     });
+}
+
+#[test]
+fn deferred_publication_reserves_ports_without_forwarding() {
+    const CHILD_ENV: &str = "MSB_TEST_DEFERRED_PUBLICATION";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "engine::network::published_ports_tests::deferred_publication_reserves_ports_without_forwarding",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "deferred-publication child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let address = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let mut config = NetworkConfig::default();
+        config.tls.enabled = false;
+        config.policy = NetworkPolicy::allow_all();
+        config.ports.push(PublishedPort {
+            host_port: address.port(),
+            guest_port: 8000,
+            protocol: PortProtocol::Udp,
+            host_bind: address.ip(),
+        });
+        let mut network = SmoltcpNetwork::build(
+            config.resolve(&EnvNetworkSecretResolver).unwrap(),
+            7,
+            microsandbox_types::DeploymentProfile::SingleTenant,
+            HostRoutes {
+                ipv4: false,
+                ipv6: false,
+            },
+        )
+        .unwrap();
+        let activation = network.defer_activation();
+        let mut backend = network.take_backend();
+        network
+            .start(tokio::runtime::Handle::current())
+            .expect("bind deferred listener");
+        assert_eq!(
+            std::net::UdpSocket::bind(address).unwrap_err().kind(),
+            std::io::ErrorKind::AddrInUse,
+        );
+        let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        client.send_to(b"deferred", address).await.unwrap();
+        let mut bytes = [0; 2048];
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(25) {
+            assert!(
+                matches!(
+                    backend.read_frame(&mut bytes),
+                    Err(msb_krun::backends::net::ReadError::NothingRead),
+                ),
+                "published traffic reached the guest before activation"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        activation.activate();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match backend.read_frame(&mut bytes) {
+                    Ok(len) => {
+                        let ethernet = EthernetFrame::new_checked(&bytes[12..len]).unwrap();
+                        let ip = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+                        let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+                        assert_eq!(udp.dst_port(), 8000);
+                        assert_eq!(udp.payload(), b"deferred");
+                        break;
+                    }
+                    Err(msb_krun::backends::net::ReadError::NothingRead) => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(error) => panic!("read guest frame: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("published traffic did not resume after activation");
+    });
+}
+
+#[tokio::test]
+async fn published_port_bind_failure_reports_endpoint() {
+    for blocked_protocol in [PortProtocol::Tcp, PortProtocol::Udp] {
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let outgoing = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        let udp_blocker = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        // A connected but non-listening TCP socket must also refuse publication.
+        let blocked = match blocked_protocol {
+            PortProtocol::Tcp => outgoing.local_addr().unwrap(),
+            PortProtocol::Udp => udp_blocker.local_addr().unwrap(),
+        };
+        let mut config = NetworkConfig::default();
+        config.tls.enabled = false;
+        config.policy = NetworkPolicy::allow_all();
+        config.ports.push(PublishedPort {
+            host_port: blocked.port(),
+            guest_port: 8000,
+            protocol: blocked_protocol,
+            host_bind: blocked.ip(),
+        });
+        let mut network = SmoltcpNetwork::build(
+            config.resolve(&EnvNetworkSecretResolver).unwrap(),
+            7,
+            microsandbox_types::DeploymentProfile::SingleTenant,
+            HostRoutes {
+                ipv4: false,
+                ipv6: false,
+            },
+        )
+        .unwrap();
+        let error = network
+            .start(tokio::runtime::Handle::current())
+            .expect_err("occupied published endpoint must fail startup");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(
+            error.to_string().contains(&blocked.to_string()),
+            "bind failure must identify the conflicting host endpoint: {error}",
+        );
+        let protocol = match blocked_protocol {
+            PortProtocol::Tcp => "TCP",
+            PortProtocol::Udp => "UDP",
+        };
+        assert!(
+            error.to_string().contains(protocol),
+            "bind failure must identify its protocol: {error}",
+        );
+    }
 }
 
 async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
@@ -141,7 +291,7 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
             sockets.add(socket)
         }
     };
-    network.start(tokio::runtime::Handle::current());
+    network.start(tokio::runtime::Handle::current()).unwrap();
     let client = tokio::spawn(async move {
         let client_ip = if bind.is_unspecified() {
             Ipv4Addr::LOCALHOST.into()

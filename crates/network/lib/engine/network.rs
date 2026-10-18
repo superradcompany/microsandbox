@@ -28,6 +28,7 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
@@ -146,7 +147,7 @@ pub struct MetricsHandle {
     shared: Arc<SharedState>,
 }
 
-/// One-shot handle that permits a deferred network stack to publish listeners and process traffic.
+/// One-shot handle that permits a deferred network stack to forward traffic.
 #[derive(Clone)]
 pub struct NetworkActivationHandle {
     gate: Arc<NetworkActivationGate>,
@@ -347,11 +348,11 @@ impl SmoltcpNetwork {
         })
     }
 
-    /// Hold network processing and published-port creation behind an explicit one-shot gate.
+    /// Hold listener tasks and packet processing behind an explicit one-shot gate.
     ///
-    /// This must be selected before [`start`](Self::start). It is used by checkpoint restore so
-    /// ingress cannot reach the child until guest activation has completed. The gate is consumed
-    /// once at poll-thread startup and adds no checks to steady-state packet processing.
+    /// Host sockets are reserved before the gate is released, so bind failures can be
+    /// reported without enabling traffic. Checkpoint restore releases the gate only
+    /// after guest activation and local control endpoint publication.
     pub fn defer_activation(&mut self) -> NetworkActivationHandle {
         assert!(
             self.poll_handle.is_none(),
@@ -386,7 +387,10 @@ impl SmoltcpNetwork {
     ///
     /// Must be called before VM boot. Requires a tokio runtime handle for
     /// spawning proxy tasks, DNS resolution, and published port listeners.
-    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) {
+    ///
+    /// Reserve every requested host port before starting the thread. Binding failures
+    /// are returned synchronously, including when traffic activation is deferred.
+    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) -> std::io::Result<()> {
         let shared = self.shared.clone();
         let poll_config = PollLoopConfig {
             gateway_mac: self.gateway_mac,
@@ -397,16 +401,25 @@ impl SmoltcpNetwork {
             mtu: self.mtu as usize,
         };
         let config = self.config.config();
+        let port_publisher = {
+            let _entered = tokio_handle.enter();
+            PortPublisher::new(
+                &config.ports,
+                config.tcp_accept_queue_size.unwrap_or_default(),
+                config.max_inbound_tcp_connections,
+                self.guest_ipv4,
+                self.guest_ipv6,
+                self.gateway_ipv4,
+                self.gateway_ipv6,
+            )?
+        };
         let network_policy = config.policy.clone();
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
-        let published_ports = config.ports.clone();
         let strict = config.strict;
         let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
         let max_udp_connections = config.max_udp_connections;
-        let max_inbound_tcp_connections = config.max_inbound_tcp_connections;
-        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -425,12 +438,10 @@ impl SmoltcpNetwork {
                         platform_policy,
                         dns_config,
                         tls_state,
-                        published_ports,
+                        port_publisher,
                         strict,
                         max_tcp_connections,
                         max_udp_connections,
-                        tcp_accept_queue_size,
-                        max_inbound_tcp_connections,
                         tokio_handle,
                         secrets,
                         outbound_proxy,
@@ -438,6 +449,7 @@ impl SmoltcpNetwork {
                 })
                 .expect("failed to spawn smoltcp poll thread"),
         );
+        Ok(())
     }
 
     /// Take the `NetBackend` for `VmBuilder::net()`. One-shot.

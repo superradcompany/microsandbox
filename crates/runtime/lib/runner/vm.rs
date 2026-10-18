@@ -2724,8 +2724,9 @@ fn build_vm(
         if vm.checkpoint_restore.is_some() {
             network_activation_handle = Some(network.defer_activation());
         }
-
-        network.start(tokio_handle.clone());
+        network
+            .start(tokio_handle.clone())
+            .map_err(|error| RuntimeError::Custom(format!("publish network endpoints: {error}")))?;
 
         let guest_mac = network.guest_mac();
         let net_backend = network.take_backend();

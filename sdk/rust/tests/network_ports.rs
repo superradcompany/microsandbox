@@ -6,7 +6,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use microsandbox::{NetworkPolicy, Sandbox};
+use microsandbox::{MicrosandboxError, MicrosandboxResult, NetworkPolicy, Sandbox, Snapshot};
 use test_utils::msb_test;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -29,6 +29,133 @@ async fn stop_and_remove(name: &str) {
     let handle = Sandbox::get(name).await.expect("get");
     handle.stop().await.expect("stop");
     let _ = Sandbox::remove(name).await;
+}
+
+async fn remove_bind_test_sandbox(name: &str) {
+    match Sandbox::get(name).await {
+        Ok(handle) => {
+            // Failed startup may already have stopped the runtime.
+            let _ = handle.stop().await;
+            Sandbox::remove(name)
+                .await
+                .expect("remove owned test sandbox");
+        }
+        Err(MicrosandboxError::SandboxNotFound(_)) => {}
+        Err(error) => panic!("query owned test sandbox: {error}"),
+    }
+}
+
+fn assert_bind_refused(result: MicrosandboxResult<Sandbox>, protocol: &str, address: SocketAddr) {
+    let error = result
+        .err()
+        .expect("occupied published port unexpectedly became ready");
+    let message = error.to_string();
+    assert!(
+        message.contains(protocol),
+        "missing protocol in startup error: {message}"
+    );
+    assert!(
+        message.contains(&address.to_string()),
+        "missing host endpoint in startup error: {message}"
+    );
+}
+
+/// A successful guest boot must not hide host publication failures.
+#[msb_test]
+async fn occupied_published_ports_refuse_cold_startup() {
+    let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    for (protocol, address) in [
+        ("TCP", tcp.local_addr().unwrap()),
+        ("UDP", udp.local_addr().unwrap()),
+    ] {
+        let name = format!("port-bind-{:016x}", rand::random::<u64>());
+        let builder = Sandbox::builder(&name)
+            .image("mirror.gcr.io/library/alpine")
+            .cpus(1)
+            .memory(256);
+        let result = if protocol == "TCP" {
+            builder.port(address.port(), 8000).create().await
+        } else {
+            builder.port_udp(address.port(), 8000).create().await
+        };
+        remove_bind_test_sandbox(&name).await;
+        assert_bind_refused(result, protocol, address);
+    }
+}
+
+/// Restore must reserve the destination ports before exposing a ready child.
+#[msb_test]
+async fn occupied_published_ports_refuse_full_restore() {
+    let source_name = format!("port-source-{:016x}", rand::random::<u64>());
+    let tcp = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let free_port = reserve_tcp_port().await;
+    let captured = async {
+        let source = Sandbox::builder(&source_name)
+            .image("mirror.gcr.io/library/alpine")
+            .cpus(1)
+            .memory(256)
+            .create()
+            .await?;
+        let output = source
+            .shell("printf 'publication-state' > /tmp/port-state")
+            .await?;
+        if !output.status().success {
+            return Err(MicrosandboxError::Io(std::io::Error::other(
+                "prepare snapshot state",
+            )));
+        }
+        Snapshot::builder("port-publication")
+            .from_sandbox(&source_name)
+            .full()
+            .create()
+            .await
+    }
+    .await;
+    remove_bind_test_sandbox(&source_name).await;
+    let snapshot = captured.expect("capture Full snapshot");
+    let mut outcomes = Vec::new();
+    for (protocol, address) in [
+        ("TCP", tcp.local_addr().unwrap()),
+        ("UDP", udp.local_addr().unwrap()),
+    ] {
+        let name = format!("port-restore-{:016x}", rand::random::<u64>());
+        let builder = Sandbox::restore_ref(snapshot.reference())
+            .name(&name)
+            .network_policy(NetworkPolicy::allow_all());
+        let result = if protocol == "TCP" {
+            builder.port(address.port(), 8000).restore().await
+        } else {
+            builder.port_udp(address.port(), 8000).restore().await
+        };
+        remove_bind_test_sandbox(&name).await;
+        outcomes.push((result, protocol, address));
+    }
+    let restored_name = format!("port-free-{:016x}", rand::random::<u64>());
+    let success = async {
+        let restored = Sandbox::restore_ref(snapshot.reference())
+            .name(&restored_name)
+            .network_policy(NetworkPolicy::allow_all())
+            .port(free_port, 8000)
+            .restore()
+            .await?;
+        let output = restored.shell("cat /tmp/port-state").await?;
+        let stream = TcpStream::connect((Ipv4Addr::LOCALHOST, free_port)).await?;
+        drop(stream);
+        Ok::<_, MicrosandboxError>(output)
+    }
+    .await;
+    remove_bind_test_sandbox(&restored_name).await;
+    Snapshot::remove_ref(snapshot.reference(), false)
+        .await
+        .expect("remove test snapshot");
+    for (result, protocol, address) in outcomes {
+        assert_bind_refused(result, protocol, address);
+    }
+    let output = success.expect("restore to an available port");
+    assert!(output.status().success);
+    assert_eq!(output.stdout().unwrap(), "publication-state");
 }
 
 #[msb_test]
