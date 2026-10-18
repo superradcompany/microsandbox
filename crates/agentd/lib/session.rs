@@ -22,7 +22,6 @@ use microsandbox_protocol::transport::ClientIncarnation;
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
-use crate::exec_output::OutputWindow;
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
 use crate::serial::InputCharge;
@@ -157,10 +156,6 @@ pub struct ExecSession {
 
     /// Accepted input stays ordered, including EOF, while a pipe or PTY backpressures.
     pending_stdin: VecDeque<PendingStdin>,
-
-    output_window: Option<Arc<OutputWindow>>,
-    stdin_consumed: u64,
-    stdin_credit_sent: u64,
 }
 
 #[derive(Debug)]
@@ -696,23 +691,6 @@ impl ExecSession {
         }
     }
 
-    /// Return output capacity without waiting for the output reader.
-    pub(crate) fn acknowledge_output(&self, consumed: u64) -> AgentdResult<()> {
-        if let Some(window) = &self.output_window {
-            window.acknowledge(consumed)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn take_stdin_credit(&mut self) -> Option<u64> {
-        if self.output_window.is_some() && self.stdin_consumed != self.stdin_credit_sent {
-            self.stdin_credit_sent = self.stdin_consumed;
-            Some(self.stdin_consumed)
-        } else {
-            None
-        }
-    }
-
     /// Returns the PID of the spawned process (as u32 for the protocol).
     pub fn pid(&self) -> u32 {
         self.process_identity.pid() as u32
@@ -772,15 +750,9 @@ impl ExecSession {
                 return Ok(());
             }
             match self.try_write_stdin(&data) {
-                Ok(count) if count == data.len() => {
-                    self.stdin_consumed += count as u64;
-                    return Ok(());
-                }
+                Ok(count) if count == data.len() => return Ok(()),
                 Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(count) => {
-                    self.stdin_consumed += count as u64;
-                    written = count;
-                }
+                Ok(count) => written = count,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error),
             }
@@ -800,9 +772,6 @@ impl ExecSession {
     /// The restored process no longer has a host-side stdin owner. Drain everything accepted
     /// before the cut, then close pipe input. A PTY has no separate write half to close safely.
     pub(crate) fn detach_stdin(&mut self) {
-        if let Some(window) = self.output_window.take() {
-            window.detach();
-        }
         if self.stdin.is_none() {
             return;
         }
@@ -848,7 +817,6 @@ impl ExecSession {
                         .front_mut()
                         .expect("polled pending input");
                     pending.written += count;
-                    self.stdin_consumed += count as u64;
                     if pending.written == pending.data.len() {
                         self.pending_stdin.pop_front();
                     }
@@ -919,7 +887,6 @@ impl ExecSession {
         process_manager: &Arc<ProcessManager>,
         workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
-        let output_window = OutputWindow::new(req.output_window)?;
         let pty = pty::openpty(None, None)?;
         let err_pipe = new_exec_error_pipe()?;
 
@@ -1132,13 +1099,7 @@ impl ExecSession {
         })?;
 
         // Spawn background reader task.
-        tokio::spawn(pty_reader_task(
-            id,
-            reader_fd,
-            exit_watcher,
-            tx,
-            output_window.clone(),
-        ));
+        tokio::spawn(pty_reader_task(id, reader_fd, exit_watcher, tx));
 
         Ok(Self {
             process_identity,
@@ -1146,9 +1107,6 @@ impl ExecSession {
             pty_master: Some(pty_master),
             stdin: None,
             pending_stdin: VecDeque::new(),
-            output_window,
-            stdin_consumed: 0,
-            stdin_credit_sent: 0,
         })
     }
 
@@ -1162,7 +1120,6 @@ impl ExecSession {
         process_manager: &Arc<ProcessManager>,
         workload_placement: Option<WorkloadPlacement>,
     ) -> AgentdResult<Self> {
-        let output_window = OutputWindow::new(req.output_window)?;
         let mut cmd = Command::new(&req.cmd);
         cmd.args(&req.args)
             .stdin(Stdio::piped())
@@ -1238,14 +1195,7 @@ impl ExecSession {
             })?;
 
         // Spawn background reader task.
-        tokio::spawn(pipe_reader_task(
-            id,
-            stdout,
-            stderr,
-            exit_watcher,
-            tx,
-            output_window.clone(),
-        ));
+        tokio::spawn(pipe_reader_task(id, stdout, stderr, exit_watcher, tx));
 
         Ok(Self {
             process_identity,
@@ -1253,9 +1203,6 @@ impl ExecSession {
             pty_master: None,
             stdin,
             pending_stdin: VecDeque::new(),
-            output_window,
-            stdin_consumed: 0,
-            stdin_credit_sent: 0,
         })
     }
 }
@@ -1266,9 +1213,6 @@ impl ExecSession {
 
 impl Drop for ExecSession {
     fn drop(&mut self) {
-        if let Some(window) = &self.output_window {
-            window.close();
-        }
         // The registration deliberately outlives the direct child so signals
         // can still reach descendants while their output is being drained.
         self.process_manager.release(self.process_identity);
@@ -1791,7 +1735,6 @@ async fn pty_reader_task(
     master_fd: OwnedFd,
     exit_watcher: ProcessExitWatcher,
     tx: SessionOutputSender,
-    output_window: Option<Arc<OutputWindow>>,
 ) {
     let tx_output = tx.clone();
     let runtime_handle = tokio::runtime::Handle::current();
@@ -1810,11 +1753,6 @@ async fn pty_reader_task(
             if n > 0 {
                 let n = n as usize;
                 let sent = runtime_handle.block_on(async {
-                    if let Some(window) = &output_window
-                        && !window.acquire(n).await
-                    {
-                        return false;
-                    }
                     let Some(permit) = tx_output.reserve(n).await else {
                         return false;
                     };
@@ -1860,7 +1798,6 @@ async fn pipe_reader_task(
     stderr: Option<tokio::process::ChildStderr>,
     exit_watcher: ProcessExitWatcher,
     tx: SessionOutputSender,
-    output_window: Option<Arc<OutputWindow>>,
 ) {
     let mut stdout = stdout;
     let mut stderr = stderr;
@@ -1884,10 +1821,6 @@ async fn pipe_reader_task(
                         stdout_eof = true;
                     }
                     Ok(n) => {
-                        if let Some(window) = &output_window
-                            && !window.acquire(n).await {
-                            break;
-                        }
                         let Some(permit) = tx.reserve(n).await else {
                             break;
                         };
@@ -1916,10 +1849,6 @@ async fn pipe_reader_task(
                         stderr_eof = true;
                     }
                     Ok(n) => {
-                        if let Some(window) = &output_window
-                            && !window.acquire(n).await {
-                            break;
-                        }
                         let Some(permit) = tx.reserve(n).await else {
                             break;
                         };
@@ -2146,7 +2075,6 @@ mod tests {
 
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
             env: Vec::new(),
@@ -2291,7 +2219,6 @@ mod tests {
                 let _runtime = handle.enter();
                 let code = 20 + offset as i32;
                 let req = ExecRequest {
-                    output_window: None,
                     cmd: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), format!("exit {code}")],
                     env: Vec::new(),
@@ -2381,7 +2308,6 @@ mod tests {
     async fn run_single_pipe_spawn(id: u32, code: i32) {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), format!("exit {code}")],
             env: Vec::new(),
@@ -2547,7 +2473,6 @@ mod tests {
             for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
                 let (tx, mut rx) = SessionOutputSender::channel();
                 let req = ExecRequest {
-                    output_window: None,
                     cmd: std::env::current_exe().unwrap().to_str().unwrap().into(),
                     args: vec![
                         "--exact".into(),
@@ -2616,7 +2541,6 @@ mod tests {
     async fn test_pty_reader_drains_ready_fd() {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
@@ -2685,7 +2609,6 @@ mod tests {
     #[test]
     fn test_request_user_overrides_config_default() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2704,7 +2627,6 @@ mod tests {
     #[test]
     fn test_config_default_user_used_when_request_has_none() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2728,7 +2650,6 @@ mod tests {
     #[test]
     fn test_request_without_user_does_not_apply_user_switch() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2753,7 +2674,6 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_resolved_user_home() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2783,7 +2703,6 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_root_when_user_absent() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2808,7 +2727,6 @@ mod tests {
     #[test]
     fn test_default_home_dir_respects_explicit_home_env() {
         let req = ExecRequest {
-            output_window: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: vec!["HOME=/tmp/custom".to_string()],
@@ -2837,7 +2755,6 @@ mod tests {
     async fn test_spawn_pipe_error_does_not_include_probe_details() {
         let (tx, _rx) = SessionOutputSender::channel();
         let req = ExecRequest {
-            output_window: None,
             cmd: "/definitely/not/a/real/binary".to_string(),
             args: Vec::new(),
             env: Vec::new(),

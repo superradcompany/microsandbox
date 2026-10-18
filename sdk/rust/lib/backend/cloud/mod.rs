@@ -340,8 +340,6 @@ impl CloudBackendBuilder {
             None => Arc::new(BackendConfig::load()?),
         };
 
-        config.resolved_config().exec.validate()?;
-
         Ok(CloudBackend {
             url,
             api_key,
@@ -552,35 +550,6 @@ mod tests {
             String::from_utf8_lossy(&child.stderr),
         );
         fixture.server.await.expect("join test server");
-    }
-
-    #[test]
-    fn builder_validates_effective_exec_limit() {
-        for (user, managed, valid) in [
-            (serde_json::Value::Null, serde_json::json!({}), true),
-            (serde_json::json!(0), serde_json::json!({}), false),
-            (
-                serde_json::json!(0),
-                serde_json::json!({"exec":{"buffer_bytes":65536}}),
-                true,
-            ),
-            (
-                serde_json::json!(65536),
-                serde_json::json!({"exec":{"buffer_bytes":0}}),
-                false,
-            ),
-        ] {
-            let sources = BackendConfig::new(
-                serde_json::from_value(serde_json::json!({"exec":{"buffer_bytes":user}})).unwrap(),
-                serde_json::from_value(managed).unwrap(),
-            );
-            let result = CloudBackend::builder()
-                .url("https://example.com")
-                .api_key("test")
-                .config_sources(sources)
-                .build();
-            assert_eq!(result.is_ok(), valid);
-        }
     }
 
     #[test]

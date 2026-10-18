@@ -239,7 +239,6 @@ enum ControlOrder {
     TcpInputData(u32),
     TcpInputFinish(u32),
     TcpOutputCredit(u32),
-    ExecOutputCredit(u32),
     ClientFence { start: u32, end: u32 },
     GlobalFence,
 }
@@ -630,13 +629,6 @@ impl ControlWrite {
             MessageType::ExecSignal if message.payload::<ExecSignal>().is_ok() => {
                 self.order = ControlOrder::ExecSignal(id)
             }
-            MessageType::ExecOutputCredit
-                if message
-                    .payload::<microsandbox_protocol::exec::ExecOutputCredit>()
-                    .is_ok() =>
-            {
-                self.order = ControlOrder::ExecOutputCredit(id);
-            }
             MessageType::BulkFinish
                 if message.payload::<BulkFinish>().is_ok_and(|finish| {
                     finish.kind == BulkKind::Tcp && finish.flow == BulkFlow::HostToGuest
@@ -681,7 +673,6 @@ impl ControlOrder {
             // their end marker. Reordering only the credit breaks a full-duplex credit cycle;
             // input data and input finish still conflict with each other in their original FIFO.
             (Self::TcpInputData(_) | Self::TcpInputFinish(_), Self::TcpOutputCredit(_)) => false,
-            (Self::ExecInput(_), Self::ExecOutputCredit(_)) => false,
             (a, b) => a.id() == b.id(),
         }
     }
@@ -693,8 +684,7 @@ impl ControlOrder {
             | Self::ExecSignal(id)
             | Self::TcpInputData(id)
             | Self::TcpInputFinish(id)
-            | Self::TcpOutputCredit(id)
-            | Self::ExecOutputCredit(id) => id,
+            | Self::TcpOutputCredit(id) => id,
             Self::ClientFence { .. }
             | Self::GlobalFence
             | Self::ShutdownFence
@@ -9424,58 +9414,6 @@ mod tests {
                 credit_limit: microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
             },
         )
-    }
-
-    #[test]
-    fn exec_output_credit_passes_stalled_stdin_but_respects_creation_and_freeze() {
-        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
-        use microsandbox_protocol::exec::{ExecOutputCredit, ExecStdin};
-
-        let shared = workload_test_shared(4096, false);
-        let control = &shared.workload_control;
-        control
-            .restore(
-                WorkloadTransportPosition::default(),
-                WorkloadTransportCredit {
-                    control_bytes: 4096,
-                    control_frames: 16,
-                    ..Default::default()
-                },
-                0,
-            )
-            .unwrap();
-        let message =
-            Message::with_payload(MessageType::ExecStdin, 17, &ExecStdin { data: vec![1; 16] })
-                .unwrap();
-        let mut encoded = Vec::new();
-        codec::encode_to_buf(&message, &mut encoded).unwrap();
-        let mut input = ControlWrite::ordinary(Bytes::from(encoded), 17, true);
-        input.classify_message_order(17, None, Some(&message));
-        let credit = || {
-            ordered_tcp_metadata(
-                MessageType::ExecOutputCredit,
-                &ExecOutputCredit { consumed: 4096 },
-            )
-        };
-        let mut pending = VecDeque::from([
-            input,
-            ordered_tcp_metadata(MessageType::ExecRequest, &()),
-            credit(),
-        ]);
-        assert!(next_control_write(&mut pending, control).unwrap().is_none());
-        pending.remove(1);
-        let gate = control.gate();
-        assert!(next_control_write(&mut pending, control).unwrap().is_none());
-        gate.release();
-        assert!(matches!(
-            next_control_write(&mut pending, control)
-                .unwrap()
-                .unwrap()
-                .order,
-            ControlOrder::ExecOutputCredit(17)
-        ));
-        assert!(next_control_write(&mut pending, control).unwrap().is_none());
-        assert_eq!(pending.len(), 1);
     }
 
     #[test]

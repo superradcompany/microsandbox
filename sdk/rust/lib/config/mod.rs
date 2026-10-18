@@ -14,7 +14,6 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
-mod execution;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -44,8 +43,6 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use std::path::Path;
 
 pub(crate) mod runtime_paths;
-
-pub use execution::{ExecConfig, ExecConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -195,10 +192,6 @@ pub struct GlobalConfig {
     /// Registry authentication configuration.
     #[config_patch(nested)]
     pub registries: RegistriesConfig,
-
-    /// Unread execution-output buffering shared by CLI and SDK commands.
-    #[config_patch(nested)]
-    pub exec: ExecConfig,
 
     /// SSH session defaults.
     #[config_patch(nested)]
@@ -892,7 +885,6 @@ mod tests {
                     "insecure": true
                 }}
             },
-            "exec": {"buffer_bytes": 1048576},
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},
             "snapshots": {"max_filesystem_state_mib": 64}

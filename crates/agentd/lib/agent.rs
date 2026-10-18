@@ -664,11 +664,6 @@ pub async fn run(
                     encode_stdin_error(id, &AgentdError::Io(error), &mut serial_out_buf)?;
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
-
-                if !inherited && let Some(session) = state.sessions.get_mut(&id) {
-                    encode_exec_stdin_credit(id, session, &mut serial_out_buf)?;
-                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
-                }
             }
             failure = process_manager_failure.changed() => {
                 let error = match failure {
@@ -2895,25 +2890,10 @@ async fn handle_message_with_charge(
             let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
                 return Ok(());
             };
-            if let Some(session) = state.sessions.get_mut(&msg.id) {
-                if let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take()) {
-                    encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
-                }
-                encode_exec_stdin_credit(msg.id, session, out_buf)?;
-            }
-        }
-
-        MessageType::ExecOutputCredit => {
-            let Some(credit) = decode_payload_or_core_error::<
-                microsandbox_protocol::exec::ExecOutputCredit,
-            >(&msg, out_buf)?
-            else {
-                return Ok(());
-            };
-            if let Some(session) = state.sessions.get(&msg.id)
-                && let Err(error) = session.acknowledge_output(credit.consumed)
+            if let Some(session) = state.sessions.get_mut(&msg.id)
+                && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
             {
-                eprintln!("rejected exec output credit for {}: {error}", msg.id);
+                encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
             }
         }
 
@@ -3436,22 +3416,6 @@ fn poll_pending_stdin(
         }
     }
     Poll::Pending
-}
-
-fn encode_exec_stdin_credit(
-    id: u32,
-    session: &mut ExecSession,
-    out_buf: &mut Vec<u8>,
-) -> AgentdResult<()> {
-    if let Some(consumed) = session.take_stdin_credit() {
-        let message = Message::with_payload(
-            MessageType::ExecStdinCredit,
-            id,
-            &microsandbox_protocol::exec::ExecStdinCredit { consumed },
-        )?;
-        codec::encode_to_buf(&message, out_buf)?;
-    }
-    Ok(())
 }
 
 fn encode_stdin_error(id: u32, error: &AgentdError, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
@@ -5860,7 +5824,6 @@ mod tests {
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
             let request = ExecRequest {
-                output_window: None,
                 cmd: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
@@ -6067,7 +6030,6 @@ mod tests {
             )
             .unwrap();
             let request = |script: &str| ExecRequest {
-                output_window: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 env: vec![],

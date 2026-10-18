@@ -1566,7 +1566,6 @@ pub(crate) fn build_exec_request(
         .collect();
 
     ExecRequest {
-        output_window: None,
         cmd,
         args,
         env,

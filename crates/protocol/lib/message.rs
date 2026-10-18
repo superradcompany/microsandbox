@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 9;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -235,14 +235,6 @@ pub enum MessageType {
     #[strum(serialize = "core.exec.signal")]
     ExecSignal,
 
-    /// Return consumed stdout/stderr window credit for a flow-controlled execution.
-    #[strum(serialize = "core.exec.output.credit")]
-    ExecOutputCredit,
-
-    /// Return stdin capacity after the child consumes piped input.
-    #[strum(serialize = "core.exec.stdin.credit")]
-    ExecStdinCredit,
-
     /// Host requests a filesystem operation.
     #[strum(serialize = "core.fs.request")]
     FsRequest,
@@ -400,7 +392,6 @@ impl MessageType {
             | Self::ExecFailed
             | Self::ExecResize
             | Self::ExecSignal => 1,
-            Self::ExecOutputCredit | Self::ExecStdinCredit => 10,
             Self::FsRequest | Self::FsResponse | Self::FsData => 2,
             Self::CoreError => 5,
             Self::Ping | Self::Pong | Self::Touch | Self::Touched => 6,

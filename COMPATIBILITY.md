@@ -87,18 +87,6 @@ Sources and checks:
 
 Required review should include golden encoded payload bytes when serialization changes. Schema snapshots protect the protocol inventory, but they do not freeze every payload's encoded representation.
 
-### Execution output backpressure
-
-Buffering is unlimited by default (`exec.buffer_bytes: null`). A configured limit
-enables generation-10 output credit. The new SDK negotiates
-support before including `output_window` or sending `core.exec.output.credit`.
-Older guests continue to receive the unchanged execution request and produce
-unthrottled output; the SDK warns only when a configured limit cannot apply to
-that connection. Older SDKs omit the window and retain their original behavior with
-new guests. No existing sandbox must restart, and no launcher, disk, catalog, or
-snapshot format changes. A new agent running behind an independently older relay
-needs separate validation because input-credit scheduling is relay-owned.
-
 ## 2. Bootstrap, Init, and Guest Runtime Contract
 
 The first current-protocol host frame is `core.bootstrap` with message ID zero and no flags. The guest then reports resolved init state, the relay installs identity mappings, the host acknowledges init, and only then may the guest become ready.

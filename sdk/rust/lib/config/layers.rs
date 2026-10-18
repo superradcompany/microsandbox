@@ -148,8 +148,6 @@ impl BackendConfig {
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
         resolved.validate_snapshots()?;
-        resolved.exec.validate()?;
-
         self.resolved = OnceLock::from(Arc::new(resolved));
         Ok(self)
     }
@@ -317,60 +315,6 @@ mod tests {
             ))
         );
         assert_eq!(std::fs::read(&user).unwrap(), before);
-    }
-
-    #[test]
-    fn exec_buffer_validates_after_managed_overrides() {
-        for (user, managed, expected) in [
-            ("{}", "{}", serde_json::Value::Null),
-            (
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                "{}",
-                serde_json::Value::Null,
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":65536}}"#,
-                "{}",
-                serde_json::json!(65536),
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":0}}"#,
-                r#"{"exec":{"buffer_bytes":1048576}}"#,
-                serde_json::json!(1048576),
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":1048576}}"#,
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                serde_json::Value::Null,
-            ),
-            (
-                r#"{"exec":{"buffer_bytes":null}}"#,
-                r#"{"exec":{"buffer_bytes":65536}}"#,
-                serde_json::json!(65536),
-            ),
-        ] {
-            let layers = BackendConfig::new(
-                serde_json::from_str(user).unwrap(),
-                serde_json::from_str(managed).unwrap(),
-            )
-            .prepare_for_local_backend(Default::default())
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(&layers.resolved_config().exec).unwrap()["buffer_bytes"],
-                expected,
-                "user={user}, managed={managed}",
-            );
-        }
-
-        for limit in [0, 65535] {
-            let user =
-                serde_json::from_value(serde_json::json!({"exec":{"buffer_bytes":limit}})).unwrap();
-            assert!(
-                BackendConfig::new(user, Default::default())
-                    .prepare_for_local_backend(Default::default())
-                    .is_err()
-            );
-        }
     }
 
     #[test]

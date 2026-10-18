@@ -6,24 +6,6 @@ icon: "terminal"
 
 Run commands, read their output, and check exit codes without SSH. Execution uses a dedicated host-to-guest channel, so it works even with networking disabled.
 
-## Slow output readers
-
-Output buffering is unlimited by default. With a limit set, a full buffer makes
-the guest agent stop reading stdout and stderr. Once the guest pipe buffers also
-fill, further writes block until you consume output; other threads can continue.
-Nonblocking writes may return `EAGAIN` instead. Output is preserved.
-
-Read output while the command runs; waiting for a completion marker first can
-leave it blocked.
-
-Collecting all output drains the stream but uses memory proportional to the total
-output. To let a command finish without an active reader, redirect its output to
-a file. This behavior applies to SDK, CLI, and SSH execution; see
-[`exec.buffer_bytes`](/configuration#exec) for configuration and compatibility.
-
-With a limit enabled, send large stdin input and read output concurrently to
-avoid blocking the command in both directions.
-
 ## Run the image default workload
 
 Sandbox creation is boot-only: configuring an image, ENTRYPOINT, or CMD does not execute that workload. Use the default-workload methods when you want the SDK to resolve the effective OCI `ENTRYPOINT + CMD` and run it. A configured CMD override replaces the image CMD while preserving the effective entrypoint. If neither field supplies an executable, these methods return the typed `NoDefaultCommand` error instead of falling back to a shell.
