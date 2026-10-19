@@ -172,15 +172,25 @@ async fn published_port_bind_failure_reports_endpoint() {
             PortProtocol::Tcp => outgoing.local_addr().unwrap(),
             PortProtocol::Udp => udp_blocker.local_addr().unwrap(),
         };
+        let tcp_reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let udp_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let tcp_address = tcp_reservation.local_addr().unwrap();
+        let udp_address = udp_reservation.local_addr().unwrap();
         let mut config = NetworkConfig::default();
         config.tls.enabled = false;
         config.policy = NetworkPolicy::allow_all();
-        config.ports.push(PublishedPort {
-            host_port: blocked.port(),
-            guest_port: 8000,
-            protocol: blocked_protocol,
-            host_bind: blocked.ip(),
-        });
+        for (address, protocol) in [
+            (tcp_address, PortProtocol::Tcp),
+            (udp_address, PortProtocol::Udp),
+            (blocked, blocked_protocol),
+        ] {
+            config.ports.push(PublishedPort {
+                host_port: address.port(),
+                guest_port: 8000,
+                protocol,
+                host_bind: address.ip(),
+            });
+        }
         let mut network = SmoltcpNetwork::build(
             config.resolve(&EnvNetworkSecretResolver).unwrap(),
             7,
@@ -191,9 +201,16 @@ async fn published_port_bind_failure_reports_endpoint() {
             },
         )
         .unwrap();
+        // Keep the free endpoints owned until the synchronous bind attempt.
+        // No await occurs before rebind; failed start spawns no poll thread.
+        drop((tcp_reservation, udp_reservation));
         let error = network
             .start(tokio::runtime::Handle::current())
             .expect_err("occupied published endpoint must fail startup");
+        let _tcp_rebound = std::net::TcpListener::bind(tcp_address)
+            .expect("rebind TCP prefix after failed startup");
+        let _udp_rebound =
+            std::net::UdpSocket::bind(udp_address).expect("rebind UDP prefix after failed startup");
         assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
         assert!(
             error.to_string().contains(&blocked.to_string()),
