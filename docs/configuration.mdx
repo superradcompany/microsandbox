@@ -10,22 +10,32 @@ arguments, and SDK inputs, start with [Configuration](/operations/configuration)
 
 microsandbox reads user configuration from `~/.microsandbox/config.json`, or `MSB_CONFIG_PATH` when set. All fields are optional. A missing file or empty JSON object adds no user overrides; defaults and managed settings still apply.
 
-Newly saved user files include `"version": 1`. An omitted version defaults to `1`; invalid or unsupported versions are rejected.
-
-In Rust, `GlobalConfigPatch::load()` reads saved user settings and `.save()` writes them without filling in defaults. Omitted fields remain omitted, and explicit clears are preserved. Unknown user fields are ignored on load and discarded on save. `GlobalConfig` holds resolved settings after layering; use `LocalBackend::config()` to read the effective backend configuration.
-
-## Managed configuration
-
-Administrators can enforce these same fields using a protected `managed.json` file with the shape `{ "version": 1, "overrides": { ... } }`. Supplied managed values take precedence over ordinary user settings and CLI/SDK options. The user and managed files have independent schema versions, each defaulting to `1` when omitted. Managed values are not automatically saved into the user file.
-
-See [Managed deployment](/enterprise/managed-configuration) for deployment, precedence, clearing, and updates. This page remains the reference for individual fields and accepted values.
-
 ## Reference example
 
-Relative host paths stored in this file resolve from the file's directory, including `home`, `paths.*`, and `registries.ca_certs`. For example, `/etc/microsandbox/config.json` containing `"ca_certs": "./company.pem"` selects `/etc/microsandbox/company.pem`, regardless of the caller's working directory. This intentionally replaces the previous working-directory-relative interpretation. Use an absolute path to keep a location elsewhere. Programmatic SDK paths and environment defaults are captured relative to the caller's working directory when the backend is constructed. Guest paths, such as `sandbox_defaults.workdir`, are unaffected.
+Set only the values you want to override. For example, give new sandboxes two CPUs and 1 GiB of memory:
+
+<CodeGroup>
+```json JSON
+{
+  "sandbox_defaults": {
+    "cpus": 2,
+    "memory_mib": 1024
+  }
+}
+```
+</CodeGroup>
+
+<Accordion title="How relative paths are resolved">
+
+Relative host paths stored in this file resolve from the file's directory, including `home`, `paths.*`, and `registries.ca_certs`. For example, `/etc/microsandbox/config.json` containing `"ca_certs": "./company.pem"` selects `/etc/microsandbox/company.pem`, regardless of the caller's working directory. This intentionally replaces the previous working-directory-relative interpretation.
+
+Use an absolute path to keep a location elsewhere. Programmatic SDK paths and environment defaults are captured relative to the caller's working directory when the backend is constructed. Guest paths, such as `sandbox_defaults.workdir`, are unaffected.
+
+</Accordion>
 
 <Accordion title="Full example">
-```json
+<CodeGroup>
+```json JSON
 {
   "home": "/custom/path/.microsandbox",
   "log_level": "info",
@@ -119,7 +129,22 @@ Relative host paths stored in this file resolve from the file's directory, inclu
   }
 }
 ```
+</CodeGroup>
 </Accordion>
+
+<Accordion title="Schema version">
+
+Newly saved user files include `"version": 1`. An omitted version defaults to `1`; invalid or unsupported versions are rejected.
+
+For reading and saving configuration programmatically, see the [Rust configuration reference](/sdk/rust/configuration#globalconfigpatch).
+
+</Accordion>
+
+## Managed configuration
+
+Administrators can enforce these same fields using a protected `managed.json` file with the shape `{ "version": 1, "overrides": { ... } }`. Supplied managed values take precedence over ordinary user settings and CLI/SDK options. The user and managed files have independent schema versions, each defaulting to `1` when omitted. Managed values are not automatically saved into the user file.
+
+See [Managed deployment](/enterprise/managed-configuration) for deployment, precedence, clearing, and updates. This page remains the reference for individual fields and accepted values.
 
 ## Top-level fields
 
@@ -145,13 +170,15 @@ Relative host paths stored in this file resolve from the file's directory, inclu
 
 Set `deployment_profile` when the local host must enforce one deployment policy for every sandbox:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "deployment_profile": "multi-tenant"
 }
 ```
+</CodeGroup>
 
-`single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. The configured value is authoritative on create and restart, so a per-sandbox CLI or SDK option cannot weaken or replace it. A programmatic `LocalBackendBuilder::deployment_profile()` override takes precedence over the file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
+`single-tenant` preserves the network configuration requested by each sandbox. `multi-tenant` applies the host-runtime isolation floor for shared infrastructure. The configured value is authoritative on create and restart, so a per-sandbox CLI or SDK option cannot weaken or replace it. A [programmatic backend override](/sdk/rust/configuration#deployment_profile) takes precedence over the user file. When the field is absent or `null`, each sandbox selects its own profile and defaults to `single-tenant`.
 
 The parser also accepts the internal wire spellings `single_tenant` and `multi_tenant` for compatibility, but the kebab-case values above are canonical in this human-edited file.
 
@@ -188,36 +215,9 @@ On Windows, the default `home` is `%USERPROFILE%\.microsandbox`. JSON strings ca
 
 Runtime path settings are captured during local backend construction, with managed paths taking precedence. Existing backend handles keep their settings until replaced.
 
-### Rust SDK path helpers
+<span id="rust-sdk-path-helpers" />
 
-Rust callers can inspect the active config and resolve runtime paths with the same precedence used by sandbox startup:
-
-```rust
-let cfg = microsandbox::config::config()?;
-let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
-let msb = &runtime.msb_path;
-let libkrunfw = &runtime.libkrunfw_path;
-```
-
-When your code owns an explicit local backend, prefer the backend-owned config:
-
-```rust
-use microsandbox::LocalBackend;
-
-let backend = LocalBackend::builder()
-    .home("/tmp/msb-home")
-    .build()
-    .await?;
-
-let cfg = backend.config();
-let runtime = microsandbox::setup::resolve_runtime(&cfg)?;
-```
-
-`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
-
-`LocalBackendBuilder::build_lazy()` now returns `Result<LocalBackend>`. It replaces `try_build_lazy()`, and `LocalBackend` no longer implements `Default`; use `LocalBackend::lazy()?` instead.
-
-For a long-lived process, construct a new backend to pick up configuration changes. Installing it with `set_default_backend` affects future operations; existing sandbox and volume handles retain their original backend. Construct the replacement successfully before installing it.
+For programmatic access, see the [Rust configuration reference](/sdk/rust/configuration#runtime-paths).
 
 ## `ssh`
 
@@ -227,19 +227,17 @@ For a long-lived process, construct a new backend to pick up configuration chang
 
 The timeout applies to host-side SSH sessions created by `msb ssh`, `msb ssh serve`, and the SDK, for both local and cloud sandboxes. SSH traffic resets the timer. This setting is separate from a sandbox lifecycle idle timeout: disconnecting SSH does not stop the sandbox, and sandbox activity policy does not change the SSH timeout.
 
-Explicit CLI or SDK options override the user-configured value; a managed timeout takes precedence over both. The setting is resolved when a client or server endpoint is prepared using the backend's retained configuration, so file changes do not alter existing connections. Programmatic local backends can override the persisted value with `LocalBackendBuilder::ssh_inactivity_timeout_secs()`.
+<Accordion title="SSH precedence and configuration lifetime">
+
+Explicit CLI or SDK options override the user-configured value; a managed timeout takes precedence over both. The setting is resolved when a client or server endpoint is prepared using the backend's retained configuration, so file changes do not alter existing connections. Programmatic local backends can [override the persisted timeout](/sdk/rust/configuration#ssh_inactivity_timeout_secs).
+
+</Accordion>
 
 ## `sandbox_defaults`
 
 <Tooltip tip="Sandbox settings are applied to local and cloud create requests. Cloud rejects unsupported options such as outbound proxies and custom metrics sampling."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Defaults applied to sandboxes unless overridden per-sandbox.
-
-Explicit CLI or SDK options win over `config.json`, and managed overrides take precedence over both. microsandbox resolves the effective values before creating a local sandbox or sending a cloud create request. Cloud creation rejects sandbox options it cannot represent. File changes apply after constructing a new backend or starting a new CLI invocation; they do not rewrite existing sandboxes.
-
-Rust applications can use [`SandboxBuilder::overlay`](/sdk/rust/sandbox#sandbox-overlay) to add sparse per-sandbox values. Local creation resolves built-in defaults < image defaults < `config.json` < CLI/SDK patches < managed overrides after image metadata is available. Cloud creation applies user settings, request options, and managed overrides on the client; the cloud worker resolves image metadata.
-
-For local `workdir`, omission inherits the lower layer and explicit `null` clears it, including an image working directory. A concrete Rust `SandboxConfig` with `workdir: None` is treated as omitted. Local CPU and memory maxima remain explicit when supplied; otherwise they follow the final size. Cloud supports no separate hotplug maximum: a supplied maximum equal to the requested size follows the final size. A maximum that differs from the final size is rejected.
 
 For workload effects, host requirements, filesystem expectations, and verification steps for these settings, see [Performance](/sandboxes/optimization).
 
@@ -257,7 +255,25 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
-An ordinary `outbound_proxy` default can be overridden per sandbox. A managed value takes precedence over CLI/SDK proxy options; managed `null` clears them. The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`; SOCKS5 accepts `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`. Passwords are resolved at sandbox startup. Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
+<Accordion title="Precedence, explicit clears, and backend differences">
+
+Explicit CLI or SDK options win over `config.json`, and managed overrides take precedence over both. microsandbox resolves the effective values before creating a local sandbox or sending a cloud create request. Cloud creation rejects sandbox options it cannot represent. File changes apply after constructing a new backend or starting a new CLI invocation; they do not rewrite existing sandboxes.
+
+Local creation resolves built-in defaults < image defaults < `config.json` < CLI/SDK patches < managed overrides after image metadata is available. Cloud creation applies user settings, request options, and managed overrides on the client; the cloud worker resolves image metadata.
+
+For local `workdir`, omission inherits the lower layer and explicit `null` clears it, including an image working directory. Local CPU and memory maxima remain explicit when supplied; otherwise they follow the final size. Cloud supports no separate hotplug maximum: a supplied maximum equal to the requested size follows the final size. A maximum that differs from the final size is rejected.
+
+</Accordion>
+
+<Accordion title="Proxy credentials and managed overrides">
+
+An ordinary `outbound_proxy` default can be overridden per sandbox. A managed value takes precedence over CLI/SDK proxy options; managed `null` clears them.
+
+The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`; SOCKS5 accepts `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`. Passwords are resolved at sandbox startup.
+
+Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
+
+</Accordion>
 
 ### `sandbox_defaults.oci`
 
@@ -289,7 +305,15 @@ Placement profiles let an operator define safe host topology policy once while c
 
 This release does not enable multi-node guest placement. `prefer_single` falls back to inherited host NUMA behavior when one node cannot fit. `strict_single` fails clearly because it is an explicit guarantee.
 
-`follow_cpu` requires managed CPU placement (`auto`, `spread`, or `compact`). Linux prefers the selected node for ordinary profiles and allows memory to spill elsewhere under pressure; `strict_single` uses a required binding instead. If CPUs span nodes, capacity is already insufficient, or the kernel rejects a best-effort affinity or memory-policy syscall, an ordinary profile starts with inherited memory placement. Windows keeps ordinary memory inherited because its preferred-node allocation cannot be undone if a later vCPU affinity attempt falls back; `strict_single` can still request required preferred-node allocation. Windows checks current boot-time availability, but does not expose equivalent per-node total capacity for a hard future-growth promise. macOS inherits ordinary CPU and memory scheduling for non-strict profiles because it has no equivalent hard-affinity API.
+<Accordion title="Platform behavior and placement fallbacks">
+
+`follow_cpu` requires [managed CPU placement](/sandboxes/optimization#policies); it cannot use inherited placement. Linux prefers the selected node for ordinary profiles and allows memory to spill elsewhere under pressure; `strict_single` uses a required binding instead. If CPUs span nodes, capacity is already insufficient, or the kernel rejects a best-effort affinity or memory-policy syscall, an ordinary profile starts with inherited memory placement.
+
+Windows keeps ordinary memory inherited because its preferred-node allocation cannot be undone if a later vCPU affinity attempt falls back; `strict_single` can still request required preferred-node allocation. Windows checks current boot-time availability, but does not expose equivalent per-node total capacity for a hard future-growth promise.
+
+macOS inherits ordinary CPU and memory scheduling for non-strict profiles because it has no equivalent hard-affinity API.
+
+</Accordion>
 
 ### `runtime.block_writeback`
 
@@ -301,7 +325,8 @@ This release does not enable multi-node guest placement. `prefer_single` falls b
 
 Use a fixed policy only when representative measurements justify a different per-disk window:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "runtime": {
     "block_writeback": {
@@ -312,10 +337,15 @@ Use a fixed policy only when representative measurements justify a different per
   }
 }
 ```
+</CodeGroup>
+
+<Accordion title="Pool sharing and live writeback behavior">
 
 `pool_mib` is a live pressure budget, not eagerly allocated RAM. Every eligible writable disk in the same `MSB_HOME` receives a weighted max-min fair share. Disks with a smaller configured maximum keep that smaller value, and the remaining pool is divided equally across the rest. Creating another sandbox never fails merely because this pool is full.
 
 Existing VMMs observe membership changes within 250 ms. If a disk already owns more dirty data than its new share, libkrun retires accounted ranges and pauses later writes until it converges below the target. A guest write already reserved before the target changed completes safely. `fixed` and an explicitly pooled `auto` policy are unsupported on other hosts.
+
+</Accordion>
 
 See the [performance guide](/sandboxes/optimization) for choosing and measuring runtime settings.
 
@@ -332,7 +362,8 @@ See the [performance guide](/sandboxes/optimization) for choosing and measuring 
 
 A map of registry hostnames to settings. Each host entry can mark the registry as insecure (plain HTTP) and can include an `auth` entry. Each auth entry specifies a username and exactly **one** credential source.
 
-```json
+<CodeGroup>
+```json JSON
 {
   "registries": {
     "hosts": {
@@ -353,6 +384,7 @@ A map of registry hostnames to settings. Each host entry can mark the registry a
   }
 }
 ```
+</CodeGroup>
 
 #### Host entry fields
 
@@ -376,7 +408,11 @@ A map of registry hostnames to settings. Each host entry can mark the registry a
 
 ### Auth resolution order
 
+<Accordion title="Managed registry credentials and certificates">
+
 Managed registry hosts merge by field. Setting `insecure: false` enforces TLS while preserving employee credentials. Omitted `auth` keeps the normal credential lookup and CLI/SDK credentials; explicit `auth: null` forces anonymous access. A managed `auth` object replaces credentials, including explicit CLI/SDK credentials. A managed `registries.ca_certs` path replaces user and per-call certificates; `null` clears them. Without a managed certificate setting, per-call certificates append to user certificates.
+
+</Accordion>
 
 For local pulls without managed `auth`, microsandbox resolves credentials in this order, including when a managed host entry only sets TLS options:
 
@@ -402,9 +438,11 @@ For local pulls without managed `auth`, microsandbox resolves credentials in thi
 
 This limit applies per filesystem device during capture, verification, export, import, restore, and live forks.
 
-- **After changing it:** restart running sandboxes to update their capture limit. Host snapshot checks use the new limit immediately, so lowering it can reject captures from sandboxes still using a larger limit.
-- **When reading snapshots:** allow enough space for each device's saved state. The reader does not need to match the capture host's maximum. A smaller limit rejects oversized state before making changes.
-- **Before raising it:** consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
+After changing it, restart running sandboxes to update their capture limit. Host snapshot checks use the new limit immediately, so lowering it can reject captures from sandboxes still using a larger limit.
+
+When reading snapshots, allow enough space for each device's saved state. The reader does not need to match the capture host's maximum. A smaller limit rejects oversized state before making changes.
+
+Before raising it, consider memory use, especially when restoring imported snapshots. Raise it only for snapshots you trust.
 
 ## `profiles`
 

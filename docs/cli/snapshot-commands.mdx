@@ -18,9 +18,11 @@ Local selectors accept a group head, `group:member`, an unambiguous ID or digest
 
 Capture disk state. Add `--full` to include memory and running processes.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap create ready --sandbox worker
 ```
+</CodeGroup>
 
 | Argument / flag | Description |
 | --- | --- |
@@ -42,11 +44,13 @@ Local disk capture accepts running, paused, stopped, or crashed sources. Cloud r
 
 <Accordion title="Examples">
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap create snap --sandbox worker --full
 msb snap create ready --sandbox worker --integrity
 msb snap create ready --sandbox worker -o ready.msb
 ```
+</CodeGroup>
 
 </Accordion>
 
@@ -58,9 +62,11 @@ Guest flushing is shared by the CLI and SDKs. See [guest flushing](/sandboxes/sn
 
 Restore a saved snapshot into a new sandbox. Disk snapshots boot fresh; full snapshots resume captured execution.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap restore worker:ready --name restored
 ```
+</CodeGroup>
 
 `--name` is required. See [restore options](/cli/sandbox-commands#msb-snap-restore) for memory sharing, disk-only restore, and resource bindings. Existing top-level `restore` commands remain supported.
 
@@ -70,10 +76,12 @@ msb snap restore worker:ready --name restored
 
 List snapshots. Use `--group` to filter a local group; it is unavailable on cloud.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap ls
 msb snap ls --group worker
 ```
+</CodeGroup>
 
 | Flag | Description |
 | --- | --- |
@@ -87,10 +95,12 @@ msb snap ls --group worker
 
 Show snapshot metadata. Add `--verify` to check recorded content hashes.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap inspect worker:ready
 msb snap inspect worker:ready --verify
 ```
+</CodeGroup>
 
 <span id="msb-snapshot-verify" />
 
@@ -98,9 +108,11 @@ msb snap inspect worker:ready --verify
 
 Check recorded content integrity. Local-only; capture with `--integrity` to record disk hashes.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap verify worker:ready
 ```
+</CodeGroup>
 
 Without disk hashes, size and structure checks cannot detect same-size corruption. Full snapshots also validate their memory and execution objects. See [integrity](/sandboxes/snapshots#verify-integrity).
 
@@ -110,9 +122,11 @@ Without disk hashes, size and structure checks cannot detect same-size corruptio
 
 Delete one or more snapshots.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap rm worker:ready
 ```
+</CodeGroup>
 
 | Flag | Description |
 | --- | --- |
@@ -121,11 +135,17 @@ msb snap rm worker:ready
 
 If other group members remain, select another head before removing the current one. `--force` does not bypass this rule.
 
+Snapshots in active use cannot be removed, even with `--force`. Removal also checks that a retained handle still refers to the same artifact.
+
+<Accordion title="Reader protection, stale entries, and interrupted cleanup">
+
 If an indexed artifact was deleted outside Microsandbox, removing it by its indexed path clears the stale entry. For a grouped snapshot, this requires the whole group directory to be gone; a surviving group still needs its head and membership checks. Indexed children still require `--force`.
 
 Removal also refuses an installed copy held by an active restore, export, verification, or import dependency read. `--force` does not bypass active readers. Independent copies of the same snapshot have independent leases. On Unix, copies sharing a hardlinked descriptor conservatively share reader protection; Windows normally protects each installed directory entry independently. Metadata handles alone do not keep snapshots busy. Saving or removing through a retained SDK handle rejects a replacement artifact at the same path.
 
 Deletion atomically retires the artifact directory before removing its contents. A later snapshot listing or removal can recover interrupted cleanup without deleting a new artifact at the original path. Unix readers lock the existing descriptor. Windows readers normally lock an entry-side coordination file outside the removable directory and fall back to the descriptor when an external parent is read-only. Publication and deletion require writable destinations for their coordination records. Concurrent cleanup requires participating SDKs and CLIs; coordinate maintenance when older clients share the storage.
+
+</Accordion>
 
 <span id="msb-snapshot-head" />
 
@@ -133,10 +153,12 @@ Deletion atomically retires the artifact directory before removing its contents.
 
 Read a local group’s head, or select a member as its head.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap head worker
 msb snap head worker:ready
 ```
+</CodeGroup>
 
 Use `--format json` for structured output. The first capture sets the head; later captures advance it only when ancestry proves they descend from it. See [snapshot groups](/sandboxes/snapshots#snapshot-groups).
 
@@ -146,9 +168,11 @@ Use `--format json` for structured output. The first capture sets the head; late
 
 Export a local snapshot to a compressed `.msb` archive. The `save` alias remains supported.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap export worker:ready --output ready.msb --with-image
 ```
+</CodeGroup>
 
 | Flag | Description |
 | --- | --- |
@@ -167,11 +191,11 @@ msb snap export worker:ready --output ready.msb --with-image
 
 Import one or more local archives. The `load` alias remains supported. Dependencies resolve regardless of input order; all members are validated before publication.
 
-Snapshot publication records image ownership before exposing the installed artifact and reports catalog failures. Pending publication and deletion recovery runs during snapshot listing; image pruning also reconciles pending publication.
-
-```bash
+<CodeGroup>
+```bash Shell
 msb snap import ready.msb
 ```
+</CodeGroup>
 
 | Flag | Description |
 | --- | --- |
@@ -182,13 +206,21 @@ msb snap import ready.msb
 
 Dependencies come from the batch, matching members in the named group, or `--base`. Import preserves recorded hashes; run `verify` to check them.
 
+<Accordion title="Publication and recovery">
+
+Snapshot publication records image ownership before exposing the installed artifact and reports catalog failures. Pending publication and deletion recovery runs during snapshot listing; image pruning also reconciles pending publication.
+
+</Accordion>
+
 <Accordion title="Examples">
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap import changes.msb base.msb --group received
 msb snap import changes.msb --base worker:ready --group received
 msb snap import experiment.msb --group worker --set-head
 ```
+</CodeGroup>
 
 </Accordion>
 
@@ -198,10 +230,12 @@ msb snap import experiment.msb --group worker --set-head
 
 Rebuild the local snapshot index from artifacts on disk. An omitted directory uses the configured snapshot store.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap reindex
 msb snap reindex /mnt/snapshots
 ```
+</CodeGroup>
 
 ## Related commands
 

@@ -15,10 +15,12 @@ For first-time installation, see the [CLI overview](/cli/overview#install).
 
 Show the selected backend, API endpoint, and how it was selected. Credentials are not printed. Alias: `msb ctx`.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb context
 msb context --format json
 ```
+</CodeGroup>
 
 ## msb self
 
@@ -26,7 +28,8 @@ Diagnose, update, downgrade, or remove the CLI. `msb doctor`, `msb update` (alia
 
 <Accordion title="Examples">
 
-```bash
+<CodeGroup>
+```bash Shell
 msb doctor                   # Alias for msb self doctor
 msb doctor --fix             # Try supported host setup fixes
 msb self doctor              # Check runtime files and supported host prerequisites
@@ -38,6 +41,7 @@ msb self downgrade 0.6.0 -y   # Skip downgrade confirmations
 msb self uninstall            # Remove msb (with confirmation prompt)
 msb self uninstall --yes      # Skip confirmation
 ```
+</CodeGroup>
 
 </Accordion>
 

@@ -16,7 +16,8 @@ Once your [pilot environment](/enterprise/prepare-environment) works with [compa
 
 Save the settings you want to enforce as `managed.json`:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "version": 1,
   "overrides": {
@@ -30,6 +31,7 @@ Save the settings you want to enforce as `managed.json`:
   }
 }
 ```
+</CodeGroup>
 
 This example enforces **two vCPUs and 1 GiB of memory** for new local and cloud sandboxes, plus a **15-minute inactivity timeout** for SSH sessions created through the CLI or SDK, including sessions to cloud sandboxes.
 

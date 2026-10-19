@@ -6,6 +6,8 @@ icon: "magnifying-glass"
 
 microsandbox handles DNS queries on the host instead of letting the guest contact a resolver directly. This makes domain rules and DNS rebinding protection possible.
 
+The DNS configuration examples use TypeScript, Rust, Python, Go, and the CLI. Ruby does not expose domain-block rules or nameserver overrides.
+
 ## DNS as egress
 
 Every DNS query must pass the sandbox's egress policy.

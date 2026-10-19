@@ -34,9 +34,11 @@ The flat root gives Docker a direct ext4 filesystem for its own overlay storage,
 
 Copy the project into the running sandbox. This happens after creation because flat roots do not currently accept create-time rootfs patches such as `--copy-dir`:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp ./my-project/. compose-ci:/workspace
 ```
+</CodeGroup>
 
 The official `dind` image starts `dockerd`. Wait for it before sending Compose commands:
 
@@ -92,15 +94,19 @@ Replace `test` with the service whose exit code should decide the CI result. `ms
 
 Stop the Compose stack inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --workdir /workspace compose-ci -- docker compose down --volumes
 ```
+</CodeGroup>
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f compose-ci
 ```
+</CodeGroup>
 
 Removing the sandbox also removes Docker's image and build cache. Keep the sandbox between trusted runs if you want to reuse that cache; do not carry a writable cache across repositories or trust boundaries.
 

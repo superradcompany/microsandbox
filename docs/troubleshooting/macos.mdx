@@ -10,23 +10,29 @@ microsandbox local sandboxes on macOS require Apple Silicon. Intel Macs are not 
 
 Run the installer, then open a new terminal if it updates your `PATH`:
 
-```bash
+<CodeGroup>
+```bash Shell
 curl -fsSL https://install.microsandbox.dev | sh
 ```
+</CodeGroup>
 
 ## Quick checks
 
 Start with the doctor command for the local setup checks:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb doctor
 ```
+</CodeGroup>
 
 Confirm that the host is Apple Silicon:
 
-```bash
+<CodeGroup>
+```bash Shell
 uname -m
 ```
+</CodeGroup>
 
 The expected result is `arm64`. If the result is `x86_64`, the machine is an Intel Mac or the command is running under an x86_64 environment. microsandbox needs Apple Silicon; Rosetta does not make an Intel Mac supported for local sandboxes.
 
@@ -42,6 +48,8 @@ The default runtime root is `~/.microsandbox`. The CLI binary lives under `bin/m
 
 If macOS is finding a stale binary, check the command path:
 
-```bash
+<CodeGroup>
+```bash Shell
 which msb
 ```
+</CodeGroup>

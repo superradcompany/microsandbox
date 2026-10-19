@@ -1,7 +1,7 @@
 ---
 title: Snapshots
 "og:title": Rust SDK Snapshots reference
-description: Create and restore sandbox snapshots with the Rust SDK.
+description: Create snapshots, fork sandboxes, and restore snapshots with the Rust SDK.
 keywords: ["Rust SDK", "Rust snapshots", "microsandbox snapshots"]
 ---
 
@@ -13,7 +13,11 @@ Use snapshot objects or references on cloud. Local operations also accept a grou
 
 ## Guest writeback
 
-Use `.guest_flush(GuestFlush::Required)` on snapshot, fork, or fork-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`. The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `Skip` retains mandatory storage barriers. A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
+Use `.guest_flush(GuestFlush::Required)` on snapshot, fork, or fork-many builders, or `source.pause_with_guest_flush(GuestFlush::Required)`. Import `GuestFlush` from `microsandbox::snapshot`.
+
+The default `Auto` flushes live disk-only captures, but adds no optional flush to full captures, forks, or pause. `Skip` retains mandatory storage barriers.
+
+A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
 ## Static methods
 
@@ -138,7 +142,11 @@ println!("{}", snap.manifest().image.reference);
 
 Open an existing artifact by group head, `group:member`, or path. This is a fast metadata operation: it verifies the manifest structure, recomputes the manifest digest, and checks that the upper file exists with the recorded size. It does **not** read the full upper contents; use [`verify()`](#snap-verify) for that.
 
+<Accordion title="Local artifact path resolution">
+
 For the local backend, relative artifact paths are resolved when the operation begins, and the returned snapshot retains that absolute location. Changing the process working directory later does not retarget an opened or listed snapshot. Local import, export, copy, and capture destinations are also resolved before asynchronous work starts. Group names and snapshot IDs continue to resolve through the snapshot store.
+
+</Accordion>
 
 <p className="msb-label">Parameters</p>
 
@@ -997,6 +1005,59 @@ data while replacing explicit-snapshot metadata in a new archive.
 | `labels(BTreeMap<String, String>)` | `Self` | Replace all labels in the copied manifest |
 | `record_integrity(bool)` | `Self` | Compute integrity when true, or omit it when false |
 | `save()` | `MicrosandboxResult<Manifest>` | Write the archive and return its manifest |
+
+## Forking
+
+Fork a running or paused local sandbox to create a child with copy-on-write memory. The source returns to its previous state, and each child needs an unused name. `SandboxHandle` has the same methods. See the [forking guide](/sandboxes/snapshots#forking) for backend limits and disk bindings.
+
+### fork()
+
+```rust
+fn fork(&self, name: impl Into<String>) -> ForkBuilder
+```
+
+<Accordion title="Example">
+
+```rust
+let child = source.fork("experiment").fork().await?;
+let out = child.exec("python", ["-V"]).await?;
+println!("{}", out.stdout()?);
+child.stop().await?;
+```
+
+</Accordion>
+
+Build one child from the current execution state; call `.fork().await` to start it.
+
+### fork_many()
+
+```rust
+fn fork_many(&self, names: impl IntoIterator<Item = impl Into<String>>) -> ForkManyBuilder
+```
+
+<Accordion title="Example">
+
+```rust
+let outcomes = source.fork_many(["alice", "bob"]).fork().await?;
+for outcome in outcomes {
+    match outcome.result {
+        Ok(child) => child.stop().await?,
+        Err(error) => eprintln!("{}: {error}", outcome.name),
+    }
+}
+```
+
+</Accordion>
+
+Capture once for all names and return outcomes in input order. Each `ForkOutcome` has a `name` and a `result` for that child. Validation or capture errors fail the outer call; a child startup error leaves successful siblings running. Stop successful children when finished.
+
+The builders support `.record_integrity()`, `.guest_flush(GuestFlush::Required)`, and `.volume()` for rebinding captured disks. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking).
+
+The single-child builder also exposes `.fork_with_progress()` with the `local` feature. Import `GuestFlush` from `microsandbox::snapshot`; see [guest writeback](#guest-writeback) for the policy.
+
+`ForkOutcome.name` is a `String`; `ForkOutcome.result` is a `MicrosandboxResult<Sandbox>`.
+
+`branch()`, `branch_many()`, the builder `.branch()` terminal, `.branch_with_progress()`, and the `BranchBuilder`, `BranchManyBuilder`, and `BranchOutcome` types remain deprecated aliases.
 
 ## RestoreBuilder
 

@@ -132,6 +132,7 @@
                 "expanded": false,
                 "pages": [
                   "sdk/rust/sandbox",
+                  "sdk/rust/configuration",
                   "sdk/rust/execution",
                   "sdk/rust/ssh",
                   "sdk/rust/filesystem",
@@ -755,7 +756,7 @@
   "footer": {
     "socials": {
       "github": "https://github.com/superradcompany/microsandbox",
-      "discord": "https://discord.gg/NQMWDfp7",
+      "discord": "https://discord.gg/T95Y3XnEAK",
       "linkedin": "https://www.linkedin.com/company/superradcompany",
       "x": "https://x.com/microsandbox"
     }

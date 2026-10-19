@@ -29,7 +29,8 @@ attributes, and protocols before pointing at a real backend.
   <Step title="Configure the OTLP receiver + debug exporter">
     Save as `otel-collector.yaml`:
 
-    ```yaml
+    <CodeGroup>
+    ```yaml YAML
     receivers:
       otlp:
         protocols:
@@ -48,18 +49,23 @@ attributes, and protocols before pointing at a real backend.
           receivers: [otlp]
           exporters: [debug]
     ```
+    </CodeGroup>
   </Step>
 
   <Step title="Start the collector">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     otelcol --config=otel-collector.yaml
     ```
+    </CodeGroup>
   </Step>
 
   <Step title="Point msb-metrics at it">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     msb-metrics otel --endpoint=http://localhost:4317 --log-level=debug
     ```
+    </CodeGroup>
 
     Boot a sandbox (`msb run alpine`) and watch metrics scroll past in
     the otel-collector log. You should see records like

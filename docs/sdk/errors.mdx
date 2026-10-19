@@ -5,12 +5,13 @@ description: Handle sandbox errors and clean up resources across the microsandbo
 icon: "triangle-exclamation"
 ---
 
-TypeScript, Rust, Python, and Go surface typed errors so you can match specific failure modes instead of parsing strings. TypeScript exposes a dedicated subclass per variant (use `instanceof`). Rust has an `Error` enum, and Python provides dedicated exception classes. Go provides an `*Error` value with an `ErrorKind` discriminator that you match via `m.IsKind(err, kind)` or `errors.As`. Ruby v0.7.4 adds typed subclasses of `Microsandbox::Error` with stable `code` strings; failures without a dedicated subclass still use the base class.
+Use typed errors to handle specific failures without parsing messages. The examples show each SDK’s matching and cleanup conventions.
 
 ## Matching errors
 
 <CodeGroup>
 ```typescript TypeScript
+// Each error variant has a dedicated subclass; match it with instanceof.
 import {
     ExecTimeoutError,
     RuntimeError,
@@ -38,6 +39,7 @@ try {
 ```
 
 ```rust Rust
+// Match variants of the Error enum.
 use microsandbox::{Sandbox, Error};
 
 let sb = Sandbox::builder("worker")
@@ -59,6 +61,7 @@ match sb.exec("python", ["script.py"]).await {
 ```
 
 ```python Python
+# Match dedicated exception classes.
 from microsandbox import ExecTimeoutError, Sandbox
 
 sb = await Sandbox.connect_or_create("worker", image="python")
@@ -72,6 +75,7 @@ except ExecTimeoutError:
 ```
 
 ```go Go
+// *Error carries an ErrorKind; inspect it with IsKind or errors.As.
 import (
     "context"
     "errors"
@@ -101,6 +105,8 @@ case err != nil:
 ```
 
 ```ruby Ruby
+# Since v0.7.4, typed Error subclasses expose stable code strings.
+# Failures without a dedicated subclass still use Microsandbox::Error.
 require "microsandbox"
 
 sb = Microsandbox::Sandbox.connect_or_create("worker", image: "python")
@@ -120,10 +126,8 @@ end
 
 `exec()` distinguishes between:
 
-- **A program that ran and exited non-zero**: the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
-- **A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. The call returns or raises an SDK error.
-
-Rust exposes a structured `ExecFailed` payload, and Go exposes the same detail on streaming execution events. Common failure kinds include `NotFound` (binary missing on `PATH`), `PermissionDenied`, `NotExecutable`, `BadCwd`, `BadArgs`, `ResourceLimit`, `UserSetupFailed`, `OutOfMemory`, `PtySetupFailed`, and `Other`.
+**A program that ran and exited non-zero**: the call returns an `ExecOutput` with a non-zero `code`. This is *not* an error in the SDK sense; it's a normal result.
+**A program that never started**: the binary doesn't exist, isn't executable, the working directory is unreachable, etc. The call returns or raises an SDK error.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -212,6 +216,12 @@ rescue Microsandbox::Error => e
 end
 ```
 </CodeGroup>
+
+<Accordion title="Structured spawn-failure details">
+
+See [Rust failure kinds](/sdk/rust/execution#execfailurekind) and [Go execution failures](/sdk/go/execution#execfailure) for structured payloads. The handling examples above show how to inspect them.
+
+</Accordion>
 
 The CLI maps these kinds to POSIX-style exit codes: `127` for `NotFound`, `126` for `PermissionDenied` and `NotExecutable`, and `1` otherwise.
 
@@ -314,6 +324,8 @@ if err := staleHandle.Destroy(ctx); m.IsKind(err, m.ErrSandboxReplaced) {
 ```
 
 ```ruby Ruby
+# No dedicated stale-identity subclass yet: Error and the stable
+# "was replaced" message are the contract. Replacement is never acted on.
 begin
   stale_handle.destroy
 rescue Microsandbox::Error => error
@@ -322,17 +334,19 @@ end
 ```
 </CodeGroup>
 
-Ruby does not yet expose a dedicated stale-identity subclass. Until it does, `Microsandbox::Error` with the stable `was replaced` message is the Ruby-specific contract; the operation still refuses to act on the replacement.
-
 ## Stop observation timeouts
 
-On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox. On Cloud, the same timeout only limits how long the SDK waits: the accepted server-side stop is not cancelled and may still complete. Cloud reports this with `SandboxStopTimedOutError` in TypeScript and Python, `Error::SandboxStopTimedOut` in Rust, and `ErrSandboxStopTimedOut` in Go. Ruby currently raises `Microsandbox::Error` with a message explaining that the accepted stop may still complete.
+On Local, a graceful-stop timeout causes the SDK to force-kill the sandbox.
+
+On Cloud, the same timeout only limits how long the SDK waits: the accepted server-side stop is not cancelled and may still complete.
+
+Cloud reports this with `SandboxStopTimedOutError` in TypeScript and Python, `Error::SandboxStopTimedOut` in Rust, and `ErrSandboxStopTimedOut` in Go. Ruby currently raises `Microsandbox::Error` with a message explaining that the accepted stop may still complete.
 
 After a Cloud timeout, poll the sandbox status or call the wait-until-stopped method if you still need confirmation. Calling `request_stop` first is useful when the application wants to submit the stop and control its own observation deadline.
 
 ## Sandbox start failures
 
-When a sandbox process exits before the agent relay is ready, creation returns or raises an SDK error. Rust exposes a structured `BootStart` payload with the failure stage and underlying message.
+When a sandbox process exits before the agent relay is ready, creation returns or raises an SDK error.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -346,6 +360,7 @@ try {
 ```
 
 ```rust Rust
+// BootStart exposes the failure stage and underlying message.
 use microsandbox::{Error, Sandbox};
 
 match Sandbox::builder("svc").image("alpine").create().await {
@@ -392,12 +407,12 @@ The CLI prints the startup failure before any captured log output so the immedia
 
 <Tooltip tip="TypeScript await using and Rust drop do not stop microsandbox cloud sandboxes, because cloud handles do not own the host process; call stop() or remove() explicitly."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Sandboxes hold compute resources, so release them when done. In TypeScript, prefer `await using` (Node 22+) which calls `Sandbox.stop()` automatically when the binding leaves scope. In Rust, `Drop` handles cleanup when the sandbox goes out of scope. In Go, pair every `CreateSandbox` with a `defer` that calls `Stop` + `Close`.
+Sandboxes hold compute resources, so release them when done.
 
 <CodeGroup>
 ```typescript TypeScript
 async function runTemporary(): Promise<string> {
-    // `await using` calls Sandbox.stop() when the binding leaves scope.
+    // Node 22+: prefer `await using`; it calls Sandbox.stop() on scope exit.
     await using sb = await Sandbox.builder("temp")
         .image("python")
         .replace()
@@ -431,6 +446,7 @@ async with await Sandbox.create("temp", image="python") as sb:
 ```
 
 ```go Go
+// Pair each CreateSandbox with deferred Stop and Close.
 sb, err := m.CreateSandbox(ctx, "temp",
     m.WithImage("python"),
     m.WithReplace(),

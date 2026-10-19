@@ -31,6 +31,7 @@ $env:JUPYTER_TOKEN = -join ($bytes | ForEach-Object { $_.ToString('x2') })
 
 Create a startup script for the guest:
 
+<CodeGroup>
 ```sh start-jupyter.sh
 #!/bin/sh
 set -eu
@@ -43,6 +44,7 @@ exec jupyter lab \
   --allow-root \
   --IdentityProvider.token="$JUPYTER_TOKEN"
 ```
+</CodeGroup>
 
 Start the server:
 
@@ -92,9 +94,11 @@ curl.exe -sS "http://127.0.0.1:8888/api?token=$env:JUPYTER_TOKEN" | Select-Objec
 
 Then inspect the recent server output:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb logs --tail 20 jupyter-demo
 ```
+</CodeGroup>
 
 The logs show Jupyter Server listening on guest port 8888. Notebooks saved under `/workspace` remain on the root disk when the sandbox stops and starts.
 
@@ -108,9 +112,11 @@ The logs show Jupyter Server listening on guest port 8888. Notebooks saved under
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f jupyter-demo
 ```
+</CodeGroup>
 
 Clear the token from the host shell:
 

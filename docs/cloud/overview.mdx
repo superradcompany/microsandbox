@@ -13,11 +13,13 @@ microsandbox cloud runs your sandboxes on hosted infrastructure. The SDKs and th
 
 ## Connect
 
-```bash
+<CodeGroup>
+```bash Shell
 export MSB_BACKEND=cloud
 export MSB_API_KEY="msb_..."
 msb context
 ```
+</CodeGroup>
 
 `msb context` confirms that subsequent commands will run on cloud and shows what selected it without exposing the API key. For profiles, SDK selection, and precedence, see [Local or cloud](/operations/backends).
 

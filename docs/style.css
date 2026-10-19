@@ -593,6 +593,7 @@ details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group 
  * wide gap; collapse them to one even, tight inset so the example reads as
  * attached to the signature it documents. */
 .code-block:has(+ details.accordion:not(.msb-accordion-group *, .accordion-group *)) { margin-bottom: 0 !important; }
+.code-block + details.accordion:not(.msb-accordion-group *, .accordion-group *) { margin-top: 1rem !important; }
 details.accordion:has(.code-block):not(.msb-accordion-group *, .accordion-group *) { margin-top: 0.5rem !important; }
 
 @media (max-width: 640px) {
@@ -843,3 +844,32 @@ body:has(.msb-guides-overview) #table-of-contents-layout {
 /* Show moved-command links only to readers following an old bookmark. */
 .msb-moved-command { display: none; }
 .msb-moved-command:target { display: block; margin: 1rem 0; }
+
+/* Credit release contributors without turning the changelog into a directory. */
+.msb-release-contributors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.5rem;
+  margin: 1rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.msb-release-contributors li {
+  margin: 0;
+  padding: 0;
+}
+
+.msb-release-contributors a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.msb-release-contributors img {
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  border-radius: 50%;
+}

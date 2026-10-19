@@ -222,7 +222,7 @@ The unique name identifying this volume.
 fn kind(&self) -> VolumeKind
 ```
 
-The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
+The storage kind. See [`VolumeKind`](#volumekind).
 
 <p className="msb-label">Returns</p>
 
@@ -437,7 +437,7 @@ The unique name identifying this volume.
 fn kind(&self) -> VolumeKind
 ```
 
-The storage kind: [`Directory`](#volumekind) or [`Disk`](#volumekind).
+The storage kind. See [`VolumeKind`](#volumekind).
 
 <p className="msb-label">Returns</p>
 
@@ -1330,7 +1330,11 @@ let sb = Sandbox::builder("worker")
 
 </Accordion>
 
-Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder) closure. `existing` (the default) behaves like [`.named()`](#mount-named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume. The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
+Mount a named volume with explicit sandbox-time existence behavior, configured via a [`NamedVolumeBuilder`](#namedvolumebuilder) closure.
+
+`existing` (the default) behaves like [`.named()`](#mount-named); `create` provisions the volume and fails if it already exists; `ensure_exists` provisions it if missing or reuses a compatible existing volume.
+
+The ensure-exists mode validates existing metadata and errors when the kind, quota, capacity, or explicitly requested labels differ; it does not mutate existing metadata.
 
 <p className="msb-label">Parameters</p>
 

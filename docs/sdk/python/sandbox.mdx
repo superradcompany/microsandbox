@@ -7,36 +7,9 @@ keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Forking
+<span id="forking" />
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### fork() and fork_many()
-
-```python
-async def fork(self, name: str, *, record_integrity: bool = False,
-               guest_flush: GuestFlush | None = None,
-               volumes: Mapping[str, MountConfig] | None = None) -> Sandbox: ...
-async def fork_many(self, names: list[str], *, record_integrity: bool = False,
-                    guest_flush: GuestFlush | None = None,
-                    volumes: Mapping[str, MountConfig] | None = None) -> list[ForkOutcome]: ...
-```
-
-`record_integrity` records disk hashes. `guest_flush` accepts `GuestFlush.AUTO`, `REQUIRED`, or `SKIP`; omitting it uses `AUTO`. Import `GuestFlush` from `microsandbox`.
-
-`volumes` rebinds a captured disk to a host image consistent with the captured state, for example `volumes={"/data": Volume.disk("./seed.img")}`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
-
-### ForkOutcome
-
-| Property | Meaning |
-| --- | --- |
-| `name` | Requested child name |
-| `sandbox` | Started `Sandbox`, or `None` on failure |
-| `error` | Exception on failure, or `None` on success |
-
-`branch()` and `branch_many()` remain deprecated aliases and emit `DeprecationWarning`. `BranchOutcome` aliases `ForkOutcome`.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/python/snapshots#forking) for live fork methods.
 
 ## Sandbox
 
@@ -641,7 +614,11 @@ await sb.modify(secrets_rm=["OLD_API_KEY"])
 
 Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect.
 
-`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart.
+
+`root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secrets are keyed by name. Each `SecretModifySpec` can set one source (`env`, `value`, or `store`) and optional settings listed below. Omitted fields stay unchanged. Plans never include secret values. Use `secrets_rm` to remove secrets.
 

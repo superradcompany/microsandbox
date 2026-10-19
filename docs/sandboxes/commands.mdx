@@ -46,7 +46,39 @@ output, err := sb.ExecDefault(ctx)
 ```
 </CodeGroup>
 
-Streaming variants are `exec_default_stream`, `execDefaultStream`, and `ExecDefaultStream`. Interactive variants are `attach_default`, `attachDefault`, and `AttachDefault`. Literal `exec` and `attach` continue to ignore ENTRYPOINT and CMD.
+The default workload also supports streaming and interactive execution:
+
+<CodeGroup>
+```typescript TypeScript
+// Choose one: stream output, or attach the current terminal.
+const stream = await sb.execDefaultStream();
+// const exit = await sb.attachDefault();
+```
+
+```rust Rust
+// Choose one: stream output, or attach the current terminal.
+let stream = sb.exec_default_stream().await?;
+// let exit = sb.attach_default().await?;
+```
+
+```python Python
+# Choose one: stream output, or attach the current terminal.
+stream = await sb.exec_default_stream()
+# exit_code = await sb.attach_default()
+```
+
+```go Go
+// Choose one: stream output, or attach the current terminal.
+stream, err := sb.ExecDefaultStream(ctx)
+if err != nil {
+    return err
+}
+defer stream.Close()
+// exitCode, err := sb.AttachDefault(ctx)
+```
+</CodeGroup>
+
+Consume the stream as shown in [Streaming output](#stream-output). Literal command execution and terminal attachment continue to ignore ENTRYPOINT and CMD.
 
 ## Execute a command
 
@@ -98,12 +130,67 @@ msb exec worker -- python -c "print('hello')"
 
 Use a background job for a command that should keep running after you disconnect. The local sandbox must already be running. Starting the job returns an ID you can use to check its progress or reconnect.
 
-```bash
+<CodeGroup>
+```typescript TypeScript
+const job = await sb.execDetachedWith("sh", (e) => e
+    .args(["-c", "echo started; sleep 60; echo done"])
+    .stdinNull());
+console.log(job.id);
+const result = await job.wait();
+const output = await job.logs();
+```
+
+```rust Rust
+use microsandbox::sandbox::jobs::JobLogOptions;
+
+let job = sb.exec_detached_with("sh", |e| e
+    .args(["-c", "echo started; sleep 60; echo done"])
+    .stdin_null()).await?;
+println!("{}", job.id());
+let result = job.wait().await?;
+let output = job.logs(&JobLogOptions::default()).await?;
+```
+
+```python Python
+from microsandbox import Stdin
+
+job = await sb.exec_detached(
+    "sh", ["-c", "echo started; sleep 60; echo done"], stdin=Stdin.null(),
+)
+print(job.id)
+result = await job.wait()
+output = await job.logs()
+```
+
+```go Go
+job, err := sb.ExecDetached(ctx, "sh",
+    []string{"-c", "echo started; sleep 60; echo done"}, m.WithExecStdinNull(),
+)
+if err != nil {
+    return err
+}
+defer job.Close()
+fmt.Println(job.ID())
+result, err := job.Wait(ctx)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+job = sb.exec_detached("sh", ["-c", "echo started; sleep 60; echo done"], stdin: :null)
+puts job.id
+result = job.wait
+output = job.logs
+```
+
+```bash CLI
 msb create alpine --name worker
 job=$(msb exec -d --no-stdin worker -- sh -c 'echo started; sleep 60; echo done')
 msb logs worker --job "$job" --follow
 msb wait worker --job "$job"
 ```
+</CodeGroup>
 
 Stopping the sandbox stops its jobs. Restarting never reruns them. Finish active jobs before taking a full snapshot or forking; pause and resume remain supported.
 
@@ -124,11 +211,13 @@ Job IDs belong to one sandbox and are separate from process IDs. Without `--job`
 
 `--no-stdin` sends EOF and disables automatic terminal allocation. Otherwise, input stays open for a later attachment. `--tty` forces a terminal; `--no-tty` uses pipes. Detached launch never reads your terminal's input and cannot be combined with `--stream`.
 
-```bash
+<CodeGroup>
+```bash Shell
 shell_job=$(msb exec -d --tty worker -- sh)
 msb attach worker --job "$shell_job"
 # Press Ctrl-] to detach, then attach again with the same job ID.
 ```
+</CodeGroup>
 
 One attachment can write at a time; others can use `--read-only`. Detaching or reaching local input EOF leaves guest input open. An abrupt disconnect releases input ownership within 30 seconds. Terminal output combines stdout and stderr as `output`; pipes keep them separate.
 
@@ -404,7 +493,7 @@ msb exec -t worker -e DEBUG=1 -w /app -- python
 
 ## Write stdin
 
-TypeScript, Rust, Python, and Ruby can pass input bytes with the command. Ruby does not expose a streaming stdin writer; Go uses the pipe API shown below.
+TypeScript, Rust, Python, and Ruby can pass input bytes with the command. Ruby does not expose a streaming stdin writer; Go uses a pipe to supply input and collect the result.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -420,6 +509,26 @@ println!("{}", output.stdout()?);
 ```python Python
 output = await sandbox.exec("cat", stdin=b"hello\n")
 print(output.stdout_text)
+```
+
+```go Go
+handle, err := sandbox.ExecStream(ctx, "cat", nil, m.WithExecStdinPipe())
+if err != nil {
+    return err
+}
+defer handle.Close()
+stdin := handle.TakeStdin()
+if _, err := stdin.Write([]byte("hello\n")); err != nil {
+    return err
+}
+if err := stdin.Close(); err != nil {
+    return err
+}
+output, err := handle.Collect(ctx)
+if err != nil {
+    return err
+}
+fmt.Print(output.Stdout())
 ```
 
 ```ruby Ruby
@@ -502,4 +611,4 @@ sessionID, err := handle.ID()
 
 ## Reference
 
-For exact execution APIs, see [TypeScript](/sdk/typescript/execution), [Rust](/sdk/rust/execution), [Python](/sdk/python/execution), or [Go](/sdk/go/execution). For command-line execution, see [`msb run`](/cli/sandbox-commands#msb-run) and [`msb exec`](/cli/sandbox-commands#msb-exec).
+For exact execution APIs, see [TypeScript](/sdk/typescript/execution), [Rust](/sdk/rust/execution), [Python](/sdk/python/execution), [Go](/sdk/go/execution), or [Ruby](/sdk/ruby/execution). For command-line execution, see [`msb run`](/cli/sandbox-commands#msb-run) and [`msb exec`](/cli/sandbox-commands#msb-exec).

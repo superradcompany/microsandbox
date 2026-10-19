@@ -55,9 +55,11 @@ On first launch Goose asks whether to share anonymous usage data, then walks thr
 
 After leaving Goose, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t goose-demo -- goose session
 ```
+</CodeGroup>
 
 </Step>
 
@@ -65,9 +67,11 @@ msb exec -t goose-demo -- goose session
 
 Exit the session and run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec goose-demo -- goose --version
 ```
+</CodeGroup>
 
 The pinned installer reports `1.44.0`.
 
@@ -77,27 +81,35 @@ The pinned installer reports `1.44.0`.
 
 With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec goose-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec goose-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/goose.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp goose-demo:/tmp/goose.patch ./goose.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./goose.patch
 ```
+</CodeGroup>
 
 </Step>
 
@@ -105,9 +117,11 @@ git apply --check ./goose.patch
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f goose-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes its Goose configuration and session data. Changes made through the default workspace mount remain in the host checkout.
 

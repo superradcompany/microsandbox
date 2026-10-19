@@ -12,13 +12,15 @@ icon: "layer-group"
 
 Download an image to the local cache. Shared layers are stored once.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb pull python
 msb pull alpine
 msb pull ghcr.io/my-org/my-image:v1
 msb pull python --materialize flat
 msb pull python --materialize all
 ```
+</CodeGroup>
 
 Expanded form: `msb image pull`.
 
@@ -45,11 +47,13 @@ Without `--materialize`, the configured `sandbox_defaults.oci.root_disk` selects
 
 Load a Docker image archive or OCI Image Layout archive into the local microsandbox cache. References are installed and recorded individually; if a later reference fails, earlier completed references remain installed. A cache eviction during a warm import is recovered from the supplied archive.
 
-```bash
+<CodeGroup>
+```bash Shell
 docker save my-image:latest | msb load
 msb load --input my-image.tar
 msb load --input oci-layout.tar --tag my-image:latest
 ```
+</CodeGroup>
 
 Expanded form: `msb image load`.
 
@@ -63,11 +67,13 @@ Expanded form: `msb image load`.
 
 Save one or more cached images as a Docker-compatible archive or OCI Image Layout archive.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb save --output my-image.tar my-image:latest
 msb save --format oci --output my-image.oci.tar my-image:latest
 msb save my-image:latest > my-image.tar
 ```
+</CodeGroup>
 
 Expanded form: `msb image save`.
 
@@ -83,11 +89,13 @@ Exports preserve image contents, but regenerated layers can change image and lay
 
 List images in the local cache.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb images
 msb images --format json
 msb images -q               # References only
 ```
+</CodeGroup>
 
 Expanded form: `msb image ls`.
 
@@ -100,10 +108,12 @@ Expanded form: `msb image ls`.
 
 Show detailed metadata for a cached image (manifest, layers, config).
 
-```bash
+<CodeGroup>
+```bash Shell
 msb image inspect python
 msb image inspect python --format json
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -113,10 +123,12 @@ msb image inspect python --format json
 
 Remove one or more cached images and their layers (layers shared with other images are kept).
 
-```bash
+<CodeGroup>
+```bash Shell
 msb rmi python
 msb rmi alpine ubuntu   # Remove multiple
 ```
+</CodeGroup>
 
 Expanded form: `msb image rm`.
 
@@ -129,11 +141,13 @@ Expanded form: `msb image rm`.
 
 Remove cached images that are not used by any sandbox or indexed snapshot, then clean up dangling image artifacts.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb image prune
 msb image prune --yes
 msb image prune --format json
 ```
+</CodeGroup>
 
 Images referenced by sandboxes or indexed snapshots are kept. `msb rmi --force` can remove a specific reference, but retains backing and cached metadata needed by those dependencies and refuses to remove a reference held by an active operation. Retained metadata files may remain after the last dependency is removed; pruning does not sweep unindexed metadata files.
 

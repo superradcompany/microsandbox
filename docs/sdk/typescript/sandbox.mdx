@@ -7,32 +7,9 @@ keywords: ["TypeScript SDK", "TypeScript sandbox", "microsandbox sandbox"]
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Forking
+<span id="forking" />
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### fork() and forkMany()
-
-```typescript
-fork(name: string, options?: ForkOptions): Promise<Sandbox>
-forkMany(names: string[], options?: ForkOptions): Promise<ForkOutcome[]>
-```
-
-`ForkOptions` is `{ recordIntegrity?: boolean; guestFlush?: GuestFlush; volumes?: Record<string, (m: MountBuilder) => MountBuilder> }`. `recordIntegrity` records disk hashes. `guestFlush` selects `"auto"`, `"required"`, or `"skip"`; the default is `"auto"`. Copy-on-write memory is inherent to a live fork, so no restore option is needed.
-
-`volumes` rebinds a captured disk to a host image consistent with the captured state, for example `{ "/data": m => m.disk("./seed.img") }`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
-
-### ForkOutcome
-
-| Field | Meaning |
-| --- | --- |
-| `name` | Requested child name |
-| `sandbox` | Started `Sandbox` on success |
-| `error` | `Error` on failure |
-
-Exactly one of `sandbox` and `error` is present. `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 ## Functions
 
@@ -605,7 +582,11 @@ await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart.
+
+`rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 

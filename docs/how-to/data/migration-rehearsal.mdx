@@ -62,18 +62,22 @@ msb run -d --name migration-base --replace `
 
 Wait for initialization, then stop the database cleanly:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec migration-base -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
+</CodeGroup>
 
 Shut PostgreSQL down with its own control command before stopping the VM and taking the snapshot. VM shutdown alone does not guarantee a clean database shutdown:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --no-tty --user postgres migration-base -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
 msb stop migration-base
 ```
+</CodeGroup>
 
 </Step>
 
@@ -95,9 +99,11 @@ msb snap create postgres-before-migration `
 
 Verify the captured snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify migration-base:postgres-before-migration
 ```
+</CodeGroup>
 
 </Step>
 
@@ -125,12 +131,14 @@ msb exec --no-tty --user postgres migration-test -- `
 
 Wait for the restored database to become ready:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data status
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
+</CodeGroup>
 
 Apply a sample destructive change and verify it:
 
@@ -160,11 +168,13 @@ Replace those statements with your real migration command and validation suite.
 
 Stop the mutated database and boot another clean copy of the baseline under the same name:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
 msb stop migration-test
 msb rm migration-test
 ```
+</CodeGroup>
 
 After removing the stopped sandbox, restore a fresh copy under the same name and start PostgreSQL:
 
@@ -186,12 +196,14 @@ msb exec --no-tty --user postgres migration-test -- `
 
 Wait for the clean database to become ready:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data status
 msb exec migration-test -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
+</CodeGroup>
 
 Confirm the sample table is absent:
 
@@ -217,17 +229,21 @@ The result should be `rolled-back`.
 
 Stop the restored database cleanly, then remove the stopped sandboxes:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec --no-tty --user postgres migration-test -- /usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m fast -w stop
 msb stop migration-test
 msb rm migration-base migration-test
 ```
+</CodeGroup>
 
 Remove the snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm migration-base:postgres-before-migration
 ```
+</CodeGroup>
 
 Clear the password from the host shell:
 

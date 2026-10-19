@@ -41,7 +41,8 @@ the upstream connection, and the buffering through hiccups.
   <Step title="Configure an OTLP receiver and Grafana Cloud exporter">
     Save as `config.alloy`:
 
-    ```alloy
+    <CodeGroup>
+    ```alloy alloy
     otelcol.receiver.otlp "ingest" {
       grpc { endpoint = "127.0.0.1:4317" }
       http { endpoint = "127.0.0.1:4318" }
@@ -69,6 +70,7 @@ the upstream connection, and the buffering through hiccups.
       password = sys.env("GC_API_TOKEN")
     }
     ```
+    </CodeGroup>
 
     Substitute your OTLP gateway region.
   </Step>
@@ -88,9 +90,11 @@ the upstream connection, and the buffering through hiccups.
   </Step>
 
   <Step title="Point msb-metrics at Alloy">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     msb-metrics otel --endpoint=http://localhost:4317
     ```
+    </CodeGroup>
 
     Alloy owns the upstream connection from here.
   </Step>

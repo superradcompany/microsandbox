@@ -10,6 +10,8 @@ You do not need to replace a running sandbox just because its workload changes. 
 
 <span id="what-can-modify-change" />
 
+Live modification is available through TypeScript, Rust, Python, Go, and the CLI. Ruby does not expose a modification API; set its supported options when creating a sandbox.
+
 ## Supported changes
 
 When a change takes effect depends on the setting:
@@ -234,7 +236,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports `applied`, `converging`, `guest-refused`, or `failed` for each resource so automation can wait for the guest to settle.
+Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports each resource’s [resize state](/sdk/rust/sandbox#resourceresizestatus), so automation can wait for the guest to settle.
 
 <span id="labels" />
 

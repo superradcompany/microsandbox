@@ -889,7 +889,7 @@ Identifies what an [`ExecEvent`](#execevent) carries.
 type ExecFailure = ffi.ExecFailure
 ```
 
-Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. See [Error Handling](/sdk/errors#spawn-time-exec-failures) for the kinds it carries (`not_found`, `permission_denied`, etc.) and how to branch on them.
+Structured detail about a failed-to-start exec, populated on `ExecEventFailed` and `ExecEventStdinError`. Failure kinds use the snake-case forms of the [failure-kind definitions](/sdk/rust/execution#execfailurekind). See [Error handling](/sdk/errors#spawn-time-exec-failures) for branching examples.
 
 | Field | Type | Description |
 |-------|------|-------------|

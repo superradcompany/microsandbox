@@ -90,7 +90,7 @@ Stopping shuts down the sandbox and its processes while keeping its configuratio
 
 `stop()` waits for graceful shutdown with no default timeout. Use your SDK's stop-with-timeout method to limit the wait. A timeout returns an error without force-killing; the shutdown may still finish later. Resume a paused sandbox before stopping it.
 
-See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
+See the SDK references for timeout options and cancellation rules: [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). Cancelling a wait does not disable automatic cleanup or [lifetime limits](#automatic-lifecycle-policies).
 
 <CodeGroup>
 ```typescript TypeScript
@@ -131,9 +131,11 @@ msb start worker
 
 Use `restart` to stop and start in one operation. If the sandbox is already stopped or crashed, it starts directly.
 
+<CodeGroup>
 ```bash CLI
 msb restart worker
 ```
+</CodeGroup>
 
 If graceful shutdown times out, restart fails without starting a new VM. For a sandbox that will not stop, see [Stop an unresponsive sandbox](#stop-an-unresponsive-sandbox).
 
@@ -342,7 +344,7 @@ result = sb.wait_until_stopped
 ```
 </CodeGroup>
 
-Use `wait_for_status` (`waitForStatus` in TypeScript and `WaitForStatus` in Go) when you need to wait for a specific lifecycle state. It has no built-in timeout, so use the language's normal timeout or cancellation primitive around it.
+To wait for a specific lifecycle state, use the status-wait method in your SDK: [TypeScript](/sdk/typescript/sandbox#sandbox-waitforstatus), [Rust](/sdk/rust/sandbox#sb-wait_for_status), [Python](/sdk/python/sandbox#sb-wait_for_status), [Go](/sdk/go/sandbox#sb-waitforstatus), or [Ruby](/sdk/ruby/sandbox#sandbox-wait_for_status). These methods have no built-in timeout; the references explain cancellation limits and how to bound the wait.
 
 ## Change configuration
 
@@ -649,4 +651,4 @@ Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to r
 
 ## Reference
 
-For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
+For exact lifecycle APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For lifecycle commands and the REST surface, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).

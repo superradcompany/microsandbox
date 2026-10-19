@@ -102,6 +102,11 @@ proxy=OutboundProxy.http_connect("127.0.0.1:3128")
 m.WithProxy(m.HTTPConnectProxy("127.0.0.1:3128"))
 ```
 
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+sandbox = Microsandbox::Sandbox.create("proxied", image: "alpine", proxy: proxy)
+```
+
 ```bash CLI
 msb run alpine --proxy http://127.0.0.1:3128
 ```
@@ -217,7 +222,7 @@ msb run alpine \
 
 ## Reference
 
-For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), or [Go](/sdk/go/proxies). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
+For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), [Go](/sdk/go/proxies), or [Ruby](/sdk/ruby/networking#outboundproxy). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
 
 ## Related
 

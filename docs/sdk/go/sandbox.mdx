@@ -7,36 +7,9 @@ keywords: ["Go SDK", "Go sandbox", "microsandbox sandbox"]
 
 See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Forking
+<span id="forking" />
 
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### Fork and ForkMany
-
-```go
-Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error)
-ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error)
-```
-
-`WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback.
-
-`WithForkVolumes` rebinds a captured disk to a host image consistent with the captured state, for example `WithForkVolumes(map[string]MountConfig{"/data": Mount.Disk("./seed.img", DiskOptions{})})`; a fork cannot add a new block device. Images are attached directly, so batch forks must not share a writable image. See [fork disk bindings](/sandboxes/snapshots#forking) for details.
-
-`ForkOptions` and `BranchOptions` have been removed. Replace direct struct use and custom option functions with `WithForkIntegrity`, `WithForkGuestFlush`, and `WithForkVolumes`. Calls already using these functions are unchanged.
-
-### ForkOutcome
-
-| Field | Meaning |
-| --- | --- |
-| `Name` | Requested child name |
-| `Sandbox` | Started `*Sandbox`, or `nil` on failure |
-| `Error` | Child startup error, or `nil` on success |
-
-Close each successful child’s handle with `Close()` after stopping it.
-
-`Branch`, `BranchMany`, `BranchOption`, `BranchOutcome`, `WithBranchIntegrity`, and `WithBranchGuestFlush` remain deprecated aliases.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/go/snapshots#forking) for live fork methods.
 
 ## Functions
 
@@ -645,7 +618,11 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart.
+
+`RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 

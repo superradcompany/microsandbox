@@ -63,11 +63,13 @@ With no command after the image, microsandbox runs the image's declared `docker-
 
 <Step title="Wait for readiness">
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec postgres-demo -- sh -lc '
   until pg_isready -h 127.0.0.1 -d examples -U postgres; do sleep 1; done
 '
 ```
+</CodeGroup>
 
 </Step>
 
@@ -101,9 +103,11 @@ Applications on the host can connect to `127.0.0.1:55432` with the same database
 
 Remove the sandbox and its database:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f postgres-demo
 ```
+</CodeGroup>
 
 Clear the password from the host shell:
 

@@ -417,9 +417,13 @@ The full network stack configuration passed via [`WithNetwork`](#m-withnetwork).
 
 Connection limits use pointers to distinguish an omitted value from explicit zero. `MaxConnections` and `MaxTCPConnections` cannot both be specified, even with the same value. Either TCP spelling can be combined with `MaxUDPConnections`.
 
-For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRestoreMaxUDPConnections`, or the corresponding fields in `RestoreConfig`. `WithRestoreMaxConnections` and `RestoreConfig.MaxConnections` remain deprecated TCP aliases with the same duplicate-alias restriction. These limits are destination resource overrides; `WithRestoreNetworkPolicy` accepts only policy rules and default actions. `WithRestoreTCPAcceptQueueSize` (or `RestoreConfig.TCPAcceptQueueSize`) sets the accept-queue depth for the listeners a restored child publishes.
+For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRestoreMaxUDPConnections`, or the corresponding fields in `RestoreConfig`.
 
-Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#deployment-profiles) for historical TCP limits and defaults.
+`WithRestoreMaxConnections` and `RestoreConfig.MaxConnections` remain deprecated TCP aliases with the same duplicate-alias restriction. These limits are destination resource overrides; `WithRestoreNetworkPolicy` accepts only policy rules and default actions.
+
+`WithRestoreTCPAcceptQueueSize` (or `RestoreConfig.TCPAcceptQueueSize`) sets the accept-queue depth for the listeners a restored child publishes.
+
+Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.
 
 #### MaxInboundTCPConnections
 

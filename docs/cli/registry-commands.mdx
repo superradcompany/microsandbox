@@ -12,9 +12,11 @@ These commands update the local credential store; see [registry authentication](
 
 Store a registry username and password. Without `--password-stdin`, the CLI prompts for the password.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb registry login ghcr.io --username octocat
 ```
+</CodeGroup>
 
 | Argument / flag | Description |
 | --- | --- |
@@ -24,10 +26,12 @@ msb registry login ghcr.io --username octocat
 
 <Accordion title="Read a token from stdin">
 
-```bash
+<CodeGroup>
+```bash Shell
 printf '%s\n' "$GHCR_TOKEN" | \
   msb registry login ghcr.io --username octocat --password-stdin
 ```
+</CodeGroup>
 
 </Accordion>
 
@@ -37,17 +41,21 @@ Passwords go in the OS credential store. Only metadata is written to the local c
 
 Remove stored credentials for a registry.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb registry logout ghcr.io
 ```
+</CodeGroup>
 
 ## msb registry list
 
 List configured registries without printing passwords. Aliases: `msb registry ls`, `msb registries`, and `msb regs`.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb registries
 ```
+</CodeGroup>
 
 ## Headless authentication
 

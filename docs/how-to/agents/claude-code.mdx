@@ -57,9 +57,11 @@ Anthropic recommends its standalone installer for normal host installations. Thi
 
 After leaving Claude Code, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t claude-code-demo -- claude
 ```
+</CodeGroup>
 
 The sandbox root disk retains Claude Code's authentication, configuration, and conversation state between sessions.
 
@@ -69,9 +71,11 @@ The sandbox root disk retains Claude Code's authentication, configuration, and c
 
 Exit the TUI and run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec claude-code-demo -- claude --version
 ```
+</CodeGroup>
 
 The pinned example prints `2.1.235 (Claude Code)`.
 
@@ -81,27 +85,35 @@ The pinned example prints `2.1.235 (Claude Code)`.
 
 With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec claude-code-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec claude-code-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/claude-code.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp claude-code-demo:/tmp/claude-code.patch ./claude-code.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./claude-code.patch
 ```
+</CodeGroup>
 
 </Step>
 
@@ -109,9 +121,11 @@ git apply --check ./claude-code.patch
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f claude-code-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes its Claude Code credentials, settings, and sessions. Changes made through the default workspace mount remain in the host checkout.
 

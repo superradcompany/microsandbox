@@ -57,6 +57,7 @@ Save the guest-side workflows as shell files on your host. Keeping them separate
 <div className="msb-accordion-group">
   <AccordionGroup>
     <Accordion title="mount-juicefs.sh">
+      <CodeGroup>
       ```sh mount-juicefs.sh
       #!/bin/sh
       set -eu
@@ -99,8 +100,10 @@ Save the guest-side workflows as shell files on your host. Keeping them separate
       mountpoint /mnt/juicefs
       printf "Object prefix: %s/\n" "$volume"
       ```
+      </CodeGroup>
     </Accordion>
     <Accordion title="test-juicefs.sh">
+      <CodeGroup>
       ```sh test-juicefs.sh
       #!/bin/sh
       set -eu
@@ -134,8 +137,10 @@ Save the guest-side workflows as shell files on your host. Keeping them separate
 
       printf "write=ok\nread=ok\nappend=ok\nrename=ok\nlinks=ok\nconcurrent_writes=ok\n"
       ```
+      </CodeGroup>
     </Accordion>
     <Accordion title="remount-juicefs.sh">
+      <CodeGroup>
       ```sh remount-juicefs.sh
       #!/bin/sh
       set -eu
@@ -154,8 +159,10 @@ Save the guest-side workflows as shell files on your host. Keeping them separate
 
       sha256sum --check /var/lib/juicefs/payload.sha256
       ```
+      </CodeGroup>
     </Accordion>
     <Accordion title="cleanup-juicefs.sh">
+      <CodeGroup>
       ```sh cleanup-juicefs.sh
       #!/bin/sh
       set -eu
@@ -165,6 +172,7 @@ Save the guest-side workflows as shell files on your host. Keeping them separate
       juicefs umount /mnt/juicefs
       printf "Delete the object prefix: %s/\n" "$(cat /var/lib/juicefs/volume-name)"
       ```
+      </CodeGroup>
     </Accordion>
   </AccordionGroup>
 </div>
@@ -213,19 +221,23 @@ The root disk keeps the metadata database when the sandbox stops and starts. Rem
 
 Install FUSE and the official JuiceFS client:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec juicefs-s3-demo -- sh -lc '
   apt-get update -qq &&
   apt-get install -y -qq ca-certificates curl fuse3 &&
   curl -fsSL https://d.juicefs.com/install | sh -
 '
 ```
+</CodeGroup>
 
 Format a new JuiceFS volume the first time this sandbox is used, then mount it at `/mnt/juicefs`:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec juicefs-s3-demo -- mount-juicefs
 ```
+</CodeGroup>
 
 `--backup-meta 0` keeps this single-sandbox example's metadata lifecycle explicit. It is also required when the S3-compatible provider is Cloudflare R2 because JuiceFS metadata backup relies on object-listing behavior that R2 does not provide.
 
@@ -235,9 +247,11 @@ msb exec juicefs-s3-demo -- mount-juicefs
 
 Create, read, append, rename, link, and concurrently write files through the mount. The script also saves the checksum of an 8 MiB payload for the remount test:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec juicefs-s3-demo -- test-juicefs
 ```
+</CodeGroup>
 
 All six checks should print `ok`.
 
@@ -247,9 +261,11 @@ All six checks should print `ok`.
 
 Unmount JuiceFS, clear its local cache, mount it again, and verify the payload against the saved checksum:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec juicefs-s3-demo -- remount-juicefs
 ```
+</CodeGroup>
 
 The checksum should report `/mnt/juicefs/example/payload.bin: OK`. Because the first cache was removed before remounting, this read verifies data persisted to S3 rather than only to the guest cache.
 
@@ -261,15 +277,19 @@ To retain the filesystem, stop and keep the sandbox together with the object pre
 
 To remove the example, delete its files through JuiceFS and unmount it first:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec juicefs-s3-demo -- cleanup-juicefs
 ```
+</CodeGroup>
 
 Delete that exact prefix from the bucket with your provider's console or S3 client, then remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f juicefs-s3-demo
 ```
+</CodeGroup>
 
 Finally, remove the temporary credential file and clear its variables from the host shell:
 

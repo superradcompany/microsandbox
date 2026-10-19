@@ -36,20 +36,24 @@ msb run ghcr.io/superradcompany/debian-systemd:12 `
 
 <Step title="Confirm systemd is PID 1">
 
-```bash
+<CodeGroup>
+```bash Shell
 root@msb:/# systemctl status
 ● msb
     State: running
     Units: 113 loaded (incl. loaded aliases)
   systemd: 252.39-1~deb12u1
 ```
+</CodeGroup>
 
 Or check directly:
 
-```bash
+<CodeGroup>
+```bash Shell
 root@msb:/# cat /proc/1/comm
 systemd
 ```
+</CodeGroup>
 
 </Step>
 
@@ -57,21 +61,25 @@ systemd
 
 `systemctl` works as it does on bare metal. Inspect a unit shipped with the image:
 
-```bash
+<CodeGroup>
+```bash Shell
 root@msb:/# systemctl status systemd-journald
 ● systemd-journald.service - Journal Service
      Loaded: loaded (/lib/systemd/system/systemd-journald.service; static)
      Active: active (running)
 ```
+</CodeGroup>
 
 Install your own and start it:
 
-```bash
+<CodeGroup>
+```bash Shell
 root@msb:/# apt update && apt install -y nginx
 root@msb:/# systemctl enable --now nginx
 root@msb:/# curl -s localhost | head -1
 <!DOCTYPE html>
 ```
+</CodeGroup>
 
 The guest detects microsandbox as a container, so packages with `policy-rc.d` deferral install but don't auto-start. `systemctl enable --now <unit>` starts them in one step.
 

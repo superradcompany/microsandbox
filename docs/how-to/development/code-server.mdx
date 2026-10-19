@@ -45,10 +45,12 @@ The host port is bound to `127.0.0.1`, so the unauthenticated editor is reachabl
 
 Replace `./my-project` with the directory you want to edit:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp ./my-project/. code-server-demo:/home/coder/project
 msb exec -u root code-server-demo -- chown -R coder:coder /home/coder/project
 ```
+</CodeGroup>
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). The editor, terminal, extensions, and project commands all run inside the microVM.
 
@@ -78,9 +80,11 @@ A healthy server responds with an HTTP status line, usually a redirect into the 
 
 Export the edited project into a new host directory:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp code-server-demo:/home/coder/project ./code-server-output
 ```
+</CodeGroup>
 
 Review `code-server-output` before merging its changes into the original checkout.
 
@@ -88,9 +92,11 @@ Review `code-server-output` before merging its changes into the original checkou
 
 <Step title="Clean up">
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f code-server-demo
 ```
+</CodeGroup>
 
 </Step>
 </Steps>

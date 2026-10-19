@@ -11,9 +11,11 @@ Check disk usage with `msb df` and remove unused runtime memory files with `msb 
 
 Show storage used by images, snapshots, sandboxes, volumes, and runtime memory files:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb df
 ```
+</CodeGroup>
 
 Add `--verbose` for object paths, ownership, and accounting details, or `--format json` for structured output. Use `msb inspect NAME` or `msb snap inspect REF` to inspect one sandbox or snapshot.
 
@@ -41,10 +43,12 @@ Logical file lengths and allocated blocks do not measure unique physical storage
 
 Preview cleanup, then run it:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb prune --dry-run
 msb prune
 ```
+</CodeGroup>
 
 Cleanup removes unused memory files from branches and cached snapshot restores. It keeps saved snapshots, sandbox disks, named volumes, and images. To clean up images, use [`msb image prune`](/cli/image-commands#msb-image-prune).
 

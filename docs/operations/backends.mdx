@@ -18,10 +18,12 @@ Use the simplest selector that matches who owns the decision:
 
 The `MSB_BACKEND` environment variable selects a backend for a single command or shell, unless an administrator has set a managed active profile:
 
-```bash
+<CodeGroup>
+```bash Shell
 MSB_BACKEND=local msb run python -- python -V
 MSB_BACKEND=cloud MSB_API_KEY="msb_..." msb ls
 ```
+</CodeGroup>
 
 Cloud selection and credentials are separate. `MSB_API_KEY` does not select cloud by itself. `MSB_API_URL` only overrides the cloud endpoint and does not select cloud either.
 
@@ -72,15 +74,16 @@ Microsandbox.use_local_backend!
 ```
 </CodeGroup>
 
-In Rust, `LocalBackend::builder().config_path(path).build_lazy()?` reads a specific user config file without changing `MSB_CONFIG_PATH`. Managed settings still apply. The builder's `home(...)` controls data storage, not which config file is read.
+Go selects its backend through the [environment](#environment) or [profiles](#profiles); it does not expose a programmatic selector. For an explicit configuration file in Rust, see [backend configuration](/sdk/rust/configuration#config_path).
 
-Local and cloud backends read user and managed configuration during construction. Invalid files cause an error even when cloud credentials are supplied explicitly. Existing backends retain their settings; construct a new backend to load file changes. The synchronous Rust constructors and backend-selection helpers remain synchronous.
+Local and cloud backends read user and managed configuration during construction. Invalid files cause an error even when cloud credentials are supplied explicitly. Existing backends retain their settings; construct a new backend to load file changes.
 
 ## Profiles
 
 Profiles are named backend configurations in `~/.microsandbox/config.json`. Use them when you switch regularly or want a shared default for an environment:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "active_profile": "production",
   "profiles": {
@@ -94,12 +97,15 @@ Profiles are named backend configurations in `~/.microsandbox/config.json`. Use 
   }
 }
 ```
+</CodeGroup>
 
 `active_profile` sets the default. `MSB_PROFILE=<name>` selects another profile for one command:
 
-```bash
+<CodeGroup>
+```bash Shell
 MSB_PROFILE=production msb run python -- python -V
 ```
+</CodeGroup>
 
 Cloud profiles require `api_key_ref`. The optional `url` field defaults to `https://api.microsandbox.dev`; set it only for a development, self-hosted, or on-premises control plane. See the [profiles schema](/configuration#profiles) for every field and credential-reference format.
 
@@ -122,10 +128,12 @@ Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is explicit clo
 
 Use `msb context` to inspect the backend kind, selection source, profile, and cloud API URL without exposing the API key:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb context
 msb context --format json
 ```
+</CodeGroup>
 
 Use the SDK accessors to inspect the active backend without exposing its API key. Detailed backend info includes the kind, cloud API URL, selection source, and profile when applicable:
 

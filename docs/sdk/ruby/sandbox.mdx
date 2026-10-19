@@ -451,7 +451,7 @@ sandbox.status # => String
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Current lifecycle status, fetched from the backend.</div>
+    <div className="msb-param-desc">Current lifecycle status, fetched from the backend: <code>created</code>, <code>starting</code>, <code>running</code>, <code>draining</code>, <code>paused</code>, <code>stopped</code>, or <code>crashed</code>.</div>
   </div>
 </div>
 
@@ -691,7 +691,7 @@ Opaque stable identity of the persisted sandbox. It remains unchanged across sto
 sandbox.wait_for_status(status) # => SandboxHandle
 ```
 
-Wait without a built-in timeout until this exact sandbox reaches one of `created`, `starting`, `running`, `draining`, `paused`, `stopped`, or `crashed`. Returns a refreshed metadata handle. Ruby's `Timeout.timeout` does not reliably interrupt the native wait. Use an SDK operation with an explicit timeout when you need a bounded shutdown.
+Wait without a built-in timeout until this exact sandbox reaches the requested [lifecycle status](#sandbox-status). Returns a refreshed metadata handle. Ruby's `Timeout.timeout` does not reliably interrupt the native wait. Use an SDK operation with an explicit timeout when you need a bounded shutdown.
 
 <p className="msb-label">Parameters</p>
 

@@ -34,33 +34,56 @@ On Linux and macOS, the install script writes the runtime to `~/.microsandbox/` 
 
 Check your local setup with:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb doctor
 ```
+</CodeGroup>
+
+## Quick start
+
+<CodeGroup>
+```bash Shell
+msb create python --name worker
+msb exec worker -- python -c "print('hello')"
+msb stop worker
+msb rm worker
+```
+</CodeGroup>
+
+`msb run` without `--name` creates an ephemeral sandbox, removed when its command finishes. Named sandboxes persist. Names must contain 1–128 UTF-8 bytes.
 
 ## Command forms
 
 Use short commands for everyday work. These forms are equivalent:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run alpine -- echo hello
 msb sandbox run alpine -- echo hello
 msb sbx run alpine -- echo hello
 ```
+</CodeGroup>
 
 Aliases such as `ls`, `rm`, `cp`, and `mod` also work inside `sandbox` and `sbx`.
 
 Saved-state operations are grouped under `msb snap`. The equivalent long form, `msb snapshot`, is also supported; this documentation uses `msb snap` consistently:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb snap create ready --sandbox devbox --full
 msb snap restore devbox:ready --name worker
 msb snap ls --group devbox
 msb snap export devbox:ready --output ready.msb
 msb snap import ready.msb --group received
 ```
+</CodeGroup>
+
+<Accordion title="Snapshot behavior, aliases, and backend support">
 
 Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live forks, groups, and archive operations are local-only. Use `msb fork devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
+
+</Accordion>
 
 ## Quick reference
 
@@ -81,17 +104,6 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 | [`doctor`, `update`, `downgrade`, `self`](/cli/management#msb-self) | Manage the CLI installation |
 | [`completion`](#shell-completion) | Generate shell completions |
 
-## Quick start
-
-```bash
-msb create python --name worker
-msb exec worker -- python -c "print('hello')"
-msb stop worker
-msb rm worker
-```
-
-`msb run` without `--name` creates an ephemeral sandbox, removed when its command finishes. Named sandboxes persist. Names must contain 1–128 UTF-8 bytes.
-
 ## Global options
 
 | Flag | Description |
@@ -108,9 +120,15 @@ msb rm worker
 
 ## Output formatting
 
+Command results normally go to stdout; progress and diagnostics go to stderr. Use JSON output when a command supports it for scripting.
+
+<Accordion title="Streams, units, and output exceptions">
+
 Progress, styled action confirmations, warnings, and errors go to stderr. Tables, inspection results, and JSON go to stdout. Empty-list messages retain their command-specific behavior: the registry empty-list message goes to stdout, while listing installed aliases produces no output when none exist. The plain `snapshot reindex` completion message also remains on stdout.
 
 Indented output uses two spaces, with nested content at four spaces. Human-readable image, snapshot, and volume sizes use binary units (KiB, MiB, GiB, TiB); JSON retains its documented numeric fields.
+
+</Accordion>
 
 ## Shell completion
 
@@ -158,30 +176,40 @@ Restart your shell. Regenerate saved completions after upgrading.
 
 Use `--tree` as an alternative to `--help` to see every command, subcommand, and flag at once:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb --tree
 ```
+</CodeGroup>
 
 You can scope it to a specific subcommand:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb image --tree    # Show only image commands
 msb volume --tree   # Show only volume commands
 msb run --tree      # Show all flags for run
 msb sandbox --tree  # Show the canonical sandbox command group
 msb sbx run --tree  # Show run flags through the group alias
 ```
+</CodeGroup>
 
 Limit the depth or hide flags and arguments for a compact command overview:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb --tree -L 2
 msb --tree --commands
 msb image --tree --commands -L 1
 msb --tree --brief --commands -L 2
 msb --tree -Cb -L 2
 ```
+</CodeGroup>
+
+<Accordion title="Tree depth and display rules">
 
 `-L N` (or `--levels N`) counts the selected root as level 0, so `-L 1` shows its immediate children and `-L 0` shows only the root. Omitting the limit shows all levels. At the depth limit, an inline marker such as `… 4 subcommands, 2 arguments` counts the immediate children that were collapsed; arguments include both flags and positional arguments. Hidden commands and options are excluded, and `--commands` excludes arguments from both the tree and these counts.
 
 `--brief` omits command and argument descriptions and their alignment padding, while retaining names, aliases, value placeholders, and collapse counts. It works with both `-L` and `--commands`.
+
+</Accordion>

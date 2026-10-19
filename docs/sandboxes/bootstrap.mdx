@@ -356,20 +356,18 @@ msb run ghcr.io/superradcompany/debian-systemd:12 \
 
 To verify the handoff worked, check `/proc/1/comm` inside the sandbox:
 
-```bash
+<CodeGroup>
+```bash Shell
 $ msb run ghcr.io/superradcompany/debian-systemd:12 --init auto -- cat /proc/1/comm
 systemd
 ```
+</CodeGroup>
 
 If `--init=auto` cannot find an init binary from the image ENTRYPOINT or the guest-side probe list, boot fails with a clear error in `kernel.log`. Use an explicit path when you know where the init lives.
 
 ### Argv and env
 
-Pass extra argv and env to the init:
-
-- **TypeScript / Rust**: `initWith(...)` / `init_with(...)`.
-- **Python**: pass an `InitConfig` to `init=`.
-- **CLI**: repeat `--init-arg` once per entry, and `--init-env KEY=VAL` once per env var.
+Pass extra arguments and environment variables to the init using the SDK options below. In the CLI, repeat `--init-arg` once per entry and `--init-env KEY=VAL` once per variable. Ruby accepts an init command but does not expose separate init arguments or environment overrides.
 
 `argv[0]` is the init command; extra argv entries are appended after it. Env is merged on top of the inherited environment.
 

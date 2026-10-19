@@ -56,9 +56,11 @@ On first launch, choose Sign in with ChatGPT, Sign in with Device Code, or provi
 
 After leaving Codex, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t codex-demo -- codex
 ```
+</CodeGroup>
 
 The sandbox root disk retains the files under `/root/.codex`, including authentication, configuration, and session history.
 
@@ -68,9 +70,11 @@ The sandbox root disk retains the files under `/root/.codex`, including authenti
 
 Exit the TUI and run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec codex-demo -- codex --version
 ```
+</CodeGroup>
 
 The pinned example prints `codex-cli 0.148.0`.
 
@@ -80,27 +84,35 @@ The pinned example prints `codex-cli 0.148.0`.
 
 With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec codex-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec codex-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/codex.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp codex-demo:/tmp/codex.patch ./codex.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./codex.patch
 ```
+</CodeGroup>
 
 </Step>
 
@@ -108,9 +120,11 @@ git apply --check ./codex.patch
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f codex-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes its Codex credentials, configuration, and sessions. Changes made through the default workspace mount remain in the host checkout.
 

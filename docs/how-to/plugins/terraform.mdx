@@ -17,6 +17,7 @@ The `random` provider makes the flow easy to test because planning it does not n
 
 <Step title="Create a test configuration">
 
+<CodeGroup>
 ```hcl main.tf
 terraform {
   required_providers {
@@ -31,6 +32,7 @@ resource "random_pet" "example" {
   prefix = "microsandbox"
 }
 ```
+</CodeGroup>
 
 </Step>
 
@@ -60,9 +62,11 @@ msb run --name terraform-base --replace `
 
 Copy the generated dependency lock file to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp terraform-base:/workspace/.terraform.lock.hcl ./.terraform.lock.hcl
 ```
+</CodeGroup>
 
 Capture the downloaded provider:
 
@@ -80,9 +84,11 @@ msb snap create terraform-runtime `
 
 Verify the snapshot before using it:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap verify terraform-base:terraform-runtime
 ```
+</CodeGroup>
 
 `terraform init` downloads the provider and creates `.terraform.lock.hcl`. The copy on the host is ready to review and commit when adapting this to a real module.
 
@@ -124,15 +130,19 @@ The provider loads and creates a plan, but it cannot contact any remote API. Pro
 
 <Step title="Clean up">
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f terraform-base terraform-vet
 ```
+</CodeGroup>
 
 Remove the reusable snapshot:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb snap rm terraform-base:terraform-runtime
 ```
+</CodeGroup>
 
 </Step>
 

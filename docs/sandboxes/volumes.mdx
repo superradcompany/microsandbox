@@ -13,6 +13,8 @@ Volumes give a sandbox persistent or shared storage by mounting host data, manag
 
 Choose bind mounts, named volumes, disk-image volumes, or tmpfs. Local sandboxes also support owned volumes: private storage that lives and dies with the sandbox.
 
+Ruby can create, inspect, list, and remove named volumes, but does not expose sandbox mount configuration, default-volume lookup, or volume filesystem operations. See the [Ruby volume reference](/sdk/ruby/volumes).
+
 ## Temporary files
 
 For OCI sandboxes with a disk-backed root, `/tmp` uses the root disk unless you
@@ -128,10 +130,12 @@ Use `--mount-file` when you want to bind one host file instead of an entire dire
 
 File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share. Writable file mounts receive the same default quota as directory binds; use `quota=<size>` to set a smaller or larger guest-growth budget.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb create alpine --name config-reader \
   --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
 ```
+</CodeGroup>
 
 ## Owned volumes
 
@@ -321,10 +325,12 @@ msb create python --name worker \
 
 The CLI command above creates `pip-cache` as a directory-backed named volume if it is missing. To create or reuse a disk-backed named volume while mounting it:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb create docker:dind --name docker-demo \
   --mount-named docker-data:/var/lib/docker:kind=disk,size=20G
 ```
+</CodeGroup>
 
 ### Sharing and host-side access
 
@@ -592,4 +598,4 @@ msb create python --name full \
 
 ## Reference
 
-For exact volume APIs, see [TypeScript](/sdk/typescript/volumes), [Rust](/sdk/rust/volumes), [Python](/sdk/python/volumes), or [Go](/sdk/go/volumes). For local volume management, see [Volume commands](/cli/volume-commands).
+For exact volume APIs, see [TypeScript](/sdk/typescript/volumes), [Rust](/sdk/rust/volumes), [Python](/sdk/python/volumes), [Go](/sdk/go/volumes), or [Ruby](/sdk/ruby/volumes). For local volume management, see [Volume commands](/cli/volume-commands).

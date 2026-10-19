@@ -105,6 +105,16 @@ m.IsRuntimeInstalled(config)
 // Install from the selected source. Returns (ResolvedRuntime, error).
 m.InstallRuntime(ctx, config, options)
 ```
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox.installed? # Check availability; returns a boolean.
+Microsandbox.install   # Install using the default source and options.
+
+# Reuse or install if missing:
+Microsandbox.install unless Microsandbox.installed?
+# Ruby does not expose resolve or per-call installation options.
+```
 </CodeGroup>
 
 Ensure does not repair incomplete installations or ignore invalid explicit paths.
@@ -113,13 +123,19 @@ Ensure does not repair incomplete installations or ignore invalid explicit paths
 
 The SDK checks these locations in order:
 
-1. **Explicit paths:** environment variables, process-level setters, then configured paths.
-2. **Runtime home:** configured `home`, then `MSB_HOME`, then `~/.microsandbox`.
-3. **SDK package:** bundled binaries, when available.
+It first checks **explicit paths**: environment variables, process-level setters, then configured paths. Next it checks the **runtime home**: configured `home`, then `MSB_HOME`, then `~/.microsandbox`. Finally it checks the **SDK package** for bundled binaries, when available.
 
-A local backend captures its effective home, relative directory overrides, configured runtime paths, and registry CA certificate path when it is constructed. Later changes to the working directory or `MSB_HOME` do not move that backend's files. Construct a new backend to select another home. Relative host paths in global `config.json` and managed configuration resolve against the contributing file’s directory. Programmatic paths and environment defaults use the caller’s working directory. Process-level SDK runtime setters capture relative paths when registered; environment runtime overrides are captured during backend construction, below managed policy. Existing saved sandbox records retain their legacy relative-path interpretation without rewriting.
+<Accordion title="Path resolution, backend lifetime, and runtime versions">
+
+A local backend captures its effective home, relative directory overrides, configured runtime paths, and registry CA certificate path when it is constructed. Later changes to the working directory or `MSB_HOME` do not move that backend's files. Construct a new backend to select another home.
+
+Relative host paths in global `config.json` and managed configuration resolve against the contributing file’s directory. Programmatic paths and environment defaults use the caller’s working directory.
+
+Process-level SDK runtime setters capture relative paths when registered; environment runtime overrides are captured during backend construction, below managed policy. Existing saved sandbox records retain their legacy relative-path interpretation without rewriting.
 
 A complete home installation wins over bundled Python and Node runtimes, even if its version differs from the SDK. Updating an SDK does not replace that installation. Go also reuses a complete home installation. [Managed runtime paths](/enterprise/deploy-and-verify#apply-configuration-updates) override user choices.
+
+</Accordion>
 
 To use a custom installation, set both `MSB_PATH` and `MSB_LIBKRUNFW_PATH` before constructing a backend. See [path overrides](/sdk/setup#override-runtime-paths) for SDK setters and precedence details.
 
@@ -127,16 +143,68 @@ To use a custom installation, set both `MSB_PATH` and `MSB_LIBKRUNFW_PATH` befor
 
 ### Bring your own runtime
 
-Install a matching pair with the [CLI installer](/getting-started/quickstart), or provision it yourself and select its paths above.
+Use an existing `msb` executable and its matching `libkrunfw` library instead of downloading a runtime at application startup. Install the pair with the [CLI installer](/getting-started/quickstart), or provision it yourself.
 
-- **Node:** the platform package includes the runtime and native addon. `--omit=optional` also removes the required addon.
-- **Rust:** embedding is opt-in. To also disable the default Cargo-time runtime download:
+Set both paths before starting your application. Replace these example paths with your installation:
 
-```bash
-cargo add microsandbox --no-default-features --features local,net
+<CodeGroup>
+```bash Linux
+export MSB_PATH="/opt/microsandbox/bin/msb"
+export MSB_LIBKRUNFW_PATH="/opt/microsandbox/lib/libkrunfw.so.5"
 ```
 
-You can still call `setup::ensure_runtime()` explicitly with these features.
+```bash macOS
+export MSB_PATH="/opt/microsandbox/bin/msb"
+export MSB_LIBKRUNFW_PATH="/opt/microsandbox/lib/libkrunfw.dylib"
+```
+
+```powershell Windows
+$env:MSB_PATH = "C:\microsandbox\bin\msb.exe"
+$env:MSB_LIBKRUNFW_PATH = "C:\microsandbox\lib\libkrunfw.dll"
+```
+</CodeGroup>
+
+Use the [resolve helper](#resolve-check-install-and-ensure) to check that the pair is available without installing anything. These environment variables also select the runtime for subsequent sandbox operations; see [path overrides](#override-runtime-paths) for precedence.
+
+<Accordion title="SDK packaging and build options">
+
+All SDKs can use the runtime paths above. You still need to install the SDK itself, including its native bindings. The packaging details differ:
+
+<CodeGroup>
+```bash TypeScript
+# Keep optional dependencies: the platform package contains both the
+# bundled runtime and the required native addon.
+# --omit=optional removes that addon too.
+npm install microsandbox
+```
+
+```bash Rust
+# Embedding is opt-in. Disable the default Cargo-time runtime download:
+cargo add microsandbox --no-default-features --features local,net
+
+# These features still allow explicit setup::ensure_runtime() calls.
+```
+
+```bash Python
+# Wheels include the native extension and a bundled runtime.
+# The runtime paths above override the bundled runtime.
+python -m pip install --only-binary=:all: microsandbox
+```
+
+```bash Go
+# The module embeds its native FFI library and extracts it on first use.
+# Your msb and libkrunfw pair is separate from that library.
+go get github.com/superradcompany/microsandbox/sdk/go
+```
+
+```bash Ruby
+# The gem needs its native extension even with an existing runtime.
+# Installing a source gem requires a Rust toolchain (1.85+).
+gem install microsandbox
+```
+</CodeGroup>
+
+</Accordion>
 
 ### Use a custom kernel
 
@@ -151,12 +219,14 @@ If your workload needs additional Linux kernel features, build a custom `libkrun
 
 For example, on Linux, replace these paths with your executable and custom library:
 
-```bash
+<CodeGroup>
+```bash Linux
 export MSB_PATH="/opt/microsandbox/bin/msb"
 export MSB_LIBKRUNFW_PATH="/opt/custom-kernel/libkrunfw.so.5"
 ```
+</CodeGroup>
 
-You can also use the [SDK path setters](#override-runtime-paths). In Rust, `set_sdk_libkrunfw_path()` is process-wide, not a `SandboxBuilder` method; call it before constructing the backend.
+You can also use the [SDK path setters](#override-runtime-paths) before constructing a backend.
 
 Boot a fresh guest to use the new kernel. Running guests and full snapshots retain their existing kernel.
 
@@ -185,8 +255,6 @@ For existing installations, see the [v0.7 migration guide](/migrations/v0.7) bef
 ## API reference
 
 <AccordionGroup>
-
-
 
 <Accordion title="Customize installation" id="customize-installation">
 
@@ -237,7 +305,6 @@ if err != nil {
 ```
 </CodeGroup>
 
-
 | Option | Behavior |
 |--------|----------|
 | Home and binary paths | Select the runtime home or explicit pair for this call. |
@@ -253,7 +320,7 @@ An embedded source requires a native SDK built with an embedded runtime archive.
 
 <Accordion title="Override runtime paths" id="override-runtime-paths">
 
-The TypeScript, Rust, Python, and Ruby SDKs can override process-wide runtime paths directly. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
+Use process-wide SDK setters where available, or the environment variables below. Go uses environment variables for process-wide overrides and `RuntimeConfig` for individual setup calls. Call setters before creating a local sandbox. Automatic package discovery is a fallback and does not occupy the explicit setter slot. A public libkrunfw setter overrides the library for the selected executable, whether that executable comes from configured paths, home, or a package.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -265,6 +332,8 @@ setRuntimeLibkrunfwPath("/opt/microsandbox/lib/libkrunfw.dylib");
 ```rust Rust
 use microsandbox::config::{set_sdk_libkrunfw_path, set_sdk_msb_path};
 
+// Process-wide configuration, not a SandboxBuilder method.
+// Set both paths before constructing the backend.
 set_sdk_msb_path("/opt/microsandbox/bin/msb");
 set_sdk_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
 ```
@@ -273,6 +342,18 @@ set_sdk_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib");
 from microsandbox import set_libkrunfw_path
 
 set_libkrunfw_path("/opt/microsandbox/lib/libkrunfw.dylib")
+```
+
+```go Go
+// These overrides apply to this setup call.
+// Use MSB_PATH and MSB_LIBKRUNFW_PATH for subsequent sandbox operations.
+runtime, err := m.ResolveRuntime(m.RuntimeConfig{
+    MSBPath: "/opt/microsandbox/bin/msb",
+    LibkrunfwPath: "/opt/microsandbox/lib/libkrunfw.dylib",
+})
+if err != nil {
+    return err
+}
 ```
 
 ```ruby Ruby
@@ -326,7 +407,8 @@ Go setup helpers may load the SDK's embedded FFI library on first use; resolve d
 
 Go also exposes the SDK's pinned release version and the version reported by the loaded FFI library:
 
-```go
+<CodeGroup>
+```go Go
 sdkVersion := m.SDKVersion()
 
 runtimeVersion, err := m.RuntimeVersion()
@@ -334,7 +416,7 @@ if err != nil {
     return err
 }
 ```
-
+</CodeGroup>
 
 
 `SDKVersion() string` does not load the FFI library. `RuntimeVersion() (string, error)` loads it automatically on first use and returns an error if loading fails.

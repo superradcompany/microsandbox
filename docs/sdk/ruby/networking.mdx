@@ -78,6 +78,25 @@ Accepts an `OutboundProxy`. The same object can be passed to `builder.proxy(prox
 
 ## OutboundProxy
 
+#### <span className="msb-recv">Microsandbox::OutboundProxy.</span><span className="msb-hn">http_connect()</span>
+
+```ruby
+Microsandbox::OutboundProxy.http_connect(address) # => OutboundProxy
+```
+
+Configure an HTTP CONNECT proxy. `address` must be an IP address and port, such as `127.0.0.1:3128`. Supports TCP without proxy authentication; UDP is unsupported. Requires a runtime with HTTP CONNECT support. See [HTTP CONNECT](/networking/outbound-proxy#http-connect).
+
+<Accordion title="Example">
+
+<CodeGroup>
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+sandbox = Microsandbox::Sandbox.create("proxied", image: "alpine", proxy: proxy)
+```
+</CodeGroup>
+
+</Accordion>
+
 #### <span className="msb-recv">Microsandbox::OutboundProxy.</span><span className="msb-hn">socks4()</span>
 
 ```ruby

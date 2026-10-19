@@ -16,7 +16,8 @@ You need JetBrains AI Assistant.
 
 Start with a small test project. Run these commands on your computer:
 
-```bash
+<CodeGroup>
+```bash Shell
 mkdir -p "$HOME/jetbrains-acp-demo"
 cd "$HOME/jetbrains-acp-demo"
 git init
@@ -33,6 +34,7 @@ msb exec jetbrains-agent --no-tty -- \
 msb exec jetbrains-agent --no-tty -- sh -c \
   'mkdir -p "$HOME/.config/opencode" && printf "%s\n" "{\"model\": \"opencode/mimo-v2.5-free\"}" > "$HOME/.config/opencode/opencode.json"' </dev/null
 ```
+</CodeGroup>
 
 The last command writes OpenCode's configuration to `~/.config/opencode/opencode.json` inside the sandbox. OpenCode loads this file on its own, so nothing about the model needs to live in the IDE's configuration. Edit it there, or copy in an existing `opencode.json` or `opencode.jsonc`, when you need more than a model name.
 
@@ -47,11 +49,14 @@ In **AI Chat > Add Custom Agent**, open `~/.jetbrains/acp.json` and add the conf
 
 Replace `/absolute/path/to/msb` with the output of:
 
-```bash
+<CodeGroup>
+```bash Shell
 command -v msb
 ```
+</CodeGroup>
 
-```json
+<CodeGroup>
+```json JSON
 {
   "default_mcp_settings": {
     "use_idea_mcp": false,
@@ -68,6 +73,7 @@ command -v msb
   }
 }
 ```
+</CodeGroup>
 
 Keep `--stream`: it lets the IDE and agent exchange messages while the agent runs. Do not replace it with `--no-tty` or disconnect its stdin.
 
@@ -86,9 +92,11 @@ Check that `hello.txt` appears in your project and the shell reports `Linux`.
 
 The example model was used with test data. Before opening a real project, choose a provider and model approved for your data, log in inside the sandbox, and replace the model name in the sandbox's `opencode.json`:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb exec jetbrains-agent -- opencode auth login
 ```
+</CodeGroup>
 
 Your login is saved in the sandbox's home volume. Do not commit credentials.
 
@@ -101,7 +109,8 @@ Your login is saved in the sandbox's home volume. Do not commit credentials.
 
 **One sandbox for all projects.** The IDE sends each project's path to the agent when a chat starts, so a single entry works for every project that is mounted at its host path. Mounts are set when the sandbox is created, so add one `-v` per project:
 
-```bash
+<CodeGroup>
+```bash Shell
 REPO_A="$(cd /path/to/repo-a && pwd -P)"
 REPO_B="$(cd /path/to/repo-b && pwd -P)"
 
@@ -111,6 +120,7 @@ msb create --name jetbrains-agent -c 2 -m 4G \
   -v jetbrains-agent-home:/root \
   -w "$REPO_A" node:22-bookworm </dev/null
 ```
+</CodeGroup>
 
 The agent can reach every mounted project, whichever one the IDE has open. A project-level `opencode.json` still applies only to its own project.
 
@@ -118,7 +128,8 @@ A parent directory mounted at its host path, such as `-v "$HOME/Dev:$HOME/Dev"`,
 
 **One sandbox per project.** Create a sandbox for each project and add one entry per sandbox. The entries differ only in the sandbox name:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "agent_servers": {
     "OpenCode: repo-a": {
@@ -132,6 +143,7 @@ A parent directory mounted at its host path, such as `-v "$HOME/Dev:$HOME/Dev"`,
   }
 }
 ```
+</CodeGroup>
 
 Use this when projects must not see each other's files.
 
@@ -159,7 +171,8 @@ Scripted tests of OpenCode 1.18.32 kept file and shell operations inside the san
 
 `OPENCODE_CONFIG_CONTENT` holds OpenCode configuration as a JSON string and takes precedence over the configuration files. Use it when one entry needs a different setting, such as a second entry with another model:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "args": [
     "exec", "jetbrains-agent", "--stream",
@@ -171,6 +184,7 @@ Scripted tests of OpenCode 1.18.32 kept file and shell operations inside the san
   }
 }
 ```
+</CodeGroup>
 
 The `-e` flag forwards the variable into the sandbox. To load a configuration file from a non-default path instead, forward a path with `"-e", "OPENCODE_CONFIG=/path/in/sandbox/opencode.json"`.
 
@@ -179,22 +193,26 @@ The `-e` flag forwards the variable into the sandbox. To load a configuration fi
 
 Install the adapter and Claude Code in the same sandbox, then log in:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb exec jetbrains-agent --no-tty -- npm install -g \
   @agentclientprotocol/claude-agent-acp@0.81.2 \
   @anthropic-ai/claude-code@2.1.282 </dev/null
 msb exec jetbrains-agent -- claude auth login
 ```
+</CodeGroup>
 
 Complete the browser login and paste the returned code into the guest terminal if prompted.
 
 Add an entry under `agent_servers` with the same `command` path and these arguments:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "args": ["exec", "jetbrains-agent", "--stream", "--", "claude-agent-acp"]
 }
 ```
+</CodeGroup>
 
 Keep both MCP settings `false`. The adapter initialized in scripted testing, but authenticated prompts and isolation remain unverified. Its [changelog](https://github.com/agentclientprotocol/claude-agent-acp/blob/v0.81.2/CHANGELOG.md#0180) says version 0.18.0 switched to built-in Claude tools; older adapters may behave differently.
 
@@ -205,19 +223,23 @@ If using an API key, add `"-e", "ANTHROPIC_API_KEY"` before `"--"` to pass it in
 
 Authorize your public key:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh authorize --file ~/.ssh/id_ed25519.pub
 ```
+</CodeGroup>
 
 Add this to `~/.ssh/config`, replacing the `msb` path:
 
-```sshconfig
+<CodeGroup>
+```sshconfig SSH config
 Host jetbrains-agent.msb
   User root
   IdentityFile ~/.ssh/id_ed25519
   IdentitiesOnly yes
   ProxyCommand /absolute/path/to/msb ssh serve jetbrains-agent --stdio
 ```
+</CodeGroup>
 
 Verify the host key on first connection. In JetBrains Gateway, enable parsing of `~/.ssh/config` and select this host.
 

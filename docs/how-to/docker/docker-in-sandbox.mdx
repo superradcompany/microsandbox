@@ -61,17 +61,21 @@ The flat root mounts ext4 directly, so Docker's overlay storage is not nested on
 
 From the sandbox shell, run a nested Ubuntu container:
 
-```sh
+<CodeGroup>
+```sh Shell
 docker run -it --rm ubuntu bash
 ```
+</CodeGroup>
 
 You are now in a container running inside Docker, which is itself running inside the microsandbox VM. Exit the Ubuntu container with `exit` to return to the `docker-demo` sandbox shell.
 
 You can also verify the daemon with a short non-interactive command:
 
-```sh
+<CodeGroup>
+```sh Shell
 docker run --rm hello-world
 ```
+</CodeGroup>
 
 </Step>
 
@@ -79,15 +83,19 @@ docker run --rm hello-world
 
 Exit the sandbox shell:
 
-```sh
+<CodeGroup>
+```sh Shell
 exit
 ```
+</CodeGroup>
 
 Back on the host, remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f docker-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes the nested daemon's images, containers, and build cache.
 
@@ -137,9 +145,11 @@ Docker gets a private ext4 disk for its data while the rest of the sandbox keeps
 
 To keep Docker data independently of the sandbox, use a [named volume](/sandboxes/volumes#named-volumes) instead:
 
-```sh
+<CodeGroup>
+```sh Shell
 --mount-named docker-data:/var/lib/docker:kind=disk,size=10G
 ```
+</CodeGroup>
 
 ## Notes
 

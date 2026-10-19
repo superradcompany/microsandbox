@@ -54,9 +54,11 @@ The tested install downloads 188 packages and takes about a minute on a warm Nod
 
 After leaving Pi, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t pi-demo -- pi
 ```
+</CodeGroup>
 
 </Step>
 
@@ -64,9 +66,11 @@ msb exec -t pi-demo -- pi
 
 Exit Pi and run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec pi-demo -- pi --version
 ```
+</CodeGroup>
 
 The pinned example prints `0.73.1`.
 
@@ -76,35 +80,45 @@ The pinned example prints `0.73.1`.
 
 With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec pi-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec pi-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/pi.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp pi-demo:/tmp/pi.patch ./pi.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./pi.patch
 ```
+</CodeGroup>
 
 </Step>
 
 <Step title="Clean up">
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f pi-demo
 ```
+</CodeGroup>
 
 Changes made through the default workspace mount remain in the host checkout.
 

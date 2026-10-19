@@ -1242,6 +1242,50 @@ POSIX resource limit identifiers. Each maps to an `RLIMIT_*` constant.
 | `Rtprio` | Max real-time priority (`RLIMIT_RTPRIO`) |
 | `Rttime` | Max real-time timeout (`RLIMIT_RTTIME`) |
 
+### ExecFailureKind
+
+The `kind` field of a structured `ExecFailed` payload. See [spawn-time failures](/sdk/errors#spawn-time-exec-failures) for handling examples.
+
+#### NotFound
+
+The binary is missing from `PATH` or the explicit path.
+
+#### PermissionDenied
+
+The binary exists but permission to execute it was denied.
+
+#### NotExecutable
+
+The kernel cannot execute the file: for example, invalid ELF, a missing script interpreter, or the wrong architecture.
+
+#### BadCwd
+
+The working directory is missing, is not a directory, or cannot be entered.
+
+#### BadArgs
+
+Arguments or environment are too large, a path is too long, path resolution encounters too many symlinks, or arguments contain invalid bytes.
+
+#### ResourceLimit
+
+A resource limit prevented startup, such as a rejected limit, exhausted process limit, or file-descriptor exhaustion.
+
+#### UserSetupFailed
+
+The requested user does not exist or user/group setup failed.
+
+#### OutOfMemory
+
+Memory pressure prevented process creation.
+
+#### PtySetupFailed
+
+PTY allocation or attachment failed.
+
+#### Other
+
+Another startup error. Inspect `errno`, `message`, and `stage` for details.
+
 ## Managed jobs
 
 Run and reconnect to background commands. See [Background jobs](/sandboxes/commands#background-jobs) for lifecycle, retention, and runtime limits.

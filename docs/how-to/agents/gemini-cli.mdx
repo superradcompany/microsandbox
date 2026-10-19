@@ -57,9 +57,11 @@ Gemini CLI first asks whether you trust the workspace. Review the mounted projec
 
 After leaving Gemini CLI, return to the same sandbox and workspace with:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec -t gemini-demo -- gemini
 ```
+</CodeGroup>
 
 </Step>
 
@@ -67,9 +69,11 @@ msb exec -t gemini-demo -- gemini
 
 Exit the TUI and run:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec gemini-demo -- gemini --version
 ```
+</CodeGroup>
 
 The pinned example prints `0.52.0`.
 
@@ -79,27 +83,35 @@ The pinned example prints `0.52.0`.
 
 With the default writable mount, changes are already in the host checkout. Review them inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec gemini-demo -- sh -lc 'cd /workspace && git status --short && git diff --stat && git diff'
 ```
+</CodeGroup>
 
 If you chose the isolated `--copy-dir` alternative, create a patch inside the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb exec gemini-demo -- sh -lc 'cd /workspace && git add -N . && git diff --binary > /tmp/gemini.patch'
 ```
+</CodeGroup>
 
 Copy the patch to the host:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb cp gemini-demo:/tmp/gemini.patch ./gemini.patch
 ```
+</CodeGroup>
 
 Check that it applies cleanly before applying it:
 
-```sh
+<CodeGroup>
+```sh Shell
 git apply --check ./gemini.patch
 ```
+</CodeGroup>
 
 </Step>
 
@@ -107,9 +119,11 @@ git apply --check ./gemini.patch
 
 Remove the sandbox:
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f gemini-demo
 ```
+</CodeGroup>
 
 Removing the sandbox also removes its Gemini authentication and settings. Changes made through the default workspace mount remain in the host checkout.
 

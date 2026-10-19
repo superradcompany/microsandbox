@@ -60,9 +60,11 @@ msb cp dependency-audit:/var/tmp/npm-audit.json .artifacts/npm-audit.json
 
 Inspect the vulnerability summary:
 
-```sh
+<CodeGroup>
+```sh Shell
 jq '.metadata.vulnerabilities' .artifacts/npm-audit.json
 ```
+</CodeGroup>
 
 The `fsize` limit bounds the guest report to 8 MiB. Treat the report as sensitive for private projects because it contains package names and versions.
 
@@ -72,9 +74,11 @@ The `fsize` limit bounds the guest report to 8 MiB. Treat the report as sensitiv
 
 Put the two blocks in a checked-in script, run it once manually, then call it from cron, a systemd timer, or your CI scheduler. The scheduler belongs outside the sandbox; the audit is the disposable part.
 
-```sh
+<CodeGroup>
+```sh Shell
 msb rm -f dependency-audit
 ```
+</CodeGroup>
 
 Use a unique sandbox name instead of `--replace` when audit jobs may overlap.
 

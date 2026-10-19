@@ -5,16 +5,18 @@ keywords: ["sandbox networking", "network policy", "port forwarding", "egress"]
 icon: "network-wired"
 ---
 
-All sandbox traffic flows through a host-controlled networking stack. From inside the VM it looks like a normal network interface; from the host side, every packet is checked against policy before it leaves.
+Microsandbox checks sandbox traffic against a host-controlled network policy. Start with the defaults, then allow only the destinations and ports your workload needs.
 
 ## Defaults
 
-By default, sandboxes can reach the public internet but cannot reach private networks, loopback, link-local addresses, or cloud metadata endpoints. Only published ports accept inbound traffic.
+Sandboxes can reach the public internet by default. Private networks, the host, loopback, link-local addresses, and cloud metadata endpoints are blocked. Inbound traffic needs a published port.
 
-To block network access:
+To isolate a sandbox from the network:
 
 <CodeGroup>
 ```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
 await using sb = await Sandbox.builder("isolated")
     .image("python")
     .disableNetwork()
@@ -22,6 +24,8 @@ await using sb = await Sandbox.builder("isolated")
 ```
 
 ```rust Rust
+use microsandbox::Sandbox;
+
 let sb = Sandbox::builder("isolated")
     .image("python")
     .network(|n| n.enabled(false))
@@ -53,30 +57,16 @@ msb create python --name isolated --no-net
 
 The TypeScript and Rust examples disable the network device. Python `Network.none()`, Go `NetworkPolicy.None()`, and CLI `--no-net` retain the device but deny traffic in both directions through policy.
 
+Ruby exposes network disablement, host/port allowlists, proxies, and basic TLS interception. Deployment profiles, policy profiles, NAT64, port publishing, and rate limits require TypeScript, Rust, Python, Go, or the CLI; see the [Ruby networking reference](/sdk/ruby/networking) for its available options.
+
 ## Deployment profiles
 
-<Tooltip tip="Managed cloud deployments choose the platform isolation profile; per-sandbox and local-operator profile overrides are not accepted."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-`single-tenant` is the default and preserves the network configuration requested by the sandbox. `multi-tenant` adds a host-runtime isolation floor: traffic must pass both the platform public-network policy and the sandbox's policy, and DNS rebinding protection is forced on. Custom DNS servers and interface overrides are removed, host CA import and published ports are disabled. Sandbox policy can further restrict this floor but cannot broaden it.
-
-The per-sandbox `maxTcpConnections` setting optionally limits concurrent guest-initiated TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
-
-Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections when the limit is omitted. The current SDK rejects explicit unlimited TCP connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero TCP limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
-
-`maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
-
-`maxInboundTcpConnections` limits active inbound TCP connections across published ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Explicit overrides require runtime support or fail with an upgrade-required error. This local-only limit is separate from the listener queue (`tcpAcceptQueueSize`).
-
-On 0.7.9+, finished connections leave the active budget after response delivery. The runtime retains up to 256 finished sockets in TIME-WAIT, evicting the oldest under pressure and shortening protection against delayed packets. Host writes stalled for 30 seconds are closed; successful writes restart the timer.
-
-Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.
-
-For NAT64, microsandbox evaluates destinations in configured `/96` NAT64 prefixes against the embedded IPv4 address as well as the IPv6 address. The well-known `64:ff9b::/96` prefix is configured by default; add environment-specific routed prefixes only when your platform actually uses them.
-
-Custom NAT64 prefixes are supported only for local sandboxes. Cloud creation rejects non-default or empty prefix lists because the cloud API cannot carry this setting.
+Local sandboxes use `single-tenant` by default. Use `multi-tenant` for shared hosts: it enforces public-network access, DNS rebinding protection, and stricter limits. Sandbox policies can restrict access further. Cloud chooses its own profile.
 
 <CodeGroup>
 ```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
 await using sb = await Sandbox.builder("shared-worker")
     .image("python")
     .deploymentProfile("multi-tenant")
@@ -85,6 +75,7 @@ await using sb = await Sandbox.builder("shared-worker")
 
 ```rust Rust
 use microsandbox::sandbox::DeploymentProfile;
+use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("shared-worker")
     .image("python")
@@ -115,53 +106,86 @@ msb create python --name shared-worker --deployment-profile multi-tenant
 ```
 </CodeGroup>
 
-An operator can set an authoritative profile with the top-level `deployment_profile` field in `~/.microsandbox/config.json` or programmatically on `LocalBackend`. That operator choice overrides the sandbox request on create and restart. Managed cloud create requests intentionally do not carry a deployment profile. The hosting driver selects it.
+<Accordion title="Deployment restrictions and operator settings">
+
+In `multi-tenant` mode, traffic must pass both the platform's public-network policy and the sandbox's policy. Custom DNS servers and interface overrides are removed; host CA import and published ports are disabled. The sandbox cannot relax these restrictions.
+
+An operator can set `deployment_profile` in `~/.microsandbox/config.json` or on `LocalBackend`. This overrides the sandbox's choice on create and restart. Managed cloud requests do not carry a deployment profile; the hosting driver selects it.
+
+</Accordion>
+
+<span id="connection-limits" />
+
+<Accordion title="Connection limits and compatibility">
+
+The per-sandbox `maxTcpConnections` setting optionally limits concurrent guest-initiated TCP connections. `maxConnections` remains a deprecated TCP-only alias. When omitted, `single-tenant` has no connection-count cap and `multi-tenant` defaults to 1,024. An explicit positive value overrides either default; zero explicitly selects unlimited. These are runtime defaults, not operator-enforced ceilings. Services accepting tenant configuration must enforce their own policy on overrides.
+
+Legacy v0.6.x launch contracts keep their historical default of 256 TCP connections when the limit is omitted. The current SDK rejects explicit unlimited TCP connections, values above 4,096, or multi-tenant values above 256 when launching an older runtime because those peers cannot preserve the requested meaning. A current runtime also rejects legacy zero TCP limits: old zero meant deny all connections, not unlimited. Current-contract defaults and explicit limits are unchanged.
+
+`maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
+
+`maxInboundTcpConnections` limits active inbound TCP connections across published ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Explicit overrides require runtime support or fail with an upgrade-required error. This local-only limit is separate from the listener queue (`tcpAcceptQueueSize`).
+
+On 0.7.9+, finished connections leave the active budget after response delivery. The runtime retains up to 256 finished sockets in TIME-WAIT, evicting the oldest under pressure and shortening protection against delayed packets. Host writes stalled for 30 seconds are closed; successful writes restart the timer.
+
+Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.
+
+`maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
+
+</Accordion>
 
 ## High-level profiles
 
-For common access shapes, compose high-level profiles. Every non-empty profile set automatically adds narrow DNS access through the sandbox gateway.
+Combine `public`, `private`, and `host` to allow those destination groups. Use `none` to deny all traffic or `all` to allow all traffic. This example allows public and private networks:
 
 <CodeGroup>
 ```typescript TypeScript
-const policy = NetworkPolicy.fromProfiles(["public", "private"]);
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .network((n) => n.policy(NetworkPolicy.fromProfiles(["public", "private"])))
+    .create();
 ```
 
 ```rust Rust
-let policy = NetworkPolicy::from_profiles([
-    NetworkProfile::Public,
-    NetworkProfile::Private,
-]);
+use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
+
+let policy = NetworkPolicy::from_profiles([NetworkProfile::Public, NetworkProfile::Private]);
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
 ```
 
 ```python Python
-network = Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE)
+from microsandbox import Network, NetworkProfile, Sandbox
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    network=Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.PRIVATE),
+)
 ```
 
 ```go Go
-network := m.NetworkPolicy.FromProfiles(
-    m.NetworkProfilePublic,
-    m.NetworkProfilePrivate,
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic, m.NetworkProfilePrivate)),
 )
 ```
 
 ```bash CLI
-msb run alpine --net "public,private"
+msb create python --name worker --net "public,private"
 ```
 </CodeGroup>
 
-The composable profiles are `public`, `private`, and `host`. `none` and `all` remain terminal whole-policy choices rather than profiles. Duplicate profiles are ignored, generated rules use a stable order, and explicit low-level rules can be placed before generated profile rules to override them.
+Add `host` for services on your machine; see [Reaching the host](#reaching-the-host). Duplicate profiles are ignored. Explicit rules placed before profile rules take precedence.
 
 ## Low-level custom policies
 
-A policy has two defaults and an ordered list of rules. The first matching rule wins.
-
-```text
-default_egress  : allow | deny
-default_ingress : allow | deny
-rules           : first match wins
-```
-
-For example, this creates a deny-by-default sandbox that can make HTTPS requests to the public internet and DNS requests through the host gateway:
+For finer control, set default actions and add rules. The first matching rule wins. This example allows public HTTPS and gateway DNS while denying other outbound traffic:
 
 <CodeGroup>
 ```typescript TypeScript
@@ -180,6 +204,8 @@ await using sb = await Sandbox.builder("restricted-worker")
 ```
 
 ```rust Rust
+use microsandbox::{NetworkPolicy, Sandbox};
+
 let policy = NetworkPolicy::builder()
     .default_deny()
     .egress(|e| e.tcp().port(443).allow_public())
@@ -229,9 +255,148 @@ msb create alpine --name restricted-worker \
 ```
 </CodeGroup>
 
-Rules can target groups like `public`, `private`, and `host`, or specific IPs, CIDRs, domains, and port ranges. See the [CLI reference](/cli/sandbox-commands#network-rule-syntax) or your language's SDK networking reference for exact syntax.
+Rules can match destination groups, IPs, CIDRs, domains, and ports. See the [CLI rule syntax](/cli/sandbox-commands#network-rule-syntax) or an [SDK reference](#reference) for exact options.
+
+## NAT64 prefixes
+
+NAT64 lets IPv6 networks reach IPv4 destinations. Microsandbox checks both addresses against policy, so translated private and metadata addresses stay blocked. The standard `64:ff9b::/96` prefix is included by default.
+
+If your local network routes another `/96` prefix, add it like this:
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("translated")
+    .image("python")
+    .network((n) => n.nat64Prefix("64:ff9b:1::/96"))
+    .create();
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let prefix = "64:ff9b:1::/96".parse()?;
+let sb = Sandbox::builder("translated")
+    .image("python")
+    .network(|n| n.nat64_prefix(prefix))
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Network, Sandbox
+
+sb = await Sandbox.create(
+    "translated",
+    image="python",
+    network=Network(nat64_prefixes=("64:ff9b::/96", "64:ff9b:1::/96")),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "translated",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        NAT64Prefixes: []string{"64:ff9b::/96", "64:ff9b:1::/96"},
+    }),
+)
+```
+
+```bash CLI
+msb create python --name translated --net-nat64-prefix 64:ff9b:1::/96
+```
+</CodeGroup>
+
+This setting classifies traffic; it does not set up NAT64 routing. Cloud rejects custom or empty prefix lists. See [CLI options](/cli/sandbox-commands#network-profiles) for details.
 
 ## Hostname rules and HTTPS
+
+Allow specific domains with hostname rules. By default, HTTPS allowed only by a hostname rule requires [TLS inspection](/networking/tls), so microsandbox can check the hostname inside the request:
+
+<CodeGroup>
+```typescript TypeScript
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+const policy = NetworkPolicy.builder()
+    .defaultDeny()
+    .egress((e) => e.tcp().port(443).allowDomain("github.com"))
+    .egress((e) => e.udp().tcp().port(53).allowHost())
+    .build();
+
+await using sb = await Sandbox.builder("github-only")
+    .image("python")
+    .network((n) => n.policy(policy))
+    .interceptTls()
+    .create();
+```
+
+```rust Rust
+use microsandbox::{NetworkPolicy, Sandbox};
+
+let policy = NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e.tcp().port(443).allow_domains(["github.com"]))
+    .egress(|e| e.udp().tcp().port(53).allow_host())
+    .build()?;
+
+let sb = Sandbox::builder("github-only")
+    .image("python")
+    .network(|n| n.policy(policy))
+    .intercept_tls()
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Action, Destination, Network, NetworkPolicy, Protocol, Rule, Sandbox
+
+sb = await Sandbox.create(
+    "github-only",
+    image="python",
+    network=Network(policy=NetworkPolicy(
+        default_egress=Action.DENY,
+        rules=(
+            Rule.allow(destination=Destination.domain("github.com"), protocol=Protocol.TCP, port=443),
+            *Rule.allow_dns(),
+        ),
+    )),
+    intercept_tls=True,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "github-only",
+    m.WithImage("python"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress: m.PolicyActionDeny,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "github.com", Protocol: m.PolicyProtocolTCP, Port: "443"},
+            m.Rule.AllowDNS(),
+        },
+    }),
+    m.WithInterceptTLS(),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "github-only",
+  image: "python",
+  network: { allowed_hosts: ["github.com"], allowed_ports: [443] },
+  intercept_tls: true
+)
+```
+
+```bash CLI
+msb create python --name github-only \
+  --net-default-egress deny \
+  --net-rule "allow@github.com:tcp:443,allow@dns" \
+  --tls-intercept
+```
+</CodeGroup>
+
+<Accordion title="How strict hostname checks work">
 
 Domain and domain-suffix rules start with the hostname microsandbox can observe. DNS rules see the query name, and TLS connections usually expose SNI before the encrypted session starts. That is enough to decide whether a connection may be opened, but it is not the same as seeing the HTTP request authority.
 
@@ -239,14 +404,16 @@ For plaintext HTTP, microsandbox can inspect the `Host` header and require it to
 
 Strict hostname policy mode is enabled by default: hostname allowlists fail closed unless microsandbox can inspect the request authority. In strict mode, hostname-based allow rules still work for plaintext HTTP and TLS-intercepted HTTPS. Non-intercepted HTTPS is denied when it would otherwise be allowed only by a hostname rule. IP, CIDR, group, and default allow rules are not treated as hostname-based allows. Set `--net-strict=false` or `network.strict: false` in sandbox configuration to opt out.
 
+</Accordion>
+
 ## Port mapping
 
-<Tooltip tip="Publishing host ports is not available on microsandbox cloud; there is no local host to publish to."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-Publish a guest port when a service inside the sandbox should be reachable from the host. Published ports bind to `127.0.0.1` by default.
+Publish a guest port to your host machine. This example forwards host port `8080` to guest port `80`, listening on `127.0.0.1` by default. Port publishing is local-only.
 
 <CodeGroup>
 ```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
 await using sb = await Sandbox.builder("api")
     .image("python")
     .port(8080, 80)
@@ -254,6 +421,8 @@ await using sb = await Sandbox.builder("api")
 ```
 
 ```rust Rust
+use microsandbox::Sandbox;
+
 let sb = Sandbox::builder("api")
     .image("python")
     .port(8080, 80)
@@ -279,6 +448,8 @@ msb create python --name api -p 8080:80
 ```
 </CodeGroup>
 
+<Accordion title="Bind addresses, port ranges, and Windows">
+
 Use an explicit bind address, such as `0.0.0.0`, only when you intentionally want to listen beyond localhost. `-p 8080:80` and SDK helpers like `.port(8080, 80)` bind to `127.0.0.1`; `-p 127.0.0.1:8080:80` is the same loopback-only shape. `-p 0.0.0.0:8080:80` or a specific LAN interface address makes the host listener reachable outside the machine, subject to your OS firewall and network policy.
 
 If the host starts without IPv4 or IPv6 routes, microsandbox assigns private guest addresses for published ports unless guest addresses are already configured. A specific host bind address must still exist at startup.
@@ -287,16 +458,18 @@ CLI `-p` and YAML `ports` lists also accept inclusive, equal-length port ranges:
 
 On Windows, the first published port may trigger a Windows Defender Firewall prompt for `msb.exe` because the runtime opens a host listening socket. For local development, keep the bind address on `127.0.0.1`. Only allow private/public network access in the firewall prompt when you intentionally bind a published port beyond loopback.
 
+</Accordion>
+
 ## Rate limits
 
-<Tooltip tip="Network traffic rate limits are available for local sandboxes. microsandbox cloud currently rejects this setting."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+Limit inbound or outbound bandwidth and packet rate on local sandboxes. Omitted limits leave traffic unthrottled; changes take effect on the next start. Cloud does not support this setting.
 
-Network rate limits apply only to traffic crossing a sandbox's virtual network device. They do not limit CPU, memory, disk I/O, API requests, or how many sandboxes can run. If you do not configure a limiter, microsandbox does not throttle the sandbox's network bandwidth or packet rate. Once configured, the limiter is enforced independently for outbound (egress) and inbound (ingress) traffic.
-
-For each direction, you can configure a bandwidth bucket measured in bytes per refill interval, a packet-rate bucket measured in packets per interval, or both. An omitted direction or bucket remains unthrottled. Buckets start full, refill continuously, and can include a one-time startup burst that does not refill. Limits are set at creation and take effect on the next sandbox start.
+This example allows 1 MiB/s outbound, a one-time 512 KiB burst, and 1,000 packets per second:
 
 <CodeGroup>
 ```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
 await using sb = await Sandbox.builder("throttled")
     .image("python")
     .network((n) => n.rateLimiter((r) => r.egress((r) => r
@@ -308,7 +481,9 @@ await using sb = await Sandbox.builder("throttled")
 
 ```rust Rust
 use std::time::Duration;
+
 use microsandbox::size::SizeExt;
+use microsandbox::Sandbox;
 
 let sb = Sandbox::builder("throttled")
     .image("python")
@@ -359,7 +534,15 @@ msb create python --name throttled \
 ```
 </CodeGroup>
 
+<Accordion title="How limits and bursts are applied">
+
+Network rate limits apply only to traffic crossing a sandbox's virtual network device. They do not limit CPU, memory, disk I/O, API requests, or how many sandboxes can run. If you do not configure a limiter, microsandbox does not throttle the sandbox's network bandwidth or packet rate. Once configured, the limiter is enforced independently for outbound (egress) and inbound (ingress) traffic.
+
+For each direction, you can configure a bandwidth bucket measured in bytes per refill interval, a packet-rate bucket measured in packets per interval, or both. An omitted direction or bucket remains unthrottled. Buckets start full, refill continuously, and can include a one-time startup burst that does not refill. Limits are set at creation and take effect on the next sandbox start.
+
 The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-ingress-bandwidth`, `--net-ingress-bandwidth-burst`, `--net-ingress-ops`, `--net-ingress-ops-burst`). Sizes accept raw bytes plus `K`, `M`, and `G` suffixes; the interval defaults to one second when omitted. A frame larger than the bandwidth bucket is delivered once and the limiter then pauses long enough to pay it off, so oversized packets are throttled instead of stuck.
+
+</Accordion>
 
 <span id="what-a-denied-http-request-sees" />
 
@@ -508,24 +691,61 @@ Both custom messages are JSON-escaped. An omitted message uses the default; an e
 
 ## Reaching the host
 
-<Tooltip tip="The host group is backend-relative; on microsandbox cloud it does not refer to the machine running the SDK or CLI, so expose local services through a reachable network endpoint."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+`host.microsandbox.internal` points to the host machine from inside a local sandbox. The default policy blocks it, so allow the `host` group when the guest needs a local service:
 
-From inside the sandbox, `host.microsandbox.internal` resolves to the host machine. The default policy denies host access, so allow the `host` group when a sandbox needs to call a dev server, database, or other local service.
+<CodeGroup>
+```typescript TypeScript
+import { NetworkPolicy, Sandbox } from "microsandbox";
 
-```bash
-msb create python --name devbox --net "public,host"
+await using sb = await Sandbox.builder("devbox")
+    .image("python")
+    .network((n) => n.policy(NetworkPolicy.fromProfiles(["public", "host"])))
+    .create();
 ```
 
-`loopback` means the sandbox's own `127.0.0.1`, not your laptop's localhost. Use `host` for `host.microsandbox.internal`.
+```rust Rust
+use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
+
+let policy = NetworkPolicy::from_profiles([NetworkProfile::Public, NetworkProfile::Host]);
+let sb = Sandbox::builder("devbox")
+    .image("python")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Network, NetworkProfile, Sandbox
+
+sb = await Sandbox.create(
+    "devbox",
+    image="python",
+    network=Network.from_profiles(NetworkProfile.PUBLIC, NetworkProfile.HOST),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "devbox",
+    m.WithImage("python"),
+    m.WithNetwork(m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic, m.NetworkProfileHost)),
+)
+```
+
+```bash CLI
+msb create python --name devbox --net "public,host"
+```
+</CodeGroup>
+
+Guest `127.0.0.1` is inside the sandbox, not the host. On cloud, the `host` group refers to the cloud worker, not the machine running your SDK.
 
 ## Reference
 
-For exact network APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), or [Go](/sdk/go/networking). For CLI flags and configuration fields, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Sandbox configuration](/cli/configuration#network).
+For exact APIs, see [TypeScript](/sdk/typescript/networking), [Rust](/sdk/rust/networking), [Python](/sdk/python/networking), [Go](/sdk/go/networking), or [Ruby](/sdk/ruby/networking). For flags and configuration, see [Sandbox commands](/cli/sandbox-commands#network-profiles) and [Sandbox configuration](/cli/configuration#network).
 
 ## Next
 
-- [DNS](/networking/dns): domain blocking, pinned nameservers, and query timeouts
-- [Proxies](/networking/outbound-proxy): route outbound TCP and non-DNS UDP through an external SOCKS proxy
-- [TLS inspection](/networking/tls): inspect HTTPS with an auto-generated CA
-- [Host sockets](/networking/host-sockets): connect guest applications to local host IPC without opening a TCP port
-- [Security model](/security/overview): understand the trust boundary, and [network defenses](/security/network) for SSRF, rebinding, and metadata protection
+- [DNS](/networking/dns): nameservers and domain blocking
+- [Outbound proxies](/networking/outbound-proxy): route traffic through a proxy
+- [TLS inspection](/networking/tls): inspect HTTPS traffic
+- [Host sockets](/networking/host-sockets): connect to host IPC without a TCP port
+- [Network security](/security/network): understand the policy boundary and defenses

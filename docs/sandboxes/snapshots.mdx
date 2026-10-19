@@ -177,6 +177,8 @@ msb exec worker -- python -c "import requests; print(requests.__version__)"
 
 Local snapshots use `group:member` selectors, such as `baseline:ready`. For cloud, pass the snapshot object or reference; it has no client-local path.
 
+Ruby can capture basic disk snapshots, inspect and export existing snapshots, and manage saved snapshot handles. Full capture, restore, fork, import, compaction, integrity verification, and group configuration are not exposed by its current API. See the [Ruby snapshot reference](/sdk/ruby/snapshots).
+
 ## Full snapshots
 
 <Tooltip tip="Full snapshots are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -408,13 +410,15 @@ Snapshots with a tmpfs root cannot be restored disk-only.
 
 ### Keep the guest clock
 
+Guest-clock overrides are currently available through the CLI and Rust SDK. Other SDKs use the default policy when creating a sandbox and inherit the saved policy when restoring.
+
 By default (`sync`), the sandbox's date and time follow the host. The host updates the clock at boot, about once a minute, and when a full snapshot restores or a paused sandbox resumes.
 
 With `off`, the host stops updating the clock after boot. Full restores continue from the snapshot's saved time. The clock keeps running, making this useful for tests that need a repeatable starting time.
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::sandbox::GuestClockPolicy;
+use microsandbox::{sandbox::GuestClockPolicy, Sandbox};
 
 let source = Sandbox::builder("worker")
     .image("alpine")
@@ -432,6 +436,8 @@ Full snapshots save this setting. Restores inherit it unless you choose `sync` t
 
 <CodeGroup>
 ```rust Rust
+use microsandbox::{sandbox::GuestClockPolicy, Sandbox};
+
 let child = Sandbox::restore("worker:snap")
     .name("child")
     .guest_clock(GuestClockPolicy::Sync)
@@ -711,7 +717,7 @@ Using the same host directory for the source and restored sandbox shares its fil
 <Accordion title="Advanced restore options">
 
 - **Reuse source bindings:** Restore on the same host using the source's validated mounts. Missing dependencies still cause restore to fail.
-- **Attach a host disk image:** Mount one at restore time with `--mount-disk SOURCE:DEST[:OPTIONS]` in the CLI, or the SDK's disk volume (`Volume.disk()`, `Mount.Disk()`, `.volume(guest, v => v.disk(path))`). A full restore accepts a disk only at a guest path captured in the snapshot.
+- **Attach a host disk image:** Mount one at restore time with `--mount-disk SOURCE:DEST[:OPTIONS]` in the CLI, or the [SDK disk-mount options](/sandboxes/volumes#disk-image-volumes). A full restore accepts a disk only at a guest path captured in the snapshot.
 - **Select a captured disk:** Restore a private copy of a named disk volume. External disk images are not converted to owned volumes.
 - **Allow missing resources:** Continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources fails and may disrupt applications or make filesystems read-only.
 
@@ -1735,5 +1741,5 @@ msb fork worker --name child --integrity
 
 See each SDK reference for setup, imports, optional controls, and result fields.
 
-- **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), and [Go](/sdk/go/snapshots).
+- **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), [Go](/sdk/go/snapshots), and [Ruby](/sdk/ruby/snapshots).
 - **CLI:** Run `msb snap --help` or `msb snap restore --help` for all options.

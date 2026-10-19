@@ -35,16 +35,20 @@ Distribution steps are covered in [Deploy and verify](/enterprise/deploy-and-ver
 
 On a connected machine with the same CPU architecture as the target, pull and export an image. This example uses Alpine; substitute your approved image:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb pull alpine
 msb save --output alpine.tar alpine
 ```
+</CodeGroup>
 
 Transfer the archive through your distribution system. On the employee device, confirm `msb context` selects the local backend, then import it as the employee who will run sandboxes:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb load --input alpine.tar --tag offline-alpine:approved
 ```
+</CodeGroup>
 
 Load into the same configured home and cache used by the application. Image export can change manifest and layer digests, so use the imported reference rather than assuming the original digest is preserved. See [image archives](/cli/image-commands#msb-save).
 
@@ -52,9 +56,11 @@ Load into the same configured home and cache used by the application. Image expo
 
 Disconnect public network access, run `msb doctor`, and test the imported image:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run offline-alpine:approved --pull never --no-net -- /bin/sh -c 'echo offline-ready'
 ```
+</CodeGroup>
 
 `--pull never` fails if the image is unavailable locally. `--no-net` disables guest networking; it does not control host installer downloads. This unnamed sandbox is removed when the command finishes.
 
