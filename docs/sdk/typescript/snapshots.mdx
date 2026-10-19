@@ -920,7 +920,19 @@ for (const outcome of outcomes) {
 
 Capture once for all names and return outcomes in input order. Each outcome has `name` and either a started `sandbox` or an `error`. Validation or capture errors reject the whole call; a child startup error leaves successful siblings running. Stop successful children when finished.
 
-`ForkOptions` supports `recordIntegrity`, [`guestFlush`](#guest-writeback) (defaults to `"auto"`), and `volumes` for rebinding captured disks. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking). `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
+### ForkOptions
+
+```typescript
+interface ForkOptions {
+  recordIntegrity?: boolean;
+  guestFlush?: GuestFlush;
+  volumes?: Record<string, (mount: NapiMountBuilder) => NapiMountBuilder>;
+}
+
+type GuestFlush = "auto" | "required" | "skip";
+```
+
+`recordIntegrity` records disk hashes. [`guestFlush`](#guest-writeback) defaults to `"auto"`. Each `volumes` key is a captured disk's guest path; its callback configures the replacement mount. Forks cannot add new block devices, and batch children cannot share a writable disk image. See [fork disk bindings](/sandboxes/snapshots#forking). `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
 
 ## RestoreBuilder
 

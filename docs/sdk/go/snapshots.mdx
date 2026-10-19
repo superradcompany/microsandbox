@@ -863,6 +863,7 @@ if err != nil {
     return err
 }
 defer child.Close()
+defer child.Stop(context.Background())
 ```
 
 </Accordion>

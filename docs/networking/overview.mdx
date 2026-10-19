@@ -130,8 +130,6 @@ On 0.7.9+, finished connections leave the active budget after response delivery.
 
 Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.
 
-`maxUdpConnections` independently limits host-side UDP relay sessions. Omission is unlimited in `single-tenant` mode and defaults to 1,024 in `multi-tenant` mode; zero explicitly selects unlimited. At a finite limit, a new session evicts the least recently active session. Sessions expire after 60 seconds of inactivity. Historical runtime launch contracts do not support an explicit UDP limit, including zero; the SDK rejects that override with an upgrade-required error instead of silently ignoring it.
-
 </Accordion>
 
 ## High-level profiles
