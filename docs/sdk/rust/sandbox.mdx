@@ -606,6 +606,9 @@ let plan = sb.modify()
 for r in &plan.resize_status {
     println!("{:?}: requested {} · actual {} · {:?}", r.resource, r.requested, r.actual, r.state);
 }
+
+// Wait for the guest to converge.
+let settled = sb.wait_until_resized_with_timeout(Duration::from_secs(60)).await?;
 ```
 
 </Accordion>
@@ -787,6 +790,54 @@ Block until the sandbox is observed in a terminal non-running state. Owned local
     <div className="msb-param-desc">Observed terminal sandbox state.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Read the current live CPU and memory resize status without changing anything. Returns an empty list when the sandbox is not running, and fails with `MicrosandboxError::Unsupported` when a running sandbox's runtime cannot report resize status.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#resourceresizestatus">Vec&lt;ResourceResizeStatus&gt;</a></div>
+    <div className="msb-param-desc">One entry per resizable resource.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Wait until every resource reaches `Applied`, `GuestRefused`, or `Failed`. Returns an empty list when the sandbox is not running, and fails with `MicrosandboxError::Unsupported` when a running sandbox's runtime cannot report resize status. There is no deadline; a guest that never converges keeps this polling, so use [`wait_until_resized_with_timeout()`](#sb-wait_until_resized_with_timeout) to bound it.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#resourceresizestatus">Vec&lt;ResourceResizeStatus&gt;</a></div>
+    <div className="msb-param-desc">The settled status.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized_with_timeout()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+async fn wait_until_resized_with_timeout(&self, timeout: Duration) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Same as [`wait_until_resized()`](#sb-wait_until_resized) within `timeout`. `Duration::ZERO` checks once. Expiry returns `MicrosandboxError::ResizeTimeout` with the last observed status, which is empty if no read completed before the deadline. The host still enforces the new limit.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_status()</span>
 
@@ -2042,7 +2093,7 @@ async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 
 Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect.
 
-A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
+A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` is a single reading taken when the change was accepted; see [`ResourceResizeStatus`](#resourceresizestatus). Use [`wait_until_resized()`](#sb-wait_until_resized) to wait for the guest.
 
 <p className="msb-label">Returns</p>
 
@@ -2840,6 +2891,35 @@ Block until terminal state is observed
 
 `Result<`[`SandboxStopResult`](#sandboxstopresult)`>`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">resize_status()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+resize_status()
+```
+
+Current live CPU and memory resize status. Empty when not running.
+
+<p className="msb-label">Returns</p>
+
+`Result<Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>>`
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">wait_until_resized()</span>
+
+<Tooltip tip="Live resize is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+wait_until_resized()
+wait_until_resized_with_timeout(timeout)
+```
+
+Wait until every live resize is terminal. Returns an empty list when the sandbox is not running, and fails with `MicrosandboxError::Unsupported` when a running sandbox's runtime cannot report resize status. The untimed variant keeps polling while a guest never converges; the timed variant returns `MicrosandboxError::ResizeTimeout` on expiry.
+
+<p className="msb-label">Returns</p>
+
+`Result<Vec<`[`ResourceResizeStatus`](#resourceresizestatus)`>>`
+
 ## SecretPatchBuilder
 
 <p className="msb-backref">Used by <a href="#sandboxmodificationbuilder-secret">secret()</a></p>
@@ -3188,21 +3268,57 @@ When or whether a planned change can take effect. Serializes as the quoted strin
 
 Runtime convergence status for a live resource resize. Enforcement applies immediately; the guest converges asynchronously (onlining CPUs, plugging memory blocks).
 
-| Field | Type | Description |
-|-------|------|-------------|
-| resource | `ResourceKind` | `Cpus` or `Memory` |
-| requested | `String` | Requested value |
-| actual | `String` | Actual value observed in the guest/runtime |
-| enforced | `String` | Host/VMM-enforced value |
-| state | `ResourceConvergenceState` | Convergence state, see below |
+<p className="msb-label">Fields</p>
 
-| State | Description |
-|-------|-------------|
-| `Accepted` | The runtime accepted the request |
-| `Converging` | The guest and VMM are still converging on the requested state |
-| `Applied` | Desired, actual, and enforced state match |
-| `GuestRefused` | The guest would not cooperate; the host enforces the new limit anyway |
-| `Failed` | The resize failed |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>resource</code><span className="msb-type">ResourceKind</span></div>
+    <div className="msb-param-desc"><code>Cpus</code> or <code>Memory</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>requested</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Requested value.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>actual</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Actual value observed in the guest/runtime.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>enforced</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Host/VMM-enforced value.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>state</code><span className="msb-type">ResourceConvergenceState</span></div>
+    <div className="msb-param-desc">Convergence state, see below.</div>
+  </div>
+</div>
+
+<p className="msb-label">Values</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Accepted</code></div>
+    <div className="msb-param-desc">The runtime accepted the request.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Converging</code></div>
+    <div className="msb-param-desc">The guest and VMM are still converging on the requested state.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Applied</code></div>
+    <div className="msb-param-desc">Desired, actual, and enforced state match. A shrink is applied only after the guest releases the CPUs or memory.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>GuestRefused</code></div>
+    <div className="msb-param-desc">The guest would not cooperate; the host enforces the new limit anyway.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Failed</code></div>
+    <div className="msb-param-desc">The resize failed.</div>
+  </div>
+</div>
+
+`Applied`, `GuestRefused`, and `Failed` are terminal; [`wait_until_resized()`](#sb-wait_until_resized) returns once every resource reaches one of them.
 
 ### SandboxStopResult
 

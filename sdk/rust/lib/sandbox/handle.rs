@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[cfg(feature = "local")]
-use super::SandboxModificationBuilder;
+use super::{ResourceResizeStatus, SandboxModificationBuilder};
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -320,6 +320,46 @@ impl SandboxHandle {
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Read the current live CPU and memory resize status.
+    ///
+    /// Returns an empty list when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status.
+    #[cfg(feature = "local")]
+    pub async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::resize_status(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Wait until every live resize reaches a terminal state.
+    ///
+    /// Returns an empty list when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Keeps polling
+    /// while a guest never converges; use `wait_until_resized_with_timeout` to
+    /// bound the wait.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(&self.backend, &self.name, &self.identity(), None).await
+    }
+
+    /// Wait until every live resize reaches a terminal state within `timeout`.
+    ///
+    /// Returns an empty list when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Expiry returns
+    /// [`MicrosandboxError::ResizeTimeout`] with the last observed status, which is empty when no read
+    /// completed before the deadline.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            Some(timeout),
+        )
+        .await
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
