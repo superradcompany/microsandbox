@@ -10,6 +10,8 @@ mod dispatch;
 pub mod downgrade;
 mod file_identity;
 mod group;
+#[cfg(test)]
+mod historical_recovery_tests;
 mod lease;
 pub(crate) mod lineage;
 mod metadata;

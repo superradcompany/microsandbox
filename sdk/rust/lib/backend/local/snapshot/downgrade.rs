@@ -233,6 +233,10 @@ pub async fn preflight_managed_v066(
     plan_graph(&mut candidates)?;
     preflight_index(db, &candidates).await?;
     journal_plans(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(&candidate.path, "downgrade", "planned");
+    }
 
     Ok(DowngradePlan { candidates })
 }
@@ -246,9 +250,41 @@ pub async fn execute_managed_v066(
 ) -> MicrosandboxResult<DowngradeReport> {
     let candidates = plan.candidates;
     backup_canonical_descriptors(db, recovery_dir, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "canonical_backed_up",
+        );
+    }
     publish_legacy_descriptors(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "legacy_descriptor_published",
+        );
+    }
     publish_legacy_index(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "legacy_index_published",
+        );
+    }
     retire_canonical_descriptors(db, &candidates).await?;
+    #[cfg(test)]
+    for candidate in &candidates {
+        super::historical_recovery_tests::boundary(
+            &candidate.path,
+            "downgrade",
+            "canonical_retired",
+        );
+    }
 
     Ok(DowngradeReport {
         artifacts: candidates.len(),
