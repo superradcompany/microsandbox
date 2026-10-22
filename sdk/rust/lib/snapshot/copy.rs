@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use super::{Manifest, Snapshot};
+use super::{Checkpoint as Snapshot, Manifest};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------

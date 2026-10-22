@@ -150,7 +150,13 @@ impl JsonControlClient {
         options: RequestOptions,
     ) -> ControlClientResult<R::Response> {
         let response = self
-            .operation_bytes(request.compatibility_json_bytes()?, options)
+            .operation_bytes_checked(
+                request.compatibility_json_bytes()?,
+                options,
+                request.requires_configuration_capture(),
+                request.requires_configuration_storage(),
+                request.requires_configuration_exec_limits(),
+            )
             .await?;
         request.decode_compatibility_json(response)
     }
@@ -171,6 +177,25 @@ impl JsonControlClient {
         request: Zeroizing<Vec<u8>>,
         options: RequestOptions,
     ) -> ControlClientResult<JsonReply> {
+        self.operation_bytes_checked(request, options, false, false, false)
+            .await
+    }
+
+    async fn operation_bytes_checked(
+        &self,
+        request: Zeroizing<Vec<u8>>,
+        options: RequestOptions,
+        configuration_capture: bool,
+        configuration_storage: bool,
+        configuration_exec_limits: bool,
+    ) -> ControlClientResult<JsonReply> {
+        let configuration_capture =
+            configuration_capture || configuration_storage || configuration_exec_limits;
+        // JSON uses separate discovery and mutation sockets. Only independently verified runtime
+        // ownership can prevent a replacement peer from silently ignoring a new request field.
+        if configuration_capture && !self.dialer.verified() {
+            return Err(ClientError::new(ErrorKind::UnsupportedOperation).into());
+        }
         let until = deadline(
             options
                 .request_timeout
@@ -178,7 +203,7 @@ impl JsonControlClient {
                 .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
         )?;
         let setup_until = deadline(self.options.setup_timeout)?.min(until);
-        if let Some(expected) = self.rediscover.filter(|_| !self.dialer.verified()) {
+        if configuration_capture || self.rediscover.is_some_and(|_| !self.dialer.verified()) {
             // A path-only caller cannot reuse evidence about an old process.
             // Discover again before this new exchange; a format change closes
             // this handle instead of silently retargeting its prepared request.
@@ -187,13 +212,23 @@ impl JsonControlClient {
                 .await
                 .map_err(crate::connection::not_sent);
             let mode = match mode {
-                Ok((mode, _)) => mode,
+                Ok((mode, capabilities)) => {
+                    if configuration_capture
+                        && (!capabilities.configuration_capture
+                            || (configuration_storage && !capabilities.configuration_storage)
+                            || (configuration_exec_limits
+                                && !capabilities.configuration_exec_limits))
+                    {
+                        return Err(ClientError::new(ErrorKind::UnsupportedOperation).into());
+                    }
+                    mode
+                }
                 Err(error) => {
                     self.close().await;
                     return Err(error);
                 }
             };
-            if mode != expected {
+            if self.rediscover.is_some_and(|expected| mode != expected) {
                 self.close().await;
                 return Err(ControlClientError::RuntimeChanged);
             }

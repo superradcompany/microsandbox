@@ -1981,3 +1981,30 @@ class RegistryAuth:
 
     def _to_dict(self) -> dict:
         return {"username": self.username, "password": self.password}
+
+
+# --------------------------------------------------------------------------------------------------
+# Types: Snapshot group inspection
+# --------------------------------------------------------------------------------------------------
+
+SnapshotSourceStatus: TypeAlias = Literal["available", "missing_sandbox", "different_catalog"]
+
+
+class SnapshotSourceBinding(TypedDict):
+    """The recorded sandbox instance and its availability at inspection time."""
+
+    database_uuid: str
+    sandbox_id: int
+    recorded_name: str
+    current_name: str | None
+    status: SnapshotSourceStatus
+
+
+class SnapshotGroupInfo(TypedDict):
+    """One protected metadata read; source=None identifies an unbound history."""
+
+    name: str
+    path: str
+    head: str | None
+    checkpoint_count: int
+    source: SnapshotSourceBinding | None

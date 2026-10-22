@@ -10,7 +10,12 @@ import (
 // Snapshot is the factory namespace for backend-neutral snapshot operations.
 var Snapshot snapshotFactory
 
-type snapshotFactory struct{}
+type snapshotFactory struct{ checkpointFactory }
+
+// Checkpoint retains the legacy artifact factory operations.
+var Checkpoint checkpointFactory
+
+type checkpointFactory struct{}
 
 // SnapshotCreateOptions configures Snapshot.Create.
 type SnapshotCreateOptions struct {
@@ -34,6 +39,8 @@ type SnapshotCreateOptions struct {
 
 // SnapshotSaveOptions configures Snapshot.Save and instance SaveTo methods.
 type SnapshotSaveOptions struct {
+	// Compatibility selects current or 0.7.8; empty preserves the native default.
+	Compatibility string
 	// Since omits disk layers and RAM objects supplied by a base snapshot or standalone archive.
 	Since string
 	// LastLayers includes the newest N sealed root-disk layers; owned disks remain complete.
@@ -44,7 +51,8 @@ type SnapshotSaveOptions struct {
 	PlainTar    bool
 }
 
-// SnapshotLoadOptions configures importing one or more archives into a snapshot group.
+// SnapshotLoadOptions configures legacy Checkpoint.LoadWithOptions/LoadMany.
+// Canonical Snapshot.Load uses SnapshotImportOptions with a separately selected group.
 type SnapshotLoadOptions struct {
 	// Parent directory containing snapshot groups; empty selects the default.
 	Dest string
@@ -60,7 +68,7 @@ type SnapshotLoadOptions struct {
 type SnapshotHeadUpdate struct {
 	Group    string
 	Previous *string
-	Head     string
+	Head     *string
 	Reason   string
 	Changed  bool
 }
@@ -106,9 +114,18 @@ type SnapshotVerifyReport struct {
 	Path       string
 	Upper      SnapshotUpperVerifyStatus
 	Checkpoint *SnapshotCheckpointVerifyStatus
+	Coverage   SnapshotVerifyCoverage
 }
 
-// SnapshotCheckpointVerifyStatus identifies a fully verified checkpoint closure.
+// SnapshotVerifyCoverage describes all required payloads, including ancestors and owned disks.
+type SnapshotVerifyCoverage struct {
+	// Kind is complete, incomplete, or unknown for older native libraries without coverage reports.
+	Kind       string
+	Unrecorded []string
+}
+
+// SnapshotCheckpointVerifyStatus identifies verified closure metadata and recorded integrity.
+// Consult Coverage before treating every required payload as authenticated.
 type SnapshotCheckpointVerifyStatus struct {
 	Kind string
 	Root string
@@ -152,6 +169,7 @@ type SnapshotIntegrity struct {
 
 // SnapshotArtifact is a backend-neutral disk snapshot.
 type SnapshotArtifact struct {
+	object              *ffi.SnapshotObject
 	headUpdate          *SnapshotHeadUpdate
 	id                  string
 	path                *string
@@ -171,6 +189,7 @@ type SnapshotArtifact struct {
 
 func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
 	return &SnapshotArtifact{
+		object:              ffi.NewSnapshotObject(info.ObjectHandle),
 		headUpdate:          snapshotHeadUpdateFromInfo(info.HeadUpdate),
 		id:                  info.ID,
 		path:                cloneStringPtr(info.Path),
@@ -233,7 +252,14 @@ func (s *SnapshotArtifact) HeadUpdate() *SnapshotHeadUpdate {
 
 // Verify recomputes recorded content integrity for the snapshot.
 func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
-	report, err := ffi.SnapshotVerify(ctx, s.reference, s.referenceKind)
+	var report *ffi.SnapshotVerifyReport
+	var err error
+	if s.object != nil {
+		report = &ffi.SnapshotVerifyReport{}
+		err = snapshotObjectRequest(ctx, s.object, map[string]any{"op": "verify"}, report)
+	} else {
+		report, err = ffi.SnapshotVerify(ctx, s.reference, s.referenceKind)
+	}
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -243,6 +269,12 @@ func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, e
 // SaveTo bundles this snapshot using its typed backend-neutral reference.
 // Backends that do not expose artifact archives return ErrUnsupportedOperation.
 func (s *SnapshotArtifact) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
+	if s.object != nil {
+		if err := ffi.CheckArchiveCompatibility(ctx, opts.Compatibility); err != nil {
+			return wrapFFI(err)
+		}
+		return snapshotObjectRequest(ctx, s.object, map[string]any{"op": "save", "path": outPath, "options": snapshotSaveOptionsWire(opts)}, nil)
+	}
 	return saveSnapshotReference(ctx, s.reference, s.referenceKind, outPath, opts)
 }
 
@@ -289,6 +321,7 @@ func (b *SnapshotCopyBuilder) Save(ctx context.Context) error {
 
 // SnapshotHandle is a lightweight handle returned by the active backend.
 type SnapshotHandle struct {
+	groupReceiver            *SnapshotGroup
 	group                    *string
 	headUpdate               *SnapshotHeadUpdate
 	id                       string
@@ -379,6 +412,9 @@ func (h *SnapshotHandle) ReferenceKind() string { return h.referenceKind }
 func (h *SnapshotHandle) CreatedAt() time.Time  { return time.Unix(h.createdAtUnix, 0) }
 
 func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
+	if h.groupReceiver != nil {
+		return h.groupReceiver.GetCheckpoint(ctx, h.id)
+	}
 	info, err := ffi.SnapshotOpen(ctx, h.reference, h.referenceKind)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -393,10 +429,17 @@ func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
 // SaveTo bundles this snapshot using its typed backend-neutral reference.
 // Backends that do not expose artifact archives return ErrUnsupportedOperation.
 func (h *SnapshotHandle) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
+	if h.groupReceiver != nil {
+		checkpoint, err := h.Open(ctx)
+		if err != nil {
+			return err
+		}
+		return checkpoint.SaveTo(ctx, outPath, opts)
+	}
 	return saveSnapshotReference(ctx, h.reference, h.referenceKind, outPath, opts)
 }
 
-func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
+func (checkpointFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
 	}
@@ -418,7 +461,7 @@ func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (
 
 // CreateArchive captures a disk or full snapshot directly into one archive file.
 // It does not create an installed snapshot directory or index row.
-func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
+func (checkpointFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a source sandbox (FromSandbox)"}
 	}
@@ -444,7 +487,7 @@ func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOp
 	}, nil
 }
 
-func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {
+func (checkpointFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {
 	info, err := ffi.SnapshotOpen(ctx, pathOrName, "")
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -452,7 +495,7 @@ func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotAr
 	return snapshotFromInfo(info), nil
 }
 
-func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error) {
+func (checkpointFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotGet(ctx, nameOrDigest)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -460,7 +503,7 @@ func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotH
 	return snapshotHandleFromInfo(info), nil
 }
 
-func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error) {
+func (checkpointFactory) List(ctx context.Context) ([]*SnapshotHandle, error) {
 	infos, err := ffi.SnapshotList(ctx)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -472,7 +515,7 @@ func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error) {
 	return out, nil
 }
 
-func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error) {
+func (checkpointFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error) {
 	infos, err := ffi.SnapshotListDir(ctx, dir)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -484,30 +527,31 @@ func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArti
 	return out, nil
 }
 
-func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error {
+func (checkpointFactory) Remove(ctx context.Context, pathOrName string, force bool) error {
 	return wrapFFI(ffi.SnapshotRemove(ctx, pathOrName, "", force))
 }
 
-func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error) {
+func (checkpointFactory) Reindex(ctx context.Context, dir string) (uint32, error) {
 	n, err := ffi.SnapshotReindex(ctx, dir)
 	return n, wrapFFI(err)
 }
 
-func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
+func (checkpointFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
 	return saveSnapshotReference(ctx, nameOrPath, "", outPath, opts)
 }
 
 func saveSnapshotReference(ctx context.Context, reference, referenceKind, outPath string, opts SnapshotSaveOptions) error {
 	return wrapFFI(ffi.SnapshotSave(ctx, reference, referenceKind, outPath, ffi.SnapshotSaveOptions{
-		WithParents: opts.WithParents,
-		WithImage:   opts.WithImage,
-		PlainTar:    opts.PlainTar,
-		Since:       opts.Since,
-		LastLayers:  opts.LastLayers,
+		Compatibility: opts.Compatibility,
+		WithParents:   opts.WithParents,
+		WithImage:     opts.WithImage,
+		PlainTar:      opts.PlainTar,
+		Since:         opts.Since,
+		LastLayers:    opts.LastLayers,
 	}))
 }
 
-func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
+func (checkpointFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotLoad(ctx, archive, dest)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -516,7 +560,7 @@ func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*Snapsho
 }
 
 // LoadWithBase imports a dependent archive into a complete locally owned snapshot closure.
-func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandle, error) {
+func (checkpointFactory) LoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotLoadWithBase(ctx, archive, dest, base)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -525,7 +569,7 @@ func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base str
 }
 
 // LoadWithOptions imports an archive into a selected or generated group.
-func (snapshotFactory) LoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandle, error) {
+func (checkpointFactory) LoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandle, error) {
 	info, err := ffi.SnapshotLoadWithOptions(ctx, archive, ffi.SnapshotLoadOptions{
 		Dest:    opts.Dest,
 		Base:    opts.Base,
@@ -539,7 +583,7 @@ func (snapshotFactory) LoadWithOptions(ctx context.Context, archive string, opts
 }
 
 // LoadMany imports archives together into one group, resolving dependencies regardless of input order.
-func (snapshotFactory) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandle, error) {
+func (checkpointFactory) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandle, error) {
 	infos, err := ffi.SnapshotLoadMany(ctx, archives, ffi.SnapshotLoadOptions{
 		Dest:    opts.Dest,
 		Base:    opts.Base,
@@ -557,7 +601,7 @@ func (snapshotFactory) LoadMany(ctx context.Context, archives []string, opts Sna
 }
 
 // GroupHead reads a group head, or selects a group:member as its head.
-func (snapshotFactory) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+func (checkpointFactory) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
 	update, err := ffi.SnapshotGroupHead(ctx, selector)
 	if err != nil {
 		return nil, wrapFFI(err)
@@ -584,6 +628,7 @@ func cloneSnapshotHeadUpdate(update *SnapshotHeadUpdate) *SnapshotHeadUpdate {
 	}
 	copy := *update
 	copy.Previous = cloneStringPtr(update.Previous)
+	copy.Head = cloneStringPtr(update.Head)
 	return &copy
 }
 
@@ -596,13 +641,20 @@ func normalizeSnapshotScope(scope string) string {
 
 func snapshotVerifyReportFromInfo(info *ffi.SnapshotVerifyReport) *SnapshotVerifyReport {
 	report := &SnapshotVerifyReport{
-		Digest: info.Digest,
-		Path:   info.Path,
+		Digest:   info.Digest,
+		Path:     info.Path,
+		Coverage: SnapshotVerifyCoverage{Kind: "unknown"},
 		Upper: SnapshotUpperVerifyStatus{
 			Kind:      info.Upper.Kind,
 			Algorithm: info.Upper.Algorithm,
 			Digest:    info.Upper.Digest,
 		},
+	}
+	if info.Coverage != nil {
+		report.Coverage = SnapshotVerifyCoverage{
+			Kind:       info.Coverage.Kind,
+			Unrecorded: append([]string(nil), info.Coverage.Unrecorded...),
+		}
 	}
 	if info.Checkpoint != nil {
 		report.Checkpoint = &SnapshotCheckpointVerifyStatus{

@@ -156,6 +156,9 @@ pub mod manifest;
 /// Pure owned-storage snapshot inventory.
 pub mod owned;
 mod restore_defaults;
+/// Portable saved-configuration building blocks. Capture/activation support is not yet enabled.
+#[doc(hidden)]
+pub mod saved_config;
 
 pub use external_mounts::EXTERNAL_MOUNTS_EXTENSION;
 pub use guest_clock::GUEST_CLOCK_EXTENSION;

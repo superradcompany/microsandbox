@@ -11,6 +11,525 @@ See the [snapshot guide](/sandboxes/snapshots) for workflows and examples.
 
 Use snapshot objects or references on cloud. Local operations also accept a group head, `group:member`, or artifact path.
 
+<span id="group-lifecycle-and-08-migration" />
+
+## Sandbox capture
+
+<span id="sandbox-group-capture" />
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">snapshot()</span>
+
+```typescript
+snapshot(group: string): Promise<SnapshotCreateResult>
+```
+
+Create a group and its first disk checkpoint with default capture options. Available on `Sandbox` and `SandboxHandle`; an existing group is refused.
+
+<span id="sandbox-group-capture-with" />
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">snapshotWith()</span>
+
+```typescript
+snapshotWith(group: string, configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult>
+```
+
+Configure the initial member using [SnapshotCaptureOptions](#snapshot-capture-options). The sandbox receiver fixes the source.
+
+<Accordion title="Example">
+
+```typescript
+import { Sandbox, Snapshot } from "microsandbox";
+
+const source = await Sandbox.get("worker");
+const created = await source.snapshotWith("history", capture =>
+  capture.initialCheckpoint("ready").recordIntegrity());
+const group = created.snapshot;
+const next = await group.checkpointWith(capture => capture.name("after-build"));
+const exact = await group.getCheckpoint("ready");
+await group.setHead("ready");
+await group.clearHead();
+// Clearing selection keeps all checkpoints; use an exact member to spawn.
+const child = await exact.spawnSandboxWith(destination => destination.name("child"));
+const reopened = await Snapshot.get("history");
+```
+
+</Accordion>
+
+Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `SnapshotHandle`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
+
+## Snapshot group methods
+
+<span id="group-get" />
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
+
+```typescript
+static get(name: string): Promise<Snapshot>
+```
+
+Open a named local history, including a headless group. Group operations on cloud return unsupported.
+
+<span id="group-list" />
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
+
+```typescript
+static list(): Promise<Snapshot[]>
+```
+
+List installed groups. Standalone artifacts are not treated as groups.
+
+<span id="group-name" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">name</span>
+
+```typescript
+get name(): string
+```
+
+Read the retained group name without changing selection.
+
+<span id="group-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">head()</span>
+
+```typescript
+head(): Promise<Checkpoint | null>
+```
+
+Read the selected checkpoint once. The returned checkpoint retains that identity if head changes later. Returns `null` after explicit clearing.
+
+<span id="group-checkpoints" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">checkpoints()</span>
+
+```typescript
+checkpoints(): Promise<SnapshotHandle[]>
+```
+
+List member handles in stable ID order, including when no head is selected.
+
+<span id="group-get-checkpoint" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">getCheckpoint()</span>
+
+```typescript
+getCheckpoint(member: string): Promise<Checkpoint>
+```
+
+Open one member by group-local name or stable checkpoint ID without changing head.
+
+<span id="group-set-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">setHead()</span>
+
+```typescript
+setHead(member: string): Promise<HeadUpdate>
+```
+
+Select an existing member by group-local name or stable ID. Selecting the current head reports a no-op.
+
+<span id="group-clear-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">clearHead()</span>
+
+```typescript
+clearHead(): Promise<HeadUpdate>
+```
+
+Clear selection while preserving every member. Clearing an already headless group reports a no-op.
+
+<span id="group-checkpoint" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">checkpoint()</span>
+
+```typescript
+checkpoint(): Promise<CheckpointCaptureResult>
+```
+
+Capture the bound sandbox and return the exact checkpoint and this operation’s head outcome. Imported or orphaned groups refuse capture; a same-name replacement sandbox never becomes the source. Uses a generated name and default disk-only capture options.
+
+<span id="group-checkpoint-with" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">checkpointWith()</span>
+
+```typescript
+checkpointWith(configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<CheckpointCaptureResult>
+```
+
+Capture the bound sandbox and return the exact checkpoint and this operation’s head outcome. Imported or orphaned groups refuse capture; a same-name replacement sandbox never becomes the source. See [capture options](#snapshot-capture-options). A destination directory is valid only when creating a new group.
+
+<span id="group-spawn" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawnSandbox()</span>
+
+```typescript
+spawnSandbox(): Promise<Sandbox>
+```
+
+Select the group head once and retain it throughout destination preparation. A headless group refuses spawning. The same methods on an exact checkpoint retain that checkpoint instead. Full checkpoints resume execution by default; disk checkpoints boot fresh. Destination options cannot change the source selector or backend.
+
+<span id="group-spawn-with" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawnSandboxWith()</span>
+
+```typescript
+spawnSandboxWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<Sandbox>
+```
+
+Configure the destination with the existing [RestoreBuilder](#restorebuilder) controls. The callback configures options; it must not call a restore terminal.
+
+<span id="group-spawn-progress" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawnSandboxWithProgress()</span>
+
+```typescript
+spawnSandboxWithProgress(): Promise<CreationProgressCreate>
+```
+
+Local-only. Read best-effort events from `progress` or iterate the returned object. Call `awaitSandbox()` for authoritative completion; stream exhaustion is not success. `cancel()` requests cancellation.
+
+<span id="group-spawn-progress-with" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawnSandboxWithProgressWith()</span>
+
+```typescript
+spawnSandboxWithProgressWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<CreationProgressCreate>
+```
+
+The configured progress variant uses the same destination rules. Call `awaitSandbox()` even when progress is ignored or cancellation was requested.
+
+<span id="group-legacy-head" />
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">groupHead()</span>
+
+```typescript
+static groupHead(selector: string): Promise<HeadUpdate>
+```
+
+Deprecated compatibility helper. Prefer opening a group and calling `head()` or `setHead(member)`; new code should not use a combined selector to mutate selection.
+
+## Save an exact checkpoint
+
+<Accordion title="Example">
+
+```typescript
+await checkpoint.save("ready.msb");
+await checkpoint.saveWith("portable.msb", save => save.withParents().withImage());
+```
+
+</Accordion>
+
+The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `saveTo` retains its explicit options form for compatibility. See the archive compatibility option below before sending output to an older reader.
+
+## Group archive import
+
+<span id="group-load" />
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load()</span>
+
+```typescript
+static load(group: string, files: string[]): Promise<SnapshotImportResult>
+```
+
+Import a batch atomically using default storage and head policy.
+
+<span id="group-load-with" />
+
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">loadWith()</span>
+
+```typescript
+static loadWith(group: string, files: string[], configure: (options: SnapshotLoadOptions) => SnapshotLoadOptions): Promise<SnapshotImportResult>
+```
+
+Configure dependency lookup, storage and selection with [SnapshotLoadOptions](#group-load-options).
+
+<Accordion title="Example">
+
+```typescript
+await Snapshot.load(group, files);
+await Snapshot.loadWith(group, files, load => load.destDir("store").base("base.msb").setHead());
+```
+
+</Accordion>
+
+`files` is `string[]`. Returns `SnapshotImportResult`: `snapshot`, `checkpoints`, `added`, `reused`, `headUpdate`, `operationId`, and `warnings`.
+
+The result contains every unique supplied checkpoint, including bundled dependencies, in stable ID order. `added` and `reused` identify what was new versus already installed at publication; archive argument order does not select the head. The head outcome belongs to this operation and does not change when another operation edits the group. Multiple incomparable tips can commit a headless group; explicit head selection refuses ambiguous tips.
+
+A successful return confirms publication and catalog completion. Warnings describe deferred cleanup after commit. A structured import error distinguishes no publication, confirmed publication with a later failure, and an unknown outcome needing recovery. Import never binds a group to a source sandbox. See [atomic import requirements](/cli/snapshot-commands#msb-snap-import) for filesystem capabilities and maintenance requirements.
+
+## Group inspection
+
+<span id="group-inspect" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">inspect()</span>
+
+```typescript
+inspect(): Promise<SnapshotGroupInfo>
+```
+
+Returns the group's name, backend path, optional head, member count and optional saved source binding. Head and count come from one protected metadata read. Field names include `checkpointCount`, `source.recordedName`, `source.currentName`, `source.databaseUuid`, `source.sandboxId`. The source is absent for an unbound history; otherwise its status is `available`, `missing_sandbox` or `different_catalog`. Saved and current names distinguish renames; identity is the catalog UUID plus sandbox row ID, so deleting and recreating the same name does not rebind the group.
+
+Source availability is observed separately from group metadata and is not a guarantee of later capture readiness. Inspection does not change the selected head or create a missing catalog identity. Invalid metadata and database failures remain errors, rather than being reported as unbound. Obtain a member with `getCheckpoint` for its immutable metadata.
+
+## Group verification
+
+<span id="group-verify" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">verify()</span>
+
+```typescript
+verify(): Promise<SnapshotGroupVerifyReport>
+```
+
+`await (await Snapshot.get("worker")).verify()` checks every pinned member and returns `SnapshotGroupVerifyReport`: `group`, `state`, `checkpoints`, and `payloadHashes`. States are `complete`, `incomplete`, `invalid`, or `empty`; an empty group explicitly means zero checkpoints checked. Each member has `id`, `path`, `state`, `report` (the existing `SnapshotVerifyReport`, or `null`), and specific `findings`. Shared physical files are hashed once per algorithm; independent copies are checked separately. Headless groups can be verified. To verify only head, obtain the optional checkpoint with `head()` and call its `verify()`.
+
+Unrecorded checksums produce incomplete coverage. Corruption, missing files, unsupported requirements, and operational failures reject with `SnapshotVerificationError`, whose `report` retains all selected members and findings. Errors before a meaningful group report exists retain their ordinary error type. Cancellation does not release reader protection while hashing continues.
+
+Selected members remain protected through hashing, including cancellation. Same-group captures, imports and head changes wait until verification finishes. Concurrent older removers must be stopped or upgraded; reads and sandbox execution can continue.
+
+## Whole-group removal
+
+<span id="group-remove" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">remove()</span>
+
+```typescript
+remove(): Promise<SnapshotRemoveResult>
+```
+
+Removes the selected history and returns `SnapshotRemoveResult` with `group`, `removed`, `headUpdate`, and `warnings`. The member IDs and cleared-head outcome belong to this operation. Empty groups can be removed. Active readers and surviving external dependents refuse removal; there is no force bypass for an entire group.
+
+If publication commits but catalog cleanup fails, the call rejects with `SnapshotGroupRemovalRecoveryError` with `result` and `detail`. The attached result means removal already happened. Cleanup warnings after successful catalog reconciliation are returned in the result. An uncertain durability outcome is an error requiring recovery rather than a claimed successful removal. Later listing recovers pending cleanup without deleting a replacement group.
+
+## Exact checkpoint removal
+
+<Accordion title="Example">
+
+```typescript
+const removed = await checkpoint.remove();
+const forced = await checkpoint.removeWith(options => options.force());
+```
+
+</Accordion>
+
+These are alternative calls, not successive removals of the same checkpoint. The instance method removes the retained checkpoint identity, refuses a replacement at the same address, and returns `CheckpointRemoveResult` with `id`, optional `headUpdate`, and `warnings`. The head outcome belongs to this operation; later head edits do not change it. Removing the head selects its surviving same-group parent or clears selection. Removing another member reports an unchanged head. Standalone artifacts have no head outcome.
+
+Force permits removal despite indexed children, but never bypasses reader protection. A repeated removal reports a missing checkpoint rather than fabricating another successful result. Backends or native libraries without exact-removal reporting return unsupported instead of falling back to deletion by name.
+
+If removal commits but catalog cleanup fails, the call rejects with `SnapshotRemovalRecoveryError`, with `result` and `detail`. Its result is authoritative: removal already happened. Recover the affected storage before retrying cleanup; do not assume an error means the checkpoint still exists.
+
+## Group options and results
+
+<span id="snapshot-capture-options" />
+
+### SnapshotCaptureOptions
+
+<span id="capture-option-name" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">name()</span>
+
+```typescript
+name(value: string): this
+```
+
+Set the member name. Omission generates a name.
+
+<span id="capture-option-initialcheckpoint" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">initialCheckpoint()</span>
+
+```typescript
+initialCheckpoint(value: string): this
+```
+
+Alias for `name`, intended for the first capture.
+
+<span id="capture-option-destdir" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">destDir()</span>
+
+```typescript
+destDir(value: string): this
+```
+
+Set the parent storage directory for a new group. An append cannot move an existing group.
+
+<span id="capture-option-full" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">full()</span>
+
+```typescript
+full(): this
+```
+
+Capture memory and device state as well as disk. The default is disk-only.
+
+<span id="capture-option-recordintegrity" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">recordIntegrity()</span>
+
+```typescript
+recordIntegrity(): this
+```
+
+Record payload integrity checksums. Disabled by default.
+
+<span id="capture-option-guestflush" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">guestFlush()</span>
+
+```typescript
+guestFlush(value: "auto" | "required" | "skip"): this
+```
+
+Select guest writeback policy. The default is `"auto"`; see [guest writeback](#guest-writeback).
+
+<span id="capture-option-label" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">label()</span>
+
+```typescript
+label(key: string, value: string): this
+```
+
+Add a checkpoint label; a later value replaces the same key.
+
+<span id="group-load-options" />
+
+### SnapshotLoadOptions
+
+<span id="load-option-base" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">base()</span>
+
+```typescript
+base(value: string): this
+```
+
+Supply an external dependency snapshot or archive.
+
+<span id="load-option-destdir" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">destDir()</span>
+
+```typescript
+destDir(value: string): this
+```
+
+Select the parent storage directory. Omission uses default storage.
+
+<span id="load-option-sethead" />
+
+#### <span className="msb-recv">options.</span><span className="msb-hn">setHead()</span>
+
+```typescript
+setHead(): this
+```
+
+Select the unique imported tip even when it is not a fast-forward. Ambiguous tips are refused; default import preserves the automatic head policy.
+
+<span id="group-create-result" />
+
+### SnapshotCreateResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">Snapshot</span></div>
+    <div className="msb-param-desc">The newly created group.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoint</code><span className="msb-type">Checkpoint</span></div>
+    <div className="msb-param-desc">The exact first checkpoint created by this call.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>headUpdate</code><span className="msb-type">HeadUpdate</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+</div>
+
+<span id="group-capture-result" />
+
+### CheckpointCaptureResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoint</code><span className="msb-type">Checkpoint</span></div>
+    <div className="msb-param-desc">The exact checkpoint created by this append.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>headUpdate</code><span className="msb-type">HeadUpdate</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+</div>
+
+<span id="group-import-result" />
+
+### SnapshotImportResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operationId</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Identifier of this import attempt.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">Snapshot</span></div>
+    <div className="msb-param-desc">The destination group.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">SnapshotHandle[]</span></div>
+    <div className="msb-param-desc">All unique supplied members, including bundled dependencies, in stable ID order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>added</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Stable IDs newly installed by this operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reused</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Stable IDs already installed at publication.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>headUpdate</code><span className="msb-type">HeadUpdate</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>warnings</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Cleanup warnings after confirmed publication and catalog completion; empty when none.</div>
+  </div>
+</div>
+
+<span id="group-head-outcome" />
+
+### HeadUpdate
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>group</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Group name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>previous</code><span className="msb-type">string | null</span></div>
+    <div className="msb-param-desc">Previous selected member ID; absent when headless.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>head</code><span className="msb-type">string | null</span></div>
+    <div className="msb-param-desc">Resulting selected member ID; absent after clearing or a headless import.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reason</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Selection reason: initialized, fast_forwarded, selected, unchanged, diverged, unknown_ancestry, ambiguous_candidates, cleared or parent_selected.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>changed</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Whether this operation changed the selected head.</div>
+  </div>
+</div>
+
+## Capture recovery
+
+A failed capture can still have published its requested artifact before source recovery failed. `SnapshotSourceRecoveryError` preserves the source checkpoint recovery locator and, when publication completed, the published artifact’s kind, path, identity, digest and `headUpdate`. The head outcome belongs to that publication even if another operation changes the group afterward. Archive-only capture and older producers omit it; do not infer it by reading the current head. Inspect those details before retrying or removing the source. The error does not prove that the source is running or safely paused.
+
 ## Guest writeback
 
 Use `.guestFlush("required")` on snapshot builders or `{ guestFlush: "required" }` in `source.fork`, `source.forkMany`, and `source.pause` options.
@@ -19,13 +538,18 @@ The default `"auto"` flushes live disk-only captures, but adds no optional flush
 
 A paused disk capture needs a matching prior flush; cloud rejects non-Auto policies. See [guest flush policy reference](/sandboxes/snapshots#guest-flushing).
 
-## Snapshot
+<span id="snapshot" />
+
+## Checkpoint
 
 A snapshot retains the backend that created or opened it.
 
 <p className="msb-member-group">Static methods</p>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">builder()</span>
+<span id="snapshot-builder" />
+<span id="snapshotbuilder" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">builder()</span>
 
 ```typescript
 static builder(name?: string): SnapshotBuilder
@@ -54,7 +578,7 @@ Configure a snapshot. Set the required source with `fromSandbox()`; see [Snapsho
 <Accordion title="Example">
 
 ```typescript
-const snap = await Snapshot.builder("deps")
+const snap = await Checkpoint.builder("deps")
   .fromSandbox("baseline")
   .label("stage", "post-deps")
   .recordIntegrity()
@@ -76,7 +600,7 @@ Capture directly into an archive without installing a local snapshot.
 <Accordion title="Example">
 
 ```typescript
-const archive = await Snapshot.builder("deps")
+const archive = await Checkpoint.builder("deps")
   .fromSandbox("baseline")
   .createArchive("/tmp/deps.msb");
 ```
@@ -85,16 +609,19 @@ const archive = await Snapshot.builder("deps")
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
+<span id="snapshot-open" />
+<span id="snapshotopen" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">open()</span>
 
 ```typescript
-static open(pathOrName: string): Promise<Snapshot>
+static open(pathOrName: string): Promise<Checkpoint>
 ```
 
 <Accordion title="Example">
 
 ```typescript
-const snap = await Snapshot.open("baseline:deps");
+const snap = await Checkpoint.open("baseline:deps");
 console.log(snap.digest);
 ```
 
@@ -115,12 +642,15 @@ Open an existing snapshot artifact by group head, `group:member`, or path. Cheap
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">The opened snapshot.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">get()</span>
+<span id="snapshot-get" />
+<span id="snapshotget" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">get()</span>
 
 ```typescript
 static get(nameOrDigest: string): Promise<SnapshotHandle>
@@ -129,7 +659,7 @@ static get(nameOrDigest: string): Promise<SnapshotHandle>
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.get("baseline:deps");
+const h = await Checkpoint.get("baseline:deps");
 console.log(h.digest, h.createdAt);
 ```
 
@@ -156,7 +686,10 @@ Look up a snapshot through the active backend and return a lightweight
   </div>
 </div>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">list()</span>
+<span id="snapshot-list" />
+<span id="snapshotlist" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">list()</span>
 
 ```typescript
 static list(): Promise<SnapshotHandle[]>
@@ -165,7 +698,7 @@ static list(): Promise<SnapshotHandle[]>
 <Accordion title="Example">
 
 ```typescript
-for (const h of await Snapshot.list()) {
+for (const h of await Checkpoint.list()) {
   console.log(h.name ?? h.digest, h.sizeBytes);
 }
 ```
@@ -184,10 +717,13 @@ snapshots; host-volume artifacts are opened explicitly by reference.
   </div>
 </div>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">listDir()</span>
+<span id="snapshot-listdir" />
+<span id="snapshotlistdir" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">listDir()</span>
 
 ```typescript
-static listDir(dir: string): Promise<Snapshot[]>
+static listDir(dir: string): Promise<Checkpoint[]>
 ```
 
 Walk a local directory and parse each subdirectory's manifest. Does not touch
@@ -208,12 +744,15 @@ snapshot artifacts. Cloud returns `UnsupportedError`.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint[]&gt;</a></div>
     <div className="msb-param-desc">Parsed snapshots found in the directory.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">remove()</span>
+<span id="snapshot-remove" />
+<span id="snapshotremove" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">remove()</span>
 
 ```typescript
 static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
@@ -222,12 +761,12 @@ static remove(pathOrName: string, opts?: { force?: boolean }): Promise<void>
 <Accordion title="Example">
 
 ```typescript
-await Snapshot.remove("baseline:deps", { force: true });
+await Checkpoint.remove("baseline:deps", { force: true });
 ```
 
 </Accordion>
 
-Remove a snapshot by group selector, unambiguous ID or digest, or path. Refuses if the snapshot has indexed children unless `force` is set. A group's head cannot be removed while other members remain, even with `force`; select another head first.
+Remove a snapshot by group selector, unambiguous ID or digest, or path. Refuses if the snapshot has indexed children unless `force` is set. Removing head atomically selects its surviving recorded same-group parent, or clears head if none survives. Non-head removal leaves head unchanged. Active readers still prevent removal, including with `force`. Group-member removal requires the same filesystem capabilities and older-writer maintenance interval as atomic import.
 
 <p className="msb-label">Parameters</p>
 
@@ -242,7 +781,10 @@ Remove a snapshot by group selector, unambiguous ID or digest, or path. Refuses 
   </div>
 </div>
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">reindex()</span>
+<span id="snapshot-reindex" />
+<span id="snapshotreindex" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">reindex()</span>
 
 ```typescript
 static reindex(dir?: string): Promise<number>
@@ -251,7 +793,7 @@ static reindex(dir?: string): Promise<number>
 <Accordion title="Example">
 
 ```typescript
-const count = await Snapshot.reindex();
+const count = await Checkpoint.reindex();
 console.log(`reindexed ${count} snapshots`);
 ```
 
@@ -281,7 +823,10 @@ returns `UnsupportedError`.
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">save()</span>
+<span id="snapshot-save" />
+<span id="snapshotsave" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">save()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
@@ -310,7 +855,7 @@ Bundle a snapshot into a `.msb` archive. The recorded manifest is archived as-is
 <Accordion title="Example">
 
 ```typescript
-await Snapshot.save("baseline:deps", "./baseline.msb", {
+await Checkpoint.save("baseline:deps", "./baseline.msb", {
   withImage: true,
 });
 ```
@@ -319,7 +864,10 @@ await Snapshot.save("baseline:deps", "./baseline.msb", {
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">load()</span>
+<span id="snapshot-load" />
+<span id="snapshotload" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">load()</span>
 <div className="msb-tags"><span className="msb-tag is-static">static</span><span className="msb-tag is-async">async</span></div>
 
 ```typescript
@@ -353,7 +901,7 @@ Unpack a snapshot archive (`.msb` or `.tar`) into the snapshots directory. Struc
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.load("./baseline.msb");
+const h = await Checkpoint.load("./baseline.msb");
 console.log("loaded", h.digest);
 ```
 
@@ -361,7 +909,10 @@ console.log("loaded", h.digest);
 
 ---
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">loadWithOptions()</span>
+<span id="snapshot-loadwithoptions" />
+<span id="snapshotloadwithoptions" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">loadWithOptions()</span>
 
 ```typescript
 static loadWithOptions(archive: string, opts?: LoadOpts): Promise<SnapshotHandle>
@@ -369,7 +920,10 @@ static loadWithOptions(archive: string, opts?: LoadOpts): Promise<SnapshotHandle
 
 Import an archive with an explicit dependency base or destination group. See [import options](#import-options).
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">loadMany()</span>
+<span id="snapshot-loadmany" />
+<span id="snapshotloadmany" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">loadMany()</span>
 
 ```typescript
 static loadMany(archives: string[], opts?: LoadOpts): Promise<SnapshotHandle[]>
@@ -377,7 +931,10 @@ static loadMany(archives: string[], opts?: LoadOpts): Promise<SnapshotHandle[]>
 
 Import archives as one batch. Returns handles in input order. Dependencies resolve from the batch, the named group, or an explicit base; input order does not matter. All members are validated before publication.
 
-#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">groupHead()</span>
+<span id="snapshot-grouphead" />
+<span id="snapshotgrouphead" />
+
+#### <span className="msb-recv">Checkpoint.</span><span className="msb-hn">groupHead()</span>
 
 ```typescript
 static groupHead(selector: string): Promise<HeadUpdate>
@@ -393,60 +950,43 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 Options for `LoadOpts`.
 
-| Option | Purpose |
-| --- | --- |
-| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
-| `base` | External snapshot or standalone archive for missing dependencies. |
-| `group` | Destination group. Omit to create one group for the import. |
-| `setHead` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dest</code></div>
+    <div className="msb-param-desc">Parent directory containing groups. Defaults to the local snapshot store.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>base</code></div>
+    <div className="msb-param-desc">External snapshot or standalone archive for missing dependencies.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>group</code></div>
+    <div className="msb-param-desc">Destination group. Omit to create one group for the import.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>setHead</code></div>
+    <div className="msb-param-desc">Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip.</div>
+  </div>
+</div>
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 
 ## SandboxHandle
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+<span id="handle-snapshot" />
 
 ```typescript
-snapshot(name: string): Promise<Snapshot>
+snapshot(group: string): Promise<SnapshotCreateResult>
+snapshotWith(group: string, configure: (capture: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult>
 ```
 
-Snapshot this sandbox into its default group with the given member name. Called on a [`SandboxHandle`](/sdk/typescript/sandbox#sandboxhandle). Local live disk captures preserve the source's running or paused state. Cloud requires a stopped persistent source. Use the returned artifact path or `sandbox:member` to open it later.
+The first positional name selects the new group. Use the initial-checkpoint option to name its first member, then call the returned group’s checkpoint method for subsequent captures. Both a connected sandbox and its metadata handle support this group-creation flow. See [group lifecycle and migration](#group-lifecycle-and-08-migration) for a complete example.
 
-<p className="msb-label">Parameters</p>
+## Checkpoint instance members {#snapshot-instance}
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Member name within the source sandbox's group.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
-    <div className="msb-param-desc">The created snapshot artifact.</div>
-  </div>
-</div>
-
-<Accordion title="Example">
-
-```typescript
-const h = await Sandbox.get("baseline");
-await h.stop();
-const snap = await h.snapshot("deps");
-```
-
-</Accordion>
-
----
-
-## Snapshot instance members {#snapshot-instance}
-
-A `Snapshot` represents a backend-neutral snapshot and retains the backend
-that created or opened it. Returned by [`Snapshot.builder().create()`](#snapshotbuilder),
-[`Snapshot.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
+A `Checkpoint` represents a backend-neutral snapshot and retains the backend
+that created or opened it. Returned by [`Checkpoint.builder().create()`](#snapshotbuilder),
+[`Checkpoint.open()`](#snapshot-open), and [`handle.snapshot()`](#handle-snapshot).
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">id</span>
 
@@ -506,7 +1046,7 @@ On-disk format of the upper layer.
 
 `SnapshotScope`
 
-Snapshot scope: `"disk"` for a disk-only snapshot or `"full"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type).
+Checkpoint scope: `"disk"` for a disk-only snapshot or `"full"` for disk plus VM execution state. See [`SnapshotScope`](#snapshotscope-type).
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">fstype</span>
 
@@ -580,6 +1120,8 @@ await snap
 
 #### <span className="msb-recv">snap.</span><span className="msb-hn">verify()</span>
 
+Check `report.coverage.kind` for `complete` or `incomplete` before treating all payloads as authenticated. Incomplete coverage lists required payload paths without recorded checksums, including ancestors and owned disks. The existing upper/head and checkpoint-root fields do not establish whole-artifact coverage. Corruption still raises an error. An older native library without coverage support reports `unknown`; a verified head is not promoted to complete coverage.
+
 ```typescript
 verify(): Promise<SnapshotVerifyReport>
 ```
@@ -615,8 +1157,6 @@ Verify the snapshot's complete state closure. File state recomputes recorded upp
 
 A metadata and lifecycle handle for an existing snapshot.
 
-<p className="msb-backref">Returned by <a href="#snapshot-get">Snapshot.get()</a>, <a href="#snapshot-list">Snapshot.list()</a>, <a href="#snapshot-load">Snapshot.load()</a></p>
-
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">digest</span>
 
 `string`
@@ -639,7 +1179,7 @@ Parent snapshot's manifest digest, or `null` for a root.
 
 [`SnapshotScope`](#snapshotscope-type)
 
-Snapshot payload scope (`"disk"` today).
+Checkpoint payload scope (`"disk"` today).
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">imageRef</span>
 
@@ -663,7 +1203,7 @@ Apparent size of the upper file at index time.
 
 `Date`
 
-Snapshot creation time (from manifest).
+Checkpoint creation time (from manifest).
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">path</span>
 
@@ -674,10 +1214,10 @@ Local artifact directory path.
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">open()</span> {#snapshothandleopen}
 
 ```typescript
-open(): Promise<Snapshot>
+open(): Promise<Checkpoint>
 ```
 
-Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Snapshot.list()`](#snapshot-list)); fetch a live handle via [`Snapshot.get()`](#snapshot-get) first.
+Open and metadata-validate the underlying artifact. Throws if this handle is read-only (came from [`Checkpoint.list()`](#snapshot-list)); fetch a live handle via [`Checkpoint.get()`](#snapshot-get) first.
 
 #### <span className="msb-recv">snapshotHandle.</span><span className="msb-hn">remove()</span> {#snapshothandleremove}
 
@@ -690,7 +1230,7 @@ Remove this installed snapshot copy and its index row using the handle's stored 
 <Accordion title="Example">
 
 ```typescript
-const h = await Snapshot.get("baseline:deps");
+const h = await Checkpoint.get("baseline:deps");
 const snap = await h.open();          // metadata-validated
 await h.remove({ force: false });     // refuse if it has children
 ```
@@ -715,15 +1255,15 @@ saveTo(out: string, opts?: SaveOpts): Promise<void>
 ```
 
 Bundle the referenced snapshot through the backend retained by the handle.
-Handles returned by `Snapshot.list()` are metadata-only; fetch a live handle
-with `Snapshot.get()` first. Cloud returns `UnsupportedError`.
+Handles returned by `Checkpoint.list()` are metadata-only; fetch a live handle
+with `Checkpoint.get()` first. Cloud returns `UnsupportedError`.
 
 ---
 
 
 ## SnapshotBuilder
 
-Fluent builder for a snapshot, returned by [`Snapshot.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
+Fluent builder for a snapshot, returned by [`Checkpoint.builder(name)`](#snapshotbuilder). Every setter mutates in place and returns `this`, so calls chain. The source sandbox is required: call [`.fromSandbox()`](#fromsandbox) before [`.create()`](#create).
 
 ---
 
@@ -836,13 +1376,13 @@ Select the [guest writeback policy](/sandboxes/snapshots#guest-flushing) before 
 #### <span className="msb-recv">.</span><span className="msb-hn">create()</span>
 
 ```typescript
-create(): Promise<Snapshot>
+create(): Promise<Checkpoint>
 ```
 
 <Accordion title="Example">
 
 ```typescript
-const snap = await Snapshot.builder("baseline-v2")
+const snap = await Checkpoint.builder("baseline-v2")
   .fromSandbox("baseline")
   .recordIntegrity()
   .create();
@@ -856,7 +1396,7 @@ Capture the configured snapshot and return the resulting artifact.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Snapshot&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#snapshot">Promise&lt;Checkpoint&gt;</a></div>
     <div className="msb-param-desc">The created snapshot artifact.</div>
   </div>
 </div>
@@ -866,11 +1406,29 @@ Capture the configured snapshot and return the resulting artifact.
 Returned by [`snapshot.copyTo()`](#snap-copyto). Each setter mutates the builder
 and returns `this`.
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `labels(Record<string, string>)` | `this` | Replace all labels in the copied manifest |
-| `recordIntegrity(boolean)` | `this` | Compute integrity when true, or omit it when false |
-| `save()` | `Promise<void>` | Write the configured archive |
+#### <span className="msb-recv">copy.</span><span className="msb-hn">labels()</span>
+
+```typescript
+labels(labels: Record<string, string>): this
+```
+
+Replace all labels in the copied manifest
+
+#### <span className="msb-recv">copy.</span><span className="msb-hn">recordIntegrity()</span>
+
+```typescript
+recordIntegrity(enabled: boolean): this
+```
+
+Compute integrity when true, or omit it when false
+
+#### <span className="msb-recv">copy.</span><span className="msb-hn">save()</span>
+
+```typescript
+save(): Promise<void>
+```
+
+Write the configured archive
 
 ## Forking
 
@@ -949,38 +1507,293 @@ const child = await Sandbox.restore("api:baseline")
 
 </Accordion>
 
-| Control | Purpose |
-| --- | --- |
-| `cowMemory()` | Share unchanged full-snapshot memory. |
-| `.forked()` | Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options). |
-| `diskOnly()` | Boot only the saved disk. |
-| `snapshotBase(base)` | Supply an archive dependency. |
-| `restore()` | Return the restored sandbox. |
-| `restoreWithProgress()` | Return progress events; await `awaitSandbox()` for the sandbox. |
+#### <span className="msb-recv">restore.</span><span className="msb-hn">cowMemory()</span>
 
-Image, replacement, and startup-command options are not accepted. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
+```typescript
+cowMemory(): this
+```
+
+Share unchanged full-snapshot memory.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">forked()</span>
+
+```typescript
+forked(): this
+```
+
+Deprecated alias for the same CoW memory policy; see [migration notes](/sandboxes/snapshots#migrating-restore-options).
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">diskOnly()</span>
+
+```typescript
+diskOnly(): this
+```
+
+Boot only the saved disk.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">snapshotBase()</span>
+
+```typescript
+snapshotBase(base: string): this
+```
+
+Supply an archive dependency.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">restore()</span>
+
+```typescript
+restore(): Promise<Sandbox>
+```
+
+Return the restored sandbox.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">restoreWithProgress()</span>
+
+```typescript
+restoreWithProgress(): Promise<CreationProgressCreate>
+```
+
+Return progress events; await `awaitSandbox()` for the sandbox.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">init()</span>
+
+```typescript
+init(cmd: string, args?: string[]): this
+```
+
+Select guest PID 1 for disk boot using an absolute guest executable path or `"auto"`. Full-memory resume rejects an explicit choice, including `"auto"`; use `diskOnly()` for a new boot. Available on group and checkpoint spawn callbacks, including progress variants.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">initWith()</span>
+
+```typescript
+initWith(cmd: string, configure: (init: InitOptionsBuilder) => InitOptionsBuilder): this
+```
+
+Set init arguments and environment using the same builder as ordinary creation. Replaces an earlier init choice. Older native SDKs refuse unsupported explicit init or hostname options before launch.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">hostname()</span>
+
+```typescript
+hostname(name: string): this
+```
+
+Set a nonempty guest hostname of at most 64 UTF-8 bytes for disk boot. Full-memory resume refuses replacement even when the requested name matches the source.
+
+Image, replacement, and automatic startup-command options are not accepted; entrypoint/CMD configure future commands only. Full restore requires matching CPU and memory settings, keeps captured network devices, and cannot apply a new guest security profile. Use disk-only restore to change these.
 
 Restore rejects missing external filesystems (and, for full restore, additional disks) by default. Use `allowMissingResources()` to resume with unavailable devices (full restore records warnings). This is separate from strict/relaxed validation of supplied mappings; inheritance does not waive missing backing. Root and owned storage remain required.
 
-<Accordion title="Destination options">
 
-| Option | Purpose |
-| --- | --- |
-| `cpus(), memory()` | CPU count and memory in MiB. Full restore must match capture. |
-| `networkPolicy()` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
-| `maxConnections()` | Concurrent TCP limit; zero means unlimited. |
-| `disableNetwork()` | Remove the NIC. Rejected for full snapshots that captured one. |
-| `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
-| `maxDuration(), idleTimeout()` | Lifetime and idle limits. Omitted means unlimited; zero expires immediately. |
-| `port(), portBind(), portUdp(), portUdpBind()` | Bind destination TCP or UDP ports. |
-| `vsock(), vsockDgram()` | Bind destination vsock endpoints. |
-| `user(), logLevel()` | Default user for new execs and host runtime log level. |
-| `dangerouslyInheritResources()` | Explicitly inherit host resources. Disabled by default. |
-| `externalMountPolicy()` | Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access. |
+#### <span className="msb-recv">restore.</span><span className="msb-hn">cpus()</span>
+
+```typescript
+cpus(count: number): this
+```
+
+CPU count. Full restore must match capture.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">memory()</span>
+
+```typescript
+memory(mib: number): this
+```
+
+Memory in MiB. Full restore must match capture.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">maxCpus()</span>
+
+```typescript
+maxCpus(count: number): this
+```
+
+Set the maximum possible CPU count for a disk boot. Must be positive and at least the requested CPU count. Full-memory resume requires the captured ceiling exactly.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">maxMemory()</span>
+
+```typescript
+maxMemory(mib: number): this
+```
+
+Set the memory ceiling in MiB for a disk boot. Must be positive and at least the requested memory. Full-memory resume requires the captured ceiling exactly. Omitting either ceiling retains the existing inherited/default choice.
+
+An older native SDK that lacks either setter rejects its explicit use before launch.
+
+#### Destination command defaults
+
+Use `workdir`, `shell`, `entrypoint`, `cmd`, `env` and `envs` to configure new commands in the destination. They work for disk boots and full resumes without changing captured processes or starting a workload during restoration. An explicit empty entrypoint or CMD clears that default; omission keeps existing resolution. Environment defaults combine with per-command overrides through the ordinary SDK rules. Guest working directories must exist. These are explicit destination settings, not automatically saved snapshot configuration. Unsupported native bindings reject new explicit options before dispatch.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">label()</span>
+
+```typescript
+label(key: string, value: string): this
+```
+
+Attach a destination sandbox label, replacing an earlier value for the same key. Source snapshot labels remain unchanged.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">labels()</span>
+
+```typescript
+labels(labels: Record<string, string>): this
+```
+
+Attach multiple destination labels. An older native SDK missing any of these setters rejects explicit use before launch.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">networkPolicy()</span>
+
+```typescript
+networkPolicy(policy: NetworkPolicy | NetworkPolicyBuilder): this
+```
+
+Replace host traffic filtering; guest DNS and TLS settings stay unchanged.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">pullPolicy()</span>
+
+```typescript
+pullPolicy(policy: string): this
+```
+
+Control retrieval of the snapshot's recorded image digest. The default `if-missing` and explicit `never` can use complete local/archive content offline. `always` revalidates that exact digest through its registry, even when cached, and fails if the registry cannot provide it. This never follows the original mutable tag or changes the source snapshot. Explicit use requires an updated native binding and is refused before dispatch when unsupported.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">proxy()</span>
+
+```typescript
+proxy(configure: (proxy: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
+```
+
+Select the destination host proxy before disk boot or full-memory resume. This preserves the captured guest interface and does not inject guest trust material. SOCKS5 passwords use destination environment references; resolved passwords are not saved in snapshot configuration. Older native bindings missing this setter reject explicit use before dispatch.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">maxConnections()</span>
+
+```typescript
+maxConnections(count: number): this
+```
+
+Concurrent TCP limit; zero means unlimited.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">disableNetwork()</span>
+
+```typescript
+disableNetwork(): this
+```
+
+Remove the NIC. Rejected for full snapshots that captured one.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">security()</span>
+
+```typescript
+security(profile: "default" | "restricted"): this
+```
+
+Guest security profile. Disk boot only, including an explicit default profile.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">maxDuration()</span>
+
+```typescript
+maxDuration(secs: number): this
+```
+
+Lifetime and idle limits. Omitted means unlimited; zero expires immediately.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">idleTimeout()</span>
+
+```typescript
+idleTimeout(secs: number): this
+```
+
+Lifetime and idle limits. Omitted means unlimited; zero expires immediately.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">guestClock()</span>
+
+```typescript
+guestClock(policy: "sync" | "off"): this
+```
+
+Override the saved guest clock policy; omission preserves it, defaulting to sync when absent.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">port()</span>
+
+```typescript
+port(host: number, guest: number): this
+```
+
+Bind destination TCP or UDP ports.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">portBind()</span>
+
+```typescript
+portBind(bind: string, host: number, guest: number): this
+```
+
+Bind destination TCP or UDP ports.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">portUdp()</span>
+
+```typescript
+portUdp(host: number, guest: number): this
+```
+
+Bind destination TCP or UDP ports.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">portUdpBind()</span>
+
+```typescript
+portUdpBind(bind: string, host: number, guest: number): this
+```
+
+Bind destination TCP or UDP ports.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">vsock()</span>
+
+```typescript
+vsock(path: string, port: number): this
+```
+
+Bind destination vsock endpoints.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">vsockDgram()</span>
+
+```typescript
+vsockDgram(path: string, port: number): this
+```
+
+Bind destination vsock endpoints.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">user()</span>
+
+```typescript
+user(user: string): this
+```
+
+Default user for new execs.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">logLevel()</span>
+
+```typescript
+logLevel(level: string): this
+```
+
+Host runtime log level.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">dangerouslyInheritResources()</span>
+
+```typescript
+dangerouslyInheritResources(): this
+```
+
+Explicitly inherit host resources. Disabled by default.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">externalMountPolicy()</span>
+
+```typescript
+externalMountPolicy(policy: "strict" | "relaxed"): this
+```
+
+Validate supplied filesystem mappings: strict (default) or relaxed. Does not grant access.
 
 Omitted controls retain destination defaults. Durations are non-negative finite seconds, rounded up. Network policy accepts `NetworkPolicy` or `NetworkPolicyBuilder`. Use `v => v.captured()` for a private captured volume.
 
-</Accordion>
+Full capture records the source clock policy; current disk capture does not. An explicit sync policy overrides a saved off policy. The same option is available on group and checkpoint spawn, including progress variants. Clock selection controls guest wall-clock synchronization. Unsupported native SDKs or runtimes refuse unsupported explicit selection before launching the destination.
+
 
 #### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
 
@@ -1016,45 +1829,70 @@ Allow unavailable external filesystems or additional disks. Full restore records
 
 Compact a local sandbox’s root or owned disks. See [compaction](/sandboxes/snapshots#compact-disks) for examples and recovery requirements.
 
-<Accordion title="Options and results">
 
-| Option | Purpose |
-| --- | --- |
-| `disk` | Select one owned disk by guest path; `/` selects the root. |
-| `rootDiskOnly` | Select only the root. Cannot combine with the disk selector. |
-| `layers` | Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer. |
-| `dryRun` | Preview without changing storage. |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>disk</code></div>
+    <div className="msb-param-desc">Select one owned disk by guest path; <code>/</code> selects the root.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>rootDiskOnly</code></div>
+    <div className="msb-param-desc">Select only the root. Cannot combine with the disk selector.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>layers</code></div>
+    <div className="msb-param-desc">Oldest sealed layers to merge, including the base. Minimum two; omit for all. Excludes the writable layer.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>dryRun</code></div>
+    <div className="msb-param-desc">Preview without changing storage.</div>
+  </div>
+</div>
 
 Defaults to the root and owned data disks; excludes named/external volumes and directories. Requires a running or fully stopped local sandbox. Fewer than two sealed layers means no change; no eligible disks returns an empty result with zero counts.
 
 Results include aggregate counts and per-disk entries keyed by `guestPath`. `materializedBytes` counts copied bytes, not reclaimed space. Times are microseconds: per-disk `totalUs` covers preparation; aggregate `totalUs` also includes switching; `pauseUs` measures the shared VM pause.
 
-</Accordion>
 
 
 ## Types
 
 ### SaveOpts <span className="msb-tag is-type">interface</span>
 
-Bundle options for [`Snapshot.save()`](#snapshot-save) and instance `saveTo()` methods. Boolean fields default to `false`; selective-export fields are omitted by default.
+Bundle options for [`Checkpoint.save()`](#snapshot-save) and instance `saveTo()` methods. Boolean fields default to `false`; selective-export fields are omitted by default.
 
-<p className="msb-backref">Used by <a href="#snapshot-save">Snapshot.save()</a> and instance <code>saveTo()</code> methods</p>
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `since` | `string` | Omit disk layers and RAM objects supplied by an exact base; incompatible with `lastLayers` and `withParents`. |
-| `lastLayers` | `number` | Include the newest N sealed root-disk layers; owned disks and full execution state remain complete. |
-| `withParents` | `boolean` | Walk the parent chain and include each ancestor in the archive. |
-| `withImage` | `boolean` | Include the OCI image cache so the archive boots offline. |
-| `plainTar` | `boolean` | Skip zstd compression and write a plain `.tar`. |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>compatibility</code><span className="msb-type"><code>&quot;current&quot; | &quot;0.7.8&quot;</code></span></div>
+    <div className="msb-param-desc">Defaults to <code>&quot;current&quot;</code>; explicit targets require a native library advertising support</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>since</code><span className="msb-type"><code>string</code></span></div>
+    <div className="msb-param-desc">Omit disk layers and RAM objects supplied by an exact base; incompatible with <code>lastLayers</code> and <code>withParents</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>lastLayers</code><span className="msb-type"><code>number</code></span></div>
+    <div className="msb-param-desc">Include the newest N sealed root-disk layers; owned disks and full execution state remain complete.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>withParents</code><span className="msb-type"><code>boolean</code></span></div>
+    <div className="msb-param-desc">Walk the parent chain and include each ancestor in the archive.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>withImage</code><span className="msb-type"><code>boolean</code></span></div>
+    <div className="msb-param-desc">Include the OCI image cache so the archive boots offline.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>plainTar</code><span className="msb-type"><code>boolean</code></span></div>
+    <div className="msb-param-desc">Skip zstd compression and write a plain <code>.tar</code>.</div>
+  </div>
+</div>
 
 ---
 
 ### SnapshotScope <span className="msb-tag is-type">type</span>
 
 Scope of what a snapshot captures: `"disk"` for filesystem state or `"full"` for disk plus VM execution state.
-
-<p className="msb-backref">Returned by <a href="#snap-scope">snap.scope</a> · <a href="#snapshothandle">SnapshotHandle.scope</a></p>
 
 ```typescript
 type SnapshotScope = "disk" | "full";
@@ -1066,10 +1904,14 @@ type SnapshotScope = "disk" | "full";
 
 Result of [`snap.verify()`](#snap-verify). Checkpoint snapshots add `checkpoint: { kind: "verified", root: string }`; the existing `upper` projection stays intact for disk-snapshot compatibility.
 
-<p className="msb-backref">Returned by <a href="#snap-verify">snap.verify()</a></p>
-
 ```typescript
-type SnapshotVerifyReport =
+type SnapshotVerifyCoverage =
+  | { readonly kind: "complete" }
+  | { readonly kind: "incomplete"; readonly unrecorded: readonly string[] }
+  | { readonly kind: "unknown" };
+
+/** Result of an explicit `Checkpoint.verify()` call. Corruption rejects the call. */
+type SnapshotVerifyReport = { readonly coverage: SnapshotVerifyCoverage } & (
   | {
       readonly digest: string;
       readonly path: string;
@@ -1085,14 +1927,37 @@ type SnapshotVerifyReport =
         readonly digest: string;
       };
       readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
-    };
+    }
+);
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `digest` | `string` | Snapshot's manifest digest. |
-| `path` | `string` | Artifact directory path. |
-| `upper.kind` | `"notRecorded" \| "verified"` | Whether an integrity hash was recorded and checked. |
-| `upper.algorithm` | `string` | Hash algorithm (`"verified"` only). |
-| `checkpoint` | `{ kind: "verified"; root: string }` | Verified checkpoint closure identity when state is full. |
-| `upper.digest` | `string` | Recomputed upper-layer digest (`"verified"` only). |
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>digest</code><span className="msb-type"><code>string</code></span></div>
+    <div className="msb-param-desc">Checkpoint's manifest digest.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type"><code>string</code></span></div>
+    <div className="msb-param-desc">Artifact directory path.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>coverage</code><span className="msb-type"><code>SnapshotVerifyCoverage</code></span></div>
+    <div className="msb-param-desc"><code>complete</code>, <code>incomplete</code> with <code>unrecorded</code> paths, or <code>unknown</code> on older native libraries.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>upper.kind</code><span className="msb-type"><code>&quot;notRecorded&quot; | &quot;verified&quot;</code></span></div>
+    <div className="msb-param-desc">Whether an integrity hash was recorded and checked.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>upper.algorithm</code><span className="msb-type"><code>string</code></span></div>
+    <div className="msb-param-desc">Hash algorithm (<code>&quot;verified&quot;</code> only).</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoint</code><span className="msb-type"><code>&#123; kind: &quot;verified&quot;; root: string &#125;</code></span></div>
+    <div className="msb-param-desc">Verified checkpoint closure identity when state is full.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>upper.digest</code><span className="msb-type"><code>string</code></span></div>
+    <div className="msb-param-desc">Recomputed upper-layer digest (<code>&quot;verified&quot;</code> only).</div>
+  </div>
+</div>

@@ -309,3 +309,162 @@ func TestForkVolumesPreserveSymlinkParentPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreGuestClockPresenceAndValidation(t *testing.T) {
+	for _, policy := range []GuestClockPolicy{"", GuestClockSync, GuestClockOff} {
+		var config RestoreConfig
+		WithRestoreGuestClock(policy)(&config)
+		if err := validateRestoreConfig(config); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["guest_clock"]
+		if policy == "" && present {
+			t.Fatal("omission became an override")
+		}
+		if policy != "" && (!present || value != string(policy)) {
+			t.Fatalf("lost policy: %s", raw)
+		}
+	}
+	if err := validateRestoreConfig(RestoreConfig{GuestClock: "invalid"}); err == nil {
+		t.Fatal("accepted invalid policy")
+	}
+}
+
+func TestRestoreBootOptionsRetainExplicitEmptyHostnameAndInit(t *testing.T) {
+	var config RestoreConfig
+	WithRestoreInit(Init.Cmd("/bin/sh", InitOptions{Args: []string{"-c", "exec sleep 300"}, Env: map[string]string{"KEY": "value"}}))(&config)
+	WithRestoreHostname("")(&config)
+	options := buildFFIRestoreOptions("saved", config)
+	if options.Hostname == nil || *options.Hostname != "" {
+		t.Fatal("explicit empty hostname was dropped")
+	}
+	if options.Init == nil || options.Init.Cmd != "/bin/sh" || len(options.Init.Args) != 2 || len(options.Init.Env) != 1 || options.Init.Env[0] != [2]string{"KEY", "value"} {
+		t.Fatalf("init changed: %+v", options.Init)
+	}
+	// Conversion owns argv; later caller edits cannot change the deferred native request.
+	config.Init.Args[0] = "changed"
+	if options.Init.Args[0] != "-c" {
+		t.Fatal("init argv retained caller backing")
+	}
+}
+
+func TestRestoreCeilingsRetainOmissionAndExplicitZero(t *testing.T) {
+	for _, value := range []uint32{0, 512} {
+		var config RestoreConfig
+		WithRestoreMaxCPUs(uint8(value / 256))(&config)
+		WithRestoreMaxMemory(value)(&config)
+		raw, err := json.Marshal(buildFFIRestoreOptions("saved", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["max_cpus"] != float64(value/256) || got["max_memory_mib"] != float64(value) {
+			t.Fatalf("explicit ceilings changed: %s", raw)
+		}
+	}
+	raw, err := json.Marshal(buildFFIRestoreOptions("saved", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var omitted map[string]any
+	if err := json.Unmarshal(raw, &omitted); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"max_cpus", "max_memory_mib"} {
+		if _, found := omitted[key]; found {
+			t.Fatalf("omission became a ceiling: %s", raw)
+		}
+	}
+}
+
+func TestRestoreDestinationLabelsPreserveExplicitAndOmittedValues(t *testing.T) {
+	config := RestoreConfig{}
+	for _, option := range []RestoreOption{WithRestoreLabel("team", "first"), WithRestoreLabel("team", "last")} {
+		option(&config)
+	}
+	raw, err := json.Marshal(buildFFIRestoreOptions("saved", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["labels"].(map[string]any)["team"] != "last" {
+		t.Fatalf("destination options lost: %s", raw)
+	}
+	raw, err = json.Marshal(buildFFIRestoreOptions("saved", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"labels"} {
+		if _, ok := got[key]; ok {
+			t.Fatalf("omitted option became explicit: %s", raw)
+		}
+	}
+}
+
+func TestRestoreCommandDefaultsPreserveEmptyAndOmittedValues(t *testing.T) {
+	var config RestoreConfig
+	for _, option := range []RestoreOption{WithRestoreWorkdir("/root"), WithRestoreShell("/bin/ash"), WithRestoreEntrypoint(), WithRestoreCmd(), WithRestoreEnv("KEY", "")} {
+		option(&config)
+	}
+	var empty []string
+	for _, argv := range []*[]string{config.Cmd, &empty} {
+		config.Cmd = argv
+		data, err := json.Marshal(buildFFIRestoreOptions("source", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"cmd", "entrypoint"} {
+			if string(fields[field]) != "[]" {
+				t.Fatalf("%s lost empty intent: %s", field, data)
+			}
+		}
+		if string(fields["env"]) != `{"KEY":""}` || string(fields["workdir"]) != `"/root"` || string(fields["shell"]) != `"/bin/ash"` {
+			t.Fatal(string(data))
+		}
+	}
+}
+
+func TestRestoreProxyKeepsDestinationCredentialReference(t *testing.T) {
+	var config RestoreConfig
+	WithRestoreProxy(SOCKS5Proxy("127.0.0.1:1080").Credentials("destination", SecretSourceEnv("DEST_PROXY_PASSWORD")))(&config)
+	proxy := buildFFIRestoreOptions("saved", config).Proxy
+	if proxy == nil || proxy.Protocol != "socks5" || proxy.Username == nil || *proxy.Username != "destination" || proxy.PasswordSource == nil || proxy.PasswordSource.Var != "DEST_PROXY_PASSWORD" {
+		t.Fatal("destination proxy or unresolved credential source was lost")
+	}
+	if buildFFIRestoreOptions("saved", RestoreConfig{}).Proxy != nil {
+		t.Fatal("omitted destination proxy must remain absent")
+	}
+}
+
+func TestRestorePullPolicyPreservesExistingValues(t *testing.T) {
+	for _, policy := range []PullPolicy{PullPolicyDefault, PullPolicyAlways, PullPolicyIfMissing, PullPolicyNever} {
+		var options RestoreConfig
+		WithRestorePullPolicy(policy)(&options)
+		wire := buildFFIRestoreOptions("saved", options)
+		if wire.PullPolicy != string(policy) || wire.Snapshot != "saved" {
+			t.Fatal("pull policy changed the snapshot selection")
+		}
+	}
+}

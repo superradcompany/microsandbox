@@ -7,7 +7,10 @@ documented keyword arguments (for direct Python construction).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from microsandbox._microsandbox import CheckpointRemoveResult, SnapshotRemoveResult
 
 
 class MicrosandboxError(Exception):
@@ -168,6 +171,65 @@ class PublishedSnapshotArtifact:
     path: str
     snapshot_id: str
     digest: str
+    # Missing in older producers and archive-only captures. Never inferred from current head.
+    head_update: dict | None = None
+
+
+class SnapshotRemovalRecoveryError(MicrosandboxError):
+    """Removal committed; result is authoritative even though cleanup needs recovery."""
+
+    code = "snapshot-removal-recovery"
+
+    def __init__(self, message: str, result: CheckpointRemoveResult, detail: str) -> None:
+        super().__init__(message)
+        self.result = result
+        self.detail = detail
+
+
+class SnapshotGroupRemovalRecoveryError(MicrosandboxError):
+    """Removal committed; result is authoritative even though cleanup needs recovery."""
+
+    code = "snapshot-group-removal-recovery"
+
+    def __init__(self, message: str, result: SnapshotRemoveResult, detail: str) -> None:
+        super().__init__(message)
+        self.result = result
+        self.detail = detail
+
+
+class SnapshotVerificationError(MicrosandboxError):
+    """Verification failed; report retains every selected member and its findings."""
+    code = "snapshot-verification"
+
+    def __init__(self, message: str, report: dict) -> None:
+        super().__init__(message)
+        self.report = report
+
+
+class SnapshotImportError(MicrosandboxError):
+    """An import failure retaining whether the entire batch committed.
+
+    ``unknown`` requires recovery before assuming either success or no changes.
+    """
+
+    code = "snapshot-import"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation_id: str,
+        archives: list[str],
+        group_path: str | None,
+        outcome: Literal["not_committed", "committed", "unknown"],
+        detail: str,
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = operation_id
+        self.archives = list(archives)
+        self.group_path = group_path
+        self.outcome = outcome
+        self.detail = detail
 
 
 class SnapshotSourceRecoveryError(MicrosandboxError):

@@ -562,6 +562,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_deadline_preserves_live_catalog_and_storage_until_owner_releases() {
+        let fixture = OwnedFixture::new("owned-cleanup-deadline").await;
+        let mut cleanup = fixture.arm().await;
+        let pools = fixture.backend.db().await.unwrap();
+        let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
+            .await
+            .unwrap();
+        let before = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        let owner = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(
+            &fixture.backend.config().run_dir(),
+            &fixture.config.spec.name,
+        )
+        .unwrap()
+        .unwrap();
+
+        // Let the real ten-second cleanup deadline expire. A test-only outer timeout
+        // would only prove cancellation, not the error returned to a waiting caller.
+        let error = tokio::time::timeout(
+            Duration::from_secs(15),
+            cleanup.finish_owned_failure(crate::MicrosandboxError::Runtime(
+                "configuration confirmation failed; termination was not confirmed".into(),
+            )),
+        )
+        .await
+        .expect("cleanup exceeded its own bounded ownership wait");
+        let message = error.to_string();
+        assert!(
+            message.contains("configuration confirmation failed"),
+            "{message}"
+        );
+        assert!(
+            cleanup.state.is_some(),
+            "a timed-out cleanup must remain armed"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.write())
+                .await
+                .unwrap(),
+            Some(before)
+        );
+        assert_eq!(
+            std::fs::read(fixture.sandbox_dir.join("upper.ext4")).unwrap(),
+            b"private root disk"
+        );
+        crate::runtime::owned_volumes::validate(&fixture.sandbox_dir, &fixture.config.spec.mounts)
+            .unwrap();
+        fixture.assert_preserved();
+        assert!(
+            microsandbox_runtime::ipc::try_acquire_transition_guard(
+                &fixture.backend.config().run_dir(),
+                &fixture.config.spec.name,
+            )
+            .unwrap()
+            .is_none(),
+            "cleanup still excludes a replacement"
+        );
+
+        drop(owner);
+        let error = finish_test_owned_failure(&mut cleanup).await;
+        assert_eq!(error.to_string(), "startup failed");
+        assert!(cleanup.state.is_none());
+        let retained = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.write())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.status, SandboxStatus::Stopped);
+        assert!(
+            fixture.sandbox_dir.exists(),
+            "recoverable stopped backing remains"
+        );
+        fixture.assert_preserved();
+    }
+
+    #[tokio::test]
     async fn owned_cancelled_insert_waits_for_catalog_before_removing_restored_staging() {
         for committed in [false, true] {
             let fixture = OwnedFixture::new("owned-cancelled-insert").await;

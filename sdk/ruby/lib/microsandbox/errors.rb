@@ -91,6 +91,25 @@ module Microsandbox
   # Capture completed, but the source sandbox failed to recover its prior
   # execution state; see the class body below for the recovery locator.
   define_error(:SnapshotSourceRecoveryError, "snapshot-source-recovery")
+  define_error(:SnapshotImportError, "snapshot-import")
+  define_error(:SnapshotVerificationError, "snapshot-verification")
+
+  define_error(:SnapshotRemovalRecoveryError, "snapshot-removal-recovery")
+  class SnapshotRemovalRecoveryError
+    # Removal committed; these facts remain valid when catalog cleanup failed.
+    attr_reader :result, :detail
+  end
+
+  define_error(:SnapshotGroupRemovalRecoveryError, "snapshot-group-removal-recovery")
+  class SnapshotGroupRemovalRecoveryError
+    # The entire history was removed even though catalog cleanup needs recovery.
+    attr_reader :result, :detail
+  end
+
+  class SnapshotVerificationError
+    # All selected members remain available when corruption makes verification fail.
+    attr_reader :report
+  end
   # The automatic adjacent-release snapshot migration was blocked.
   define_error(:SnapshotMigrationError, "snapshot-migration")
 
@@ -130,6 +149,19 @@ module Microsandbox
     attr_reader :hint
   end
 
+  class SnapshotImportError
+    # @return [String, nil] this import attempt's durable journal identity
+    attr_reader :operation_id
+    # @return [Array<String>, nil] supplied archive paths
+    attr_reader :archives
+    # @return [String, nil] prepared destination group directory
+    attr_reader :group_path
+    # @return [String, nil] "not_committed", "committed", or "unknown"
+    attr_reader :outcome
+    # @return [String, nil] the original failure diagnostic
+    attr_reader :detail
+  end
+
   # The native layer attaches the recovery locator as attributes, mirroring
   # the Python SDK's +SnapshotSourceRecoveryError+. +artifact+ is set only when
   # the requested snapshot was published; otherwise +checkpoint_path+ names the
@@ -145,7 +177,8 @@ module Microsandbox
     # @return [String, nil] the runtime-local checkpoint path
     attr_reader :checkpoint_path
     # @return [Hash, nil] the published snapshot, with "kind" ("installed" or
-    #   "archive"), "path", "snapshot_id", and "digest" keys
+    #   "archive"), "path", "snapshot_id", and "digest" keys; installed captures may
+    #   also include their operation-owned "head_update" outcome
     attr_reader :artifact
     # @return [String, nil] the runtime's recovery diagnostic
     attr_reader :detail

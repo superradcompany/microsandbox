@@ -9,12 +9,16 @@ mod create_ops;
 #[cfg(target_os = "linux")]
 mod dax;
 mod dir_ops;
+mod file_metadata;
 mod file_ops;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
 mod mobility;
 mod remove_ops;
+mod runtime_scripts;
+#[cfg(test)]
+mod runtime_scripts_tests;
 mod special;
 mod xattr_ops;
 
@@ -1189,6 +1193,10 @@ fn open_root_no_symlink(root_dir: &Path) -> io::Result<File> {
 //--------------------------------------------------------------------------------------------------
 
 pub use builder::PassthroughFsBuilder;
+pub use runtime_scripts::{
+    CapturedRuntimeScripts, RuntimeBootScript, RuntimeRestoredScript, RuntimeScriptLimits,
+    RuntimeScriptMetadata, stage_runtime_boot_scripts, stage_runtime_restored_scripts,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Tests

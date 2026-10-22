@@ -306,15 +306,6 @@ pub async fn spawn_sandbox(
     mode: SpawnMode,
     lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    // Durable configuration stores only host-side source references. Resolve
-    // them into the private runtime configuration before the sandbox process
-    // is spawned.
-    #[cfg(feature = "net")]
-    let resolved_network = config
-        .local_network_config()?
-        .resolve(&EnvNetworkSecretResolver)
-        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
-
     // Resolve the already-layered runtime paths as one compatible pair before launch.
     let global = local.config();
     #[cfg(feature = "embed-binaries")]
@@ -330,13 +321,24 @@ pub async fn spawn_sandbox(
     let resolved_runtime = crate::setup::resolve_runtime(global)?;
     ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
     let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+    let retention_supported = launch_contract.machine
+        && launch_contract::supports_configuration_retention(&resolved_runtime.msb_path).await;
     // A stopped sandbox may have been edited without a runtime installed, or
     // the selected executable may have changed since creation. Validate its
     // effective configuration here for both initial launch and later starts.
     launch_contract.validate_launch_intent(config)?;
-    #[cfg(feature = "net")]
-    launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
     launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
+    #[cfg(feature = "net")]
+    let resolved_network = {
+        let mut network = config.local_network_config()?;
+        network.http =
+            launch_contract::select_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        // Resolve source-backed values only after selecting a supported wire configuration.
+        // No failed mutation is retried through a different launch contract.
+        network
+            .resolve(&EnvNetworkSecretResolver)
+            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?
+    };
     launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
     launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
     if config.checkpoint_restore.as_ref().is_some_and(|restore| {
@@ -638,6 +640,13 @@ pub async fn spawn_sandbox(
     }
     if !launch_contract.machine {
         visible[0] = OsString::from("sandbox");
+    }
+    // Selection happens before the single launch dispatch. Older strict launch decoders never
+    // see the optional metadata; unavailable tracking does not disable their existing operations.
+    if retention_supported {
+        launch.retention_source = Some(microsandbox_runtime::retention::RetentionSource {
+            configuration: serde_json::to_value(config.clone_for_persistence())?,
+        });
     }
     let launch_value = match launch_contract.encode(&launch) {
         Ok(launch) => launch,

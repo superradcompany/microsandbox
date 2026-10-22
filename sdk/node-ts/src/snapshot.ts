@@ -1,3 +1,6 @@
+import { parseCheckpointRemoval, type CheckpointRemoveResult } from "./snapshot-removal.js";
+import { Sandbox, CreationProgressCreate, type RestoreBuilder } from "./sandbox.js";
+import type { NapiRestoreBuilder } from "./internal/napi.js";
 import { UnsupportedError } from "./errors.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -59,6 +62,8 @@ export type SnapshotState =
  * Bundle options for `Snapshot.save` and instance `saveTo` methods.
  */
 export interface SaveOpts {
+  /** Explicit recipient; unsupported required capabilities are refused, never removed. */
+  compatibility?: "current" | "0.7.8";
   /** Omit disk layers and RAM objects supplied by this base; mutually exclusive with lastLayers/withParents. */
   since?: string;
   /** Newest N sealed disk layers. Full snapshots still include all memory/device state. */
@@ -69,6 +74,19 @@ export interface SaveOpts {
   withImage?: boolean;
   /** Skip zstd compression and write a plain `.tar`. */
   plainTar?: boolean;
+}
+
+/** Archive controls for the receiver-based saveWith callback. */
+export class SnapshotSaveOptions {
+  private options: SaveOpts = {};
+  compatibility(target: "current" | "0.7.8"): this { this.options.compatibility = target; return this; }
+  withParents(): this { this.options.withParents = true; return this; }
+  withImage(): this { this.options.withImage = true; return this; }
+  plainTar(): this { this.options.plainTar = true; return this; }
+  since(base: string): this { this.options.since = base; return this; }
+  lastLayers(count: number): this { this.options.lastLayers = count; return this; }
+  /** @internal */
+  toNative(): SaveOpts { return { ...this.options }; }
 }
 
 /** Options for importing one or more archives into a snapshot group. */
@@ -87,13 +105,19 @@ export interface LoadOpts {
 export interface HeadUpdate {
   readonly group: string;
   readonly previous: string | null;
-  readonly head: string;
+  readonly head: string | null;
   readonly reason: string;
   readonly changed: boolean;
 }
 
-/** Result of an explicit `Snapshot.verify()` call. */
-export type SnapshotVerifyReport =
+/** Whole-artifact coverage; older native libraries cannot attest to this field. */
+export type SnapshotVerifyCoverage =
+  | { readonly kind: "complete" }
+  | { readonly kind: "incomplete"; readonly unrecorded: readonly string[] }
+  | { readonly kind: "unknown" };
+
+/** Result of an explicit `Checkpoint.verify()` call. Corruption rejects the call. */
+export type SnapshotVerifyReport = { readonly coverage: SnapshotVerifyCoverage } & (
   | {
       readonly digest: string;
       readonly path: string;
@@ -109,7 +133,8 @@ export type SnapshotVerifyReport =
         readonly digest: string;
       };
       readonly checkpoint?: { readonly kind: "verified"; readonly root: string };
-    };
+    }
+);
 
 /**
  * Fluent builder for a snapshot. Returned by `Snapshot.builder(name)`.
@@ -147,6 +172,14 @@ export interface SnapshotCopyBuilder extends NapiSnapshotCopyBuilderSetters {
   save(): Promise<void>;
 }
 
+/** Exact-member removal options; force never bypasses active readers. */
+export class CheckpointRemoveOptions {
+  private forced = false;
+  force(): this { this.forced = true; return this; }
+  /** @internal */
+  toNative(): boolean { return this.forced; }
+}
+
 /**
  * A backend-neutral snapshot artifact.
  *
@@ -163,6 +196,18 @@ export class Snapshot {
   /** @internal */
   constructor(inner: NapiSnapshot) {
     this.inner = inner;
+  }
+
+  /** Remove this exact checkpoint and return this operation's head decision. */
+  async remove(): Promise<CheckpointRemoveResult> {
+    return this.removeWith((options) => options);
+  }
+
+  async removeWith(configure: (options: CheckpointRemoveOptions) => CheckpointRemoveOptions): Promise<CheckpointRemoveResult> {
+    if (!this.inner.removeCheckpoint) throw new UnsupportedError("Checkpoint removal reports require an updated native library");
+    const options = configure(new CheckpointRemoveOptions());
+    const result = await withMappedErrors(() => this.inner.removeCheckpoint!(options.toNative()));
+    return parseCheckpointRemoval(JSON.parse(result));
   }
 
   /**
@@ -232,6 +277,7 @@ export class Snapshot {
     out: string,
     opts?: SaveOpts,
   ): Promise<void> {
+    requireArchiveCompatibility(opts);
     await withMappedErrors(() => napi.Snapshot.save(nameOrPath, out, opts));
   }
 
@@ -260,7 +306,7 @@ export class Snapshot {
   /** Read a group's head, or select `group:member` as its head. */
   static async groupHead(selector: string): Promise<HeadUpdate> {
     const update = await withMappedErrors(() => napi.Snapshot.groupHead(selector));
-    return { ...update, previous: update.previous ?? null };
+    return { ...update, previous: update.previous ?? null, head: update.head ?? null };
   }
 
   //--------------------------------------------------------------------------
@@ -295,7 +341,7 @@ export class Snapshot {
   /** Outcome of the group head update performed by this capture. */
   get headUpdate(): HeadUpdate | null {
     const update = this.inner.headUpdate;
-    return update ? { ...update, previous: update.previous ?? null } : null;
+    return update ? { ...update, previous: update.previous ?? null, head: update.head ?? null } : null;
   }
 
   /** Canonical content digest (`sha256:hex`). The snapshot's identity. */
@@ -455,7 +501,34 @@ export class Snapshot {
    * Bundle this snapshot into a `.tar.zst` archive.
    * Throws `UnsupportedError` when the backend does not expose artifact archives.
    */
+  /** Export this exact checkpoint with default archive controls. */
+  async save(out: string): Promise<void> { await this.saveTo(out); }
+
+  /** Export this exact checkpoint with portable/incremental archive controls. */
+  async saveWith(out: string, configure: (options: SnapshotSaveOptions) => SnapshotSaveOptions): Promise<void> {
+    await this.saveTo(out, configure(new SnapshotSaveOptions()).toNative());
+  }
+
+  async spawnSandbox(): Promise<Sandbox> { return this.spawnSandboxWith(b => b); }
+
+  async spawnSandboxWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<Sandbox> {
+    const builder = configure(Sandbox.restore(this));
+    const sandbox = await withMappedErrors(() => this.inner.spawnSandboxWithBuilder(builder as unknown as NapiRestoreBuilder));
+    return new Sandbox(sandbox, await sandbox.name);
+  }
+
+  async spawnSandboxWithProgress(): Promise<CreationProgressCreate> {
+    return this.spawnSandboxWithProgressWith(b => b);
+  }
+
+  async spawnSandboxWithProgressWith(configure: (options: RestoreBuilder) => RestoreBuilder): Promise<CreationProgressCreate> {
+    const builder = configure(Sandbox.restore(this));
+    const progress = await withMappedErrors(() => this.inner.spawnSandboxWithProgressBuilder(builder as unknown as NapiRestoreBuilder));
+    return new CreationProgressCreate(progress, "");
+  }
+
   async saveTo(out: string, opts?: SaveOpts): Promise<void> {
+    requireArchiveCompatibility(opts);
     await withMappedErrors(() => this.inner.saveTo(out, opts));
   }
 
@@ -511,6 +584,17 @@ function wrapCopyBuilder(builder: NapiSnapshotCopyBuilder): SnapshotCopyBuilder 
 
 /** @internal */
 function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
+  let coverage: SnapshotVerifyCoverage;
+  if (r.coverageKind == null) {
+    // A head checksum from an older native library cannot prove ancestor/owned-disk coverage.
+    coverage = { kind: "unknown" };
+  } else if (r.coverageKind === "complete") {
+    coverage = { kind: "complete" };
+  } else if (r.coverageKind === "incomplete" && r.unrecorded?.length) {
+    coverage = { kind: "incomplete", unrecorded: [...r.unrecorded] };
+  } else {
+    throw invalidProjection(`invalid verification coverage ${r.coverageKind}`);
+  }
   const checkpoint =
     typeof r.checkpointRoot === "string"
       ? { kind: "verified" as const, root: r.checkpointRoot }
@@ -520,6 +604,7 @@ function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
       digest: r.digest,
       path: r.path,
       upper: { kind: "notRecorded" },
+      coverage,
       ...(checkpoint === undefined ? {} : { checkpoint }),
     };
   }
@@ -527,6 +612,7 @@ function verifyReportToTs(r: NapiSnapshotVerifyReport): SnapshotVerifyReport {
     return {
       digest: r.digest,
       path: r.path,
+      coverage,
       upper: {
         kind: "verified",
         algorithm: requiredProjectionString(
@@ -562,4 +648,12 @@ export function _napiSnapshotInfoIsHandle(
   info: NapiSnapshotInfo,
 ): info is NapiSnapshotInfo {
   return typeof info?.digest === "string";
+}
+
+/** @internal Never let an older native option decoder silently ignore an explicit target. */
+export function requireArchiveCompatibility(opts?: SaveOpts): void {
+  if (opts?.compatibility !== undefined &&
+      !napi.snapshotArchiveCompatibilityTargets?.().includes(opts.compatibility)) {
+    throw new UnsupportedError("The requested archive compatibility target requires an updated native library");
+  }
 }

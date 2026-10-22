@@ -323,6 +323,9 @@ mod tests {
                 "--exact",
                 "backend::local::sandbox::process_exit::tests::exit_barrier_child",
                 "--nocapture",
+                // Serial libtest prints its test prefix on the readiness line. Keep the
+                // child harness concurrent so the parent sees standalone protocol lines.
+                "--test-threads=2",
             ])
             .env("MSB_DARWIN_EXIT_CHILD", "1")
             .stdin(Stdio::piped())

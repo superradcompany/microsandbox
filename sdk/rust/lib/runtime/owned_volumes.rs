@@ -388,6 +388,29 @@ mod tests {
 
     #[test]
     fn disk_teardown_probe_releases_partial_guards_and_never_creates_markers() {
+        // This assertion requires the final reference to each flock to close immediately.
+        // Unrelated parallel fork tests can inherit CLOEXEC descriptors until their exec,
+        // so run the unchanged ownership assertions in their own test process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::owned_volumes::tests::disk_teardown_probe_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess-only lock release assertions"]
+    fn disk_teardown_probe_worker() {
         let (directory, mounts) = disk_marker_fixture();
         let last_owner = try_acquire_disk_guards(directory.path(), &mounts[1..])
             .unwrap()

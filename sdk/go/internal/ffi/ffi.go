@@ -22,10 +22,9 @@
 //   - A heap-allocated C string (JSON {kind,message}) on failure. The Go
 //     side MUST free it with call_msb_free_string immediately after reading.
 //
-// Raw agent calls (`msb_agent_*`) are the exception: they return scalar values
-// through out parameters and variable-size CBOR bodies as Rust-allocated byte
-// buffers. The Go side MUST copy those bytes and free them with
-// call_msb_agent_free_bytes.
+// Raw agent calls (`msb_agent_*`) return scalars and allocated CBOR bodies.
+// Snapshot-object owned calls return allocated JSON. Go MUST copy both kinds
+// of allocated byte buffer and release them with call_msb_agent_free_bytes.
 //
 // Sandboxes are identified across the boundary by opaque uint64 handles
 // allocated by the Rust side. Call (*Sandbox).Close to release.
@@ -37,8 +36,8 @@
 // Go pointers across calls. Error strings returned by Rust are heap-allocated
 // by Rust and freed by Go via call_msb_free_string. Output JSON is written
 // into a Go-owned buffer; Rust does not retain that pointer. Raw agent byte
-// outputs are allocated by Rust, copied by Go, then released through
-// call_msb_agent_free_bytes.
+// outputs and snapshot-object owned responses are allocated by Rust, copied
+// by Go, then released through call_msb_agent_free_bytes.
 //
 // # Thread safety
 //
@@ -227,6 +226,9 @@ typedef char *(*msb_image_list_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_
 typedef char *(*msb_image_inspect_fn)(uint64_t cancel_id, const char *reference, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_remove_fn)(uint64_t cancel_id, const char *reference, bool force, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_image_prune_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_snapshot_object_fn)(uint64_t, uint64_t, const char *, uint8_t *, size_t);
+typedef char *(*msb_snapshot_object_owned_fn)(uint64_t, uint64_t, const char *, uint8_t **, size_t *);
+typedef void (*msb_snapshot_object_close_fn)(uint64_t);
 typedef char *(*msb_storage_usage_fn)(uint64_t cancel_id, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_storage_usage_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_storage_prune_fn)(uint64_t cancel_id, const char *options_json, uint8_t *buf, size_t buf_len);
@@ -415,6 +417,9 @@ static msb_image_list_fn           ptr_msb_image_list           = NULL;
 static msb_image_inspect_fn        ptr_msb_image_inspect        = NULL;
 static msb_image_remove_fn         ptr_msb_image_remove         = NULL;
 static msb_image_prune_fn         ptr_msb_image_prune         = NULL;
+static msb_snapshot_object_fn ptr_msb_snapshot_object = NULL;
+static msb_snapshot_object_owned_fn ptr_msb_snapshot_object_owned = NULL;
+static msb_snapshot_object_close_fn ptr_msb_snapshot_object_close = NULL;
 static msb_storage_usage_fn       ptr_msb_storage_usage       = NULL;
 static msb_sandbox_storage_usage_fn ptr_msb_sandbox_storage_usage = NULL;
 static msb_storage_prune_fn       ptr_msb_storage_prune       = NULL;
@@ -623,6 +628,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_image_remove);
 	RESOLVE(msb_image_prune);
 	RESOLVE_OPTIONAL(msb_storage_usage);
+	RESOLVE_OPTIONAL(msb_snapshot_object);
+	RESOLVE_OPTIONAL(msb_snapshot_object_owned);
+	RESOLVE_OPTIONAL(msb_snapshot_object_close);
 	RESOLVE_OPTIONAL(msb_sandbox_storage_usage);
 	RESOLVE_OPTIONAL(msb_storage_prune);
 	RESOLVE(msb_image_load);
@@ -1081,6 +1089,23 @@ char *call_msb_image_remove(uint64_t cancel_id, const char *reference, bool forc
 char *call_msb_image_prune(uint64_t cancel_id, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_image_prune ? ptr_msb_image_prune(cancel_id, buf, buf_len) : NULL;
 }
+bool has_msb_snapshot_objects(void) { return ptr_msb_snapshot_object && ptr_msb_snapshot_object_close; }
+bool has_msb_snapshot_artifact_receivers(void) {
+    // General receivers predate create_artifact/list_dir. Select the producer ABI
+    // before dispatch: probing by capture failure could repeat a published mutation.
+    return has_msb_snapshot_objects() && lib_handle &&
+        dlsym(lib_handle, "msb_supports_snapshot_artifact_receivers") != NULL;
+}
+char *call_msb_snapshot_object(uint64_t cancel_id, uint64_t handle, const char *request, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_snapshot_object ? ptr_msb_snapshot_object(cancel_id, handle, request, buf, buf_len) : NULL;
+}
+bool has_msb_snapshot_object_owned(void) { return ptr_msb_snapshot_object_owned != NULL; }
+char *call_msb_snapshot_object_owned(uint64_t cancel_id, uint64_t handle, const char *request, uint8_t **out, size_t *len) {
+    return ptr_msb_snapshot_object_owned(cancel_id, handle, request, out, len);
+}
+void call_msb_snapshot_object_close(uint64_t handle) {
+    if (ptr_msb_snapshot_object_close) ptr_msb_snapshot_object_close(handle);
+}
 bool has_msb_storage_usage(void) { return ptr_msb_storage_usage != NULL; }
 bool has_msb_sandbox_storage_usage(void) { return ptr_msb_sandbox_storage_usage != NULL; }
 char *call_msb_sandbox_storage_usage(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
@@ -1276,11 +1301,24 @@ const logsBufSize = 48 << 20
 // serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
 // maps Kind back into microsandbox.ErrorKind.
 type Error struct {
+	Removal  json.RawMessage                `json:"removal,omitempty"`
+	Detail   string                         `json:"detail,omitempty"`
+	Report   json.RawMessage                `json:"report,omitempty"`
+	Import   *SnapshotImportDetails         `json:"import,omitempty"`
 	Kind     string                         `json:"kind"`
 	Message  string                         `json:"message"`
 	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
 	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
 	OSError *int32 `json:"os_error,omitempty"`
+}
+
+// SnapshotImportDetails keeps publication certainty across the native boundary.
+type SnapshotImportDetails struct {
+	OperationID string   `json:"operation_id"`
+	Archives    []string `json:"archives"`
+	GroupPath   *string  `json:"group_path"`
+	Outcome     string   `json:"outcome"`
+	Detail      string   `json:"detail"`
 }
 
 // SnapshotSourceRecoveryDetails preserves native recovery metadata across the FFI.
@@ -1296,47 +1334,52 @@ type SnapshotSourceRecoveryDetails struct {
 
 // PublishedSnapshotArtifact names a completed installed snapshot or archive.
 type PublishedSnapshotArtifact struct {
-	Kind       string `json:"kind"`
-	Path       string `json:"path"`
-	SnapshotID string `json:"snapshot_id"`
-	Digest     string `json:"digest"`
+	Kind       string              `json:"kind"`
+	Path       string              `json:"path"`
+	SnapshotID string              `json:"snapshot_id"`
+	Digest     string              `json:"digest"`
+	HeadUpdate *SnapshotHeadUpdate `json:"head_update,omitempty"`
 }
 
 func (e *Error) Error() string { return e.Message }
 
 // Error kind strings. Keep in sync with sdk/go/native/src/lib.rs FfiError::kind.
 const (
-	KindSandboxNotFound        = "sandbox_not_found"
-	KindSandboxAlreadyExists   = "sandbox_already_exists"
-	KindSandboxReplaced        = "sandbox_replaced"
-	KindSandboxStopTimedOut    = "sandbox_stop_timed_out"
-	KindSandboxStillRunning    = "sandbox_still_running"
-	KindVolumeNotFound         = "volume_not_found"
-	KindVolumeAlreadyExists    = "volume_already_exists"
-	KindExecTimeout            = "exec_timeout"
-	KindStopTimeout            = "stop_timeout"
-	KindNoDefaultCommand       = "no_default_command"
-	KindInvalidConfig          = "invalid_config"
-	KindInvalidArgument        = "invalid_argument"
-	KindInvalidHandle          = "invalid_handle"
-	KindBufferTooSmall         = "buffer_too_small"
-	KindCancelled              = "cancelled"
-	KindInternal               = "internal"
-	KindFilesystem             = "filesystem"
-	KindImageNotFound          = "image_not_found"
-	KindImageInUse             = "image_in_use"
-	KindSnapshotNotFound       = "snapshot_not_found"
-	KindSnapshotAlreadyExists  = "snapshot_already_exists"
-	KindSnapshotSandboxRunning = "snapshot_sandbox_running"
-	KindSnapshotImageMissing   = "snapshot_image_missing"
-	KindSnapshotIntegrity      = "snapshot_integrity"
-	KindSnapshotMigration      = "snapshot_migration"
-	KindSnapshotSourceRecovery = "snapshot_source_recovery"
-	KindPatchFailed            = "patch_failed"
-	KindMetricsDisabled        = "metrics_disabled"
-	KindMetricsUnavailable     = "metrics_unavailable"
-	KindUnsupportedOperation   = "unsupported_operation"
-	KindIO                     = "io"
+	KindSandboxNotFound              = "sandbox_not_found"
+	KindSandboxAlreadyExists         = "sandbox_already_exists"
+	KindSandboxReplaced              = "sandbox_replaced"
+	KindSandboxStopTimedOut          = "sandbox_stop_timed_out"
+	KindSandboxStillRunning          = "sandbox_still_running"
+	KindVolumeNotFound               = "volume_not_found"
+	KindVolumeAlreadyExists          = "volume_already_exists"
+	KindExecTimeout                  = "exec_timeout"
+	KindStopTimeout                  = "stop_timeout"
+	KindNoDefaultCommand             = "no_default_command"
+	KindInvalidConfig                = "invalid_config"
+	KindInvalidArgument              = "invalid_argument"
+	KindInvalidHandle                = "invalid_handle"
+	KindBufferTooSmall               = "buffer_too_small"
+	KindCancelled                    = "cancelled"
+	KindInternal                     = "internal"
+	KindFilesystem                   = "filesystem"
+	KindImageNotFound                = "image_not_found"
+	KindImageInUse                   = "image_in_use"
+	KindSnapshotNotFound             = "snapshot_not_found"
+	KindSnapshotAlreadyExists        = "snapshot_already_exists"
+	KindSnapshotSandboxRunning       = "snapshot_sandbox_running"
+	KindSnapshotImageMissing         = "snapshot_image_missing"
+	KindSnapshotIntegrity            = "snapshot_integrity"
+	KindSnapshotMigration            = "snapshot_migration"
+	KindSnapshotSourceRecovery       = "snapshot_source_recovery"
+	KindSnapshotImport               = "snapshot_import"
+	KindSnapshotGroupRemovalRecovery = "snapshot_group_removal_recovery"
+	KindSnapshotRemovalRecovery      = "snapshot_removal_recovery"
+	KindSnapshotVerification         = "snapshot_verification"
+	KindPatchFailed                  = "patch_failed"
+	KindMetricsDisabled              = "metrics_disabled"
+	KindMetricsUnavailable           = "metrics_unavailable"
+	KindUnsupportedOperation         = "unsupported_operation"
+	KindIO                           = "io"
 )
 
 // Sandbox is an opaque handle to a Rust-side sandbox. Call Close to release.
@@ -2119,6 +2162,12 @@ func createSandbox(ctx context.Context, name string, opts CreateOptions, connect
 
 // RestoreSandbox uses the dedicated native restore entry point.
 func RestoreSandbox(ctx context.Context, name string, opts RestoreOptions) (*Sandbox, error) {
+	if err := CheckRestoreBootOptions(ctx, opts); err != nil {
+		return nil, err
+	}
+	if err := CheckRestoreGuestClock(ctx, opts.GuestClock); err != nil {
+		return nil, err
+	}
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
@@ -2194,6 +2243,7 @@ func ConnectSandbox(ctx context.Context, name string) (*Sandbox, error) {
 
 // SandboxHandleInfo is the JSON payload returned by LookupSandbox.
 type SandboxHandleInfo struct {
+	ObjectHandle  uint64 `json:"object_handle"`
 	ID            string `json:"id"`
 	Name          string `json:"name"`
 	Status        string `json:"status"`
@@ -2463,6 +2513,18 @@ func LookupSandbox(ctx context.Context, name string) (*SandboxHandleInfo, error)
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	if bool(C.has_msb_snapshot_objects()) {
+		raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "lookup_source", "name": name})
+		if err != nil {
+			return nil, err
+		}
+		var info SandboxHandleInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return nil, fmt.Errorf("parse retained source: %w", err)
+		}
+		return &info, nil
+	}
+
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
@@ -3141,6 +3203,18 @@ func ListSandboxes(ctx context.Context, options SandboxListOptions) (*SandboxPag
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	if bool(C.has_msb_snapshot_objects()) {
+		raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "list_sources", "options": options})
+		if err != nil {
+			return nil, err
+		}
+		var page SandboxPage
+		if err := json.Unmarshal(raw, &page); err != nil {
+			return nil, fmt.Errorf("parse retained sources: %w", err)
+		}
+		return &page, nil
+	}
+
 	filterJSON, err := json.Marshal(options)
 	if err != nil {
 		return nil, fmt.Errorf("marshal list filter: %w", err)
@@ -5471,6 +5545,7 @@ func ImageSave(ctx context.Context, references []string, outputPath string, form
 // ---------------------------------------------------------------------------
 
 type SnapshotInfo struct {
+	ObjectHandle              uint64              `json:"object_handle"`
 	Reference                 string              `json:"reference"`
 	ReferenceKind             string              `json:"reference_kind"`
 	HeadUpdate                *SnapshotHeadUpdate `json:"head_update"`
@@ -5529,9 +5604,13 @@ type SnapshotHandleInfo struct {
 }
 
 type SnapshotVerifyReport struct {
-	Digest string `json:"digest"`
-	Path   string `json:"path"`
-	Upper  struct {
+	Digest   string `json:"digest"`
+	Path     string `json:"path"`
+	Coverage *struct {
+		Kind       string   `json:"kind"`
+		Unrecorded []string `json:"unrecorded,omitempty"`
+	} `json:"coverage,omitempty"`
+	Upper struct {
 		Kind      string `json:"kind"`
 		Algorithm string `json:"algorithm,omitempty"`
 		Digest    string `json:"digest,omitempty"`
@@ -5554,11 +5633,12 @@ type SnapshotCreateOptions struct {
 }
 
 type SnapshotSaveOptions struct {
-	Since       string  `json:"since,omitempty"`
-	LastLayers  *uint32 `json:"last_layers,omitempty"`
-	WithParents bool    `json:"with_parents,omitempty"`
-	WithImage   bool    `json:"with_image,omitempty"`
-	PlainTar    bool    `json:"plain_tar,omitempty"`
+	Compatibility string  `json:"compatibility,omitempty"`
+	Since         string  `json:"since,omitempty"`
+	LastLayers    *uint32 `json:"last_layers,omitempty"`
+	WithParents   bool    `json:"with_parents,omitempty"`
+	WithImage     bool    `json:"with_image,omitempty"`
+	PlainTar      bool    `json:"plain_tar,omitempty"`
 }
 
 type SnapshotLoadOptions struct {
@@ -5571,7 +5651,7 @@ type SnapshotLoadOptions struct {
 type SnapshotHeadUpdate struct {
 	Group    string  `json:"group"`
 	Previous *string `json:"previous"`
-	Head     string  `json:"head"`
+	Head     *string `json:"head"`
 	Reason   string  `json:"reason"`
 	Changed  bool    `json:"changed"`
 }
@@ -5613,6 +5693,19 @@ func SnapshotCreate(ctx context.Context, sourceSandbox string, opts SnapshotCrea
 	}
 	if err := checkGuestFlush(opts.GuestFlush, !opts.Full); err != nil {
 		return nil, err
+	}
+	if bool(C.has_msb_snapshot_artifact_receivers()) {
+		// Capture once through the owned response; reopening by name afterward could
+		// select a replacement, and retrying a legacy response could capture twice.
+		raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "create_artifact", "source": sourceSandbox, "options": opts})
+		if err != nil {
+			return nil, err
+		}
+		var info SnapshotInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return nil, fmt.Errorf("parse retained checkpoint create: %w", err)
+		}
+		return &info, nil
 	}
 	payload, err := json.Marshal(opts)
 	if err != nil {
@@ -5669,6 +5762,18 @@ func SnapshotOpen(ctx context.Context, reference, referenceKind string) (*Snapsh
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	if bool(C.has_msb_snapshot_objects()) {
+		raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "open", "reference": reference, "reference_kind": referenceKind})
+		if err != nil {
+			return nil, err
+		}
+		var info SnapshotInfo
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return nil, fmt.Errorf("parse retained checkpoint: %w", err)
+		}
+		return &info, nil
+	}
+
 	cReference := C.CString(reference)
 	defer C.free(unsafe.Pointer(cReference))
 	cReferenceKind := C.CString(referenceKind)
@@ -5747,6 +5852,17 @@ func SnapshotListDir(ctx context.Context, dir string) ([]*SnapshotInfo, error) {
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	if bool(C.has_msb_snapshot_artifact_receivers()) {
+		raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "list_dir", "directory": dir})
+		if err != nil {
+			return nil, err
+		}
+		var infos []*SnapshotInfo
+		if err := json.Unmarshal(raw, &infos); err != nil {
+			return nil, fmt.Errorf("parse retained checkpoint list: %w", err)
+		}
+		return infos, nil
+	}
 	cDir := C.CString(dir)
 	defer C.free(unsafe.Pointer(cDir))
 	out, err := call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
@@ -5798,6 +5914,9 @@ func SnapshotReindex(ctx context.Context, dir string) (uint32, error) {
 }
 
 func SnapshotSave(ctx context.Context, reference, referenceKind, outPath string, opts SnapshotSaveOptions) error {
+	if err := CheckArchiveCompatibility(ctx, opts.Compatibility); err != nil {
+		return err
+	}
 	if err := ensureLoaded(); err != nil {
 		return err
 	}
@@ -6007,4 +6126,110 @@ func RequirePortModification() error {
 		return fmt.Errorf("published-port modification requires an updated native library")
 	}
 	return nil
+}
+
+// SnapshotObjectCall refuses old native libraries before dispatch. Receiver handles
+// carry their original backend; a caller must not reconstruct them from names.
+func SnapshotObjectCall(ctx context.Context, handle uint64, request any) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := ensureLoaded(); err != nil {
+		return nil, err
+	}
+	if !bool(C.has_msb_snapshot_objects()) {
+		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support snapshot group receivers; update the native SDK"}
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	text := C.CString(string(payload))
+	defer C.free(unsafe.Pointer(text))
+	if bool(C.has_msb_snapshot_object_owned()) {
+		return snapshotObjectOwned(ctx, handle, text)
+	}
+	// Retain the old ABI for earlier native bundles. Never replay mutations on buffer errors.
+	// Unlike metadata-only calls, a successful result transfers native ownership.
+	// Cancellation racing a completed call must not discard those object handles.
+	buf := make([]byte, defaultBufSize)
+	cancelID := C.call_msb_cancel_alloc()
+	done := make(chan *C.char, 1)
+	go func() {
+		done <- C.call_msb_snapshot_object(cancelID, C.uint64_t(handle), text, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(len(buf)))
+	}()
+	var failure *C.char
+	select {
+	case failure = <-done:
+	case <-ctx.Done():
+		C.call_msb_cancel_trigger(cancelID)
+		failure = <-done // native code must release the borrowed input before C.free
+	}
+	if failure != nil {
+		err := errorFromPtr(failure)
+		if native, ok := err.(*Error); ok && native.Kind == KindCancelled && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	return buf[:end], nil
+}
+
+// Successful completion wins a cancellation race: the response owns native receivers
+// and may describe an already committed mutation. Always join before freeing input/slots.
+func snapshotObjectOwned(ctx context.Context, handle uint64, text *C.char) ([]byte, error) {
+	out, length, cleanup := allocRustBytesOut()
+	defer cleanup()
+	defer freeRustBytes(out, length)
+	cancelID := C.call_msb_cancel_alloc()
+	done := make(chan *C.char, 1)
+	go func() {
+		done <- C.call_msb_snapshot_object_owned(cancelID, C.uint64_t(handle), text, out, length)
+	}()
+	var failure *C.char
+	select {
+	case failure = <-done:
+	case <-ctx.Done():
+		C.call_msb_cancel_trigger(cancelID)
+		failure = <-done
+	}
+	if failure != nil {
+		err := errorFromPtr(failure)
+		if native, ok := err.(*Error); ok && native.Kind == KindCancelled && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	// Move ownership before copying, so a panicking copy cannot free the allocation twice.
+	ptr, size := *out, *length
+	*out, *length = nil, 0
+	return takeRustBytes(ptr, size), nil
+}
+
+func releaseSnapshotObject(handle uint64) { C.call_msb_snapshot_object_close(C.uint64_t(handle)) }
+
+// CheckArchiveCompatibility requires explicit acknowledgement before serializing a new option.
+// Old native JSON decoders can ignore unknown fields, so sending the option alone is unsafe.
+func CheckArchiveCompatibility(ctx context.Context, target string) error {
+	if target == "" {
+		return nil
+	}
+	raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "archive_compatibility"})
+	if err != nil {
+		return fmt.Errorf("archive compatibility requires an updated native library: %w", err)
+	}
+	var targets []string
+	if err := json.Unmarshal(raw, &targets); err != nil {
+		return err
+	}
+	for _, supported := range targets {
+		if supported == target {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsupported archive compatibility target %q", target)
 }

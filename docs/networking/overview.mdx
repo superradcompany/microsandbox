@@ -546,11 +546,11 @@ The `--net-ingress-*` flags mirror the egress flags for inbound traffic (`--net-
 
 ## HTTP denial responses
 
-New local sandboxes return JSON `403 Forbidden` responses for supported denied requests by default, with `code`, `message`, and `domain` fields. Set `deny_response: false` to close denied connections without a response. This requires a supporting runtime; cloud behavior is unchanged.
+New local sandboxes return JSON `403 Forbidden` responses for supported denied requests by default, with `code`, `message`, and `domain` fields. Set `deny_response: false` to close denied connections without a response. When HTTP settings are omitted, the SDK selects the installed runtime's supported behavior before launch: JSON on current runtimes, text on runtimes that support only text responses, or closing denied connections on runtimes without response support. Cloud behavior is unchanged.
 
 In JSON mode, `network_deny_message` and `secret_deny_message` customize the respective messages. Messages are used as-is; the destination is in `domain`. Changing a message or format does not override an explicit `deny_response: false`.
 
-Select `deny_response_format: text` for legacy behavior: network denials return plain text, `deny_message` substitutes `{host}`, and secret violations close without a response. The old message setting remains supported but is deprecated for new integrations. Each mode uses only its own message settings. Omitted settings use the runtime defaults: responses enabled with JSON format. Explicit settings take precedence. Cloud accepts the default settings without applying them; enabled custom settings are local-only.
+Select `deny_response_format: text` for legacy behavior: network denials return plain text, `deny_message` substitutes `{host}`, and secret violations close without a response. The old message setting remains supported but is deprecated for new integrations. Each mode uses only its own message settings. Explicit settings require runtime support and are never silently downgraded. An empty HTTP configuration counts as omission; an explicitly selected JSON format remains strict even though it matches the current default. Cloud accepts the default settings without applying them; enabled custom settings are local-only.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -683,7 +683,7 @@ Secret-policy denial:
 }
 ```
 
-Both custom messages are JSON-escaped. An omitted message uses the default; an empty string leaves `message` empty (Go treats an empty string as omitted). Text mode works with older runtimes that support denial responses. JSON mode requires the new runtime capability; the SDK returns an upgrade-required error if it is missing.
+Both custom messages are JSON-escaped. An omitted message uses the default; an empty string leaves `message` empty (Go treats an empty string as omitted). Text mode works with older runtimes that support denial responses. Explicit JSON mode requires the new runtime capability; the SDK returns an upgrade-required error before launch or replacement if it is missing. Newly persisted configurations retain whether HTTP settings were omitted, so restarting with an older runtime preserves the same selection rule. Older saved configurations containing concrete HTTP settings without omission information are treated as explicit.
 
 </Accordion>
 

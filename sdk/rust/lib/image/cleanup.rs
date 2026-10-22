@@ -390,6 +390,30 @@ mod tests {
     use crate::Image;
     use microsandbox_image::{CachedImageMetadata, CachedLayerMetadata, ImageConfig};
 
+    #[cfg(unix)]
+    fn recovery_fixture_in_child(name: &str) -> bool {
+        if std::env::var("MSB_TEST_IMAGE_RECOVERY").as_deref() == Ok(name) {
+            return false;
+        }
+        // These fixtures assert immediate recovery after dropping the last lock.
+        // A sibling test's fork can retain that descriptor until exec, so create
+        // the locks in a child with no unrelated process-spawning test threads.
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("image::cleanup::tests::{name}"),
+                "--nocapture",
+            ])
+            .env("MSB_TEST_IMAGE_RECOVERY", name)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated recovery fixture {name} failed: {status}"
+        );
+        true
+    }
+
     async fn local(home: &std::path::Path) -> LocalBackend {
         crate::test_support::local_backend_builder(home)
             .build()
@@ -591,6 +615,26 @@ mod tests {
 
     #[tokio::test]
     async fn pending_snapshot_publication_roots_survive_prune_until_abandoned() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_PENDING_PUBLICATION_PRUNE").is_none() {
+            // A parallel fork may retain the publisher's descriptor until exec. Keep
+            // this immediate post-drop reclamation assertion in its own process,
+            // just like the busy-image fixture; do not weaken production lock safety.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "image::cleanup::tests::pending_snapshot_publication_roots_survive_prune_until_abandoned",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_PENDING_PUBLICATION_PRUNE", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated publication prune test failed: {status}"
+            );
+            return;
+        }
         use sea_orm::Set;
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
@@ -689,6 +733,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "interrupted_cleanup_rechecks_catalog_and_never_unlinks_replacement",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');
@@ -728,6 +778,12 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_discards_abandoned_preparation_without_unlinking_sources() {
+        #[cfg(unix)]
+        if recovery_fixture_in_child(
+            "recovery_discards_abandoned_preparation_without_unlinking_sources",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;
         let metadata = metadata('a', 'c');

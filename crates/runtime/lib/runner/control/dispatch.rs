@@ -289,6 +289,17 @@ impl Dispatcher {
                     "invalid exec control payload",
                 )),
             }
+        } else if envelope.t == microsandbox_protocol::labels::LABELS_REQUEST && generation >= 2 {
+            match microsandbox_protocol::labels::decode_request(&envelope) {
+                Ok(request) => match self.handler.handle_labels(request) {
+                    Ok(response) => Reply::Labels(response),
+                    Err(error) => Reply::Error(error),
+                },
+                Err(_) => Reply::Error(ControlError::rejected(
+                    "invalid_request",
+                    "invalid label update payload",
+                )),
+            }
         } else if envelope.t == microsandbox_protocol::jobs::JOB_REQUEST && generation >= 2 {
             // Keep the released, exhaustively matchable control enums source-compatible.
             match envelope.payload::<microsandbox_protocol::jobs::JobRequest>() {

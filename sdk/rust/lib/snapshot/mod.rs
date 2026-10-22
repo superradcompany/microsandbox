@@ -1,19 +1,31 @@
 //! Backend-neutral snapshot capture, inspection, archives, and restore references.
 //!
-//! Local storage supports disk and full execution snapshots, immutable groups,
+//! Local storage supports mutable groups of immutable disk and full checkpoints,
 //! layered disks, owned storage, and incremental archives. Cloud storage retains
 //! its own wire contract and reports unsupported local artifact operations explicitly.
 
 mod api;
+mod archive_compatibility;
 mod copy;
+mod group;
+mod import;
+#[doc(hidden)]
+pub mod saved_config;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotHandle, SnapshotReference};
+pub use api::{Checkpoint, SnapshotArchive, SnapshotBuilder, SnapshotHandle, SnapshotReference};
+pub use archive_compatibility::ArchiveCompatibility;
 pub use copy::SnapshotCopyBuilder;
+pub use group::{
+    CheckpointCaptureResult, Snapshot, SnapshotCaptureOptions, SnapshotCreateResult,
+    SnapshotImportResult,
+};
+#[doc(hidden)]
+pub use import::PreparedSnapshotImport;
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
     ImageRef, LayerFileKind, LayerPayload, Manifest, SnapshotCapture, SnapshotConsistency,
@@ -22,8 +34,11 @@ pub use microsandbox_types::snapshot::{
 };
 pub use microsandbox_types::{GuestFlush, SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use types::{
-    CheckpointVerifyStatus, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts, SnapshotVerifyReport,
-    UpperVerifyStatus,
+    CheckpointRemoveOptions, CheckpointRemoveResult, CheckpointVerification,
+    CheckpointVerifyStatus, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts, SnapshotGroupInfo,
+    SnapshotGroupVerifyReport, SnapshotImportOptions, SnapshotRemoveResult, SnapshotSourceBinding,
+    SnapshotSourceStatus, SnapshotVerificationFinding, SnapshotVerificationFindingKind,
+    SnapshotVerificationState, SnapshotVerifyCoverage, SnapshotVerifyReport, UpperVerifyStatus,
 };
 
 #[cfg(feature = "local")]

@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -171,6 +172,14 @@ const (
 	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
 	// before the SDK's deadline and may still complete asynchronously.
 	ErrSandboxStopTimedOut
+	// ErrSnapshotImport retains whether a failed archive import committed its batch.
+	ErrSnapshotImport
+	// ErrSnapshotVerification retains the whole-group verification report.
+	ErrSnapshotVerification
+	// ErrSnapshotRemovalRecovery means removal committed but cleanup needs recovery.
+	ErrSnapshotRemovalRecovery
+	// ErrSnapshotGroupRemovalRecovery means whole-history removal committed but needs cleanup.
+	ErrSnapshotGroupRemovalRecovery
 )
 
 func (k ErrorKind) String() string {
@@ -219,6 +228,14 @@ func (k ErrorKind) String() string {
 		return "SnapshotIntegrity"
 	case ErrSnapshotMigration:
 		return "SnapshotMigration"
+	case ErrSnapshotImport:
+		return "SnapshotImport"
+	case ErrSnapshotGroupRemovalRecovery:
+		return "SnapshotGroupRemovalRecovery"
+	case ErrSnapshotRemovalRecovery:
+		return "SnapshotRemovalRecovery"
+	case ErrSnapshotVerification:
+		return "SnapshotVerification"
 	case ErrSnapshotSourceRecovery:
 		return "SnapshotSourceRecovery"
 	case ErrPatchFailed:
@@ -276,7 +293,65 @@ type PublishedSnapshotArtifact struct {
 	Path       string
 	SnapshotID string
 	Digest     string
+	// HeadUpdate describes this publication; nil means no group outcome was reported.
+	HeadUpdate *SnapshotHeadUpdate
 }
+
+// SnapshotImportOutcome describes publication certainty, not whether the call succeeded.
+type SnapshotImportOutcome string
+
+const (
+	SnapshotImportNotCommitted SnapshotImportOutcome = "not_committed"
+	SnapshotImportCommitted    SnapshotImportOutcome = "committed"
+	SnapshotImportUnknown      SnapshotImportOutcome = "unknown"
+)
+
+// SnapshotImportDetails identifies the attempt and preserves its original diagnostic.
+type SnapshotImportDetails struct {
+	OperationID string
+	Archives    []string
+	GroupPath   *string
+	Outcome     SnapshotImportOutcome
+	Detail      string
+}
+
+// SnapshotImportError may report committed work. Inspect Details before retrying.
+type SnapshotImportError struct {
+	Details SnapshotImportDetails
+	err     *Error
+}
+
+func (e *SnapshotImportError) Error() string { return e.err.Message }
+func (e *SnapshotImportError) Unwrap() error { return e.err }
+
+// SnapshotRemovalRecoveryError preserves a committed removal when catalog cleanup fails.
+type SnapshotRemovalRecoveryError struct {
+	Result *CheckpointRemoveResult
+	Detail string
+	err    *Error
+}
+
+func (e *SnapshotRemovalRecoveryError) Error() string { return e.err.Message }
+func (e *SnapshotRemovalRecoveryError) Unwrap() error { return e.err }
+
+// SnapshotGroupRemovalRecoveryError preserves a committed removal when catalog cleanup fails.
+type SnapshotGroupRemovalRecoveryError struct {
+	Result *SnapshotRemoveResult
+	Detail string
+	err    *Error
+}
+
+func (e *SnapshotGroupRemovalRecoveryError) Error() string { return e.err.Message }
+func (e *SnapshotGroupRemovalRecoveryError) Unwrap() error { return e.err }
+
+// SnapshotVerificationError preserves per-member results without treating corruption as success.
+type SnapshotVerificationError struct {
+	Report *SnapshotGroupVerifyReport
+	err    *Error
+}
+
+func (e *SnapshotVerificationError) Error() string { return e.err.Message }
+func (e *SnapshotVerificationError) Unwrap() error { return e.err }
 
 // SnapshotSourceRecoveryDetails contains recovery locators. Their presence does not
 // imply the source is running, safely paused, or eligible for ordinary resume.
@@ -346,6 +421,34 @@ func wrapFFI(err error) error {
 	}
 	var fe *ffi.Error
 	if errors.As(err, &fe) {
+		if fe.Kind == ffi.KindSnapshotRemovalRecovery && len(fe.Removal) != 0 {
+			var result CheckpointRemoveResult
+			if json.Unmarshal(fe.Removal, &result) == nil {
+				return &SnapshotRemovalRecoveryError{Result: &result, Detail: fe.Detail, err: &Error{Kind: ErrSnapshotRemovalRecovery, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotGroupRemovalRecovery && len(fe.Removal) != 0 {
+			var result SnapshotRemoveResult
+			if json.Unmarshal(fe.Removal, &result) == nil {
+				return &SnapshotGroupRemovalRecoveryError{Result: &result, Detail: fe.Detail, err: &Error{Kind: ErrSnapshotGroupRemovalRecovery, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotVerification && len(fe.Report) != 0 {
+			var report SnapshotGroupVerifyReport
+			if json.Unmarshal(fe.Report, &report) == nil {
+				return &SnapshotVerificationError{Report: &report, err: &Error{Kind: ErrSnapshotVerification, Message: fe.Message, Cause: fe}}
+			}
+		}
+		if fe.Kind == ffi.KindSnapshotImport && fe.Import != nil {
+			d := fe.Import
+			return &SnapshotImportError{
+				Details: SnapshotImportDetails{
+					OperationID: d.OperationID, Archives: append([]string(nil), d.Archives...),
+					GroupPath: cloneStringPtr(d.GroupPath), Outcome: SnapshotImportOutcome(d.Outcome), Detail: d.Detail,
+				},
+				err: &Error{Kind: ErrSnapshotImport, Message: fe.Message, Cause: fe},
+			}
+		}
 		if fe.Kind == ffi.KindSnapshotSourceRecovery && fe.Recovery != nil {
 			r := fe.Recovery
 			recovery := SnapshotSourceRecoveryDetails{
@@ -356,6 +459,7 @@ func wrapFFI(err error) error {
 			if a := r.Artifact; a != nil {
 				recovery.Artifact = &PublishedSnapshotArtifact{
 					Kind: a.Kind, Path: a.Path, SnapshotID: a.SnapshotID, Digest: a.Digest,
+					HeadUpdate: snapshotHeadUpdateFromInfo(a.HeadUpdate),
 				}
 			}
 			return &SnapshotSourceRecoveryError{
@@ -410,6 +514,14 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrSnapshotIntegrity
 	case ffi.KindSnapshotMigration:
 		return ErrSnapshotMigration
+	case ffi.KindSnapshotImport:
+		return ErrSnapshotImport
+	case ffi.KindSnapshotGroupRemovalRecovery:
+		return ErrSnapshotGroupRemovalRecovery
+	case ffi.KindSnapshotRemovalRecovery:
+		return ErrSnapshotRemovalRecovery
+	case ffi.KindSnapshotVerification:
+		return ErrSnapshotVerification
 	case ffi.KindSnapshotSourceRecovery:
 		return ErrSnapshotSourceRecovery
 	case ffi.KindPatchFailed:

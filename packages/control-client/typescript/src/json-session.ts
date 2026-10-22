@@ -28,21 +28,30 @@ export class JsonSession {
   async operation(request: ExtendedLegacyControlRequest, options: RequestOptions = {}): Promise<JsonReply> {
     // Validate and serialize before discovery so unsupported/invalid native
     // requests cannot cause network I/O. Legacy batches have no framed-size cap.
+    const configurationExecLimits = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_exec_limits === true;
+    const configurationStorage = (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration_storage === true;
+    const configurationCapture = configurationExecLimits || configurationStorage || (request.op === "checkpoint_create" || request.op === "disk_checkpoint_create") && request.retain_configuration === true;
+    // Discovery and mutation use different sockets: pin their runtime identity independently.
+    if (configurationCapture && !this.dialer.verifier) throw new ClientError("unsupported_operation");
     const line = encodeJsonRequest(request);
     const attempt = new ControlAttempt(options.requestTimeoutMs ?? this.options.limits?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, [options.signal, this.#closed.signal]);
     let setup: ControlAttempt | undefined;
     try {
       setup = new ControlAttempt(Math.min(attempt.remaining(), this.options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS), [attempt.signal]);
-      if (this.expectedMode && !this.dialer.verifier) {
+      if (configurationCapture || (this.expectedMode && !this.dialer.verifier)) {
         let mode: ControlMode;
-        try { mode = (await this.discover(setup)).mode; }
+        try {
+          const discovered = await this.discover(setup);
+          mode = discovered.mode;
+          if (configurationCapture && (!discovered.capabilities.configuration_capture || (configurationStorage && !discovered.capabilities.configuration_storage) || (configurationExecLimits && !discovered.capabilities.configuration_exec_limits))) throw new ClientError("unsupported_operation");
+        }
         catch (error) {
           // Discovery is read-only. Its lost reply says nothing about admission
           // of the prepared mutation, which has not been written.
           const failure = controlError(error);
           throw failure instanceof ClientError ? failure.withDelivery("not_sent") : failure;
         }
-        if (mode !== this.expectedMode) throw new ControlClientError("runtime_changed");
+        if (this.expectedMode && mode !== this.expectedMode) throw new ControlClientError("runtime_changed");
       }
       return await this.exchange(line, attempt, setup);
     } catch (error) {

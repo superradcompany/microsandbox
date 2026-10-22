@@ -6,6 +6,9 @@
 use std::process;
 
 #[cfg(target_os = "linux")]
+use microsandbox_protocol::init_observation::InitObservation;
+
+#[cfg(target_os = "linux")]
 use microsandbox_agentd::{AgentdError, BootParams, agent, clock, handoff, init};
 
 //--------------------------------------------------------------------------------------------------
@@ -71,11 +74,18 @@ fn main() {
 
     // Phase 1.5: Optional PID 1 handoff. Returns only in the child;
     // the parent execve's into the new init and never returns here.
-    if let Some(spec) = handoff_spec
-        && let Err(e) = handoff::do_handoff(spec)
-    {
-        exit_startup_failure(&port, &mut boot_console, "handoff", &e);
-    }
+    let init_observation = match handoff_spec {
+        Some(spec) => match handoff::do_handoff_observed(spec) {
+            // Do not lossy-decode a guest path into false evidence. A non-UTF8 path still boots
+            // exactly as before, but cannot be represented by this optional observation.
+            Ok(path) => path
+                .to_str()
+                .map(|path| InitObservation::Handoff { path: path.into() }),
+            Err(e) => exit_startup_failure(&port, &mut boot_console, "handoff", &e),
+        },
+        None => Some(InitObservation::Builtin),
+    };
+    boot_console.set_init_observation(init_observation);
 
     // Phase 2: Build a single-threaded tokio runtime and run the agent loop.
     let rt = match tokio::runtime::Builder::new_current_thread()

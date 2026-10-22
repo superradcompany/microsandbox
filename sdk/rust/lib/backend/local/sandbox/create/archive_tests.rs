@@ -15,15 +15,20 @@ use microsandbox_image::snapshot::{
     LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency, SnapshotFormat,
     SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState,
 };
-use sea_orm::EntityTrait;
+use microsandbox_image::{CachedImageMetadata, GlobalCache, ImageConfig, RootfsMaterialization};
+use sea_orm::{EntityTrait, Set};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 use crate::BackendSelectionSource;
 use crate::backend::local::database;
 use crate::backend::local::snapshot::archive::{
     save_direct_checkpoint_snapshot, save_direct_file_snapshot,
 };
-use crate::config::GlobalConfig;
-use crate::sandbox::SandboxBuilder;
+use crate::config::{GlobalConfig, RegistryOptions};
+use crate::db::entity::run as run_entity;
+use crate::sandbox::{PullPolicy, SandboxBuilder};
 use crate::snapshot::SnapshotReference;
 use crate::test_support::local_backend;
 
@@ -288,15 +293,49 @@ async fn assert_request_preserves_target(
     request: impl Into<SandboxBuilder>,
     reason: &str,
 ) {
+    assert_request_preserves_target_with_owner(backend, request, reason, false).await;
+}
+
+async fn assert_request_preserves_target_with_owner(
+    backend: Arc<LocalBackend>,
+    request: impl Into<SandboxBuilder>,
+    reason: &str,
+    running: bool,
+) {
     let config = replaceable_config();
     let pools = backend.db().await.unwrap();
     let id = LocalBackend::insert_sandbox_record_with_status(
         pools.write(),
         &config,
-        SandboxStatus::Stopped,
+        if running {
+            SandboxStatus::Running
+        } else {
+            SandboxStatus::Stopped
+        },
     )
     .await
     .unwrap();
+    // A real child catches premature stop/kill as well as catalog/storage deletion.
+    // It does not pretend to establish guest execution or VM activation behavior.
+    let mut owner = if running {
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        run_entity::Entity::insert(run_entity::ActiveModel {
+            sandbox_id: Set(id),
+            pid: Set(Some(child.id().unwrap() as i32)),
+            status: Set(run_entity::RunStatus::Running),
+            ..Default::default()
+        })
+        .exec(pools.write())
+        .await
+        .unwrap();
+        Some(child)
+    } else {
+        None
+    };
     let before = sandbox_entity::Entity::find_by_id(id)
         .one(pools.read())
         .await
@@ -336,11 +375,52 @@ async fn assert_request_preserves_target(
         vec![std::ffi::OsString::from("replaceable")],
         "staging must be reclaimed"
     );
+    if let Some(owner) = owner.as_mut() {
+        assert!(
+            owner.try_wait().unwrap().is_none(),
+            "prior owner was stopped"
+        );
+        let run = LocalBackend::load_latest_run(pools.read(), id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, run_entity::RunStatus::Running);
+        assert_eq!(run.pid, Some(owner.id().unwrap() as i32));
+        owner.kill().await.unwrap();
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn uncached_snapshot_image_preserves_replacement_target() {
+    for running in [false, true] {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let source = root.path().join("snapshot-upper.ext4");
+        std::fs::write(&source, b"snapshot disk must remain unchanged").unwrap();
+        let backend = backend(root.path(), 18).await;
+        // Exercise the resolved disk-snapshot input accepted by older runtimes. Image
+        // admission must fail before replacement or attempting to consume the disk.
+        let mut request = replaceable_config();
+        request.snapshot_upper_source = Some(source.clone());
+        request.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+        request.spec.pull_policy = crate::sandbox::PullPolicy::Never;
+        request.replace_existing = true;
+        assert_request_preserves_target_with_owner(
+            backend,
+            request,
+            "is not cached locally and pull policy is `never`",
+            running,
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(source).unwrap(),
+            b"snapshot disk must remain unchanged"
+        );
+    }
+}
 
 #[tokio::test]
 async fn archive_flat_layout_is_admitted_before_replacement() {
@@ -449,9 +529,11 @@ async fn disk_only_restore_from_full_archive_passes_admission() {
 
     // Match the public restore builder: the reference is resolved during preparation.
     let builder = SandboxBuilder::new("disk-only-child")
-        .network(|network| network.http(|http| http.deny_response(false)))
         .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
         .disk_only();
+    // Only network-enabled builds need the historical HTTP-denial override.
+    #[cfg(feature = "net")]
+    let builder = builder.network(|network| network.http(|http| http.deny_response(false)));
     let error = match backend
         .create_sandbox(backend.clone(), builder, SpawnMode::Attached, None)
         .await
@@ -584,6 +666,106 @@ async fn archive_publication_preserves_relative_disk_chain() {
             microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path).unwrap();
         assert_eq!(pair[0].path, child.join(backing));
     }
+}
+
+#[tokio::test]
+async fn cached_snapshot_always_revalidates_the_recorded_digest() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let backend = backend(root.path(), 18).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reference = format!("{}/fixture:mutable-tag", listener.local_addr().unwrap());
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let cache = GlobalCache::new(&backend.cache_dir()).unwrap();
+    cache.write_image_metadata_async(&reference.parse().unwrap(), &CachedImageMetadata {
+        manifest_digest: digest.clone(),
+        config_digest: format!("sha256:{}", "b".repeat(64)),
+        raw_manifest_json: r#"{"schemaVersion":2,"layers":[]}"#.into(),
+        raw_config_json: r#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[]}}"#.into(),
+        config: ImageConfig::default(),
+        layers: Vec::new(),
+    }).await.unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") && request.len() < 16 * 1024 {
+                let mut byte = [0];
+                if stream.read(&mut byte).await.unwrap() == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            let line = String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            observed.lock().await.push(line.clone());
+            // Permit the registry probe, then refuse the immutable manifest. A cached
+            // image must not make explicit Always succeed when its registry is unavailable.
+            let response = if line.contains(" /v2/ ") {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            } else {
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+            };
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    for policy in [PullPolicy::Never, PullPolicy::IfMissing] {
+        let image = backend
+            .resolve_snapshot_oci_image(
+                &reference,
+                &digest,
+                policy,
+                RegistryOptions {
+                    insecure: true,
+                    ..Default::default()
+                },
+                RootfsMaterialization::Flat,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(image.pull_result.manifest_digest.to_string(), digest);
+    }
+    assert!(
+        requests.lock().await.is_empty(),
+        "cache-only policies contacted registry"
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        backend.resolve_snapshot_oci_image(
+            &reference,
+            &digest,
+            PullPolicy::Always,
+            RegistryOptions {
+                insecure: true,
+                ..Default::default()
+            },
+            RootfsMaterialization::Flat,
+            None,
+        ),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    assert!(
+        result.expect("registry request must finish").is_err(),
+        "Always incorrectly accepted a cache hit"
+    );
+    let requests = requests.lock().await;
+    assert!(
+        requests
+            .iter()
+            .any(|line| line.contains(&format!("/manifests/{digest}"))),
+        "missing digest request: {requests:?}"
+    );
+    assert!(
+        requests.iter().all(|line| !line.contains("mutable-tag")),
+        "snapshot followed its original tag"
+    );
 }
 
 #[tokio::test]

@@ -23,6 +23,32 @@ var (
 	_ snapshotCopier = (*SnapshotArtifact)(nil)
 )
 
+func TestSnapshotVerificationCoveragePreservesUncertainty(t *testing.T) {
+	for _, test := range []struct{ body, want string }{
+		{`{"upper":{"kind":"verified"}}`, "unknown"},
+		{`{"coverage":{"kind":"complete"}}`, "complete"},
+		{`{"upper":{"kind":"verified"},"coverage":{"kind":"incomplete","unrecorded":["base.raw"]}}`, "incomplete"},
+	} {
+		var native ffi.SnapshotVerifyReport
+		if err := json.Unmarshal([]byte(test.body), &native); err != nil {
+			t.Fatal(err)
+		}
+		report := snapshotVerifyReportFromInfo(&native)
+		if report.Coverage.Kind != test.want {
+			t.Fatalf("coverage = %q, want %q", report.Coverage.Kind, test.want)
+		}
+		if test.want == "incomplete" {
+			if report.Upper.Kind != "verified" || len(report.Coverage.Unrecorded) != 1 || report.Coverage.Unrecorded[0] != "base.raw" {
+				t.Fatalf("lost coverage or head: %+v", report)
+			}
+			native.Coverage.Unrecorded[0] = "changed"
+			if report.Coverage.Unrecorded[0] != "base.raw" {
+				t.Fatal("report aliases native path slice")
+			}
+		}
+	}
+}
+
 func TestSnapshotCopyBuilderCopiesMutableInput(t *testing.T) {
 	snapshot := &SnapshotArtifact{reference: "/snapshots/example", referenceKind: "path"}
 	labels := map[string]string{"environment": "test"}
@@ -128,7 +154,7 @@ func TestFFIWireShape_SnapshotHeadUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"group":"work","previous":null,"head":"baseline","reason":"initialized","changed":true}`), &update); err != nil {
 		t.Fatal(err)
 	}
-	if update.Group != "work" || update.Previous != nil || update.Head != "baseline" || update.Reason != "initialized" || !update.Changed {
+	if update.Group != "work" || update.Previous != nil || (update.Head == nil || *update.Head != "baseline") || update.Reason != "initialized" || !update.Changed {
 		t.Fatalf("unexpected head update: %#v", update)
 	}
 }
@@ -193,5 +219,21 @@ func TestLegacySnapshotPaths(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestClearedHeadIsDistinctFromEmptyIdentifier(t *testing.T) {
+	var update ffi.SnapshotHeadUpdate
+	if err := json.Unmarshal([]byte(`{"group":"work","previous":"base","head":null,"reason":"cleared","changed":true}`), &update); err != nil {
+		t.Fatal(err)
+	}
+	result := snapshotHeadUpdateFromInfo(&update)
+	if result.Head != nil || result.Previous == nil || *result.Previous != "base" || !result.Changed {
+		t.Fatalf("lost clear outcome: %#v", result)
+	}
+	clone := cloneSnapshotHeadUpdate(result)
+	*clone.Previous = "different"
+	if *result.Previous != "base" {
+		t.Fatal("clone shares mutable previous head")
 	}
 }

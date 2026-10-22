@@ -441,10 +441,7 @@ HTTP *HTTPConfig
 
 <Tooltip tip="Readable HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Omitting `HTTP` enables JSON denial responses locally. When supplying `HTTPConfig`,
-set `DenyResponse: true` to keep them enabled; `false` disables them. An empty format
-defaults to JSON. `NetworkDenyMessage` and `SecretDenyMessage` customize the respective
-messages. See [HTTP denial responses](/networking/overview#http-denial-responses).
+Omitting `HTTP` selects JSON denial responses on supporting local runtimes and the supported legacy behavior on older runtimes. When supplying `HTTPConfig`, set `DenyResponse: true` to keep responses enabled; `false` disables them. An empty format defaults to JSON, and explicit settings require runtime support. `NetworkDenyMessage` and `SecretDenyMessage` customize the respective messages. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 ### PolicyRule
 

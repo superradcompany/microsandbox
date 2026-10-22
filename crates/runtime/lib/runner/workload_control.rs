@@ -5,12 +5,15 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use microsandbox_protocol::codec;
+#[cfg(test)]
+use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::core::{
-    CoreError, Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
+    CoreError, WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFrozen, WorkloadThawed, WorkloadTransportCredit,
     WorkloadTransportPosition,
 };
+use microsandbox_protocol::init_observation::{InitObservation, ObservedReady};
 use microsandbox_protocol::message::{Message, MessageType};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -36,7 +39,7 @@ struct PendingReply {
 }
 
 struct State {
-    ready: Option<(u8, Ready)>,
+    ready: Option<(u8, ObservedReady)>,
     active: bool,
     closed: bool,
     gates: usize,
@@ -96,9 +99,16 @@ impl WorkloadControl {
         })
     }
 
-    pub(crate) fn install_ready(&self, version: u8, ready: Ready, dual_port: bool) {
+    pub(crate) fn install_ready(
+        &self,
+        version: u8,
+        ready: impl Into<ObservedReady>,
+        dual_port: bool,
+    ) {
+        let ready = ready.into();
         let mut state = self.state.lock().unwrap();
-        if ready.workload_transport_barrier_version == Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
+        if ready.ready.workload_transport_barrier_version
+            == Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
             && state.ready.is_none()
         {
             state.credit = WorkloadTransportCredit {
@@ -145,18 +155,33 @@ impl WorkloadControl {
             .ok_or_else(|| "ready workload transport writer is unavailable".into())
     }
 
-    pub(crate) fn ready(&self) -> Result<(u8, Ready), String> {
+    pub(crate) fn ready(&self) -> Result<(u8, ObservedReady), String> {
         let state = self.state.lock().unwrap();
         if !state.active || state.closed {
             return Err("workload control transport is not running".into());
         }
         let (version, ready) = state.ready.clone().ok_or("guest readiness unavailable")?;
-        if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+        if ready.ready.workload_transport_barrier_version
+            != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
+        {
             return Err(format!(
                 "guest lacks workload transport barrier version {WORKLOAD_TRANSPORT_BARRIER_VERSION}"
             ));
         }
         Ok((version, ready))
+    }
+
+    /// Boot evidence is needed before the relay starts admitting clients. Unlike capture's
+    /// ready(), this does not authorize workload commands or require a running writer.
+    pub(crate) fn boot_init(&self) -> Option<InitObservation> {
+        let state = self.state.lock().unwrap();
+        if state.closed {
+            return None;
+        }
+        state
+            .ready
+            .as_ref()
+            .and_then(|(_, ready)| ready.init_observation.clone())
     }
 
     pub(crate) fn gate(self: &Arc<Self>) -> InputGate {
@@ -232,7 +257,7 @@ impl WorkloadControl {
         match state
             .ready
             .as_ref()
-            .and_then(|(_, ready)| ready.workload_transport_barrier_version)
+            .and_then(|(_, ready)| ready.ready.workload_transport_barrier_version)
         {
             None => return Ok(true),
             Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) => {}
@@ -520,6 +545,24 @@ mod tests {
             false,
         );
         control
+    }
+
+    #[test]
+    fn boot_evidence_does_not_authorize_workload_commands_before_the_writer_starts() {
+        let control = WorkloadControl::new();
+        assert!(control.boot_init().is_none());
+        control.install_ready(
+            9,
+            ObservedReady {
+                ready: Ready::default(),
+                init_observation: Some(InitObservation::Builtin),
+            },
+            false,
+        );
+        assert_eq!(control.boot_init(), Some(InitObservation::Builtin));
+        assert!(control.ready().is_err());
+        control.close();
+        assert!(control.boot_init().is_none());
     }
 
     #[test]

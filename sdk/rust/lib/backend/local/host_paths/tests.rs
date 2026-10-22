@@ -249,13 +249,16 @@ fn persisted_sources_survive_a_different_restart_directory() {
     // a same-type serde round trip, so stored absolute inputs remain admitted.
     std::env::set_current_dir(&second).unwrap();
     let restored = serde_json::from_str::<SandboxConfig>(&stored).unwrap();
-    let expected = config_with_host_inputs(Some(&first));
+    let mut expected = config_with_host_inputs(Some(&first));
     // The same boundary is called before restore/branch preparation and before
     // progress tasks are spawned; delayed work must retain its original mappings.
     assert_eq!(
         serde_json::to_value(builder.config.clone().into_config()).unwrap(),
         serde_json::to_value(&expected).unwrap()
     );
+    // Private absence evidence can be added while decoding historical input;
+    // every operational field, including every host path, must stay identical.
+    expected.field_presence = restored.field_presence.clone();
     assert_eq!(
         serde_json::to_value(&restored).unwrap(),
         serde_json::to_value(&expected).unwrap()
@@ -475,22 +478,24 @@ fn legacy_saved_paths_round_trip_without_rewriting() {
     let legacy = config_with_host_inputs(None);
     let stored = serde_json::to_string(&legacy).unwrap();
     let decoded = serde_json::from_str::<SandboxConfig>(&stored).unwrap();
-    assert_eq!(serde_json::to_string(&decoded).unwrap(), stored);
+    let mut operational = decoded.clone();
+    operational.field_presence = legacy.field_presence.clone();
+    assert_eq!(serde_json::to_string(&operational).unwrap(), stored);
     assert_eq!(
-        serde_json::to_string(&decoded.clone_for_persistence()).unwrap(),
+        serde_json::to_string(&operational.clone_for_persistence()).unwrap(),
         stored
     );
 
     // A new child can capture the same inputs without changing its saved parent.
+    let before = serde_json::to_value(&decoded).unwrap();
     let mut child = decoded.clone();
     resolve_host_paths(&mut child).unwrap();
-    assert_eq!(serde_json::to_string(&decoded).unwrap(), stored);
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), before);
+    let mut expected = config_with_host_inputs(Some(&std::env::current_dir().unwrap()));
+    expected.field_presence = decoded.field_presence.clone();
     assert_eq!(
         serde_json::to_value(&child).unwrap(),
-        serde_json::to_value(config_with_host_inputs(Some(
-            &std::env::current_dir().unwrap()
-        )))
-        .unwrap()
+        serde_json::to_value(&expected).unwrap()
     );
 }
 

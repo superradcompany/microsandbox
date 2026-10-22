@@ -1108,6 +1108,41 @@ char *msb_runtime_setup(uint64_t cancel_id,
                         uintptr_t buf_len);
 
 /**
+ * Advertise retained receivers from the `create_artifact` and `list_dir` producers.
+ *
+ * The symbol is optional for older Go clients. Receiver dispatch alone does not
+ * imply these operations exist, and clients must select capture before mutation.
+ */
+void msb_supports_snapshot_artifact_receivers(void);
+
+/**
+ * Execute only the explicitly tagged operation against a retained receiver.
+ */
+char *msb_snapshot_object(uint64_t cancel_id,
+                          uint64_t handle,
+                          const char *request,
+                          unsigned char *buf,
+                          uintptr_t buf_len);
+
+/**
+ * Execute once and transfer an allocated JSON response, without a fixed buffer limit.
+ *
+ * # Safety
+ * `request` must point to a readable NUL-terminated string. `out_ptr` and `out_len`
+ * must point to writable slots. Free successful output with `msb_agent_free_bytes`.
+ */
+char *msb_snapshot_object_owned(uint64_t cancel_id,
+                                uint64_t handle,
+                                const char *request,
+                                unsigned char **out_ptr,
+                                uintptr_t *out_len);
+
+/**
+ * Release a receiver, without deleting its persistent artifact or group.
+ */
+void msb_snapshot_object_close(uint64_t handle);
+
+/**
  * Observe one live sandbox through its retained native backend and stable identity.
  */
 char *msb_sandbox_storage_usage(uint64_t cancel_id,

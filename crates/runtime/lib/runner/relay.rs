@@ -48,6 +48,7 @@ use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
+use microsandbox_protocol::init_observation::ObservedReady;
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
@@ -1412,10 +1413,10 @@ impl AgentRelay {
                                 .into(),
                         ));
                     }
-                    let ready: Ready = msg.payload().map_err(|error| {
+                    let ready: ObservedReady = msg.payload().map_err(|error| {
                         RuntimeError::Custom(format!("decode core.ready payload: {error}"))
                     })?;
-                    self.select_ready_transport(&ready)?;
+                    self.select_ready_transport(&ready.ready)?;
                     tracing::info!(
                         dual_port = self.dual_port_active,
                         "agent relay: received core.ready from agentd"
@@ -1426,7 +1427,7 @@ impl AgentRelay {
                         // This capability describes only the already authenticated local SDK
                         // hop. Agentd remains unaware of shared mappings and the guest generation
                         // stays unchanged.
-                        ready.local_transport = Some(LocalTransportReady::shared_arena_v1());
+                        ready.ready.local_transport = Some(LocalTransportReady::shared_arena_v1());
                         ready
                     };
                     // Capture the complete client-facing capability set, including the existing
@@ -1870,17 +1871,18 @@ impl AgentRelay {
 
     fn install_restored_ready(&mut self, restored: &RestoredAgentState) -> RuntimeResult<()> {
         // Guest RAM already contains the completed bulk binding: no new boot hello is sent.
-        if restored.ready.bulk_transport.is_some() && self.bulk_shared.is_none() {
+        if restored.ready.ready.bulk_transport.is_some() && self.bulk_shared.is_none() {
             return Err(RuntimeError::Custom(
                 "restored agent requires its captured bulk console lane".into(),
             ));
         }
         self.bulk_connection_id = restored
             .ready
+            .ready
             .bulk_transport
             .as_ref()
             .map(|ready| ready.connection_id);
-        self.select_ready_transport(&restored.ready)?;
+        self.select_ready_transport(&restored.ready.ready)?;
         self.shared.workload_control.install_ready(
             restored.protocol_generation,
             restored.ready.clone(),
@@ -1918,12 +1920,12 @@ impl AgentRelay {
         })?;
         let ready_message = codec::decode_message_frame(&ready_frame)
             .map_err(|error| RuntimeError::Custom(format!("decode relay Ready: {error}")))?;
-        let ready_payload = ready_message.payload::<Ready>().map_err(|error| {
+        let ready_payload = ready_message.payload::<ObservedReady>().map_err(|error| {
             RuntimeError::Custom(format!("decode relay Ready payload: {error}"))
         })?;
         // Only bundled peers with bounded, nonblocking guest input and range retirement can
         // advertise the stronger delivery contract. Older agents retain their existing path.
-        let exec_control_supported = ready_payload.workload_transport_barrier_version
+        let exec_control_supported = ready_payload.ready.workload_transport_barrier_version
             == Some(microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION)
             && self.range_lease_active;
 
@@ -1940,7 +1942,7 @@ impl AgentRelay {
         let (agent_tx, agent_rx) = ControlWriter::new();
         agent_tx
             .execution_tracker
-            .install(ready_payload.exec_limits)
+            .install(ready_payload.ready.exec_limits)
             .map_err(RuntimeError::Custom)?;
         agent_tx
             .exec_controls
@@ -8768,14 +8770,20 @@ mod tests {
             relay = relay.with_bind_identity_map(None, 0);
         }
 
+        let observation = microsandbox_protocol::init_observation::InitObservation::Handoff {
+            path: "/sbin/init".into(),
+        };
         let ready = encoded_message(
             MessageType::Ready,
-            &Ready {
-                boot_time_ns: 0,
-                init_time_ns: 0,
-                ready_time_ns: 0,
-                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-                ..Default::default()
+            &ObservedReady {
+                ready: Ready {
+                    boot_time_ns: 0,
+                    init_time_ns: 0,
+                    ready_time_ns: 0,
+                    workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                    ..Default::default()
+                },
+                init_observation: Some(observation.clone()),
             },
         );
         shared.tx_ring.push(ready.clone()).unwrap();
@@ -8785,16 +8793,19 @@ mod tests {
 
         let _private = shared.workload_control.start();
         let (_, captured_ready) = shared.workload_control.ready().unwrap();
+        assert_eq!(captured_ready.init_observation, Some(observation.clone()));
         #[cfg(unix)]
         assert_eq!(
-            captured_ready.local_transport,
+            captured_ready.ready.local_transport,
             Some(LocalTransportReady::shared_arena_v1())
         );
         #[cfg(not(unix))]
-        assert!(captured_ready.local_transport.is_none());
+        assert!(captured_ready.ready.local_transport.is_none());
 
         let cached = relay.ready_frame.as_ref().expect("SDK-facing ready frame");
-        let cached_ready: Ready = decode_frame(cached).unwrap().payload().unwrap();
+        let cached_observed: ObservedReady = decode_frame(cached).unwrap().payload().unwrap();
+        assert_eq!(cached_observed.init_observation, Some(observation));
+        let cached_ready = cached_observed.ready;
         #[cfg(unix)]
         assert_eq!(
             cached_ready.local_transport,
@@ -8991,7 +9002,8 @@ mod tests {
                 agent_version: "test-agent".into(),
                 workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
                 ..Default::default()
-            },
+            }
+            .into(),
             attempt_id: attempt_id.into(),
             host_input: Default::default(),
             input_credit: Default::default(),
@@ -9016,7 +9028,7 @@ mod tests {
                 .await
                 .unwrap();
             let mut restored = restored_agent("checkpoint-attempt");
-            restored.ready.exec_limits = policy;
+            restored.ready.ready.exec_limits = policy;
             relay.install_restored_ready(&restored).unwrap();
 
             let guest_shared = Arc::clone(&shared);

@@ -28,6 +28,10 @@ use crate::config::{
     layers::{BackendConfig, ConfigLayers, Overlay},
 };
 
+use super::command_provenance::CommandProvenance;
+use super::environment_provenance::EnvironmentProvenance;
+use super::field_presence::FieldPresence;
+use super::init_provenance::InitProvenance;
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
 use crate::snapshot::SnapshotReference;
 
@@ -128,11 +132,54 @@ pub(crate) enum SnapshotRestoreMode {
 /// local SDK/runtime operation state beside that shared contract, such as
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[serde(remote = "Self")]
 pub struct SandboxConfig {
+    /// Preserve omission through catalog round trips. Older SDKs may omit this additive hint;
+    /// absent historical HTTP documents are implicit, while concrete HTTP choices stay strict.
+    #[serde(default, skip_serializing_if = "http_defaults_are_not_implicit")]
+    pub(crate) http_defaults_implicit: Option<bool>,
+    /// Original init selection before SDK image-entrypoint resolution. This local hint is
+    /// not guest observation; older catalogs omit it and must not gain inferred provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) init_provenance: Option<InitProvenance>,
+    /// Builder-only guard: an older resolved init path cannot reveal its original selection.
+    #[serde(skip)]
+    pub(crate) init_provenance_unknown: bool,
+    /// Private evidence distinguishing reusable CMD from a detached one-shot invocation.
+    /// The existing runtime CMD is unchanged; older records have no such evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) command_provenance: Option<CommandProvenance>,
+    /// Reconstruction from a record without command evidence cannot recover original intent.
+    /// This guard is local to building; omission in persisted data is still represented by None.
+    #[serde(skip)]
+    pub(crate) command_provenance_unknown: bool,
+    /// Optional host-private origin evidence; absence in an older record means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) environment_provenance: Option<EnvironmentProvenance>,
+    /// Builder-only guard against turning historical values into new literal declarations.
+    #[serde(skip)]
+    pub(crate) environment_provenance_unknown: bool,
+    /// Optional, value-bound evidence for omitted nonsecret defaults. Old records stay unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) field_presence: Option<FieldPresence>,
+    /// Reconstructing retained configuration must not manufacture declarations from defaults.
+    #[serde(skip)]
+    pub(crate) field_presence_unknown: bool,
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
     #[serde(skip)]
     pub(crate) snapshot_lease: Option<microsandbox_image::storage_lease::StorageLease>,
+    /// Descriptor selected by a retained local checkpoint receiver. Validate under its
+    /// reader lease before child preparation; this constraint never crosses the runtime ABI.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_expected_digest: Option<String>,
+    /// Private archive staging and image leases for one canonical path-set launch.
+    /// Retained through child materialization, never written to persisted/runtime state.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_prepared_sources:
+        Option<std::sync::Arc<crate::backend::local::snapshot::PreparedLaunchSource>>,
     /// Operation-local observer; never persisted or retained as a stream owner.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -239,6 +286,11 @@ pub struct SandboxConfig {
     #[serde(skip)]
     pub(crate) snapshot_root_virtual_size: Option<u64>,
 
+    /// Explicit canonical launch capacity, applied only to the private child disk before boot.
+    /// Never sent to a runtime or persisted as an unfinished storage operation.
+    #[serde(skip)]
+    pub(crate) snapshot_root_growth_mib: Option<u32>,
+
     /// Archive to materialize directly into child staging during create.
     ///
     /// Transient and never persisted.
@@ -324,6 +376,21 @@ pub struct SandboxConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxConfigPatch {
+    /// A concrete network rebuild must not turn unrelated options into HTTP requests.
+    pub(crate) fn http_defaults_are_implicit(&self) -> bool {
+        self.http_defaults_implicit
+            .unwrap_or_else(|| !self.has_http_override())
+    }
+
+    pub(crate) fn has_http_override(&self) -> bool {
+        let http = &self.spec.network.http;
+        http.deny_response.is_some()
+            || http.deny_response_format.is_some()
+            || http.deny_message.is_some()
+            || http.network_deny_message.is_some()
+            || http.secret_deny_message.is_some()
+    }
+
     /// Convert ordinary backend defaults; host deployment policy is applied during local creation.
     pub(crate) fn from_defaults(global: &GlobalConfigPatch) -> Self {
         let mut patch = Self::from_global(global);
@@ -519,6 +586,18 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
+    /// Only a proven omission with unchanged defaults may select a legacy response behavior.
+    #[cfg(feature = "net")]
+    pub(crate) fn has_implicit_http_defaults(&self) -> bool {
+        let http = &self.spec.network.http;
+        self.http_defaults_implicit == Some(true)
+            && http.deny_response
+            && http.deny_response_format == microsandbox_types::HttpDenyResponseFormat::Json
+            && http.deny_message.is_none()
+            && http.network_deny_message.is_none()
+            && http.secret_deny_message.is_none()
+    }
+
     /// Discard materialized restore paths before releasing their archive staging owner.
     pub(crate) fn clear_prepared_restore(&mut self) {
         #[cfg(feature = "local")]
@@ -579,8 +658,29 @@ impl SandboxConfig {
             // Custom backends without device settings supply their own configuration behavior.
             None => ConfigLayers::unmanaged(),
         };
+        // A detached invocation temporarily occupies runtime.cmd. Resolve its prior value
+        // through the same image/default/managed layers, without changing the launch config.
+        // Reading just launch_cmd_before_override would miss an inherited image CMD.
+        let command_defaults = options.launch_cmd_before_override.as_ref().map(|previous| {
+            let mut defaults = options.clone();
+            defaults.spec.runtime.cmd = previous.clone();
+            let mut baseline = self.clone();
+            layers()
+                .base(image_defaults.clone())
+                .options(defaults)
+                .build()
+                .apply_to(&mut baseline);
+            baseline
+                .command_provenance
+                .as_ref()
+                .filter(|origin| origin.matches(&baseline.spec.runtime.cmd))
+                .map_or_else(
+                    || baseline.spec.runtime.cmd.clone(),
+                    |origin| origin.defaults.clone(),
+                )
+        });
         let mut patch = layers().base(image_defaults).options(options).build();
-
+        let http_defaults_implicit = patch.http_defaults_are_implicit();
         #[cfg(feature = "local")]
         if let Some(geometry) = patch
             .restore_resources
@@ -595,7 +695,41 @@ impl SandboxConfig {
 
         let max_cpus = patch.spec.resources.max_cpus;
         let max_memory_mib = patch.spec.resources.max_memory_mib;
+        let mut explicit_presence = patch
+            .field_presence
+            .clone()
+            .or_else(|| self.field_presence.clone())
+            .unwrap_or_default();
         patch.apply_to(self);
+        self.http_defaults_implicit = Some(http_defaults_implicit);
+        if self.command_provenance_unknown {
+            self.command_provenance = None;
+        } else if let Some(defaults) = command_defaults {
+            self.command_provenance = Some(CommandProvenance::new(
+                self.spec.runtime.cmd.clone(),
+                defaults,
+            ));
+        } else if self
+            .command_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(&self.spec.runtime.cmd))
+        {
+            self.command_provenance = Some(CommandProvenance::new(
+                self.spec.runtime.cmd.clone(),
+                self.spec.runtime.cmd.clone(),
+            ));
+        }
+        // Fresh declarations can establish intent; reconstructing an older resolved path
+        // cannot. A retained valid hint survives, and explicit setters replace it.
+        if self.init_provenance_unknown {
+            self.init_provenance = None;
+        } else if self
+            .init_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(self.spec.init.as_ref()))
+        {
+            self.init_provenance = Some(InitProvenance::from_init(self.spec.init.as_ref()));
+        }
 
         if let Some(config) = backend_config
             && let RootfsSource::Oci(oci) = &mut self.spec.image
@@ -618,6 +752,21 @@ impl SandboxConfig {
                 inherited_entrypoint,
             );
         }
+        // Init auto-selection may inherit environment from the workload. Resolve origins only
+        // after that merge so host-forwarded values cannot become literal init defaults.
+        self.environment_provenance
+            .get_or_insert_with(Default::default)
+            .resolve(
+                &self.spec.env,
+                self.spec.init.as_ref(),
+                self.environment_provenance_unknown,
+            );
+        self.field_presence = Some(if self.field_presence_unknown {
+            explicit_presence.retain_matching(&self.spec);
+            explicit_presence
+        } else {
+            FieldPresence::declared(&self.spec)
+        });
         Ok(())
     }
 
@@ -639,6 +788,26 @@ impl SandboxConfig {
     /// transient launch markers and any workload argv routed through an inherited init are removed.
     pub(crate) fn clone_for_persistence(&self) -> Self {
         let mut config = self.clone();
+        if let Some(presence) = &mut config.field_presence {
+            presence.retain_matching(&config.spec);
+        }
+        if let Some(origin) = &mut config.environment_provenance {
+            origin.retain_matching(&config.spec.env, config.spec.init.as_ref());
+        }
+        if config
+            .init_provenance
+            .as_ref()
+            .is_some_and(|origin| !origin.matches(config.spec.init.as_ref()))
+        {
+            config.init_provenance = None;
+        }
+        if config
+            .command_provenance
+            .as_ref()
+            .is_some_and(|origin| !origin.matches(&config.spec.runtime.cmd))
+        {
+            config.command_provenance = None;
+        }
         config.local_restore_paths_resolved = false;
         #[cfg(feature = "local")]
         {
@@ -659,6 +828,7 @@ impl SandboxConfig {
             config.snapshot_owned_source = None;
         }
         config.snapshot_root_virtual_size = None;
+        config.snapshot_root_growth_mib = None;
         #[cfg(feature = "local")]
         {
             config.snapshot_upper_layers.clear();
@@ -800,6 +970,11 @@ impl SandboxConfig {
         if init.cmd != HANDOFF_INIT_AUTO {
             return;
         }
+        // Resolution changes the launch spelling, but must not repair missing historical
+        // evidence. Explicit new auto requests retain their intent throughout resolution.
+        self.init_provenance = (!self.init_provenance_unknown).then(|| InitProvenance::Auto {
+            configured: HANDOFF_INIT_AUTO.into(),
+        });
         let Some(entrypoint) = image_entrypoint else {
             return;
         };
@@ -811,7 +986,14 @@ impl SandboxConfig {
             return;
         };
 
+        // Preserve the literal auto request before replacing the launch spelling. The guest
+        // will independently report which executable it selected; this only records intent.
+        let resolved_origin = (!self.init_provenance_unknown).then(|| InitProvenance::Auto {
+            configured: init_path.to_string(),
+        });
+
         if !inherited_entrypoint {
+            self.init_provenance = resolved_origin;
             let init = self
                 .spec
                 .init
@@ -825,6 +1007,7 @@ impl SandboxConfig {
         let Some(entrypoint) = self.spec.runtime.entrypoint.take() else {
             return;
         };
+        self.init_provenance = resolved_origin;
         let mut workload_entrypoint = entrypoint.clone();
         if workload_entrypoint
             .first()
@@ -1083,6 +1266,12 @@ pub(crate) fn network_spec_from_config(
     Ok(serde_json::from_value(serde_json::to_value(config)?)?)
 }
 
+// Explicit settings already serialize their HTTP fields. Only omission needs an additive
+// hint; avoid rewriting legacy concrete documents just to store the equivalent false value.
+fn http_defaults_are_not_implicit(value: &Option<bool>) -> bool {
+    *value != Some(true)
+}
+
 #[cfg(feature = "net")]
 pub(crate) fn network_config_from_spec(
     spec: &microsandbox_types::NetworkSpec,
@@ -1133,9 +1322,102 @@ impl From<SandboxSpec> for SandboxConfig {
     }
 }
 
+// The remote derive supplies the field codec without duplicating this large struct. The
+// trait entry point inspects only presence before defaulting erases historical omissions.
+impl Serialize for SandboxConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SandboxConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let implicit = value
+            .pointer("/network/http")
+            .is_none_or(|http| http.as_object().is_some_and(serde_json::Map::is_empty));
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("http_defaults_implicit")
+                .or_insert(serde_json::Value::Bool(implicit));
+        }
+        // This optional private hint cannot make otherwise supported old configuration
+        // unreadable. Unknown/future/malformed evidence is unavailable, never a default.
+        // A malformed or future hint must not erase its negative evidence and thereby
+        // certify a synthesized policy. Only the exact false value declines this guard.
+        let secret_policy_unrecorded = value
+            .pointer("/field_presence/secret_policy_unrecorded")
+            .is_some_and(|marker| marker != &serde_json::Value::Bool(false));
+        let unrecorded_network_policy = value
+            .pointer("/field_presence/unrecorded_network_policy")
+            .cloned();
+        let mut presence = value
+            .as_object_mut()
+            .and_then(|object| object.remove("field_presence"))
+            .and_then(|hint| {
+                serde_json::from_value::<Option<FieldPresence>>(hint)
+                    .ok()
+                    .flatten()
+            });
+        if let Some(presence) = &mut presence {
+            presence.retain_recorded_mounts(value.get("mounts"));
+        }
+        // Historical records without positive presence evidence can still need a
+        // negative guard: typed decoding must not turn an absent policy into intent.
+        let had_presence = presence.is_some();
+        let mut network_presence = presence.take().unwrap_or_default();
+        network_presence.retain_negative_network_policy(unrecorded_network_policy.as_ref());
+        if secret_policy_unrecorded {
+            network_presence.mark_secret_policy_unrecorded();
+        }
+        network_presence.retain_recorded_network(value.get("network"));
+        if had_presence
+            || network_presence.secret_policy_was_unrecorded()
+            || network_presence.has_unrecorded_network_policy(None)
+        {
+            presence = Some(network_presence);
+        }
+        let resources_recorded = value
+            .get("resources")
+            .is_some_and(serde_json::Value::is_object);
+        let network_recorded = value
+            .get("network")
+            .is_some_and(serde_json::Value::is_object);
+        let mut config = Self::deserialize(value).map_err(serde::de::Error::custom)?;
+        config.field_presence = presence;
+        config.field_presence_unknown = true;
+        // Decoding retained configuration does not establish where its values came from.
+        // Matching evidence remains usable, but absent origins must stay unknown even
+        // when callers reconstruct a sparse patch directly instead of using From.
+        config.environment_provenance_unknown = true;
+        config.command_provenance_unknown = config
+            .command_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(&config.spec.runtime.cmd));
+        config.init_provenance_unknown = config
+            .init_provenance
+            .as_ref()
+            .is_none_or(|origin| !origin.matches(config.spec.init.as_ref()));
+        if let Some(presence) = &mut config.field_presence {
+            presence.retain_recorded_parents(resources_recorded, network_recorded);
+            presence.retain_matching(&config.spec);
+        }
+        Ok(config)
+    }
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            http_defaults_implicit: None,
+            init_provenance: None,
+            init_provenance_unknown: false,
+            command_provenance: None,
+            command_provenance_unknown: false,
+            environment_provenance: None,
+            environment_provenance_unknown: false,
+            field_presence: None,
+            field_presence_unknown: false,
             spec: SandboxSpec {
                 resources: SandboxResources {
                     cpus: default_cpus(),
@@ -1160,6 +1442,10 @@ impl Default for SandboxConfig {
             creation_progress: None,
             #[cfg(feature = "local")]
             snapshot_lease: None,
+            #[cfg(feature = "local")]
+            snapshot_expected_digest: None,
+            #[cfg(feature = "local")]
+            snapshot_prepared_sources: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -1174,6 +1460,7 @@ impl Default for SandboxConfig {
             #[cfg(feature = "local")]
             snapshot_owned_source: None,
             snapshot_root_virtual_size: None,
+            snapshot_root_growth_mib: None,
             snapshot_archive_source: None,
             snapshot_parent: None,
             snapshot_base: None,
@@ -1234,10 +1521,28 @@ mod tests {
             )
             .unwrap();
         config.merge_image_defaults(image);
-        // Compare effective launch settings, independent of sparse source bookkeeping.
-        let layered = serde_json::to_value(&layered).unwrap();
-        let config = serde_json::to_value(&config).unwrap();
-        assert_eq!(layered, config);
+        // Fresh builder resolution records input provenance; merely merging image defaults
+        // into an older config must not invent it. Compare all pre-existing launch fields.
+        let mut layered = serde_json::to_value(&layered).unwrap();
+        let mut merged = serde_json::to_value(&config).unwrap();
+        layered.as_object_mut().unwrap().remove("init_provenance");
+        merged.as_object_mut().unwrap().remove("init_provenance");
+        layered
+            .as_object_mut()
+            .unwrap()
+            .remove("command_provenance");
+        merged.as_object_mut().unwrap().remove("command_provenance");
+        layered
+            .as_object_mut()
+            .unwrap()
+            .remove("environment_provenance");
+        merged
+            .as_object_mut()
+            .unwrap()
+            .remove("environment_provenance");
+        layered.as_object_mut().unwrap().remove("field_presence");
+        merged.as_object_mut().unwrap().remove("field_presence");
+        assert_eq!(layered, merged);
     }
 
     #[test]
@@ -1643,6 +1948,7 @@ mod tests {
         let config = SandboxConfig {
             restore_boot_overrides: super::super::restore_builder::RestoreBootOverrides {
                 security: true,
+                ..Default::default()
             },
             ..Default::default()
         };

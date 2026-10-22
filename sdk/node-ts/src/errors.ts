@@ -1,3 +1,7 @@
+import type { HeadUpdate } from "./snapshot.js";
+import type { CheckpointRemoveResult, SnapshotRemoveResult } from "./snapshot-removal.js";
+import type { SnapshotGroupVerifyReport } from "./snapshot-verification.js";
+
 export type MicrosandboxErrorCode =
   | "io"
   | "http"
@@ -29,6 +33,10 @@ export type MicrosandboxErrorCode =
   | "image"
   | "patchFailed"
   | "snapshotSourceRecovery"
+  | "snapshotImport"
+  | "snapshotVerification"
+  | "snapshotRemovalRecovery"
+  | "snapshotGroupRemovalRecovery"
   | "metricsDisabled"
   | "metricsUnavailable"
   | "unsupportedOperation"
@@ -235,6 +243,8 @@ export interface PublishedSnapshotArtifact {
   readonly path: string;
   readonly snapshotId: string;
   readonly digest: string;
+  /** This publication’s outcome; omitted by older producers and archive-only captures. */
+  readonly headUpdate?: HeadUpdate | null;
 }
 
 /** Recovery locators do not imply that the source is running or safe to resume. */
@@ -256,6 +266,45 @@ export class SnapshotSourceRecoveryError extends MicrosandboxError {
     options?: ErrorOptions,
   ) {
     super("snapshotSourceRecovery", message, options);
+  }
+}
+
+/** Known publication state of a failed archive batch. Unknown requires recovery. */
+export type SnapshotImportOutcome = "not_committed" | "committed" | "unknown";
+
+export interface SnapshotImportDetails {
+  readonly operationId: string;
+  readonly archives: readonly string[];
+  readonly groupPath: string | null;
+  readonly outcome: SnapshotImportOutcome;
+  readonly detail: string;
+}
+
+/** Preserve partial success: a failed call may have committed its entire batch. */
+export class SnapshotImportError extends MicrosandboxError {
+  constructor(message: string, readonly details: SnapshotImportDetails, options?: ErrorOptions) {
+    super("snapshotImport", message, options);
+  }
+}
+
+/** Removal committed, but catalog/cleanup recovery is still required. */
+export class SnapshotRemovalRecoveryError extends MicrosandboxError {
+  constructor(message: string, readonly result: CheckpointRemoveResult, readonly detail: string, options?: ErrorOptions) {
+    super("snapshotRemovalRecovery", message, options);
+  }
+}
+
+/** Whole-group removal committed, but catalog/cleanup recovery remains pending. */
+export class SnapshotGroupRemovalRecoveryError extends MicrosandboxError {
+  constructor(message: string, readonly result: SnapshotRemoveResult, readonly detail: string, options?: ErrorOptions) {
+    super("snapshotGroupRemovalRecovery", message, options);
+  }
+}
+
+/** Failed verification retains results for every selected checkpoint. */
+export class SnapshotVerificationError extends MicrosandboxError {
+  constructor(message: string, readonly report: SnapshotGroupVerifyReport, options?: ErrorOptions) {
+    super("snapshotVerification", message, options);
   }
 }
 

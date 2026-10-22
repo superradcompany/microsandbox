@@ -9,7 +9,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from microsandbox import Sandbox, Snapshot, Volume
+from microsandbox import Checkpoint, Sandbox, Volume
 
 IMAGE = os.environ.get("MICROSANDBOX_PYTHON_INTEGRATION_IMAGE", "mirror.gcr.io/library/alpine")
 
@@ -44,4 +44,4 @@ async def remove_volume(name: str) -> None:
 
 async def remove_snapshot(path_or_name: str | Path) -> None:
     with suppress(Exception):
-        await Snapshot.remove(str(path_or_name), force=True)
+        await Checkpoint.remove_by_reference(str(path_or_name), force=True)

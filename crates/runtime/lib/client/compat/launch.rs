@@ -158,6 +158,7 @@ impl PreviousLaunch {
             .map(|network| network.into_current(self.deployment_profile))
             .transpose()?;
         let mut launch = LaunchConfig {
+            retention_source: None,
             execution: ExecutionIntent::Boot,
             bootstrap,
             cpu_lease_dir,

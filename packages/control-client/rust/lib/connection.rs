@@ -256,12 +256,46 @@ impl ControlConnection {
         request: &R,
         configure: impl FnOnce(RequestOptions) -> RequestOptions,
     ) -> ControlClientResult<R::Response> {
-        let options = configure(RequestOptions::default());
+        let mut options = configure(RequestOptions::default());
         match &self.inner.selected {
             Selected::Json(client) => client.request_compatible(request, options).await,
             Selected::Framed(client) => {
                 if request.min_generation() > client.ready().welcome.generation {
                     return self.inner_json(request, options).await;
+                }
+                if request.requires_configuration_capture()
+                    || request.requires_configuration_storage()
+                    || request.requires_configuration_exec_limits()
+                {
+                    // Query this exact framed peer, not only the earlier JSON discovery socket.
+                    // A replaced endpoint must not make an old peer silently ignore a new field.
+                    let until = deadline(
+                        options
+                            .request_timeout
+                            .or(self.inner.options.limits.request_timeout)
+                            .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+                    )?;
+                    let probe_options = self.verify_before_request(options.clone()).await?;
+                    let capabilities = client
+                        .request_typed_with(&crate::GetRuntimeCapabilities, |_| probe_options)
+                        .await
+                        .map_err(|error| match error {
+                            ControlClientError::Client(error) => {
+                                ControlClientError::Client(error.with_delivery(Delivery::NotSent))
+                            }
+                            _ => ClientError::new(ErrorKind::InvalidData).into(),
+                        })?;
+                    check_deadline(until)?;
+                    options.request_timeout =
+                        Some(until.saturating_duration_since(tokio::time::Instant::now()));
+                    if !capabilities.configuration_capture
+                        || (request.requires_configuration_storage()
+                            && !capabilities.configuration_storage)
+                        || (request.requires_configuration_exec_limits()
+                            && !capabilities.configuration_exec_limits)
+                    {
+                        return Err(ClientError::new(ErrorKind::UnsupportedOperation).into());
+                    }
                 }
                 let options = self.verify_before_request(options).await?;
                 client.request_typed_with(request, |_| options).await

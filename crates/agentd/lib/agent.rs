@@ -39,6 +39,7 @@ use microsandbox_protocol::exec::{
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
+use microsandbox_protocol::init_observation::{InitObservation, ObservedReady};
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
@@ -209,6 +210,7 @@ struct ActivityTracker {
 pub struct BootConsoleState {
     input: Vec<u8>,
     init_failure_ack: bool,
+    init_observation: Option<InitObservation>,
 }
 
 #[derive(Clone)]
@@ -297,6 +299,13 @@ impl Default for AgentState {
             pending_bulk_finishes: HashMap::new(),
             fs: FsState::default(),
         }
+    }
+}
+
+impl BootConsoleState {
+    /// Retain boot selection without adding init arguments or environment to Ready.
+    pub fn set_init_observation(&mut self, observation: Option<InitObservation>) {
+        self.init_observation = observation;
     }
 }
 
@@ -540,20 +549,23 @@ pub async fn run(
     let ready_msg = Message::with_payload(
         MessageType::Ready,
         0,
-        &Ready {
-            boot_time_ns,
-            init_time_ns,
-            ready_time_ns,
-            agent_version: env!("CARGO_PKG_VERSION").to_string(),
-            bulk_transport: bulk_port
-                .as_ref()
-                .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
-            relay_lease: Some(RelayLeaseReady::range_lease_v1()),
-            // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
-            // the runtime over the guest consoles, so the runtime injects this capability later.
-            local_transport: None,
-            workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
-            exec_limits: config.exec_limits,
+        &ObservedReady {
+            ready: Ready {
+                boot_time_ns,
+                init_time_ns,
+                ready_time_ns,
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                bulk_transport: bulk_port
+                    .as_ref()
+                    .map(|port| BulkTransportReady::dual_port_v1(port.connection_id)),
+                relay_lease: Some(RelayLeaseReady::range_lease_v1()),
+                // Shared arenas are negotiated only on the local SDK-to-runtime hop. Agentd speaks to
+                // the runtime over the guest consoles, so the runtime injects this capability later.
+                local_transport: None,
+                workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+                exec_limits: config.exec_limits,
+            },
+            init_observation: boot_console.init_observation,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;

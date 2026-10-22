@@ -9,9 +9,12 @@ use microsandbox_image::checkpoint::{
     CheckpointClosure, CheckpointGeometry, MemoryExtentContent, ObjectId, ResourceDescriptor,
     ResourceTreatment,
 };
+#[cfg(test)]
+use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::core::{
-    Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
+    WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
 };
+use microsandbox_protocol::init_observation::ObservedReady;
 use microsandbox_protocol::message::{MessageType, PROTOCOL_VERSION};
 
 //--------------------------------------------------------------------------------------------------
@@ -45,7 +48,7 @@ pub(crate) struct RestoredAgentState {
     /// Protocol generation spoken by the captured agent.
     pub(crate) protocol_generation: u8,
     /// Cached ready payload used for post-activation client handshakes.
-    pub(crate) ready: Ready,
+    pub(crate) ready: ObservedReady,
     /// Checkpoint attempt that owns the captured workload freeze.
     pub(crate) attempt_id: String,
     /// Complete host input admitted before the captured freeze acknowledgement.
@@ -599,9 +602,9 @@ fn parse_restored_agent_resource(
         ));
     }
 
-    let ready: Ready = serde_json::from_str(value("ready")?)
+    let ready: ObservedReady = serde_json::from_str(value("ready")?)
         .map_err(|error| format!("checkpoint guest readiness is invalid: {error}"))?;
-    if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+    if ready.ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
         return Err("checkpoint guest has an unsupported development transport-credit contract; recreate the full snapshot with a matching build".into());
     }
     let host_input: WorkloadTransportPosition =
@@ -620,7 +623,7 @@ fn parse_restored_agent_resource(
     let guest_bulk_bytes_target = value("transport_guest_bulk_bytes")?
         .parse::<u64>()
         .map_err(|error| format!("checkpoint guest bulk position is invalid: {error}"))?;
-    if ready.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
+    if ready.ready.bulk_transport.is_none() && guest_bulk_bytes_target != 0 {
         return Err("combined checkpoint has a dedicated guest bulk counter".into());
     }
     Ok(RestoredAgentState {
@@ -783,10 +786,32 @@ mod tests {
 
         assert_eq!(restored.protocol_generation, PROTOCOL_VERSION);
         assert_eq!(restored.attempt_id, "checkpoint-attempt");
-        assert_eq!(restored.ready.agent_version, "0.6.16-test");
-        assert_eq!(restored.ready.boot_time_ns, 10);
-        assert_eq!(restored.ready.init_time_ns, 20);
-        assert_eq!(restored.ready.ready_time_ns, 30);
+        assert_eq!(restored.ready.ready.agent_version, "0.6.16-test");
+        assert_eq!(restored.ready.ready.boot_time_ns, 10);
+        assert_eq!(restored.ready.ready.init_time_ns, 20);
+        assert_eq!(restored.ready.ready.ready_time_ns, 30);
+    }
+
+    #[test]
+    fn restores_optional_init_selection_without_inventing_legacy_evidence() {
+        use microsandbox_protocol::init_observation::InitObservation;
+
+        let mut resource = agent_resource(PROTOCOL_VERSION);
+        let legacy = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert!(legacy.ready.init_observation.is_none());
+        let mut ready = legacy.ready;
+        ready.init_observation = Some(InitObservation::Builtin);
+        resource
+            .binding
+            .insert("ready".into(), serde_json::to_string(&ready).unwrap());
+        let restored = parse_restored_agent_resource(&resource, "checkpoint-attempt").unwrap();
+        assert_eq!(
+            restored.ready.init_observation,
+            Some(InitObservation::Builtin)
+        );
+        // Older parsers consume exactly this same nested Ready document, not a new binding key.
+        let legacy: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        assert_eq!(legacy.agent_version, "0.6.16-test");
     }
 
     #[test]
@@ -838,8 +863,8 @@ mod tests {
     #[test]
     fn rejects_development_snapshot_with_stdin_charged_to_control() {
         let mut resource = agent_resource(PROTOCOL_VERSION);
-        let mut ready: Ready = serde_json::from_str(&resource.binding["ready"]).unwrap();
-        ready.workload_transport_barrier_version = Some(1);
+        let mut ready: ObservedReady = serde_json::from_str(&resource.binding["ready"]).unwrap();
+        ready.ready.workload_transport_barrier_version = Some(1);
         resource
             .binding
             .insert("ready".into(), serde_json::to_string(&ready).unwrap());

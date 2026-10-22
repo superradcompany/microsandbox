@@ -13,6 +13,8 @@ path = "lib/lib.rs"
 
 [features]
 default = ["download-binaries", "embed-binaries", "net", "runner"]
+# Opt-in disposable-VM qualification only; normal/release builds contain no fault hooks.
+retention-test-hooks = []
 client = ["dep:hex", "dep:microsandbox-image", "dep:rand", "dep:tempfile", "dep:tokio"]
 runner = [
     "client",

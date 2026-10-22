@@ -24,7 +24,11 @@
 //!     .build().await?;
 //! ```
 
+use std::collections::BTreeMap;
+
 use microsandbox_protocol::HANDOFF_INIT_AUTO;
+
+use super::environment_provenance::{EnvironmentEntry, EnvironmentOrigin};
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
@@ -41,6 +45,14 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 pub struct InitOptionsBuilder {
     args: Vec<String>,
     env: Vec<(String, String)>,
+    origins: BTreeMap<String, EnvironmentEntry>,
+}
+
+/// Keep the init payload and its private origin evidence together through builder handoff.
+pub(crate) struct PreparedInitOptions {
+    pub(crate) args: Vec<String>,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) origins: BTreeMap<String, EnvironmentEntry>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -69,7 +81,12 @@ impl InitOptionsBuilder {
     /// Set an env var for the init process. Repeatable; later entries
     /// with the same key shadow earlier ones inside the guest.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.push((key.into(), value.into()));
+        let (key, value) = (key.into(), value.into());
+        self.origins.insert(
+            key.clone(),
+            EnvironmentEntry::new(&value, EnvironmentOrigin::Literal),
+        );
+        self.env.push((key, value));
         self
     }
 
@@ -78,14 +95,29 @@ impl InitOptionsBuilder {
         mut self,
         vars: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
     ) -> Self {
-        self.env
-            .extend(vars.into_iter().map(|(k, v)| (k.into(), v.into())));
+        for (key, value) in vars {
+            self = self.env(key, value);
+        }
         self
     }
 
-    /// Finalise into `(args, env)`. Called by the SandboxBuilder shim.
-    pub(crate) fn build(self) -> (Vec<String>, Vec<(String, String)>) {
-        (self.args, self.env)
+    /// CLI bridge retaining host origin for an already-resolved value without rereading it.
+    #[doc(hidden)]
+    pub fn host_env(self, key: String, value: String) -> Self {
+        let mut builder = self.env(&key, &value);
+        builder
+            .origins
+            .insert(key, EnvironmentEntry::new(&value, EnvironmentOrigin::Host));
+        builder
+    }
+
+    /// Return argv, environment and private origin evidence together.
+    pub(crate) fn build(self) -> PreparedInitOptions {
+        PreparedInitOptions {
+            args: self.args,
+            env: self.env,
+            origins: self.origins,
+        }
     }
 }
 

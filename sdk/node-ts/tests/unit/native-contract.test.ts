@@ -63,6 +63,17 @@ describe("native Sandbox lifecycle contract", () => {
     expect(() => builder.networkPolicyJson(JSON.stringify({ tls: {} })))
       .toThrow("restore network policy accepts only default actions and rules");
     expect(() => builder.cpus(256)).toThrow("cpus out of u8 range");
+    expect(() => builder.maxCpus(256)).toThrow("max_cpus out of u8 range");
+    for (const value of [-1, 1.5, NaN, Infinity, -Infinity, 2 ** 32]) {
+      expect(() => builder.maxCpus(value)).toThrow();
+      expect(() => builder.maxMemory(value)).toThrow();
+    }
+    // Numeric refusal must leave the deferred builder reusable. Zero remains
+    // explicit here; core resource validation rejects it at the terminal call.
+    expect(builder.maxCpus(0).maxMemory(0).maxCpus(2).maxMemory(512)).toBe(builder);
+    expect(builder.label("team", "first").labels({ team: "last" })).toBe(builder);
+    expect(builder.workdir("/root").shell("/bin/ash").entrypoint([]).cmd([])
+      .env("EMPTY", "").envs({ DEST: "value" })).toBe(builder);
     expect(() => builder.security("invalid" as never)).toThrow("invalid security profile");
     for (const value of [-1, NaN, Infinity, -Infinity, 2 ** 64]) {
       expect(() => builder.maxDuration(value)).toThrow("restore duration must be finite");
@@ -72,7 +83,7 @@ describe("native Sandbox lifecycle contract", () => {
     for (const value of [0, -0, 0.5, 1.5, Number.MIN_VALUE]) {
       expect(builder.maxDuration(value).idleTimeout(value)).toBe(builder);
     }
-    for (const method of ["image", "network", "cmd", "entrypoint", "replace", "create"]) {
+    for (const method of ["image", "network", "foregroundCommand", "backgroundCommand", "replace", "create"]) {
       expect((builder as unknown as Record<string, unknown>)[method], method).toBeUndefined();
     }
   });
@@ -151,4 +162,9 @@ describe("native storage contract", () => {
     expect(typeof napi.storageUsage).toBe("function");
     expect(typeof napi.storagePrune).toBe("function");
   });
+});
+
+it("refuses a conflicting legacy group before reading archives", async () => {
+  await expect(napi.SnapshotGroup.load("selected", ["missing.msb"], { group: "other" }))
+    .rejects.toThrow("different destination group");
 });

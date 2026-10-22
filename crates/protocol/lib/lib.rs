@@ -11,6 +11,10 @@ mod error;
 
 /// Runtime-owned execution jobs on the host-control extension.
 pub mod jobs;
+/// Capability-probed runtime-owned label updates.
+pub mod labels;
+/// Compact private configuration deltas for negotiated metadata updates.
+pub mod labels_delta;
 
 //--------------------------------------------------------------------------------------------------
 // Constants: Host↔Guest Shutdown Timings
@@ -450,6 +454,7 @@ pub mod exec;
 pub mod exec_control;
 pub mod fs;
 pub mod heartbeat;
+pub mod init_observation;
 pub mod message;
 pub mod tcp;
 #[doc(hidden)]

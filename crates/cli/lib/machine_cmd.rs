@@ -374,6 +374,7 @@ pub fn run(args: MachineArgs) -> ! {
     };
 
     let config = Config {
+        retention_source: launch.retention_source,
         agent_transport: args.agent_transport,
         sandbox_name: args.sandbox_name,
         sandbox_id: args.sandbox_id,

@@ -1,4 +1,7 @@
+mod core_error;
 mod jobs;
+mod snapshot_group;
+mod snapshot_spawn;
 
 use std::{
     ffi::c_void,
@@ -19,7 +22,6 @@ use magnus::{
 };
 use microsandbox_core::{
     AgentClientError, BackendKind, MicrosandboxError, MicrosandboxResult, Operation,
-    PublishedSnapshotArtifact, SnapshotArtifactKind, SnapshotSourceRecoveryError,
     UnsupportedReason,
     backend::{CloudBackend, LocalBackend, resolve_default_backend, set_default_backend},
     image::{Image, ImageHandle},
@@ -31,9 +33,11 @@ use microsandbox_core::{
         SandboxPage, SandboxPingResult, SandboxStatus, SandboxStopResult, SandboxTouchResult,
         SecretSource,
     },
-    snapshot::{SaveOpts, Snapshot, SnapshotHandle},
+    snapshot::{Checkpoint as Snapshot, SaveOpts, SnapshotHandle},
     volume::{Volume, VolumeHandle, VolumeKind},
 };
+
+use core_error::core_error;
 
 // -------------------------------------------------------------------------------------------------
 // GVL release — FFI
@@ -270,6 +274,12 @@ fn core_error_class_name(error: &MicrosandboxError) -> &'static str {
         MicrosandboxError::SnapshotImageMissing(_) => "SnapshotImageMissingError",
         MicrosandboxError::SnapshotIntegrity(_) => "SnapshotIntegrityError",
         MicrosandboxError::SnapshotSourceRecovery(_) => "SnapshotSourceRecoveryError",
+        MicrosandboxError::SnapshotImport(_) => "SnapshotImportError",
+        MicrosandboxError::SnapshotVerification(_) => "SnapshotVerificationError",
+        MicrosandboxError::SnapshotRemovalRecovery { .. } => "SnapshotRemovalRecoveryError",
+        MicrosandboxError::SnapshotGroupRemovalRecovery { .. } => {
+            "SnapshotGroupRemovalRecoveryError"
+        }
         MicrosandboxError::SnapshotMigration { .. } => "SnapshotMigrationError",
         // Always present: the extension enables the core's `net` feature.
         MicrosandboxError::NetworkBuilder(_) => "NetworkPolicyError",
@@ -294,70 +304,6 @@ fn exception_class(ruby: &Ruby, name: &str) -> ExceptionClass {
                 .or_else(|_| module.const_get::<_, ExceptionClass>("Error"))
         })
         .unwrap_or_else(|_| ruby.exception_runtime_error())
-}
-
-/// Convert a core error into the matching typed Ruby exception. The message is
-/// always the core error's `Display` rendering, except for `Unsupported`,
-/// which names the Ruby API instead of the Rust path.
-fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
-    if let MicrosandboxError::Unsupported { op, reason } = &error {
-        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason));
-    }
-    if let MicrosandboxError::SnapshotSourceRecovery(recovery) = &error {
-        return snapshot_source_recovery_error(ruby, error.to_string(), recovery);
-    }
-    Error::new(
-        exception_class(ruby, core_error_class_name(&error)),
-        error.to_string(),
-    )
-}
-
-/// Build a `Microsandbox::SnapshotSourceRecoveryError` carrying the recovery
-/// locator as the attributes read by its `attr_reader`s, mirroring the Python
-/// SDK's `SnapshotSourceRecoveryError`, so callers never parse the message.
-fn snapshot_source_recovery_error(
-    ruby: &Ruby,
-    message: String,
-    recovery: &SnapshotSourceRecoveryError,
-) -> Error {
-    let class = exception_class(ruby, "SnapshotSourceRecoveryError");
-    let exception = match class.new_instance((message.as_str(),)) {
-        Ok(exception) => exception,
-        Err(_) => return Error::new(class, message),
-    };
-    // Best-effort extras; the message already carries the locator.
-    if let Some(object) = RObject::from_value(exception.as_value()) {
-        let checkpoint_path = recovery.checkpoint_path.to_string_lossy().into_owned();
-        let _ = object.ivar_set("@source_sandbox", recovery.source_sandbox.as_str());
-        let _ = object.ivar_set("@checkpoint_id", recovery.checkpoint_id.as_str());
-        let _ = object.ivar_set("@checkpoint_root", recovery.checkpoint_root.as_str());
-        let _ = object.ivar_set("@checkpoint_path", checkpoint_path);
-        let _ = object.ivar_set("@detail", recovery.detail.as_str());
-        let _ = object.ivar_set("@publication_error", recovery.publication_error.as_deref());
-        let artifact = recovery.artifact.as_ref();
-        if let Some(Ok(hash)) = artifact.map(|artifact| published_artifact_hash(ruby, artifact)) {
-            let _ = object.ivar_set("@artifact", hash);
-        }
-    }
-    exception.into()
-}
-
-/// The snapshot that was published despite the source failing to recover, as
-/// a Hash with the same keys as the Python SDK's `PublishedSnapshotArtifact`.
-fn published_artifact_hash(
-    ruby: &Ruby,
-    artifact: &PublishedSnapshotArtifact,
-) -> Result<RHash, Error> {
-    let kind = match artifact.kind {
-        SnapshotArtifactKind::Installed => "installed",
-        SnapshotArtifactKind::Archive => "archive",
-    };
-    let hash = ruby.hash_new();
-    hash.aset("kind", kind)?;
-    hash.aset("path", artifact.path.to_string_lossy().into_owned())?;
-    hash.aset("snapshot_id", artifact.snapshot_id.as_str())?;
-    hash.aset("digest", artifact.digest.as_str())?;
-    Ok(hash)
 }
 
 /// Build a `Microsandbox::UnsupportedError` carrying the rendered message plus
@@ -1086,7 +1032,7 @@ struct RubySnapshotHandle {
     inner: SnapshotHandle,
 }
 
-#[magnus::wrap(class = "Microsandbox::Snapshot", free_immediately, size)]
+#[magnus::wrap(class = "Microsandbox::Checkpoint", free_immediately, size)]
 struct RubySnapshot {
     inner: Snapshot,
 }
@@ -1828,11 +1774,6 @@ impl RubySandboxHandle {
         run(ruby, async move { handle.destroy_with(options).await })
     }
 
-    fn snapshot(ruby: &Ruby, this: typed_data::Obj<Self>, name: String) -> Result<RHash, Error> {
-        let handle = Arc::clone(&this.inner);
-        snapshot_hash(run(ruby, async move { handle.snapshot(&name).await })?)
-    }
-
     fn metrics(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<RubySandboxMetrics, Error> {
         let handle = Arc::clone(&this.inner);
         let inner = run(ruby, async move { handle.metrics().await })?;
@@ -1997,6 +1938,23 @@ impl RubyVolumeHandle {
 // -------------------------------------------------------------------------------------------------
 
 impl RubySnapshot {
+    fn remove(
+        ruby: &Ruby,
+        this: typed_data::Obj<Self>,
+        args: &[Value],
+    ) -> Result<snapshot_group::RubyCheckpointRemoveResult, Error> {
+        let parsed = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        reject_unknown_keywords(ruby, parsed.keywords, &["force"])?;
+        let force = keyword::<bool>(parsed.keywords, "force")?.unwrap_or(false);
+        let checkpoint = this.inner.clone();
+        let inner = run(ruby, async move {
+            checkpoint
+                .remove_with(|options| if force { options.force() } else { options })
+                .await
+        })?;
+        Ok(snapshot_group::RubyCheckpointRemoveResult { inner })
+    }
+
     fn digest(&self) -> String {
         self.inner.digest().to_owned()
     }
@@ -2390,7 +2348,9 @@ fn snapshot_remove(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
     }
     let name = parsed.required.0;
     let force = parsed.optional.0.unwrap_or(false);
-    run(ruby, async move { Snapshot::remove(&name, force).await })
+    run(ruby, async move {
+        Snapshot::remove_by_reference(&name, force).await
+    })
 }
 
 fn snapshot_save(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
@@ -2404,15 +2364,15 @@ fn snapshot_save(ruby: &Ruby, args: &[Value]) -> Result<(), Error> {
             "plain_tar",
             "since",
             "last_layers",
+            "compatibility",
         ],
     )?;
     let reference = parsed.required.0;
     let out = PathBuf::from(parsed.required.1);
-    let opts = snapshot_save_opts(parsed.keywords)?;
-    run(
-        ruby,
-        async move { Snapshot::save(&reference, &out, opts).await },
-    )
+    let opts = snapshot_save_opts(ruby, parsed.keywords)?;
+    run(ruby, async move {
+        Snapshot::save_by_reference(&reference, &out, opts).await
+    })
 }
 
 // -- Image statics -----------------------------------------------------------
@@ -2659,30 +2619,33 @@ fn fs_metadata_hash(md: FsMetadata) -> Result<RHash, Error> {
     Ok(h)
 }
 
-fn snapshot_hash(snapshot: Snapshot) -> Result<RHash, Error> {
-    let hash = current_ruby().hash_new();
-    hash.aset("digest", snapshot.digest())?;
-    hash.aset("reference", snapshot.reference().value())?;
-    hash.aset("reference_kind", snapshot.reference().kind())?;
-    hash.aset("size_bytes", snapshot.size_bytes())?;
-    Ok(hash)
-}
-
 fn parse_snapshot_save_args(ruby: &Ruby, args: &[Value]) -> Result<(PathBuf, SaveOpts), Error> {
     let parsed = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
     reject_unknown_keywords(
         ruby,
         parsed.keywords,
-        &["with_parents", "with_image", "plain_tar"],
+        &[
+            "with_parents",
+            "with_image",
+            "plain_tar",
+            "since",
+            "last_layers",
+            "compatibility",
+        ],
     )?;
     Ok((
         PathBuf::from(parsed.required.0),
-        snapshot_save_opts(parsed.keywords)?,
+        snapshot_save_opts(ruby, parsed.keywords)?,
     ))
 }
 
-fn snapshot_save_opts(keywords: RHash) -> Result<SaveOpts, Error> {
+fn snapshot_save_opts(ruby: &Ruby, keywords: RHash) -> Result<SaveOpts, Error> {
     Ok(SaveOpts {
+        compatibility: keyword::<String>(keywords, "compatibility")?
+            .as_deref()
+            .unwrap_or("current")
+            .parse()
+            .map_err(|error: MicrosandboxError| argument_error(ruby, error.to_string()))?,
         with_parents: keyword::<bool>(keywords, "with_parents")?.unwrap_or(false),
         with_image: keyword::<bool>(keywords, "with_image")?.unwrap_or(false),
         plain_tar: keyword::<bool>(keywords, "plain_tar")?.unwrap_or(false),
@@ -2778,6 +2741,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     sandbox.define_method("ping", method!(RubySandbox::ping, 0))?;
     sandbox.define_method("touch", method!(RubySandbox::touch, 0))?;
     sandbox.define_method("metrics", method!(RubySandbox::metrics, 0))?;
+    sandbox.define_method("snapshot", method!(RubySandbox::snapshot, -1))?;
     sandbox.define_method("logs", method!(RubySandbox::logs, -1))?;
     sandbox.define_method("ssh_exec", method!(RubySandbox::ssh_exec, -1))?;
     // filesystem
@@ -2835,7 +2799,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     )?;
     handle.define_method("restart", method!(RubySandboxHandle::restart, -1))?;
     handle.define_method("destroy", method!(RubySandboxHandle::destroy, -1))?;
-    handle.define_method("snapshot", method!(RubySandboxHandle::snapshot, 1))?;
+    handle.define_method("snapshot", method!(RubySandboxHandle::snapshot, -1))?;
     handle.define_method("metrics", method!(RubySandboxHandle::metrics, 0))?;
     handle.define_method("ping", method!(RubySandboxHandle::ping, 0))?;
     handle.define_method("touch", method!(RubySandboxHandle::touch, 0))?;
@@ -2960,19 +2924,26 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     vol_handle.define_method("remove", method!(RubyVolumeHandle::remove, 0))?;
 
     // -- Snapshot ------------------------------------------------------------
-    let snapshot = module.define_class("Snapshot", ruby.class_object())?;
+    let snapshot = module.define_class("Checkpoint", ruby.class_object())?;
+    snapshot_group::register(ruby, module)?;
+    snapshot_spawn::register(ruby, module)?;
     snapshot.define_singleton_method("open", function!(snapshot_open, -1))?;
     snapshot.define_singleton_method("get", function!(snapshot_get, -1))?;
     snapshot.define_singleton_method("list", function!(snapshot_list, -1))?;
     snapshot.define_singleton_method("remove", function!(snapshot_remove, -1))?;
     snapshot.define_singleton_method("save", function!(snapshot_save, -1))?;
+    snapshot.define_method("id", method!(RubySnapshot::id, 0))?;
+    snapshot.define_method("remove", method!(RubySnapshot::remove, -1))?;
     snapshot.define_method("digest", method!(RubySnapshot::digest, 0))?;
     snapshot.define_method("size_bytes", method!(RubySnapshot::size_bytes, 0))?;
     snapshot.define_method("reference", method!(RubySnapshot::reference, 0))?;
     snapshot.define_method("reference_kind", method!(RubySnapshot::reference_kind, 0))?;
     snapshot.define_method("save_to", method!(RubySnapshot::save_to, -1))?;
+    snapshot.define_method("save", method!(RubySnapshot::save_to, -1))?;
+    snapshot.define_method("verify", method!(RubySnapshot::verify, 0))?;
 
     let snap_handle = module.define_class("SnapshotHandle", ruby.class_object())?;
+    snap_handle.define_method("id", method!(RubySnapshotHandle::id, 0))?;
     snap_handle.define_method("digest", method!(RubySnapshotHandle::digest, 0))?;
     snap_handle.define_method("name", method!(RubySnapshotHandle::name, 0))?;
     snap_handle.define_method("size_bytes", method!(RubySnapshotHandle::size_bytes, 0))?;

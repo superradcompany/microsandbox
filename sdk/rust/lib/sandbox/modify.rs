@@ -10,6 +10,7 @@ use microsandbox_types::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
+use crate::backend::local::snapshot::configuration_capture::ExpectedConfigurationCapture;
 use crate::backend::{Backend, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
@@ -133,8 +134,15 @@ struct LiveControl {
 
 /// A published runtime checkpoint and the independent outcome of source recovery.
 pub(crate) struct CheckpointCaptureOutcome {
+    pub(crate) configuration: Option<ExpectedConfigurationCapture>,
     pub(crate) checkpoint: microsandbox_protocol::control::CheckpointState,
     pub(crate) recovery_error: Option<String>,
+}
+
+/// A disk generation and its independently selected configuration owner.
+pub(crate) struct DiskCheckpointCaptureOutcome {
+    pub(crate) checkpoint: microsandbox_runtime::control::DiskCheckpointControlState,
+    pub(crate) configuration: Option<ExpectedConfigurationCapture>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -389,6 +397,19 @@ impl SandboxModificationBuilder {
             serde_json::to_string(&prospective)?;
         }
         let restart_required = plan_requires_restart(&plan) && running_status(status);
+        // Select the metadata path before any live effect. Unsupported older runtimes
+        // keep their catalog path; dispatched updates are never replayed there.
+        let label_owner = if !restart_required && has_live_label_change(&plan) {
+            match &session {
+                Some(session) => session
+                    .label_update_owner()
+                    .await
+                    .map_err(MicrosandboxError::ControlClient)?,
+                None => None,
+            }
+        } else {
+            None
+        };
         if restart_required {
             handle.stop().await?;
         }
@@ -518,20 +539,40 @@ impl SandboxModificationBuilder {
         if !plan.changes.is_empty() {
             apply_patch_to_config(&mut config, &self.patch);
             apply_secret_patch_to_config(&mut config, &self.patch)?;
+            let labels_persisted_by_runtime = label_owner.is_some();
             let active_labels = if !restart_required && has_live_label_change(&plan) {
                 let (Some(active), Some(expected_json)) = (active.as_mut(), active_json.clone())
                 else {
                     return Err(MicrosandboxError::ControlStateChanged);
                 };
                 apply_label_patch_to_config(active, &self.patch);
-                Some(ActiveLabelsUpdate {
-                    expected_json,
-                    active_config_json: serde_json::to_string(active)?,
-                })
+                if let Some(owner) = label_owner {
+                    control_session(&session)?
+                        .update_labels(
+                            owner,
+                            &expected_json,
+                            handle.config_json(),
+                            serde_json::to_string(&config)?,
+                            self.patch.labels.iter().cloned().collect(),
+                            self.patch.labels_remove.clone(),
+                        )
+                        .await
+                        .map_err(MicrosandboxError::ControlClient)?;
+                    None
+                } else {
+                    Some(ActiveLabelsUpdate {
+                        expected_json,
+                        active_config_json: serde_json::to_string(active)?,
+                    })
+                }
             } else {
                 None
             };
-            persist_config(&self.backend, &handle, &config, active_labels).await?;
+            // The capable runtime commits desired config, active labels and their index
+            // in one transaction. A second SDK write could overwrite a concurrent edit.
+            if !labels_persisted_by_runtime {
+                persist_config(&self.backend, &handle, &config, active_labels).await?;
+            }
         }
         if restart_required {
             start_after_modify(&handle).await?;
@@ -827,7 +868,9 @@ async fn live_control(
     patch: &SandboxModificationPatch,
     policy: ModificationPolicy,
 ) -> MicrosandboxResult<(LiveControl, Option<ControlSession>)> {
-    let needs_control = patch.root_disk_size_mib.is_some()
+    let needs_control = !patch.labels.is_empty()
+        || !patch.labels_remove.is_empty()
+        || patch.root_disk_size_mib.is_some()
         || patch.cpus.is_some()
         || patch.memory_mib.is_some()
         || !patch.secrets.is_empty()
@@ -1142,7 +1185,15 @@ pub(crate) async fn control_checkpoint_create(
             ),
         ));
     }
+    let configuration = ExpectedConfigurationCapture::prepare(local, name, &session).await?;
     let request = microsandbox_protocol::control::CheckpointCreate {
+        retain_configuration: configuration.as_ref().map(|_| true),
+        retain_configuration_exec_limits: (configuration.is_some()
+            && capabilities.configuration_exec_limits)
+            .then_some(true),
+        retain_configuration_storage: (configuration.is_some()
+            && capabilities.configuration_storage)
+            .then_some(true),
         guest_flush: capture_flush_policy(Some(capabilities), guest_flush, false)?,
         record_integrity,
         checkpoint_id,
@@ -1158,7 +1209,9 @@ pub(crate) async fn control_checkpoint_create(
         .request(&CreateCheckpoint(request))
         .await
         .map_err(crate::MicrosandboxError::ControlClient)?;
-    checkpoint_response(response)
+    let mut outcome = checkpoint_response(response)?;
+    outcome.configuration = configuration;
+    Ok(outcome)
 }
 
 fn checkpoint_response(
@@ -1168,6 +1221,7 @@ fn checkpoint_response(
         MicrosandboxError::Runtime("control response omitted checkpoint state".into())
     })?;
     Ok(CheckpointCaptureOutcome {
+        configuration: None,
         checkpoint,
         recovery_error: response.recovery_error,
     })
@@ -1179,7 +1233,7 @@ pub(crate) async fn control_disk_checkpoint_create(
     name: &str,
     checkpoint_id: String,
     guest_flush: microsandbox_types::GuestFlush,
-) -> MicrosandboxResult<microsandbox_runtime::control::DiskCheckpointControlState> {
+) -> MicrosandboxResult<DiskCheckpointCaptureOutcome> {
     let session = local.control_session(name).await?.ok_or_else(|| {
         MicrosandboxError::Runtime("runtime control endpoint is unavailable".into())
     })?;
@@ -1188,7 +1242,15 @@ pub(crate) async fn control_disk_checkpoint_create(
         return Err(MicrosandboxError::unsupported(Operation::SnapshotOps,
             UnsupportedReason::NotAvailable("this runtime does not support live disk-only snapshots; recreate the sandbox with the updated runtime".into())));
     }
+    let configuration = ExpectedConfigurationCapture::prepare(local, name, &session).await?;
     let request = microsandbox_protocol::control::DiskCheckpointCreate {
+        retain_configuration: configuration.as_ref().map(|_| true),
+        retain_configuration_exec_limits: (configuration.is_some()
+            && capabilities.configuration_exec_limits)
+            .then_some(true),
+        retain_configuration_storage: (configuration.is_some()
+            && capabilities.configuration_storage)
+            .then_some(true),
         checkpoint_id,
         guest_flush: capture_flush_policy(Some(capabilities), guest_flush, true)?,
     };
@@ -1196,11 +1258,15 @@ pub(crate) async fn control_disk_checkpoint_create(
         .request(&CreateDiskCheckpoint(request))
         .await
         .map_err(crate::MicrosandboxError::ControlClient)?;
-    Ok(microsandbox_runtime::control::DiskCheckpointControlState {
-        checkpoint_id: response.checkpoint_id,
-        path: response.path,
-        disk: response.disk,
-        owned_volumes: response.owned_volumes,
+    Ok(DiskCheckpointCaptureOutcome {
+        configuration,
+        checkpoint: microsandbox_runtime::control::DiskCheckpointControlState {
+            configuration: response.configuration,
+            checkpoint_id: response.checkpoint_id,
+            path: response.path,
+            disk: response.disk,
+            owned_volumes: response.owned_volumes,
+        },
     })
 }
 
@@ -3521,6 +3587,7 @@ mod tests {
     fn checkpoint_reply(ok: bool) -> microsandbox_protocol::control::CheckpointResult {
         microsandbox_protocol::control::CheckpointResult {
             checkpoint: Some(microsandbox_protocol::control::CheckpointState {
+                configuration: None,
                 checkpoint_id: "checkpoint_test".into(),
                 checkpoint_root: format!("sha256:{}", "a".repeat(64)),
                 path: "/runtime/checkpoint_test".into(),
@@ -5399,7 +5466,11 @@ mod tests {
         };
         assert_eq!(change.field, SECRET_FIELD);
         assert_eq!(change.change, SecretChangeKind::Added);
+        #[cfg(feature = "net")]
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // A build without network support must still redact a refused secret plan.
+        #[cfg(not(feature = "net"))]
+        assert_eq!(change.disposition, ModificationDisposition::Unsupported);
     }
 
     //----------------------------------------------------------------------------------------------
