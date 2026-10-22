@@ -112,7 +112,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[ignore = "requires a local VM runtime and registry access"]
+    #[ignore = "requires MSB_TEST_RUNTIME_DIR, a local VM runtime, and registry access"]
     async fn live_idle_timeout_retains_exit_until_explicit_cleanup() {
         use crate::Sandbox;
         use crate::backend::with_backend;
@@ -123,11 +123,19 @@ mod tests {
             .build()
             .await
             .unwrap();
-        // Install the released runtime into the isolated test home. No runtime
-        // source changes or global installation are involved in this check.
-        crate::setup::install_runtime(backend.config(), Default::default())
-            .await
-            .unwrap();
+        // Exercise the candidate runtime built for this integration run, even
+        // before its release archive exists.
+        let runtime_dir = std::env::var_os("MSB_TEST_RUNTIME_DIR")
+            .expect("MSB_TEST_RUNTIME_DIR must point to the built runtime pair");
+        crate::setup::install_runtime(
+            backend.config(),
+            crate::setup::InstallOptions {
+                source: crate::setup::InstallSource::Directory(runtime_dir.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         with_backend(backend, async {
             let builder = Sandbox::builder("retained-idle")
                 .image("alpine:3.20")

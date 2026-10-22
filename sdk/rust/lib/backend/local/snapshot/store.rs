@@ -1322,6 +1322,13 @@ mod tests {
             .await
             .unwrap();
         let parent = local.snapshots_dir();
+        #[cfg(unix)]
+        let parent = {
+            std::fs::create_dir_all(&parent).unwrap();
+            let alias = home.path().join("snapshot-alias");
+            std::os::unix::fs::symlink(&parent, &alias).unwrap();
+            alias
+        };
         let artifact = parent.join("flat");
         let snapshot = manifest(78, None);
         std::fs::create_dir_all(&artifact).unwrap();
@@ -1330,12 +1337,26 @@ mod tests {
             snapshot.to_canonical_bytes().unwrap(),
         )
         .unwrap();
+        let indexed_artifact_path = artifact.canonicalize().unwrap();
         let opened = open_snapshot(&local, artifact.to_str().unwrap())
             .await
             .unwrap();
         index_upsert(&local, &artifact, opened.digest(), opened.manifest())
             .await
             .unwrap();
+        #[cfg(unix)]
+        {
+            let row = indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut legacy: snapshot_entity::ActiveModel = row.into();
+            legacy.artifact_path = Set(artifact.display().to_string());
+            snapshot_entity::Entity::insert(legacy)
+                .exec(local.db().await.unwrap().write())
+                .await
+                .unwrap();
+        }
         let lease = StorageLease::try_exclusive(&artifact).unwrap().unwrap();
         super::super::deletion::quarantine(&artifact).unwrap();
         drop(lease);
@@ -1343,6 +1364,12 @@ mod tests {
         super::super::deletion::recover_parent(&local, &parent)
             .await
             .unwrap();
+        assert!(
+            indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(indexed_path(&local, &artifact).await.unwrap().is_none());
 
         std::fs::create_dir(&artifact).unwrap();
@@ -1365,7 +1392,12 @@ mod tests {
         super::super::deletion::recover_parent(&local, &parent)
             .await
             .unwrap();
-        assert!(indexed_path(&local, &artifact).await.unwrap().is_some());
+        assert!(
+            indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
     }
 

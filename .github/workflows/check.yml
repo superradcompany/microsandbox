@@ -1691,10 +1691,12 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          MSB_TEST_RUNTIME_DIR: ${{ github.workspace }}/build
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
+          ln -sf "libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}" build/libkrunfw.so
           # Functional VM tests deliberately create multiple writable-root sandboxes. Give this
           # dedicated runner a stable admission pool so unrelated tests do not depend on its
           # momentary MemAvailable-derived pool; Auto still exercises the shipping 1536 MiB
