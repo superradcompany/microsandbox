@@ -148,7 +148,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 serde_ignored = "0.1"
 serde_json = "1.0"
-serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["comments", "deserialize"] }
 sha2 = "0.11.0"
 # Temporary scheduling fix for smoltcp-rs/smoltcp#1214, based on v0.14.0.
 smoltcp = { git = "https://github.com/superradcompany/smoltcp", rev = "509a8fcae9a8aae7f1484b719a4fb29b0581ecc9", default-features = false }
@@ -162,7 +162,7 @@ thiserror = "2.0"
 # A Ruby process may fork after the native runtime has started; inherited
 # parking_lot waiter state can reference worker threads that do not survive in
 # the child, causing the rebuilt runtime to segfault.
-tokio = { version = "1.52", features = [
+tokio = { version = "1.53.3", features = [
     "fs",
     "io-util",
     "io-std",

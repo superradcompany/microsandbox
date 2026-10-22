@@ -368,7 +368,8 @@ impl ActivityTracker {
 impl BulkInputState {
     fn new(file: File) -> AgentdResult<Self> {
         Ok(Self {
-            port: AsyncFd::new(file)?,
+            // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+            port: unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?,
             read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
             input: BytesMut::new(),
         })
@@ -490,7 +491,8 @@ pub async fn run(
     set_nonblocking(port_fd)?;
 
     // A single AsyncFd tracks both readable and writable readiness.
-    let async_port = AsyncFd::new(port_file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(port_file) }.map_err(std::io::Error::from)?;
 
     // A combined port carries full raw records; a dual-port control stream does not. Size the
     // allocation from the selected topology so combined throughput does not pay four reads per
@@ -1233,7 +1235,8 @@ async fn bulk_writer_task(
     mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?;
     let mut generation = 0;
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
@@ -5156,9 +5159,11 @@ mod tests {
 
         let (mut control_source, control) = UnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
-        let control = AsyncFd::new(control).unwrap();
+        // SAFETY: UnixStream owns a stable descriptor for the lifetime of AsyncFd.
+        let control = unsafe { AsyncFd::register(control) }.unwrap();
         let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
-        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+        let pipe_writer = unsafe { AsyncFd::register(pipe_writer) }.unwrap();
         // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
         let mut writable = pipe_writer.writable().await.unwrap();
         loop {

@@ -1689,7 +1689,8 @@ fn nonblocking_input(fd: OwnedFd) -> std::io::Result<AsyncFd<OwnedFd>> {
     {
         return Err(std::io::Error::last_os_error());
     }
-    AsyncFd::new(fd)
+    // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+    unsafe { AsyncFd::register(fd) }.map_err(Into::into)
 }
 
 fn write_nonblocking_fd(fd: RawFd, data: &[u8]) -> std::io::Result<usize> {

@@ -166,6 +166,12 @@ impl WakePipe {
         self.read_fd.as_raw_fd()
     }
 
+    /// Clone the pollable read end for an independently owned registration.
+    #[cfg(unix)]
+    pub fn try_clone_read_fd(&self) -> std::io::Result<OwnedFd> {
+        self.read_fd.try_clone()
+    }
+
     /// Waitable handle for Windows wait APIs.
     #[cfg(windows)]
     pub fn as_raw_handle(&self) -> RawHandle {

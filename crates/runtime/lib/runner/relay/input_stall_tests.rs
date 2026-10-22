@@ -19,7 +19,7 @@ async fn assert_pending_once<F: std::future::Future>(mut future: std::pin::Pin<&
 fn blocked_write(shared: Arc<ConsoleSharedState>) -> tokio::task::JoinHandle<bool> {
     tokio::spawn(async move {
         #[cfg(unix)]
-        let capacity = AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()).unwrap();
+        let capacity = register_wake_pipe(&shared.rx_capacity_wake).unwrap();
 
         push_bulk_fragment_with_timeout(
             &shared,
@@ -123,7 +123,7 @@ async fn input_stall_temporary_backpressure_keeps_admission_open() {
         let writer_shared = Arc::clone(&shared);
         let writer = tokio::spawn(async move {
             #[cfg(unix)]
-            let capacity = AsyncFd::new(writer_shared.rx_capacity_wake.as_raw_fd()).unwrap();
+            let capacity = register_wake_pipe(&writer_shared.rx_capacity_wake).unwrap();
 
             push_bulk_fragment_with_timeout(
                 &writer_shared,
