@@ -740,13 +740,18 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
     Ok(input.trim().eq_ignore_ascii_case("y"))
 }
 
-/// Whether this diagnosis includes the WHP host prerequisite problem.
+/// Whether this diagnosis includes a WHP host problem that enabling the
+/// feature can fix. Problems where the feature is already enabled do not
+/// advise the enable command, so `--fix` must not offer it either.
 #[cfg(windows)]
 fn has_windows_hypervisor_problem(diagnosis: &microsandbox::setup::Diagnosis) -> bool {
-    diagnosis
-        .problems
-        .iter()
-        .any(|problem| problem.headline == "Windows Hypervisor Platform is not available")
+    diagnosis.problems.iter().any(|problem| {
+        problem.headline == "Windows Hypervisor Platform is not available"
+            && problem
+                .hints
+                .iter()
+                .any(|hint| hint == microsandbox::setup::ENABLE_HYPERVISOR_PLATFORM_COMMAND)
+    })
 }
 
 /// Apply the elevated Windows Hypervisor Platform enable flow.

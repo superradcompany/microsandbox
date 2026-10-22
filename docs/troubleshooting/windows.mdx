@@ -56,7 +56,13 @@ Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 </CodeGroup>
 
-If the feature is enabled but `msb doctor` still reports that the hypervisor is unavailable, confirm that virtualization is enabled in firmware/UEFI, then reboot once.
+If the feature is enabled but `msb doctor` still reports that the hypervisor is unavailable, restart Windows if a restart is pending. Otherwise, the likely causes are, in order:
+
+1. Hardware virtualization is turned off in the firmware (BIOS/UEFI) settings.
+2. The hypervisor is disabled at boot. If `bcdedit /enum {current}` shows `hypervisorlaunchtype Off`, run `bcdedit /set hypervisorlaunchtype auto` from an elevated prompt, then reboot.
+3. This Windows is itself a virtual machine without nested virtualization. Enable nested virtualization on its host.
+
+`msb doctor --fix` does not offer to enable the feature when it is already enabled.
 
 ## Runtime path
 

@@ -2,9 +2,13 @@
 
 use std::ffi::c_void;
 use std::fmt;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -21,6 +25,18 @@ const WINHV_PLATFORM_DLL: &str = "WinHvPlatform.dll";
 const WHV_GET_CAPABILITY: &[u8] = b"WHvGetCapability\0";
 const WHV_CAPABILITY_CODE_HYPERVISOR_PRESENT: i32 = 0;
 const WHV_CAPABILITY_BUFFER_LEN: usize = 1024;
+
+/// Reads the `HypervisorPlatform` install state from `Win32_OptionalFeature`
+/// (documented and readable without elevation) and whether Component Based
+/// Servicing has a restart pending. Prints `<InstallState>;<True|False>`.
+const SERVICING_PROBE_SCRIPT: &str = concat!(
+    "$ErrorActionPreference = 'Stop'; ",
+    "$feature = Get-CimInstance -ClassName Win32_OptionalFeature -Filter 'Name=''HypervisorPlatform'''; ",
+    r"$pending = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'; ",
+    "'{0};{1}' -f $feature.InstallState, $pending",
+);
+const SERVICING_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICING_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -44,8 +60,21 @@ pub enum WindowsHostSetupError {
         reason: String,
     },
 
-    /// WHP reported that no hypervisor is available to the current boot session.
+    /// WHP reported that no hypervisor is available to the current boot session,
+    /// and the `HypervisorPlatform` feature state could not be determined.
     HypervisorNotPresent,
+
+    /// WHP reported that no hypervisor is available because the
+    /// `HypervisorPlatform` feature is not enabled.
+    HypervisorPlatformNotEnabled,
+
+    /// `HypervisorPlatform` is enabled, but Windows has a restart pending, so the
+    /// hypervisor is not active for the current boot session yet.
+    HypervisorRestartPending,
+
+    /// `HypervisorPlatform` is enabled and no restart is pending, but the
+    /// hypervisor did not start for the current boot session.
+    HypervisorNotLaunched,
 
     /// WHP returned an error while querying host capabilities.
     CapabilityQueryFailed {
@@ -62,6 +91,14 @@ pub enum WindowsHostSetupError {
 
 struct WhpLibrary {
     module: HMODULE,
+}
+
+/// Install state of the `HypervisorPlatform` optional feature.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum FeatureState {
+    Enabled,
+    NotEnabled,
+    Unknown,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -87,6 +124,19 @@ impl WindowsHostSetupError {
                 "WHP is installed but the hypervisor is not active for this Windows boot session"
                     .to_string()
             }
+            Self::HypervisorPlatformNotEnabled => {
+                format!("the {HYPERVISOR_PLATFORM_FEATURE} Windows feature is not enabled")
+            }
+            Self::HypervisorRestartPending => {
+                format!(
+                    "{HYPERVISOR_PLATFORM_FEATURE} is enabled, but Windows has a restart pending"
+                )
+            }
+            Self::HypervisorNotLaunched => {
+                format!(
+                    "{HYPERVISOR_PLATFORM_FEATURE} is enabled, but the hypervisor did not start for this Windows boot session"
+                )
+            }
             Self::CapabilityQueryFailed { hresult } => {
                 format!(
                     "WHvGetCapability failed with HRESULT 0x{:08x}",
@@ -101,13 +151,44 @@ impl WindowsHostSetupError {
 
     /// Actionable setup hints for CLI and SDK consumers.
     pub fn hints(&self) -> Vec<&'static str> {
-        vec![
+        let enable_hints = [
             "Run PowerShell as Administrator:",
             ENABLE_HYPERVISOR_PLATFORM_COMMAND,
             "Reboot if Windows asks, then run the sandbox again.",
             "HypervisorPlatform is the WHP API that libkrun uses; it is not the full Hyper-V management role.",
             "VirtualMachinePlatform for WSL2/Docker is separate, so it can be enabled while HypervisorPlatform is still off.",
-        ]
+        ];
+        let launch_causes = [
+            "1. Hardware virtualization is turned off in the firmware (BIOS/UEFI) settings; turn it on.",
+            "2. The hypervisor is disabled at boot: if `bcdedit /enum {current}` shows `hypervisorlaunchtype Off`, run `bcdedit /set hypervisorlaunchtype auto` as Administrator, then reboot.",
+            "3. This Windows is itself a virtual machine without nested virtualization; enable nested virtualization on its host.",
+        ];
+
+        match self {
+            Self::HypervisorRestartPending => {
+                vec!["Restart Windows to finish applying the change, then run the sandbox again."]
+            }
+            Self::HypervisorNotLaunched => {
+                let mut hints = vec!["Likely causes, in order:"];
+                hints.extend(launch_causes);
+                hints
+            }
+            // The feature state could not be read, so cover both the
+            // not-enabled and the enabled-but-not-starting cases.
+            Self::HypervisorNotPresent => {
+                let mut hints = enable_hints.to_vec();
+                hints.push(
+                    "If HypervisorPlatform is already enabled and Windows has restarted since, the hypervisor is not starting. Likely causes, in order:",
+                );
+                hints.extend(launch_causes);
+                hints
+            }
+            Self::HypervisorPlatformNotEnabled
+            | Self::HypervisorPlatformLibraryUnavailable { .. }
+            | Self::HypervisorPlatformEntryPointMissing { .. }
+            | Self::CapabilityQueryFailed { .. }
+            | Self::CapabilityPayloadInvalid { .. } => enable_hints.to_vec(),
+        }
     }
 }
 
@@ -200,7 +281,12 @@ pub fn verify_windows_host_prerequisites() -> Result<(), WindowsHostSetupError> 
     }
 
     if !hypervisor_present_from_capability(&capability) {
-        return Err(WindowsHostSetupError::HypervisorNotPresent);
+        // WinHvPlatform.dll ships even when the feature is disabled, so the
+        // capability query alone cannot tell "not enabled" from "not starting".
+        let (feature, restart_pending) = probe_hypervisor_platform_servicing()
+            .map(|output| parse_servicing_probe(&output))
+            .unwrap_or((FeatureState::Unknown, false));
+        return Err(hypervisor_inactive_error(feature, restart_pending));
     }
 
     Ok(())
@@ -241,6 +327,81 @@ pub(super) fn host_section() -> (super::host::Section, Vec<super::host::Problem>
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
+/// Pick the setup error for a boot session where WHP reports no hypervisor, so
+/// the advice never asks to enable a feature that is already enabled.
+fn hypervisor_inactive_error(
+    feature: FeatureState,
+    restart_pending: bool,
+) -> WindowsHostSetupError {
+    match feature {
+        FeatureState::Enabled if restart_pending => WindowsHostSetupError::HypervisorRestartPending,
+        FeatureState::Enabled => WindowsHostSetupError::HypervisorNotLaunched,
+        FeatureState::NotEnabled => WindowsHostSetupError::HypervisorPlatformNotEnabled,
+        FeatureState::Unknown => WindowsHostSetupError::HypervisorNotPresent,
+    }
+}
+
+/// Run the servicing probe. Returns `None` when PowerShell or WMI is
+/// unavailable, fails, or does not answer in time.
+fn probe_hypervisor_platform_servicing() -> Option<String> {
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            SERVICING_PROBE_SCRIPT,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + SERVICING_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(SERVICING_PROBE_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Parse `<InstallState>;<True|False>` from the servicing probe.
+///
+/// `Win32_OptionalFeature.InstallState` is 1 (Enabled), 2 (Disabled),
+/// 3 (Absent), or 4 (Unknown).
+fn parse_servicing_probe(output: &str) -> (FeatureState, bool) {
+    let Some((install_state, restart_pending)) = output.trim().split_once(';') else {
+        return (FeatureState::Unknown, false);
+    };
+
+    let feature = match install_state.trim() {
+        "1" => FeatureState::Enabled,
+        "2" | "3" => FeatureState::NotEnabled,
+        _ => FeatureState::Unknown,
+    };
+    let restart_pending = restart_pending.trim().eq_ignore_ascii_case("true");
+
+    (feature, restart_pending)
+}
+
 fn hypervisor_present_from_capability(capability: &[u8]) -> bool {
     let bytes: [u8; 4] = capability[..4]
         .try_into()
@@ -272,6 +433,80 @@ mod tests {
         assert!(rendered.contains(HYPERVISOR_PLATFORM_FEATURE));
         assert!(rendered.contains(ENABLE_HYPERVISOR_PLATFORM_COMMAND));
         assert!(rendered.contains("VirtualMachinePlatform"));
+    }
+
+    #[test]
+    fn disabled_feature_gets_enable_advice() {
+        let error = hypervisor_inactive_error(FeatureState::NotEnabled, false);
+        let rendered = error.to_string();
+
+        assert_eq!(error, WindowsHostSetupError::HypervisorPlatformNotEnabled);
+        assert!(rendered.contains(ENABLE_HYPERVISOR_PLATFORM_COMMAND));
+        assert!(!rendered.contains("hypervisorlaunchtype"));
+    }
+
+    #[test]
+    fn enabled_feature_with_pending_restart_gets_restart_advice() {
+        let error = hypervisor_inactive_error(FeatureState::Enabled, true);
+        let rendered = error.to_string();
+
+        assert_eq!(error, WindowsHostSetupError::HypervisorRestartPending);
+        assert!(rendered.contains("Restart Windows"));
+        assert!(!rendered.contains(ENABLE_HYPERVISOR_PLATFORM_COMMAND));
+    }
+
+    #[test]
+    fn enabled_feature_without_pending_restart_lists_launch_causes() {
+        let error = hypervisor_inactive_error(FeatureState::Enabled, false);
+        let rendered = error.to_string();
+
+        assert_eq!(error, WindowsHostSetupError::HypervisorNotLaunched);
+        assert!(!rendered.contains(ENABLE_HYPERVISOR_PLATFORM_COMMAND));
+
+        let firmware = rendered.find("firmware").expect("firmware cause");
+        let launch_type = rendered
+            .find("bcdedit /set hypervisorlaunchtype auto")
+            .expect("hypervisorlaunchtype cause");
+        let nested = rendered
+            .find("nested virtualization")
+            .expect("nested virtualization cause");
+        assert!(firmware < launch_type && launch_type < nested);
+    }
+
+    #[test]
+    fn unknown_feature_state_covers_both_paths() {
+        let error = hypervisor_inactive_error(FeatureState::Unknown, true);
+        let rendered = error.to_string();
+
+        assert_eq!(error, WindowsHostSetupError::HypervisorNotPresent);
+        assert!(rendered.contains(ENABLE_HYPERVISOR_PLATFORM_COMMAND));
+        assert!(rendered.contains("hypervisorlaunchtype"));
+        assert!(rendered.contains("nested virtualization"));
+    }
+
+    #[test]
+    fn servicing_probe_output_parses() {
+        assert_eq!(
+            parse_servicing_probe("1;False\r\n"),
+            (FeatureState::Enabled, false)
+        );
+        assert_eq!(
+            parse_servicing_probe("1;True"),
+            (FeatureState::Enabled, true)
+        );
+        assert_eq!(
+            parse_servicing_probe("2;False"),
+            (FeatureState::NotEnabled, false)
+        );
+        assert_eq!(
+            parse_servicing_probe("3;True"),
+            (FeatureState::NotEnabled, true)
+        );
+        assert_eq!(
+            parse_servicing_probe(";False"),
+            (FeatureState::Unknown, false)
+        );
+        assert_eq!(parse_servicing_probe(""), (FeatureState::Unknown, false));
     }
 
     #[test]
