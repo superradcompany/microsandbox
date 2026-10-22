@@ -70,6 +70,10 @@ impl Backend for ConfigurationErrorBackend {
         BackendKind::Cloud
     }
 
+    fn info(&self) -> MicrosandboxResult<super::BackendInfo> {
+        Err(self.error())
+    }
+
     fn sandboxes(&self) -> &dyn SandboxBackend {
         self
     }

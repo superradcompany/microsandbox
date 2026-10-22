@@ -80,6 +80,9 @@ pub struct ModifyPortEndpoint {
 /// secret name. `env` / `value` / `store` are mutually exclusive ways to
 /// provide the secret material; setting more than one is rejected at the
 /// boundary. Only `value` may carry raw secret material.
+///
+/// Omitted policy fields keep the stored setting; a supplied `substitution`
+/// replaces the whole rule.
 #[napi(object)]
 #[derive(Default, Clone)]
 pub struct SecretModifySpec {
@@ -88,6 +91,21 @@ pub struct SecretModifySpec {
     pub store: Option<String>,
     pub placeholder: Option<String>,
     pub allowed_hosts: Option<Vec<String>>,
+    pub substitution: Option<SecretModifySubstitution>,
+    pub violation_action: Option<String>,
+    pub require_tls_identity: Option<bool>,
+    pub allow_placeholder_for: Option<Vec<String>>,
+}
+
+/// Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+/// take the create defaults.
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct SecretModifySubstitution {
+    pub headers: Option<bool>,
+    pub header_fields: Option<Vec<String>>,
+    pub query: Option<bool>,
+    pub body: Option<bool>,
 }
 
 /// Exit status for an executed command.

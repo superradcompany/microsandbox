@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { NetworkConfig } from "../network-config.js";
+import type { NetworkConfig, SecretSubstitution } from "../network-config.js";
 import type { NetworkPolicy } from "../policy/types.js";
 import { msbPath } from "./resolve-binary.js";
 
@@ -22,6 +22,7 @@ export const napi = native;
 
 export interface NativeBindings {
   readonly supportsPortModification?: () => boolean;
+  readonly supportsSecretPolicyModification?: () => boolean;
   readonly setPackagedMsbPath: (path: string) => void;
   readonly setRuntimeMsbPath?: (path: string) => void;
   readonly setRuntimeLibkrunfwPath?: (path: string) => void;
@@ -478,6 +479,10 @@ export interface NapiSecretModifySpec {
   store?: string;
   placeholder?: string;
   allowedHosts?: string[];
+  substitution?: SecretSubstitution;
+  violationAction?: string;
+  requireTlsIdentity?: boolean;
+  allowPlaceholderFor?: string[];
 }
 
 /** Native shape returned by `Sandbox.logs()` / `SandboxHandle.logs()`. */

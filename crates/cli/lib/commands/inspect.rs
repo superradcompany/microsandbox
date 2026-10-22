@@ -8,7 +8,7 @@ use microsandbox::sandbox::{
 };
 use serde::Serialize;
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 /// Render a non-default mount policy suffix for `msb inspect` output.
 ///
@@ -69,8 +69,8 @@ pub struct InspectArgs {
     pub job: Option<String>,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,7 +88,8 @@ struct PendingConfigChange {
 /// Execute the `msb inspect` command.
 pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     if let Some(job) = &args.job {
-        return super::jobs::inspect(&args.name, job, args.format.as_deref() == Some("json")).await;
+        return super::jobs::inspect(&args.name, job, args.format == Some(OutputFormat::Json))
+            .await;
     }
     let handle = Sandbox::get(&args.name).await?;
     let desired_config = handle.config().ok();
@@ -111,7 +112,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
     );
     let storage = handle.storage_usage().await;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let config: serde_json::Value =
             serde_json::from_str(handle.config_json()).unwrap_or(serde_json::Value::Null);
         let mut json = serde_json::json!({

@@ -380,6 +380,8 @@ impl SandboxModificationBuilder {
             }
             ports::preflight(&config, active.as_ref(), &self.patch, status)?;
         }
+        let restart_required = plan_requires_restart(&plan) && running_status(status);
+
         if handle.local().is_some() {
             // Validate configuration serialization before stopping a VM,
             // growing a disk, or issuing any live control mutation.
@@ -387,8 +389,21 @@ impl SandboxModificationBuilder {
             apply_patch_to_config(&mut prospective, &self.patch);
             apply_secret_patch_to_config(&mut prospective, &self.patch)?;
             serde_json::to_string(&prospective)?;
+
+            // A restart-backed modification must be launchable on the selected
+            // runtime before the VM is stopped. Otherwise a capability gap (for
+            // example HTTP CONNECT proxy authentication) is only discovered by
+            // the start that follows `stop`, which leaves the workload down and
+            // the rejected change already persisted.
+            if restart_required && let Some(local) = self.backend.as_local() {
+                crate::runtime::launch_contract::validate_runtime_config(
+                    &prospective,
+                    local.config(),
+                )
+                .await?;
+            }
         }
-        let restart_required = plan_requires_restart(&plan) && running_status(status);
+
         if restart_required {
             handle.stop().await?;
         }
@@ -1383,17 +1398,25 @@ fn apply_patch_to_config(config: &mut SandboxConfig, patch: &SandboxModification
             }
         }
     }
-    for var in &patch.env {
-        if let Some(existing) = config
+    for var in patched_env(patch) {
+        let Some(last) = config
             .spec
             .env
-            .iter_mut()
-            .find(|entry| entry.key == var.key)
-        {
-            existing.value = var.value.clone();
-        } else {
+            .iter()
+            .rposition(|entry| entry.key == var.key)
+        else {
             config.spec.env.push(var.clone());
+            continue;
+        };
+        // A key already at this value is left as is, earlier entries included.
+        if config.spec.env[last].value == var.value {
+            continue;
         }
+        // Set the last entry, the one commands see, and drop the key's earlier ones.
+        let mut rest = config.spec.env.split_off(last);
+        rest[0].value = var.value.clone();
+        config.spec.env.retain(|entry| entry.key != var.key);
+        config.spec.env.append(&mut rest);
     }
     config
         .spec
@@ -2328,8 +2351,9 @@ fn push_spec_changes(
     changes: &mut Vec<PlannedChange>,
     warnings: &mut Vec<ModificationWarning>,
 ) {
-    for var in &patch.env {
-        let existing = config.spec.env.iter().find(|entry| entry.key == var.key);
+    // Entries apply in order, so commands see the last entry for a key.
+    for var in patched_env(patch) {
+        let existing = config.spec.env.iter().rfind(|entry| entry.key == var.key);
         if existing.is_some_and(|entry| entry.value == var.value) {
             continue;
         }
@@ -2346,7 +2370,7 @@ fn push_spec_changes(
     }
 
     for key in &patch.env_remove {
-        let Some(existing) = config.spec.env.iter().find(|entry| entry.key == *key) else {
+        let Some(existing) = config.spec.env.iter().rfind(|entry| entry.key == *key) else {
             continue;
         };
         changes.push(spec_change(
@@ -2415,6 +2439,20 @@ fn push_spec_changes(
             push_future_exec_warning(WORKDIR_FIELD, status, policy, warnings);
         }
     }
+}
+
+/// The env entries `patch` sets, one per key: a key set twice takes its last value.
+fn patched_env(patch: &SandboxModificationPatch) -> impl Iterator<Item = &EnvVar> {
+    patch
+        .env
+        .iter()
+        .enumerate()
+        .filter(|(index, var)| {
+            !patch.env[index + 1..]
+                .iter()
+                .any(|later| later.key == var.key)
+        })
+        .map(|(_, var)| var)
 }
 
 fn push_spec_conflicts(
@@ -5260,6 +5298,106 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_env_key_plans_once_against_its_last_entry() {
+        // Commands see the last entry for a key.
+        let mut current = config(2, 1024);
+        current.spec.env = vec![
+            EnvVar::new("KEY", "a"),
+            EnvVar::new("OTHER", "1"),
+            EnvVar::new("KEY", "b"),
+        ];
+        let rows = |patch: SandboxModificationPatch| -> Vec<(Option<String>, Option<String>)> {
+            build_plan(
+                "api".to_string(),
+                SandboxStatus::Stopped,
+                &current,
+                None,
+                LiveControl::default(),
+                patch,
+                ModificationPolicy::NoRestart,
+            )
+            .changes
+            .into_iter()
+            .map(|change| {
+                let PlannedChange::Config(change) = change else {
+                    panic!("expected config change");
+                };
+                (change.before, change.after)
+            })
+            .collect()
+        };
+        let set = |env: Vec<EnvVar>| SandboxModificationPatch {
+            env,
+            ..SandboxModificationPatch::default()
+        };
+        let row = |before: &str, after: Option<&str>| {
+            (Some(before.to_string()), after.map(str::to_string))
+        };
+
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "v")])),
+            vec![row("KEY=b", Some("KEY=v"))]
+        );
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "a")])),
+            vec![row("KEY=b", Some("KEY=a"))]
+        );
+        assert_eq!(
+            rows(set(vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "y")])),
+            vec![row("KEY=b", Some("KEY=y"))]
+        );
+        assert!(rows(set(vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "b")])).is_empty());
+        assert_eq!(
+            rows(SandboxModificationPatch {
+                env_remove: vec!["KEY".to_string()],
+                ..SandboxModificationPatch::default()
+            }),
+            vec![row("KEY=b", None)]
+        );
+    }
+
+    #[test]
+    fn applying_a_repeated_env_key_keeps_one_entry_with_the_new_value() {
+        let mut current = config(2, 1024);
+        current.spec.env = vec![
+            EnvVar::new("KEY", "a"),
+            EnvVar::new("OTHER", "1"),
+            EnvVar::new("KEY", "b"),
+            EnvVar::new("LAST", "1"),
+        ];
+        let patch = SandboxModificationPatch {
+            env: vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "y")],
+            ..SandboxModificationPatch::default()
+        };
+
+        let mut changed = current.clone();
+        apply_patch_to_config(&mut changed, &patch);
+        assert_eq!(
+            changed.spec.env,
+            vec![
+                EnvVar::new("OTHER", "1"),
+                EnvVar::new("KEY", "y"),
+                EnvVar::new("LAST", "1"),
+            ]
+        );
+
+        // A key already at its value plans no change, so apply leaves its entries.
+        for env in [
+            vec![EnvVar::new("KEY", "b")],
+            vec![EnvVar::new("KEY", "x"), EnvVar::new("KEY", "b")],
+        ] {
+            let mut unchanged = current.clone();
+            let patch = SandboxModificationPatch {
+                env,
+                labels: vec![("team".to_string(), "infra".to_string())],
+                ..SandboxModificationPatch::default()
+            };
+            apply_patch_to_config(&mut unchanged, &patch);
+            assert_eq!(unchanged.spec.env, current.spec.env);
+        }
+    }
+
+    #[test]
     fn setting_and_removing_the_same_key_is_a_conflict() {
         let patch = SandboxModificationPatch {
             env: vec![EnvVar::new("MODE", "prod")],
@@ -5778,6 +5916,135 @@ mod tests {
                 .unwrap();
             assert!(repeat.changes.is_empty());
         }
+    }
+
+    /// A restart-backed modification must refuse a prospective configuration the
+    /// selected runtime cannot launch before stopping the VM. Regression: the
+    /// capability check used to run only in the start that followed `stop`, which
+    /// left the workload down with the rejected change persisted.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn restart_preflight_leaves_a_running_sandbox_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::config::{GlobalConfig, PathsConfig};
+
+        // Keep the home path short: the restart sequence derives Unix socket paths
+        // from it, and a long macOS temporary directory can exceed the socket limit.
+        let temp = tempfile::Builder::new()
+            .prefix("msb-restart-preflight-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        // A `#!` wrapper has no embedded version metadata, so it resolves as a
+        // legacy launch contract and the pre-stop validation refuses the proxy at
+        // the legacy network gate. The auth-specific capability gate needs a real
+        // executable that also answers the capability probe, which a unit test
+        // cannot fake; `http_connect_credentials_require_runtime_support_before_launch`
+        // covers that gate, and this test covers where the gate runs.
+        let msb = temp.path().join("msb");
+        std::fs::write(
+            &msb,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             --version) printf 'msb 0.6.18\\n' ;;\n\
+             __launch-protocol) printf '%s' '{\"protocols\":[2,1],\"http_connect_proxy\":true}' ;;\n\
+             *) exit 1 ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let library = temp
+            .path()
+            .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+        std::fs::write(&library, b"").unwrap();
+
+        let backend: Arc<dyn Backend> =
+            Arc::new(crate::test_support::local_backend(GlobalConfig {
+                home: Some(home),
+                paths: PathsConfig {
+                    msb: Some(msb),
+                    libkrunfw: Some(library),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }));
+
+        let mut config = config(2, 1024);
+        config.spec.name = "restart-preflight".to_string();
+        let mut network = config.local_network_config().unwrap();
+        network.outbound_proxy = Some(
+            serde_json::from_value(serde_json::json!({
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "proxy-user",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
+                }
+            }))
+            .unwrap(),
+        );
+        config.set_local_network_config(network).unwrap();
+
+        // The row has no recorded runtime, so `stop` converges the stale `Running`
+        // status instead of failing. That keeps the pre-fix ordering observable: the
+        // stop, the persisted change, and the failed start all happen for real.
+        let local = backend.as_local().unwrap();
+        let db = local.db().await.unwrap();
+        let row = sandbox_entity::ActiveModel {
+            name: Set(config.spec.name.clone()),
+            config: Set(serde_json::to_string(&config).unwrap()),
+            active_config: Set(None),
+            status: Set(SandboxStatus::Running),
+            ephemeral: Set(false),
+            ..Default::default()
+        }
+        .insert(db.write())
+        .await
+        .unwrap();
+
+        let result = SandboxModificationBuilder::new(backend.clone(), &config.spec.name)
+            .workdir("/srv")
+            .restart()
+            .apply()
+            .await;
+
+        // The workload and the durable configuration are the regression signal: a
+        // preflight that runs after the stop leaves the sandbox terminal and the
+        // rejected change already persisted, whatever the start then reports.
+        let saved = sandbox_entity::Entity::find_by_id(row.id)
+            .one(db.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.status,
+            SandboxStatus::Running,
+            "the restart preflight must fail before stopping the workload"
+        );
+
+        let persisted: SandboxConfig = serde_json::from_str(&saved.config).unwrap();
+        assert_eq!(
+            persisted.spec.runtime.workdir, config.spec.runtime.workdir,
+            "the rejected change must not be persisted"
+        );
+        assert_eq!(
+            persisted.local_network_config().unwrap().outbound_proxy,
+            config.local_network_config().unwrap().outbound_proxy,
+            "the durable network configuration must be unchanged"
+        );
+
+        // The refusal is the launch-contract gate, not a stop or start failure. The
+        // legacy gate names the proxy feature itself, so it cannot be satisfied by
+        // the `HTTP CONNECT proxy authentication` capability refusal.
+        let error = result.expect_err("an unsupported runtime must refuse the restart");
+        assert!(
+            error.to_string().contains("HTTP CONNECT outbound proxies")
+                && error.to_string().contains("upgrade msb"),
+            "unexpected error: {error}"
+        );
     }
 
     /// The `tls` change a secret patch emits when it must turn interception on.

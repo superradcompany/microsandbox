@@ -215,6 +215,7 @@ async fn check_stalled_ipv6_fallback() {
         policy: NetworkPolicy::allow_all(),
         outbound_proxy: Some(OutboundProxy::HttpConnect {
             address: listener.local_addr().unwrap(),
+            credentials: None,
         }),
         ..Default::default()
     };

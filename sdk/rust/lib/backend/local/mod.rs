@@ -487,6 +487,7 @@ impl LocalBackendBuilder {
         let path = self.config_path.unwrap_or_else(crate::config::config_path);
         let config = BackendConfig::load_from(&path, self.managed_config_path.as_deref())?
             .prepare_for_local_backend(self.config)?;
+        config.require_backend(BackendKind::Local, None)?;
 
         Ok(LocalBackend::from_backend_config(
             config,
@@ -520,13 +521,13 @@ impl Backend for LocalBackend {
         BackendKind::Local
     }
 
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
+    fn info(&self) -> crate::MicrosandboxResult<BackendInfo> {
+        Ok(BackendInfo {
             kind: BackendKind::Local,
             api_url: None,
             source: self.selection_source,
             profile: self.profile.clone(),
-        }
+        })
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -1731,6 +1732,69 @@ mod tests {
             .unwrap();
         assert_eq!(backend.config().sandbox_defaults.cpus, 3);
         assert!(backend.db.get().is_none());
+    }
+
+    #[test]
+    fn local_construction_checks_final_policy_without_creating_home_or_database() {
+        let _env_guard = crate::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("runtime");
+        let user = dir.path().join("config.json");
+        let managed = dir.path().join("managed.json");
+        for (ordinary, enforced, builder_policy, allowed) in [
+            (
+                r#"{"allowed_backends":["cloud"]}"#,
+                r#"{"overrides":{}}"#,
+                None,
+                false,
+            ),
+            (
+                r#"{"allowed_backends":["local"]}"#,
+                r#"{"overrides":{"allowed_backends":["cloud"]}}"#,
+                None,
+                false,
+            ),
+            (
+                r#"{"allowed_backends":[]}"#,
+                r#"{"overrides":{}}"#,
+                None,
+                false,
+            ),
+            (
+                "{}",
+                r#"{"overrides":{}}"#,
+                Some(vec![BackendKind::Cloud]),
+                false,
+            ),
+            (
+                "{}",
+                r#"{"overrides":{"allowed_backends":["local"]}}"#,
+                Some(vec![BackendKind::Cloud]),
+                true,
+            ),
+        ] {
+            std::fs::write(&user, ordinary).unwrap();
+            std::fs::write(&managed, enforced).unwrap();
+            let mut builder = LocalBackend::builder()
+                .config_path(&user)
+                .managed_config_path(&managed)
+                .home(&home);
+            if let Some(policy) = builder_policy {
+                builder.config.allowed_backends_mut(policy);
+            }
+
+            let result = builder.build_lazy();
+            if allowed {
+                assert!(result.unwrap().db.get().is_none());
+            } else {
+                let error = result.err().unwrap();
+                assert!(
+                    error.to_string().contains("allowed_backends")
+                        || error.to_string().contains("allowed backends")
+                );
+            }
+            assert!(!home.exists());
+        }
     }
 
     #[test]

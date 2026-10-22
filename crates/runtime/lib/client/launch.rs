@@ -83,6 +83,11 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub http_connect_proxy: bool,
 
+    /// HTTP CONNECT outbound proxy credentials are supported. Older runtimes omit
+    /// this capability and would silently connect without authentication.
+    #[serde(default)]
+    pub http_connect_proxy_auth: bool,
+
     /// The launch field `guest_clock` is honored by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]
@@ -92,6 +97,10 @@ pub struct LaunchCapabilities {
     /// Older runtimes omit this capability.
     #[serde(default)]
     pub fs_state_limit: bool,
+
+    /// Sandbox-owned execution policy is installed and enforced by the runtime.
+    #[serde(default)]
+    pub exec_limits: bool,
 }
 
 /// Hidden CLI handoff describing the metrics slot the host reserved for this sandbox.

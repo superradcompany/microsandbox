@@ -446,6 +446,10 @@ bool has_port_modification(void) {
     return lib_handle && dlsym(lib_handle, "msb_supports_port_modification") != NULL;
 }
 
+bool has_secret_policy_modification(void) {
+    return lib_handle && dlsym(lib_handle, "msb_supports_secret_policy_modification") != NULL;
+}
+
 // load_error holds a static error string on dlopen/dlsym failure.
 // Not freed by callers — it lives for the process lifetime.
 static char load_error[1024] = {0};
@@ -6005,6 +6009,18 @@ func RequirePortModification() error {
 	}
 	if !bool(C.has_port_modification()) {
 		return fmt.Errorf("published-port modification requires an updated native library")
+	}
+	return nil
+}
+
+// RequireSecretPolicyModification rejects secret policy edits that an older
+// library would skip.
+func RequireSecretPolicyModification() error {
+	if err := ensureLoaded(); err != nil {
+		return err
+	}
+	if !bool(C.has_secret_policy_modification()) {
+		return fmt.Errorf("secret policy modification requires an updated native library")
 	}
 	return nil
 }

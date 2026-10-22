@@ -588,7 +588,9 @@ Plan or apply a configuration change. The returned plan labels each change `"liv
 
 Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder`, `allowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Unknown keys are rejected. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy: "restart"` to apply now, or `policy: "next_start"` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -2946,15 +2948,48 @@ Compute the plan without applying anything. Defaults to `false`
 
 <p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the other supplied fields.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| env | `string` | Host environment variable to resolve when applying the modification |
-| value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
-| store | `string` | Reserved for a host-side secret store reference; currently unsupported |
-| placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
-| allowedHosts | `string[]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host environment variable to resolve when applying the modification.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Raw secret value. Stored in the durable sandbox config until replaced by a source reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>store</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Reserved for a host-side secret store reference; currently unsupported.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Explicit guest-visible placeholder. New secrets default to <code>$MSB_&lt;NAME&gt;</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowedHosts</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>substitution</code><a className="msb-type" href="/sdk/typescript/secrets#secretsubstitution">SecretSubstitution</a></div>
+    <div className="msb-param-desc">Desired substitution locations. A supplied value replaces the stored rule; omitted keys take the defaults (headers on, every header, no query or body), so repeat <code>headerFields</code> to keep a narrowed list. Omission keeps the stored rule; new secrets default to headers only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>violationAction</code><a className="msb-type" href="/sdk/typescript/secrets#violationaction">ViolationAction</a></div>
+    <div className="msb-param-desc">Per-secret blocking action. Omission keeps the existing override.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>requireTlsIdentity</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Whether substitution requires verified TLS identity. Omission keeps the existing setting; new secrets default to <code>true</code>. Explicit <code>false</code> disables this requirement.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowPlaceholderFor</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Hosts permitted to receive the unchanged placeholder. A non-empty list replaces the existing hosts; an empty list leaves them unchanged.</div>
+  </div>
+</div>
 
 ### PullPolicy
 

@@ -176,6 +176,12 @@ The `examples/rust/*` projects are workspace members as well.
 
 ## Testing
 
+Run the CLI context tests and SDK backend-policy subprocess tests on a host
+without a machine-wide `managed.json`. They isolate user configuration and
+environment variables, but intentionally retain system policy. Use an unmanaged
+development machine or CI runner; do not remove an organization's policy to run
+tests. Rust SDK unit tests use injected policy fixtures to cover managed settings.
+
 Run all workspace tests:
 
 ```bash

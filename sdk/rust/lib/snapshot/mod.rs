@@ -32,8 +32,8 @@ pub use crate::backend::local::snapshot::downgrade;
 #[cfg(feature = "local")]
 pub(crate) use crate::backend::local::snapshot::{
     CHECKPOINT_DIRECTORY, adopt_local_branch_for_child, apply_additional_disks, lineage,
-    materialize_additional_disks, materialize_archive_for_child,
-    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
-    materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
-    stage_local_branch_closure, validate_checkpoint_owned_inventory, validate_owned_inventory,
+    materialize_additional_disks, materialize_checkpoint_disk_for_child,
+    materialize_checkpoint_for_child, materialize_file_snapshot_for_child,
+    materialize_owned_volumes, root_device, stage_local_branch_closure,
+    validate_checkpoint_owned_inventory, validate_owned_inventory,
 };

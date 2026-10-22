@@ -1,15 +1,21 @@
 //! HTTP CONNECT outbound proxy builders and transport.
 
+use std::fmt;
 use std::net::AddrParseError;
 #[cfg(feature = "engine")]
 use std::{io, net::SocketAddr, time::Duration};
 
+#[cfg(feature = "engine")]
+use base64::Engine as _;
+use microsandbox_types::SecretSource;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "engine")]
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
+use zeroize::Zeroizing;
 
 use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyConfig, OutboundProxyProtocol,
@@ -28,10 +34,26 @@ const CONNECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Environment-backed username/password credentials for an HTTP CONNECT proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpConnectCredentials {
+    username: String,
+    password: SecretSource,
+}
+
+/// Resolved HTTP CONNECT credentials held only by the network runtime.
+#[doc(hidden)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedHttpConnectCredentials {
+    username: String,
+    password: Zeroizing<String>,
+}
+
 /// Builds an HTTP CONNECT outbound proxy.
 #[derive(Debug, Clone)]
 pub struct HttpConnectProxyBuilder {
     address: String,
+    credentials: Option<HttpConnectCredentials>,
 }
 
 /// HTTP CONNECT wire protocol operations.
@@ -47,7 +69,77 @@ impl HttpConnectProxyBuilder {
     pub(super) fn new(address: impl Into<String>) -> Self {
         Self {
             address: address.into(),
+            credentials: None,
         }
+    }
+
+    /// Sets username authentication and a host-side password source.
+    ///
+    /// The username may be empty, for proxies that authenticate with a token
+    /// alone, but must not contain `:` or control characters. The password
+    /// source must resolve to a non-empty value at launch.
+    pub fn credentials(mut self, username: impl Into<String>, password: SecretSource) -> Self {
+        self.credentials = Some(HttpConnectCredentials {
+            username: username.into(),
+            password,
+        });
+        self
+    }
+}
+
+impl HttpConnectCredentials {
+    /// Returns the durable authentication username.
+    pub(crate) fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Returns the host-side password source.
+    pub(crate) fn password_source(&self) -> &SecretSource {
+        &self.password
+    }
+
+    /// Validates the durable username and the host-side password source.
+    pub(super) fn validate(&self) -> Result<(), OutboundProxyBuildError> {
+        let reason = if let Err(reason) = validate_username(&self.username) {
+            reason
+        } else {
+            match &self.password {
+                SecretSource::Env { var } if var.is_empty() => {
+                    "password environment variable must not be empty"
+                }
+                SecretSource::Env { .. } => return Ok(()),
+                SecretSource::Store { .. } => "store-backed password sources are not supported yet",
+            }
+        };
+        Err(OutboundProxyBuildError::InvalidHttpConnectCredentials { reason })
+    }
+}
+
+impl ResolvedHttpConnectCredentials {
+    /// Creates credentials for the private launch contract.
+    #[doc(hidden)]
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            username: username.into(),
+            password: Zeroizing::new(password.into()),
+        }
+    }
+
+    /// Returns the resolved authentication username.
+    pub(super) fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Validates the resolved username and password.
+    pub(super) fn validate(&self) -> Result<(), OutboundProxyBuildError> {
+        let reason = if let Err(reason) = validate_username(&self.username) {
+            reason
+        } else if self.password.is_empty() {
+            "password must not be empty"
+        } else {
+            return Ok(());
+        };
+        Err(OutboundProxyBuildError::InvalidHttpConnectCredentials { reason })
     }
 }
 
@@ -57,10 +149,11 @@ impl HttpConnectProtocol {
     pub(super) async fn connect(
         address: SocketAddr,
         destination: SocketAddr,
+        credentials: Option<&ResolvedHttpConnectCredentials>,
     ) -> io::Result<TcpStream> {
         let mut stream = TcpStream::connect(address).await?;
         let authority = destination.to_string();
-        let request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
+        let request = Self::build_connect_request(&authority, credentials);
 
         stream.write_all(request.as_bytes()).await?;
         stream.flush().await?;
@@ -81,16 +174,68 @@ impl HttpConnectProtocol {
             return Ok(stream);
         }
 
-        let kind = if status == 407 {
-            io::ErrorKind::PermissionDenied
-        } else {
-            io::ErrorKind::ConnectionRefused
-        };
+        if status == 407 {
+            let message = if credentials.is_some() {
+                "HTTP CONNECT proxy rejected the supplied credentials (status 407)"
+            } else {
+                "HTTP CONNECT proxy requires authentication (status 407)"
+            };
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
+        }
 
         Err(io::Error::new(
-            kind,
+            io::ErrorKind::ConnectionRefused,
             format!("HTTP CONNECT proxy rejected the tunnel with status {status}"),
         ))
+    }
+
+    /// Builds the CONNECT request.
+    ///
+    /// Exactly one `Proxy-Authorization: Basic` header is added when credentials
+    /// are configured. The password is base64-encoded (standard alphabet, UTF-8
+    /// bytes) into the header, and the whole request is zeroized on drop so the
+    /// token does not linger in host memory.
+    ///
+    /// The request is sized exactly and written in a single pass. Growing the
+    /// buffer would reallocate and free a block that already holds the token, and
+    /// `Zeroizing` only wipes the final allocation.
+    fn build_connect_request(
+        authority: &str,
+        credentials: Option<&ResolvedHttpConnectCredentials>,
+    ) -> Zeroizing<String> {
+        let encoded = credentials.map(|credentials| {
+            let userinfo = Zeroizing::new(format!(
+                "{}:{}",
+                credentials.username,
+                credentials.password.as_str()
+            ));
+            Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(userinfo.as_bytes()))
+        });
+        let token = encoded.as_ref().map(|encoded| encoded.as_str());
+
+        let mut capacity = "CONNECT ".len()
+            + authority.len()
+            + " HTTP/1.1\r\nHost: ".len()
+            + authority.len()
+            + "\r\n".len();
+        if let Some(token) = token {
+            capacity += "Proxy-Authorization: Basic ".len() + token.len() + "\r\n".len();
+        }
+        capacity += "\r\n".len();
+
+        let mut request = Zeroizing::new(String::with_capacity(capacity));
+        request.push_str("CONNECT ");
+        request.push_str(authority);
+        request.push_str(" HTTP/1.1\r\nHost: ");
+        request.push_str(authority);
+        request.push_str("\r\n");
+        if let Some(token) = token {
+            request.push_str("Proxy-Authorization: Basic ");
+            request.push_str(token);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        request
     }
 
     async fn read_connect_response_status(stream: &mut TcpStream) -> io::Result<u16> {
@@ -206,7 +351,42 @@ impl OutboundProxyConfig for HttpConnectProxyBuilder {
             }
         })?;
 
-        Ok(OutboundProxy::HttpConnect { address })
+        if let Some(credentials) = &self.credentials {
+            credentials.validate()?;
+        }
+
+        Ok(OutboundProxy::HttpConnect {
+            address,
+            credentials: self.credentials,
+        })
+    }
+}
+
+impl fmt::Debug for ResolvedHttpConnectCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedHttpConnectCredentials")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// Validates a Basic authentication username shared by the durable and resolved
+/// credentials.
+///
+/// RFC 7617 permits an empty user-id, which some proxies use for token-only
+/// authentication, but forbids `:` and control characters.
+fn validate_username(username: &str) -> Result<(), &'static str> {
+    if username.contains(':') {
+        Err("username must not contain ':'")
+    } else if username.chars().any(char::is_control) {
+        Err("username must not contain control characters")
+    } else {
+        Ok(())
     }
 }
 
@@ -218,6 +398,8 @@ impl OutboundProxyConfig for HttpConnectProxyBuilder {
 mod tests {
     use std::{future::Future, io, net::SocketAddr, time::Duration};
 
+    use base64::Engine as _;
+    use microsandbox_types::SecretSource;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -226,7 +408,14 @@ mod tests {
         time::{Instant, timeout},
     };
 
-    use super::{CONNECT_RESPONSE_HEADER_LIMIT, CONNECT_RESPONSE_TIMEOUT, HttpConnectProtocol};
+    use super::{
+        CONNECT_RESPONSE_HEADER_LIMIT, CONNECT_RESPONSE_TIMEOUT, HttpConnectProtocol,
+        ResolvedHttpConnectCredentials,
+    };
+    use crate::proxy::{
+        OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
+        ResolvedOutboundProxy,
+    };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -652,11 +841,14 @@ mod tests {
             assert_eq!(request, expected_request(destination()), "status {status}");
             let error = result.unwrap_err();
             assert_eq!(error.kind(), kind, "status {status}");
-            assert_eq!(
-                error.to_string(),
-                format!("HTTP CONNECT proxy rejected the tunnel with status {status}"),
-                "status {status}"
-            );
+            // 407 has a dedicated authentication diagnostic; every other non-2xx
+            // status keeps the generic rejection message.
+            let expected = if status == 407 {
+                "HTTP CONNECT proxy requires authentication (status 407)".to_string()
+            } else {
+                format!("HTTP CONNECT proxy rejected the tunnel with status {status}")
+            };
+            assert_eq!(error.to_string(), expected, "status {status}");
         }
     }
 
@@ -756,7 +948,7 @@ mod tests {
             bounded(release_rx).await.unwrap();
         });
 
-        let result = bounded(HttpConnectProtocol::connect(address, destination())).await;
+        let result = bounded(HttpConnectProtocol::connect(address, destination(), None)).await;
 
         let request = bounded(request_rx).await.unwrap();
         release_tx.send(()).unwrap();
@@ -785,7 +977,7 @@ mod tests {
             bounded(stream.write_all(b"pong")).await.unwrap();
         });
 
-        let mut stream = bounded(HttpConnectProtocol::connect(address, destination()))
+        let mut stream = bounded(HttpConnectProtocol::connect(address, destination(), None))
             .await
             .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), address);
@@ -847,7 +1039,8 @@ mod tests {
                 }
             });
 
-            let mut handshake = Box::pin(HttpConnectProtocol::connect(address, destination()));
+            let mut handshake =
+                Box::pin(HttpConnectProtocol::connect(address, destination(), None));
 
             let request = tokio::select! {
                 biased;
@@ -887,7 +1080,8 @@ mod tests {
             let (address, request_rx, written_rx, task) =
                 spawn_stalled_proxy(response.to_vec()).await;
             let started = Instant::now();
-            let mut handshake = Box::pin(HttpConnectProtocol::connect(address, destination()));
+            let mut handshake =
+                Box::pin(HttpConnectProtocol::connect(address, destination(), None));
 
             let request = tokio::select! {
                 biased;
@@ -923,7 +1117,7 @@ mod tests {
     #[tokio::test]
     async fn cancelling_connect_closes_proxy_socket() {
         let (address, request_rx, written_rx, task) = spawn_stalled_proxy(Vec::new()).await;
-        let handshake = tokio::spawn(HttpConnectProtocol::connect(address, destination()));
+        let handshake = tokio::spawn(HttpConnectProtocol::connect(address, destination(), None));
 
         let request = bounded(request_rx).await.unwrap();
         assert_eq!(request, expected_request(destination()));
@@ -934,6 +1128,238 @@ mod tests {
         assert!(error.is_cancelled());
         // The proxy must observe EOF, not be aborted to hide a leaked client socket.
         join_proxy(task).await;
+    }
+
+    #[tokio::test]
+    async fn connect_sends_exactly_one_basic_authorization_header() {
+        let credentials = ResolvedHttpConnectCredentials::new("user", "pass");
+        let (result, request) = exchange_authenticated(
+            b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+            destination(),
+            &credentials,
+        )
+        .await;
+        result.expect("authenticated tunnel");
+
+        let token = base64::engine::general_purpose::STANDARD.encode("user:pass");
+        let expected = format!(
+            "CONNECT {0} HTTP/1.1\r\nHost: {0}\r\nProxy-Authorization: Basic {token}\r\n\r\n",
+            destination()
+        )
+        .into_bytes();
+        assert_eq!(request, expected);
+        // Regression guard: exactly one authorization header, never a duplicate.
+        assert_eq!(
+            request
+                .split(|byte| *byte == b'\n')
+                .filter(|line| line.starts_with(b"Proxy-Authorization:"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_sends_empty_username_as_leading_colon() {
+        let credentials = ResolvedHttpConnectCredentials::new("", "token");
+        let (result, request) = exchange_authenticated(
+            b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+            destination(),
+            &credentials,
+        )
+        .await;
+        result.expect("token-only tunnel");
+
+        // base64(":token"), written out so the encoding is checked independently.
+        let expected = b"Proxy-Authorization: Basic OnRva2Vu\r\n";
+        assert!(
+            request
+                .windows(expected.len())
+                .any(|window| window == expected),
+            "{request:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_base64_encodes_password_bytes_verbatim() {
+        // Only the first ':' separates the userinfo, and the whole pair is
+        // base64-encoded, so a password may contain ':', space, tab, and non-ASCII.
+        // The expected tokens are written out in full rather than re-encoded with
+        // the same library, so a wrong alphabet or padding choice cannot mask
+        // itself.
+        for (password, token) in [
+            // Identical under the URL-safe alphabet.
+            ("p:a ss\t\u{e9}", "dXNlcjpwOmEgc3MJw6k="),
+            // Contains '/' and '=', so the URL-safe and unpadded variants differ.
+            ("a\u{ff}\u{e9}", "dXNlcjphw7/DqQ=="),
+        ] {
+            let credentials = ResolvedHttpConnectCredentials::new("user", password);
+            let (result, request) = exchange_authenticated(
+                b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+                destination(),
+                &credentials,
+            )
+            .await;
+            result.expect("authenticated tunnel");
+
+            let expected = format!("Proxy-Authorization: Basic {token}").into_bytes();
+            assert!(
+                request
+                    .windows(expected.len())
+                    .any(|window| window == expected),
+                "password {password:?}: {request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_connect_request_allocates_the_buffer_once() {
+        // Growing the request buffer would reallocate and free a block that already
+        // holds the base64 token; `Zeroizing` only wipes the final allocation.
+        let credentials = ResolvedHttpConnectCredentials::new("user", "a\u{ff}\u{e9}");
+        for authority in ["192.0.2.10:443", "[2001:db8::1]:443"] {
+            for credentials in [None, Some(&credentials)] {
+                let request = HttpConnectProtocol::build_connect_request(authority, credentials);
+                assert_eq!(
+                    request.capacity(),
+                    request.len(),
+                    "request for {authority} was not allocated in one pass"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_reports_407_as_an_authentication_failure() {
+        let response =
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\n"
+                .to_vec();
+
+        let (result, request) = exchange(response.clone(), destination()).await;
+        assert_eq!(request, expected_request(destination()));
+        let error = result.expect_err("407 without credentials");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("requires authentication"),
+            "{error}"
+        );
+
+        let credentials = ResolvedHttpConnectCredentials::new("user", "pass");
+        let (result, _) = exchange_authenticated(response, destination(), &credentials).await;
+        let error = result.expect_err("407 with credentials");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("rejected the supplied credentials"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn resolved_credentials_never_render_the_password() {
+        let credentials = ResolvedHttpConnectCredentials::new("user", "hunter2");
+        let debug = format!("{credentials:?}");
+        assert!(debug.contains("user"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+    }
+
+    #[test]
+    fn builder_rejects_invalid_http_connect_credentials() {
+        for (username, var) in [
+            ("user:name", "PROXY_PASSWORD"),
+            ("user\nname", "PROXY_PASSWORD"),
+            ("user", ""),
+        ] {
+            let error = OutboundProxyBuilder::new()
+                .http_connect("127.0.0.1:3128")
+                .credentials(username, SecretSource::env(var))
+                .build()
+                .expect_err("invalid credentials must not build");
+            assert!(
+                matches!(
+                    error,
+                    OutboundProxyBuildError::InvalidHttpConnectCredentials { .. }
+                ),
+                "{username:?}/{var:?}: {error}"
+            );
+        }
+
+        // RFC 7617 permits an empty user-id for token-only proxies.
+        OutboundProxyBuilder::new()
+            .http_connect("127.0.0.1:3128")
+            .credentials("", SecretSource::env("PROXY_PASSWORD"))
+            .build()
+            .unwrap();
+
+        let proxy = OutboundProxyBuilder::new()
+            .http_connect("127.0.0.1:3128")
+            .credentials("user", SecretSource::env("PROXY_PASSWORD"))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            proxy,
+            OutboundProxy::HttpConnect {
+                credentials: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolved_unauthenticated_http_connect_omits_credentials() {
+        let resolved = ResolvedOutboundProxy::HttpConnect {
+            address: "127.0.0.1:3128".parse().unwrap(),
+            credentials: None,
+        };
+
+        // Older runtimes decode this variant without a credentials member, so an
+        // unauthenticated proxy keeps its previous launch JSON shape.
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap(),
+            serde_json::json!({"http_connect": {"address": "127.0.0.1:3128"}})
+        );
+        let restored: ResolvedOutboundProxy = serde_json::from_value(
+            serde_json::json!({"http_connect": {"address": "127.0.0.1:3128"}}),
+        )
+        .unwrap();
+        assert_eq!(restored, resolved);
+    }
+
+    #[test]
+    fn durable_http_connect_credentials_round_trip_without_the_secret() {
+        let proxy = OutboundProxyBuilder::new()
+            .http_connect("127.0.0.1:3128")
+            .credentials("user", SecretSource::env("PROXY_PASSWORD"))
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_value(&proxy).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "user",
+                    "password": {"kind": "env", "var": "PROXY_PASSWORD"}
+                }
+            })
+        );
+        let restored: OutboundProxy = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, proxy);
+
+        // The field is additive: an unauthenticated proxy omits the key entirely.
+        let plain = OutboundProxyBuilder::new()
+            .http_connect("127.0.0.1:3128")
+            .build()
+            .unwrap();
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("credentials")
+                .is_none()
+        );
     }
 
     async fn assert_success(response: Vec<u8>, label: &str, tail: &[u8]) {
@@ -960,7 +1386,28 @@ mod tests {
         destination: SocketAddr,
     ) -> (io::Result<TcpStream>, Vec<u8>) {
         let (address, request_rx, task) = spawn_mock_proxy(response).await;
-        let result = bounded(HttpConnectProtocol::connect(address, destination)).await;
+        let result = bounded(HttpConnectProtocol::connect(address, destination, None)).await;
+
+        let request = bounded(request_rx).await.expect("request capture stalled");
+        join_proxy(task).await;
+        if let Ok(stream) = &result {
+            assert_eq!(stream.peer_addr().unwrap(), address);
+        }
+        (result, request)
+    }
+
+    async fn exchange_authenticated(
+        response: Vec<u8>,
+        destination: SocketAddr,
+        credentials: &ResolvedHttpConnectCredentials,
+    ) -> (io::Result<TcpStream>, Vec<u8>) {
+        let (address, request_rx, task) = spawn_mock_proxy(response).await;
+        let result = bounded(HttpConnectProtocol::connect(
+            address,
+            destination,
+            Some(credentials),
+        ))
+        .await;
 
         let request = bounded(request_rx).await.expect("request capture stalled");
         join_proxy(task).await;

@@ -100,6 +100,8 @@ type PortEndpoint struct {
 // modification. Env, Value, and Store are mutually exclusive ways to provide
 // the secret material; setting more than one is rejected before the request
 // crosses into the core.
+//
+// Zero-valued fields keep the stored setting.
 type SecretModifySpec struct {
 	// Env resolves the value from a host environment variable at apply time.
 	Env string
@@ -117,6 +119,18 @@ type SecretModifySpec struct {
 	// AllowedHosts sets the desired allowed host patterns. Empty leaves an
 	// existing secret's hosts unchanged; a new secret needs at least one.
 	AllowedHosts []string
+
+	// Substitution replaces the secret's whole substitution rule.
+	Substitution *SecretSubstitution
+
+	// AllowPlaceholderFor sets the hosts that may receive the unchanged placeholder.
+	AllowPlaceholderFor []string
+
+	// ViolationAction sets this secret's blocking action.
+	ViolationAction ViolationAction
+
+	// RequireTLSIdentity sets whether substitution requires verified TLS identity.
+	RequireTLSIdentity *bool
 }
 
 // SandboxModificationPlan is the dry-run or apply plan returned by Modify.
@@ -187,10 +201,8 @@ type ResourceResizeStatus struct {
 // Modify plans or applies a sandbox modification on this live sandbox.
 // With DryRun the plan is computed without applying anything.
 func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
-	if len(opts.Ports) > 0 || len(opts.PortsRemove) > 0 {
-		if err := ffi.RequirePortModification(); err != nil {
-			return nil, err
-		}
+	if err := requireModifyCapabilities(opts); err != nil {
+		return nil, err
 	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
@@ -206,10 +218,8 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 // Modify plans or applies a sandbox modification by name. It does not start
 // stopped sandboxes; next-start changes persist for the next boot.
 func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
-	if len(opts.Ports) > 0 || len(opts.PortsRemove) > 0 {
-		if err := ffi.RequirePortModification(); err != nil {
-			return nil, err
-		}
+	if err := requireModifyCapabilities(opts); err != nil {
+		return nil, err
 	}
 	payload, err := buildModifyRequestJSON(opts)
 	if err != nil {
@@ -220,6 +230,35 @@ func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*Sandbo
 		return nil, wrapFFI(err)
 	}
 	return parseModificationPlan(out)
+}
+
+// requireModifyCapabilities rejects options that an older native library
+// would accept but not apply.
+func requireModifyCapabilities(opts ModifyOptions) error {
+	if len(opts.Ports) > 0 || len(opts.PortsRemove) > 0 {
+		if err := ffi.RequirePortModification(); err != nil {
+			return err
+		}
+	}
+	if secretPolicyRequested(opts) {
+		if err := ffi.RequireSecretPolicyModification(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// secretPolicyRequested reports whether any secret spec sets a policy field.
+func secretPolicyRequested(opts ModifyOptions) bool {
+	for _, spec := range opts.Secrets {
+		if spec.Substitution != nil ||
+			len(spec.AllowPlaceholderFor) > 0 ||
+			spec.ViolationAction != ViolationActionDefault ||
+			spec.RequireTLSIdentity != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // modifyEnvVar mirrors the core EnvVar serde shape.
@@ -258,11 +297,25 @@ type modifyPatch struct {
 // the only field that may carry raw secret material; it is omitted when empty
 // and must never be echoed into errors or debug output.
 type modifySecret struct {
-	Name         string              `json:"name"`
-	Source       *modifySecretSource `json:"source,omitempty"`
-	Value        string              `json:"value,omitempty"`
-	Placeholder  *string             `json:"placeholder,omitempty"`
-	AllowedHosts []string            `json:"allowed_hosts,omitempty"`
+	Name               string              `json:"name"`
+	Source             *modifySecretSource `json:"source,omitempty"`
+	Value              string              `json:"value,omitempty"`
+	Placeholder        *string             `json:"placeholder,omitempty"`
+	AllowedHosts       []string            `json:"allowed_hosts,omitempty"`
+	Substitution       *modifySubstitution `json:"substitution,omitempty"`
+	PassthroughHosts   []string            `json:"passthrough_hosts,omitempty"`
+	ViolationAction    ViolationAction     `json:"violation_action,omitempty"`
+	RequireTLSIdentity *bool               `json:"require_tls_identity,omitempty"`
+}
+
+// modifySubstitution mirrors the core SecretSubstitution serde shape. Every
+// field is always sent; header_fields must be a list, since the core rejects
+// null.
+type modifySubstitution struct {
+	Headers      bool     `json:"headers"`
+	HeaderFields []string `json:"header_fields"`
+	Query        bool     `json:"query"`
+	Body         bool     `json:"body"`
 }
 
 // modifySecretSource mirrors the core SecretSource serde shape (internally
@@ -338,8 +391,9 @@ func buildModifyRequestJSON(opts ModifyOptions) (string, error) {
 }
 
 // buildModifySecret converts one SecretModifySpec into the wire shape,
-// rejecting specs that set more than one of Env/Value/Store. Error messages
-// name only the offending fields, never the secret material itself.
+// rejecting specs that set more than one of Env/Value/Store or an unknown
+// ViolationAction. Error messages name only the offending fields, never the
+// secret material itself.
 func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error) {
 	set := make([]string, 0, 3)
 	if spec.Env != "" {
@@ -357,8 +411,25 @@ func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error)
 			name, strings.Join(set, " and "),
 		)
 	}
+	// The snake_case spellings match create and decode as core serde aliases.
+	switch spec.ViolationAction {
+	case ViolationActionDefault, ViolationActionBlock, ViolationActionBlockAndLog, ViolationActionBlockAndTerminate,
+		"block_and_log", "block_and_terminate":
+	default:
+		return modifySecret{}, fmt.Errorf(
+			"secret %q: ViolationAction must be %q, %q, or %q",
+			name, ViolationActionBlock, ViolationActionBlockAndLog, ViolationActionBlockAndTerminate,
+		)
+	}
 
-	entry := modifySecret{Name: name, Value: spec.Value, AllowedHosts: spec.AllowedHosts}
+	entry := modifySecret{
+		Name:               name,
+		Value:              spec.Value,
+		AllowedHosts:       spec.AllowedHosts,
+		PassthroughHosts:   spec.AllowPlaceholderFor,
+		ViolationAction:    spec.ViolationAction,
+		RequireTLSIdentity: spec.RequireTLSIdentity,
+	}
 	switch {
 	case spec.Env != "":
 		entry.Source = &modifySecretSource{Kind: "env", Var: spec.Env}
@@ -368,6 +439,14 @@ func buildModifySecret(name string, spec SecretModifySpec) (modifySecret, error)
 	if spec.Placeholder != "" {
 		placeholder := spec.Placeholder
 		entry.Placeholder = &placeholder
+	}
+	if sub := spec.Substitution; sub != nil {
+		entry.Substitution = &modifySubstitution{
+			Headers:      sub.Headers == nil || *sub.Headers,
+			HeaderFields: append([]string{}, sub.HeaderFields...),
+			Query:        sub.Query,
+			Body:         sub.Body,
+		}
 	}
 	return entry, nil
 }

@@ -25,8 +25,7 @@ use super::Sandbox;
 use super::{
     SandboxSpec,
     config::{
-        RestoreOverrideIntent, SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode,
-        sandbox_log_level_from_runtime,
+        SandboxConfig, SandboxConfigPatch, SnapshotRestoreMode, sandbox_log_level_from_runtime,
     },
     exec::{Rlimit, RlimitResource},
     init::{HandoffInit, InitOptionsBuilder},
@@ -39,6 +38,8 @@ use super::{
 use crate::UnsupportedReason;
 use crate::backend::default_backend;
 use crate::config::layers::BackendConfig;
+#[cfg(feature = "local")]
+use crate::config::{GlobalConfig, GlobalConfigPatch};
 #[cfg(feature = "local")]
 use crate::runtime::SpawnMode;
 use crate::snapshot::SnapshotReference;
@@ -57,11 +58,21 @@ pub struct SandboxBuilder {
     /// Raw script snippets supplied through construction patches. They are materialized only when
     /// building so later shell overrides determine their shebang.
     config_scripts: BTreeMap<String, String>,
-    /// Pending backend-scoped snapshot reference, resolved during async `build()`.
-    pending_snapshot: Option<SnapshotReference>,
-    /// Distinguishes a sparse-patch snapshot, which later builder calls may override, from an
-    /// explicit restore call that retains the established mutual-exclusion validation.
-    pending_snapshot_from_config: bool,
+    /// Snapshot restore progress: an explicit reference awaits backend resolution during async
+    /// `build()`, then becomes inspected state kept separate from the caller's sparse options.
+    restore: RestoreState,
+}
+
+/// Lifecycle of a snapshot restore flowing through the builder.
+#[derive(Default)]
+enum RestoreState {
+    /// No explicit restore source was supplied.
+    #[default]
+    None,
+    /// Reference awaiting backend resolution during async `build()`.
+    Pending(SnapshotReference),
+    /// Inspected snapshot state, kept separate from the caller's sparse options until finishing.
+    Prepared(Box<SandboxConfigPatch>),
 }
 
 /// Sub-builder for registry connection settings.
@@ -125,8 +136,7 @@ impl SandboxBuilder {
             detached: false,
             build_error: None,
             config_scripts: BTreeMap::new(),
-            pending_snapshot: None,
-            pending_snapshot_from_config: false,
+            restore: RestoreState::default(),
         }
     }
 
@@ -162,10 +172,6 @@ impl SandboxBuilder {
     /// .image("./ubuntu.qcow2")   // disk image (auto-detect fs)
     /// ```
     pub fn image(mut self, image: impl IntoImage) -> Self {
-        if self.pending_snapshot_from_config {
-            self.pending_snapshot = None;
-            self.pending_snapshot_from_config = false;
-        }
         match image.into_rootfs_source() {
             Ok(rootfs) => {
                 self.config.spec.image = Some(rootfs);
@@ -186,10 +192,6 @@ impl SandboxBuilder {
     /// .image_with(|i| i.disk("./ubuntu.qcow2").fstype("ext4"))
     /// ```
     pub fn image_with(mut self, f: impl FnOnce(ImageBuilder) -> ImageBuilder) -> Self {
-        if self.pending_snapshot_from_config {
-            self.pending_snapshot = None;
-            self.pending_snapshot_from_config = false;
-        }
         match f(ImageBuilder::new()).build() {
             Ok(rootfs) => {
                 self.config.spec.image = Some(rootfs);
@@ -206,8 +208,7 @@ impl SandboxBuilder {
     /// Apply a CLI-selected image after discarding a lower-precedence configured snapshot.
     #[doc(hidden)]
     pub fn override_image(mut self, image: impl IntoImage) -> Self {
-        self.pending_snapshot = None;
-        self.pending_snapshot_from_config = false;
+        self.restore = RestoreState::None;
         self.image(image)
     }
 
@@ -217,8 +218,7 @@ impl SandboxBuilder {
         mut self,
         configure: impl FnOnce(ImageBuilder) -> ImageBuilder,
     ) -> Self {
-        self.pending_snapshot = None;
-        self.pending_snapshot_from_config = false;
+        self.restore = RestoreState::None;
         self.image_with(configure)
     }
 
@@ -227,8 +227,7 @@ impl SandboxBuilder {
     pub fn override_snapshot(mut self, snapshot: impl Into<String>) -> Self {
         self.config.spec.image = Some(RootfsSource::oci(""));
         self.config.local_restore_paths_resolved = Some(false);
-        self.pending_snapshot = Some(SnapshotReference::auto(snapshot));
-        self.pending_snapshot_from_config = false;
+        self.restore = RestoreState::Pending(SnapshotReference::auto(snapshot));
         self
     }
 
@@ -360,7 +359,8 @@ impl SandboxBuilder {
     /// It does not increase the effective guest memory by itself; use
     /// [`memory`](Self::memory) for the initial effective memory.
     pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
-        self.config.spec.resources.max_memory_mib = Some(size.into().as_u32());
+        let memory_mib = size.into().as_u32();
+        self.config.spec.resources.max_memory_mib = Some(memory_mib);
         self
     }
 
@@ -1247,8 +1247,7 @@ impl SandboxBuilder {
         reference: impl Into<SnapshotReference>,
     ) -> Self {
         self.config.local_restore_paths_resolved = Some(false);
-        self.pending_snapshot = Some(reference.into());
-        self.pending_snapshot_from_config = false;
+        self.restore = RestoreState::Pending(reference.into());
         self
     }
 
@@ -1287,6 +1286,11 @@ impl SandboxBuilder {
     /// A concrete config cannot retain the distinction between an omitted and cleared workdir:
     /// on local creation, `None` inherits global or image defaults. Use [`create`](Self::create)
     /// directly to preserve explicit workdir clears through image resolution.
+    /// Reusing a concrete config supplies populated CPU and memory values explicitly.
+    /// Keep builder patches sparse to inherit omitted settings from a memory snapshot.
+    ///
+    /// Local archive preparation reads metadata only. Keep the archive available until
+    /// creation finishes; payload validation and extraction happen during creation.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         let backend = default_backend();
         #[cfg(feature = "cloud")]
@@ -1294,57 +1298,74 @@ impl SandboxBuilder {
             return cloud.build_sandbox_config(self).await;
         }
         self.prepare(backend.clone()).await?;
+        #[cfg(feature = "local")]
+        if let Some(local) = backend.as_local() {
+            return self.finish_local(local.config_sources(), None);
+        }
         self.finish(BackendConfig::for_backend(backend.as_ref()), None)
     }
 
     pub(crate) fn finish(
-        mut self,
+        self,
         backend_config: Option<&BackendConfig>,
         image_defaults: Option<SandboxConfigPatch>,
     ) -> MicrosandboxResult<SandboxConfig> {
-        let restore_overrides = self
-            .config
-            .restore_overrides
-            .unwrap_or_else(|| self.restore_override_intent());
-        // Snapshot preparation has already fixed the VM geometry and root layout.
-        // Policy may reject that state, but must never silently rewrite it.
-        let captured_resources = self
-            .config
-            .resumed_from_full_snapshot
-            .unwrap_or_default()
-            .then(|| self.config.spec.resources.clone().into_config());
-        let captured_root = self
-            .config
+        self.finish_config(SandboxConfig::default(), backend_config, image_defaults)
+    }
+
+    /// Merge built-in local defaults below image, backend, and caller settings.
+    #[cfg(feature = "local")]
+    pub(crate) fn finish_local(
+        self,
+        backend_config: &BackendConfig,
+        image_defaults: Option<SandboxConfigPatch>,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        let base = SandboxConfigPatch::from_defaults(&GlobalConfigPatch::from_present_fields(
+            GlobalConfig::default(),
+        ))
+        .overlay(image_defaults.unwrap_or_default());
+
+        self.finish_config(SandboxConfig::default(), Some(backend_config), Some(base))
+    }
+
+    #[cfg(feature = "cloud")]
+    pub(crate) fn finish_cloud(
+        self,
+        backend_config: &BackendConfig,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        self.finish_config(SandboxConfig::default(), Some(backend_config), None)
+    }
+
+    fn finish_config(
+        mut self,
+        mut sandbox: SandboxConfig,
+        backend_config: Option<&BackendConfig>,
+        image_defaults: Option<SandboxConfigPatch>,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        // Inspect captured state before layering caller options and managed requirements.
+        let prepared = match std::mem::take(&mut self.restore) {
+            RestoreState::Prepared(prepared) => Some(*prepared),
+            _ => None,
+        };
+        let captured = prepared.as_ref().unwrap_or(&self.config);
+        let captured_root = captured
             .snapshot_parent
             .as_ref()
-            .and(self.config.spec.image.as_ref())
+            .and(captured.spec.image.as_ref())
             .and_then(RootfsSource::oci_root_disk)
             .cloned();
-        let mut sandbox = SandboxConfig::default();
-        sandbox.apply_layers(
-            backend_config,
-            std::mem::take(&mut self.config),
-            image_defaults,
-        );
+        let options = if let Some(mut prepared) = prepared {
+            // Inspection started from the caller's options and may have replaced captured
+            // state. Do not overlay the old concrete values back onto that result.
+            prepared.spec.resources = self.config.spec.resources.clone();
+            prepared.spec.deployment_profile = self.config.spec.deployment_profile;
+            prepared
+        } else {
+            std::mem::take(&mut self.config)
+        };
 
-        if let Some(captured) = captured_resources {
-            let effective = &sandbox.spec.resources;
-            if (
-                effective.cpus,
-                effective.max_cpus,
-                effective.memory_mib,
-                effective.max_memory_mib,
-            ) != (
-                captured.cpus,
-                captured.max_cpus,
-                captured.memory_mib,
-                captured.max_memory_mib,
-            ) {
-                return Err(MicrosandboxError::InvalidConfig(
-                    "managed settings conflict with the snapshot's captured CPU and memory geometry".into(),
-                ));
-            }
-        }
+        sandbox.apply_layers(backend_config, options, image_defaults)?;
+
         if let Some(captured) = captured_root
             && sandbox.spec.image.oci_root_disk().is_none_or(|effective| {
                 std::mem::discriminant(effective) != std::mem::discriminant(&captured)
@@ -1354,9 +1375,9 @@ impl SandboxBuilder {
                 "managed settings conflict with the snapshot's captured root disk layout".into(),
             ));
         }
-        sandbox.restore_overrides = restore_overrides;
         self.materialize_config_scripts(&mut sandbox);
         self.validate(&mut sandbox)?;
+
         Ok(sandbox)
     }
 
@@ -1412,7 +1433,7 @@ impl SandboxBuilder {
         if backend.as_local().is_some() {
             let captured = self.config.local_restore_paths_resolved == Some(true);
             crate::backend::local::host_paths::resolve_patch_paths(&mut self.config)?;
-            if !captured && let Some(reference) = &mut self.pending_snapshot {
+            if !captured && let RestoreState::Pending(reference) = &mut self.restore {
                 crate::backend::local::host_paths::resolve_snapshot_reference(reference)?;
             }
         }
@@ -1434,21 +1455,35 @@ impl SandboxBuilder {
         #[cfg(feature = "local")]
         self.capture_host_paths(backend.as_ref())?;
         self.resolve_pending(backend).await?;
-        Ok(&mut self.config)
+        Ok(match &mut self.restore {
+            RestoreState::Prepared(prepared) => prepared,
+            _ => &mut self.config,
+        })
     }
 
     /// Open the deferred snapshot artifact and copy its pinned image
     /// reference, manifest digest, and upper-layer source path into the
-    /// config. Driven by build and create preparation.
+    /// config. Driven by build and create preparation. Archives contribute metadata here;
+    /// their payloads are extracted only during creation.
     async fn resolve_pending(
         &mut self,
         backend: std::sync::Arc<dyn crate::Backend>,
     ) -> MicrosandboxResult<()> {
-        let Some(snapshot_ref) = self.pending_snapshot.take() else {
-            return Ok(());
+        let pending = match std::mem::take(&mut self.restore) {
+            RestoreState::Pending(reference) => Some(reference),
+            other => {
+                self.restore = other;
+                None
+            }
         };
-        self.pending_snapshot_from_config = false;
-        if self.has_explicit_rootfs_source() {
+
+        let explicit_source = pending.is_some();
+        let snapshot_ref = pending.or_else(|| self.config.snapshot_reference.clone());
+        let archive_source = self.config.snapshot_archive_source.clone();
+        if snapshot_ref.is_none() && archive_source.is_none() {
+            return Ok(());
+        }
+        if explicit_source && self.has_explicit_rootfs_source() && archive_source.is_none() {
             return Err(MicrosandboxError::InvalidConfig(
                 "from_snapshot is mutually exclusive with explicit rootfs configuration".into(),
             ));
@@ -1464,33 +1499,65 @@ impl SandboxBuilder {
                 "patches cannot be combined with from_snapshot".into(),
             ));
         }
-        let overrides = self.restore_override_intent();
-        let mut config = SandboxConfig::default();
-        config.apply_layers(
-            BackendConfig::for_backend(backend.as_ref()),
-            std::mem::take(&mut self.config),
-            None,
-        );
-        config.restore_overrides = overrides;
-        #[cfg(feature = "local")]
-        if backend.as_local().is_some() {
-            crate::backend::local::host_paths::resolve_host_paths(&mut config)?;
-        }
-        backend
-            .snapshots()
-            .prepare_restore(backend.clone(), &mut config, snapshot_ref)
-            .await?;
-        self.config = SandboxConfigPatch::from_present_fields(config);
-        Ok(())
-    }
 
-    fn restore_override_intent(&self) -> RestoreOverrideIntent {
-        RestoreOverrideIntent {
-            cpus: self.config.spec.resources.cpus.is_some(),
-            max_cpus: self.config.spec.resources.max_cpus.is_some(),
-            memory: self.config.spec.resources.memory_mib.is_some(),
-            max_memory: self.config.spec.resources.max_memory_mib.is_some(),
+        #[cfg(feature = "cloud")]
+        if backend.as_cloud().is_some() {
+            self.config.snapshot_reference = snapshot_ref;
+            return Ok(());
         }
+
+        let mut config = SandboxConfig::default();
+        // A newly selected source replaces an archive retained by a concrete config round-trip.
+        if snapshot_ref.is_some() {
+            self.config.snapshot_archive_source = None;
+        }
+
+        let mut inspection = match BackendConfig::for_backend(backend.as_ref()) {
+            Some(backend) => backend
+                .sandbox_layers()
+                .options(self.config.clone())
+                .build(),
+            None => self.config.clone(),
+        };
+
+        inspection.spec.resources = Default::default();
+        inspection.apply_to(&mut config);
+        config.snapshot_reference = snapshot_ref.clone();
+        if snapshot_ref.is_some() {
+            config.clear_prepared_restore();
+        }
+
+        #[cfg(feature = "local")]
+        if let Some(local) = backend.as_local() {
+            crate::backend::local::host_paths::resolve_host_paths(&mut config)?;
+            if let Some(snapshot_ref) = snapshot_ref {
+                local
+                    .prepare_local_restore(backend.clone(), &mut config, snapshot_ref)
+                    .await?;
+            } else {
+                local.prepare_archive_restore(&mut config).await?;
+            }
+        } else if let Some(snapshot_ref) = snapshot_ref {
+            backend
+                .snapshots()
+                .prepare_restore(backend.clone(), &mut config, snapshot_ref)
+                .await?;
+        }
+
+        #[cfg(not(feature = "local"))]
+        if let Some(snapshot_ref) = snapshot_ref {
+            backend
+                .snapshots()
+                .prepare_restore(backend.clone(), &mut config, snapshot_ref)
+                .await?;
+        }
+
+        // Carry only prepared state forward. The original caller patch remains on the builder.
+        self.config.snapshot_reference = None;
+        let prepared = SandboxConfigPatch::from_present_fields(config);
+        self.restore = RestoreState::Prepared(Box::new(prepared));
+
+        Ok(())
     }
 
     fn has_explicit_rootfs_source(&self) -> bool {
@@ -1574,7 +1641,7 @@ impl SandboxBuilder {
         let (handle, sender) = crate::progress::channel();
         self.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(crate::backend::with_backend(backend, async move {
-            if self.pending_snapshot.is_some() {
+            if matches!(self.restore, RestoreState::Pending(_)) {
                 let _ = sender.try_send(crate::CreationProgress::Startup(
                     crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
                 ));
@@ -1731,18 +1798,8 @@ impl SandboxBuilder {
             )));
         }
 
-        // Check that image is set (non-empty OCI string or Bind path). A direct
-        // archive restore resolves its pinned image while the local backend
-        // authenticates and streams the archive into child-owned staging. Keep
-        // that path single-pass instead of scanning the archive once here and
-        // then reading the payload again during creation.
+        // Local snapshot preparation has already supplied its pinned image.
         match &sandbox.spec.image {
-            RootfsSource::Oci(oci)
-                if oci.reference.is_empty() && sandbox.snapshot_archive_source.is_some() =>
-            {
-                // The archive source is transient and cloud conversion rejects
-                // it explicitly, so only the local backend may defer this field.
-            }
             RootfsSource::Oci(oci)
                 if oci.reference.is_empty() && sandbox.snapshot_reference.is_none() =>
             {
@@ -2082,8 +2139,7 @@ pub(crate) fn prepare_local_snapshot_restore(
                         "checkpoint architecture cannot restore on this host".into(),
                     ));
                 }
-                let restore_overrides = config.restore_overrides;
-                apply_checkpoint_restore_constraints(config, state, &opened, restore_overrides)?;
+                apply_checkpoint_restore_constraints(config, state, &opened)?;
                 config.suppress_launch_for_full_restore();
             }
             config.checkpoint_restore =
@@ -2208,16 +2264,14 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
 /// Apply the immutable VM geometry and effective guest network identity carried by a checkpoint.
 ///
 /// Installed snapshots call this while resolving the builder. Archive restores call it after the
-/// descriptor and closure have streamed into child staging.
+/// descriptor and checkpoint metadata have been inspected without extracting payloads.
 #[cfg(feature = "local")]
 pub(crate) fn apply_checkpoint_restore_constraints(
     config: &mut SandboxConfig,
     state: &crate::snapshot::CheckpointSnapshotState,
     checkpoint: &microsandbox_image::checkpoint::CheckpointManifest,
-    overrides: RestoreOverrideIntent,
 ) -> MicrosandboxResult<()> {
-    // Keep this guard at the shared boundary as well: archive descriptors are resolved later
-    // than installed snapshots, and must not silently discard a requested boot policy.
+    // Both installed snapshots and archives must reject unsupported boot policy changes.
     config.restore_boot_overrides.validate_scope(
         crate::snapshot::SnapshotScope::Full,
         config.snapshot_restore_mode,
@@ -2237,7 +2291,10 @@ pub(crate) fn apply_checkpoint_restore_constraints(
             )));
         }
     }
-    apply_checkpoint_resources(config, state, overrides)?;
+    config.restore_resources.geometry = Some(checkpoint.geometry);
+    config
+        .restore_resources
+        .capture_agent_ready(&checkpoint.resources)?;
     apply_capture_network(config, &checkpoint.resources)
 }
 
@@ -2337,43 +2394,6 @@ fn checkpoint_network_override_conflicts(
 }
 
 #[cfg(feature = "local")]
-fn apply_checkpoint_resources(
-    config: &mut SandboxConfig,
-    state: &crate::snapshot::CheckpointSnapshotState,
-    overrides: RestoreOverrideIntent,
-) -> MicrosandboxResult<()> {
-    let vcpus = u8::try_from(checkpoint_requirement_u64(state, "vcpus")?).map_err(|_| {
-        MicrosandboxError::SnapshotIntegrity("checkpoint vCPU count exceeds u8".into())
-    })?;
-    let max_vcpus =
-        u8::try_from(checkpoint_requirement_u64(state, "max_vcpus")?).map_err(|_| {
-            MicrosandboxError::SnapshotIntegrity("checkpoint maximum vCPU count exceeds u8".into())
-        })?;
-    let memory_mib =
-        u32::try_from(checkpoint_requirement_u64(state, "memory_mib")?).map_err(|_| {
-            MicrosandboxError::SnapshotIntegrity("checkpoint memory exceeds u32 MiB".into())
-        })?;
-    let max_memory_mib = u32::try_from(checkpoint_requirement_u64(state, "max_memory_mib")?)
-        .map_err(|_| {
-            MicrosandboxError::SnapshotIntegrity("checkpoint maximum memory exceeds u32 MiB".into())
-        })?;
-    if (overrides.cpus && config.spec.resources.cpus != vcpus)
-        || (overrides.max_cpus && config.spec.resources.max_cpus != max_vcpus)
-        || (overrides.memory && config.spec.resources.memory_mib != memory_mib)
-        || (overrides.max_memory && config.spec.resources.max_memory_mib != max_memory_mib)
-    {
-        return Err(MicrosandboxError::InvalidConfig(
-            "a full snapshot must restore with its captured CPU and memory geometry".into(),
-        ));
-    }
-    config.spec.resources.cpus = vcpus;
-    config.spec.resources.max_cpus = max_vcpus;
-    config.spec.resources.memory_mib = memory_mib;
-    config.spec.resources.max_memory_mib = max_memory_mib;
-    Ok(())
-}
-
-#[cfg(feature = "local")]
 fn checkpoint_requirement_u64(
     state: &crate::snapshot::CheckpointSnapshotState,
     key: &str,
@@ -2426,8 +2446,7 @@ impl From<SandboxConfig> for SandboxBuilder {
             detached: false,
             build_error: None,
             config_scripts: BTreeMap::new(),
-            pending_snapshot: None,
-            pending_snapshot_from_config: false,
+            restore: RestoreState::default(),
         }
     }
 }
@@ -2439,15 +2458,14 @@ impl From<SandboxConfig> for SandboxBuilder {
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::{
-        BackendConfig, SandboxBuilder, SandboxConfigPatch, apply_checkpoint_resources,
+        BackendConfig, RestoreState, SandboxBuilder, SandboxConfig, SandboxConfigPatch,
         checkpoint_network_override_conflicts,
     };
     use crate::config::GlobalConfigPatch;
-    use crate::sandbox::config::RestoreOverrideIntent;
     #[cfg(feature = "local")]
     use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
-    use crate::{LogLevel, MicrosandboxError, RestoreKind};
+    use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, RestoreKind};
     use std::collections::BTreeMap;
 
     #[cfg(feature = "net")]
@@ -2492,27 +2510,17 @@ mod tests {
     use crate::backend::with_backend;
     use crate::snapshot::SnapshotReference;
 
-    fn checkpoint_state_with_geometry(
-        vcpus: u8,
-        max_vcpus: u8,
-        memory_mib: u32,
-        max_memory_mib: u32,
-    ) -> crate::snapshot::CheckpointSnapshotState {
-        crate::snapshot::CheckpointSnapshotState {
-            checkpoint_id: "checkpoint_test".into(),
-            checkpoint_root:
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            restore_intents: vec!["clone".into()],
-            requirements_summary: BTreeMap::from([
-                ("vcpus".into(), serde_json::Value::from(vcpus)),
-                ("max_vcpus".into(), serde_json::Value::from(max_vcpus)),
-                ("memory_mib".into(), serde_json::Value::from(memory_mib)),
-                (
-                    "max_memory_mib".into(),
-                    serde_json::Value::from(max_memory_mib),
-                ),
-            ]),
-        }
+    fn finish_prepared_restore(
+        config: SandboxConfig,
+        mut caller: SandboxConfigPatch,
+        backend: &BackendConfig,
+    ) -> MicrosandboxResult<SandboxConfig> {
+        caller.snapshot_reference = None;
+        let prepared = SandboxConfigPatch::from_present_fields(config);
+        let mut builder = SandboxBuilder::new("");
+        builder.config = caller;
+        builder.restore = RestoreState::Prepared(Box::new(prepared));
+        builder.finish_local(backend, None)
     }
 
     #[cfg(feature = "cloud")]
@@ -2523,7 +2531,7 @@ mod tests {
             .unwrap();
         let local = SandboxBuilder::new("local-defaults")
             .image("alpine")
-            .finish(Some(&local_config), None)
+            .finish_local(&local_config, None)
             .unwrap();
         assert_eq!(local.spec.runtime.shell.as_deref(), Some("/bin/sh"));
 
@@ -2724,10 +2732,9 @@ mod tests {
                         Some(SandboxConfigPatch::from_image(&image)),
                     )
                     .unwrap();
-                assert_eq!(
-                    serde_json::to_value(&actual).unwrap(),
-                    serde_json::to_value(&expected).unwrap()
-                );
+                let actual_settings = serde_json::to_value(&actual).unwrap();
+                let expected_settings = serde_json::to_value(&expected).unwrap();
+                assert_eq!(actual_settings, expected_settings);
                 assert_eq!(
                     actual.init_owns_boot_workload(),
                     expected.init_owns_boot_workload()
@@ -3859,25 +3866,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_builder_accepts_archive_as_deferred_image_source() {
+    async fn test_builder_rejects_invalid_archive_before_resolving_settings() {
         let directory = tempfile::tempdir().unwrap();
         let archive = directory.path().join("snapshot.tar.zst");
-        std::fs::write(&archive, b"validated by the local backend").unwrap();
-
-        let config = SandboxBuilder::new("test")
+        std::fs::write(&archive, b"not an archive").unwrap();
+        let result = SandboxBuilder::new("test")
             .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
             .build()
-            .await
-            .unwrap();
-
-        assert_eq!(
-            config.snapshot_archive_source.as_deref(),
-            Some(archive.as_path())
-        );
-        assert!(matches!(
-            config.spec.image,
-            crate::sandbox::RootfsSource::Oci(ref image) if image.reference.is_empty()
-        ));
+            .await;
+        assert!(result.is_err());
     }
 
     #[test]
@@ -3891,6 +3888,13 @@ mod tests {
             .config
             .into_config();
         captured.suppress_launch_for_full_restore();
+        captured.restore_resources.geometry =
+            Some(microsandbox_image::checkpoint::CheckpointGeometry {
+                vcpus: 4,
+                max_vcpus: 8,
+                memory_mib: 2048,
+                max_memory_mib: 4096,
+            });
         for (policy, accepted) in [
             (serde_json::json!({}), true),
             (
@@ -4001,6 +4005,59 @@ mod tests {
 
     #[cfg(feature = "local")]
     #[test]
+    fn memory_restore_adopts_the_captured_execution_policy() {
+        use microsandbox_image::checkpoint::{ResourceDescriptor, ResourceTreatment};
+        use microsandbox_protocol::core::Ready;
+        use microsandbox_types::ExecLimits;
+
+        let captured = ExecLimits {
+            max_executions: 7,
+            input_limit: 262144,
+            ..Default::default()
+        };
+        let resource = ResourceDescriptor {
+            id: "agent".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Reconnect,
+            binding: BTreeMap::from([(
+                "ready".into(),
+                serde_json::to_string(&Ready {
+                    exec_limits: Some(captured),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )]),
+        };
+        let mut config = SandboxConfig::default();
+        config
+            .restore_resources
+            .capture_agent_ready(std::slice::from_ref(&resource))
+            .unwrap();
+        assert_eq!(config.exec_limits(), captured);
+
+        // A captured guest without an advertised policy, and a disk-only restore,
+        // both fall back to the built-in defaults.
+        let resource = ResourceDescriptor {
+            id: "agent".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Reconnect,
+            binding: BTreeMap::from([(
+                "ready".into(),
+                serde_json::to_string(&Ready::default()).unwrap(),
+            )]),
+        };
+        let mut config = SandboxConfig::default();
+        config
+            .restore_resources
+            .capture_agent_ready(std::slice::from_ref(&resource))
+            .unwrap();
+        assert_eq!(config.exec_limits(), ExecLimits::default());
+        config.restore_resources.agent_ready = None;
+        assert_eq!(config.exec_limits(), ExecLimits::default());
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
     fn snapshot_restore_keeps_recorded_guest_clock_unless_overridden() {
         use super::super::GuestClockPolicy;
 
@@ -4097,181 +4154,165 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_restore_adopts_captured_vm_geometry() {
-        let builder = SandboxBuilder::new("restore");
-        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+    fn checkpoint_restore_resolves_sparse_resources_and_explicit_concrete_configs() {
+        use crate::sandbox::restore_resources::RestoreResources;
+        use microsandbox_image::checkpoint::CheckpointGeometry;
 
-        let mut config = builder.config.clone().into_config();
-
-        apply_checkpoint_resources(&mut config, &state, RestoreOverrideIntent::default()).unwrap();
-
-        assert_eq!(config.spec.resources.cpus, 4);
-        assert_eq!(config.spec.resources.max_cpus, 8);
-        assert_eq!(config.spec.resources.memory_mib, 2048);
-        assert_eq!(config.spec.resources.max_memory_mib, 4096);
-    }
-
-    #[test]
-    fn checkpoint_restore_rejects_conflicting_explicit_geometry() {
-        let builder = SandboxBuilder::new("restore").cpus(2);
-        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
-
-        let mut config = builder.config.clone().into_config();
-
-        let error = apply_checkpoint_resources(
-            &mut config,
-            &state,
-            RestoreOverrideIntent {
-                cpus: true,
-                ..RestoreOverrideIntent::default()
-            },
-        )
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("captured CPU and memory geometry")
+        let geometry = CheckpointGeometry {
+            vcpus: 4,
+            max_vcpus: 8,
+            memory_mib: 2048,
+            max_memory_mib: 4096,
+        };
+        let sources = BackendConfig::new(
+            serde_json::from_value(
+                serde_json::json!({"sandbox_defaults":{"cpus":1,"memory_mib":512}}),
+            )
+            .unwrap(),
+            Default::default(),
         );
-    }
-
-    #[test]
-    fn checkpoint_restore_checks_each_explicit_patch_resource() {
-        let state = checkpoint_state_with_geometry(4, 8, 2048, 4096);
+        let matching = SandboxResourcesPatch::new()
+            .cpus(4)
+            .max_cpus(8)
+            .memory_mib(2048)
+            .max_memory_mib(4096);
         let cases = [
-            ("cpus", SandboxResourcesPatch::new().cpus(4), false),
-            ("cpus", SandboxResourcesPatch::new().cpus(2), true),
-            ("max_cpus", SandboxResourcesPatch::new().max_cpus(8), false),
-            ("max_cpus", SandboxResourcesPatch::new().max_cpus(4), true),
+            (SandboxResourcesPatch::new(), true, false),
+            (SandboxResourcesPatch::new().cpus(4), true, false),
+            (SandboxResourcesPatch::new().cpus(2), false, false),
+            (SandboxResourcesPatch::new().max_cpus(8), true, false),
+            (SandboxResourcesPatch::new().max_cpus(4), false, false),
+            (SandboxResourcesPatch::new().memory_mib(2048), true, false),
+            (SandboxResourcesPatch::new().memory_mib(512), false, false),
             (
-                "memory",
-                SandboxResourcesPatch::new().memory_mib(2048),
-                false,
-            ),
-            ("memory", SandboxResourcesPatch::new().memory_mib(512), true),
-            (
-                "max_memory",
                 SandboxResourcesPatch::new().max_memory_mib(4096),
+                true,
                 false,
             ),
             (
-                "max_memory",
                 SandboxResourcesPatch::new().max_memory_mib(2048),
-                true,
+                false,
+                false,
             ),
-        ];
-
-        for (field, patch, conflicting) in cases {
-            let builder = SandboxBuilder::new("restore")
-                .overlay(SandboxConfigPatch::new().spec(SandboxSpecPatch::new().resources(patch)));
-            let intent = builder.restore_override_intent();
-            assert_eq!(intent.cpus, field == "cpus");
-            assert_eq!(intent.max_cpus, field == "max_cpus");
-            assert_eq!(intent.memory, field == "memory");
-            assert_eq!(intent.max_memory, field == "max_memory");
-            let mut config = builder.config.clone().into_config();
-            let result = apply_checkpoint_resources(&mut config, &state, intent);
-            if conflicting {
-                assert!(
-                    result
-                        .unwrap_err()
-                        .to_string()
-                        .contains("captured CPU and memory geometry"),
-                    "{field}"
-                );
-            } else {
-                result.unwrap();
-                assert_eq!(config.spec.resources.cpus, 4);
-                assert_eq!(config.spec.resources.max_cpus, 8);
-                assert_eq!(config.spec.resources.memory_mib, 2048);
-                assert_eq!(config.spec.resources.max_memory_mib, 4096);
-            }
-        }
-    }
-
-    #[test]
-    fn checkpoint_restore_patch_preserves_omission_and_prior_intent() {
-        // Clearing a patch field means omission, not resetting a previous builder request.
-        let absent = SandboxConfigPatch::new().spec(
-            SandboxSpecPatch::new().resources(
+            (
                 SandboxResourcesPatch::new()
                     .cpus(2)
                     .clear_cpus()
                     .memory_mib(512)
                     .clear_memory_mib(),
+                true,
+                false,
             ),
-        );
-        let omitted = SandboxBuilder::new("restore").overlay(absent.clone());
-        let intent = omitted.restore_override_intent();
-        assert!(!intent.cpus && !intent.max_cpus && !intent.memory && !intent.max_memory);
-        let mut omitted_config = omitted.config.into_config();
-        apply_checkpoint_resources(
-            &mut omitted_config,
-            &checkpoint_state_with_geometry(4, 8, 2048, 4096),
-            intent,
-        )
-        .unwrap();
+            (matching.clone(), true, true),
+        ];
+        for (patch, sparse_accepted, concrete_accepted) in cases {
+            for reuse in [false, true] {
+                let builder = SandboxBuilder::new("restore").image("alpine").overlay(
+                    SandboxConfigPatch::new()
+                        .spec(SandboxSpecPatch::new().resources(patch.clone())),
+                );
+                let mut builder = if reuse {
+                    SandboxBuilder::from(builder.finish(Some(&sources), None).unwrap())
+                } else {
+                    builder
+                };
+                builder.restore = RestoreState::Prepared(Box::new(
+                    SandboxConfigPatch::new()
+                        .spec(
+                            SandboxSpecPatch::new()
+                                .name("restore".into())
+                                .image(super::RootfsSource::oci("alpine")),
+                        )
+                        .restore_resources(RestoreResources {
+                            geometry: Some(geometry),
+                            ..Default::default()
+                        }),
+                ));
+                let result = builder.finish(Some(&sources), None);
+                let accepted = if reuse {
+                    concrete_accepted
+                } else {
+                    sparse_accepted
+                };
+                assert_eq!(
+                    result.is_ok(),
+                    accepted,
+                    "reuse={reuse}, patch={patch:?}, result={result:?}"
+                );
+                if let Ok(config) = result {
+                    assert_eq!(
+                        (config.spec.resources.cpus, config.spec.resources.max_cpus),
+                        (4, 8)
+                    );
+                    assert_eq!(
+                        (
+                            config.spec.resources.memory_mib,
+                            config.spec.resources.max_memory_mib
+                        ),
+                        (2048, 4096)
+                    );
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("captured CPU and memory geometry")
+                    );
+                }
+            }
+        }
 
-        let explicit = SandboxBuilder::new("restore")
-            .cpus(4)
-            .max_cpus(8)
-            .memory(2048)
-            .max_memory(4096)
-            .overlay(absent)
-            .overlay(SandboxConfigPatch::new());
-        let intent = explicit.restore_override_intent();
-        assert!(intent.cpus && intent.max_cpus && intent.memory && intent.max_memory);
-        assert_eq!(explicit.config.spec.resources.memory_mib, Some(2048));
-    }
-
-    #[test]
-    fn checkpoint_restore_patch_tracks_requests_equal_to_defaults() {
-        let mut builder = SandboxBuilder::new("restore");
-        let default_memory = crate::SandboxConfig::default().spec.resources.memory_mib;
-        builder = builder.overlay(
-            SandboxConfigPatch::new().spec(
-                SandboxSpecPatch::new()
-                    .resources(SandboxResourcesPatch::new().memory_mib(default_memory)),
-            ),
-        );
-        let intent = builder.restore_override_intent();
-        assert!(intent.memory);
-        let state =
-            checkpoint_state_with_geometry(4, 8, default_memory + 512, default_memory + 1024);
-        let mut config = builder.config.into_config();
-        assert!(apply_checkpoint_resources(&mut config, &state, intent).is_err());
-    }
-
-    #[tokio::test]
-    async fn checkpoint_archive_build_retains_patch_resource_intent() {
-        let directory = tempfile::tempdir().unwrap();
-        let archive = directory.path().join("saved.msb");
-        std::fs::write(&archive, b"archive validation is deferred to the backend").unwrap();
-        let config = SandboxBuilder::new("restore")
-            .with_snapshot_reference(SnapshotReference::path(archive.to_string_lossy()))
-            .overlay(
-                SandboxConfigPatch::new().spec(
-                    SandboxSpecPatch::new().resources(
-                        SandboxResourcesPatch::new()
-                            .cpus(2)
-                            .max_cpus(4)
-                            .memory_mib(512)
-                            .max_memory_mib(1024),
-                    ),
-                ),
+        // A pending archive can have valid captured maxima below inherited cold-boot defaults.
+        let inherited = BackendConfig::new(
+            serde_json::from_value(
+                serde_json::json!({"sandbox_defaults":{"cpus":16,"memory_mib":8192}}),
             )
-            .build()
-            .await
-            .unwrap();
-
-        // Direct archives cross the builder/backend boundary before geometry is checked.
-        // Both routes must carry the same intent into that later validation.
-        assert_eq!(
-            config.snapshot_archive_source.as_deref(),
-            Some(archive.as_path())
+            .unwrap(),
+            Default::default(),
         );
-        let intent = config.restore_overrides;
-        assert!(intent.cpus && intent.max_cpus && intent.memory && intent.max_memory);
+        let mut pending = SandboxBuilder::new("restore")
+            .image("alpine")
+            .max_cpus(8)
+            .max_memory(4096);
+        pending.config.snapshot_archive_source = Some("pending.msb".into());
+        let caller = pending.config.clone();
+        let mut staging = SandboxConfig::default();
+        pending.config.apply_to(&mut staging);
+        staging.restore_resources.geometry = Some(geometry);
+        staging.snapshot_parent = Some("captured".into());
+        let restored = finish_prepared_restore(staging, caller, &inherited).unwrap();
+        assert_eq!(
+            (
+                restored.spec.resources.cpus,
+                restored.spec.resources.memory_mib
+            ),
+            (4, 2048)
+        );
+
+        // Direct edits and setters after conversion remain explicit, too.
+        let config = SandboxBuilder::new("restore")
+            .image("alpine")
+            .overlay(SandboxConfigPatch::new().spec(SandboxSpecPatch::new().resources(matching)))
+            .finish(Some(&sources), None)
+            .unwrap();
+        let mut edited = config.clone();
+        edited.spec.resources.memory_mib = 512;
+        for mut builder in [
+            SandboxBuilder::from(edited),
+            SandboxBuilder::from(config).cpus(2),
+        ] {
+            builder.config.restore_resources = Some(RestoreResources {
+                geometry: Some(geometry),
+                ..Default::default()
+            });
+            assert!(
+                builder
+                    .finish(Some(&sources), None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("captured CPU and memory geometry")
+            );
+        }
     }
 
     #[test]
@@ -4932,6 +4973,38 @@ mod tests {
         assert_eq!(json["credentials"]["password"]["kind"], "env");
         assert_eq!(json["credentials"]["password"]["var"], "SOCKS5_PASSWORD");
         assert!(json["credentials"].get("value").is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn test_builder_sets_http_connect_credentials() {
+        let config = SandboxBuilder::new("test")
+            .image("alpine")
+            .proxy(|p| {
+                p.http_connect("127.0.0.1:3128").credentials(
+                    "sandbox",
+                    SecretSource::Env {
+                        var: "HTTP_CONNECT_PASSWORD".into(),
+                    },
+                )
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let network = config.local_network_config().unwrap();
+        let json = serde_json::to_value(network.outbound_proxy).unwrap();
+        assert_eq!(json["protocol"], "http_connect");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(
+            json["credentials"]["password"]["var"],
+            "HTTP_CONNECT_PASSWORD"
+        );
+        assert!(json["credentials"].get("value").is_none());
+        // The password stays a source reference; no plaintext under the nested
+        // password object either.
+        assert!(json["credentials"]["password"].get("value").is_none());
     }
 
     #[cfg(feature = "net")]

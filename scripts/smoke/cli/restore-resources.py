@@ -1,6 +1,7 @@
 """Isolated live restore-resource qualification (macOS, Linux, Windows).
 
-Run explicitly with --msb PATH --firmware PATH --out DIRECTORY. The matching
+Run explicitly with --msb PATH --firmware PATH --out DIRECTORY. Add --plain-tar
+to exercise uncompressed archives. The matching
 guest agentd must sit beside the firmware. Requires working virtualization and
 network access to pull alpine:3.21. Leaves artifacts/logs for inspection, but
 stops/removes only its own uniquely named sandboxes, even after failures.
@@ -20,6 +21,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--msb', required=True, help='Candidate executable')
 p.add_argument('--firmware', required=True, help='Firmware beside matching agentd')
 p.add_argument('--out', required=True, help='New evidence directory')
+p.add_argument('--plain-tar', action='store_true', help='Exercise uncompressed snapshot archives')
 a = p.parse_args()
 out = Path(a.out).absolute()
 out.mkdir(parents=True, exist_ok=False)
@@ -36,6 +38,9 @@ results = []
 (out / 'home.txt').write_text(str(home))
 
 def run(*args, check=True, timeout=120):
+    if a.plain_tar and args[:2] == ('snapshot', 'create') and '-o' in args:
+        args = (*args, '--plain-tar')
+
     start = time.monotonic()
     cp = subprocess.run([a.msb, *map(str, args)], env=env, capture_output=True,
                         text=True, encoding='utf-8', errors='replace', timeout=timeout)
@@ -136,8 +141,8 @@ try:
     assert not (home/'volumes'/absent).exists(), 'missing named volume was created'
     disk_only_missing = ('mount /work', '--allow-missing-resources')
     record('full-disk-only-missing', lambda: restore('diskonly', archive, ['--disk-only'], disk_only_missing, True))
-    # Archive --disk-only restores currently fail before the mount check (tracked separately), so use the installed ref.
-    record('full-disk-only-mapped', lambda: restore('diskonlymap', installed, ['--disk-only', '-v', directory+':/work'], cold=True))
+    record('full-disk-only-mapped', lambda: restore('diskonlymap', archive, ['--disk-only', '-v', directory+':/work'], cold=True))
+    record('installed-full-disk-only-mapped', lambda: restore('installeddiskonlymap', installed, ['--disk-only', '-v', directory+':/work'], cold=True))
     backing = home/'volumes'/directory
     hidden = backing.with_name(directory+'-held')
     backing.rename(hidden)

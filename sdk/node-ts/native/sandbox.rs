@@ -1324,6 +1324,12 @@ pub fn supports_port_modification() -> bool {
     true
 }
 
+/// Whether this native library applies secret policy fields in modify specs.
+#[napi]
+pub fn supports_secret_policy_modification() -> bool {
+    true
+}
+
 pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {
     options.and_then(|options| options.dry_run).unwrap_or(false)
 }
@@ -1371,8 +1377,9 @@ pub(crate) fn checked_layer_count(layers: Option<f64>) -> Result<Option<usize>> 
 }
 
 /// Convert one `secrets` entry into the canonical secret patch, rejecting
-/// specs that set more than one of `env` / `value` / `store`. Errors name
-/// only the conflicting fields, never the secret material; the raw value
+/// specs that set more than one of `env` / `value` / `store` or an unknown
+/// `violationAction`. Errors name only the secret and the field, never the
+/// secret material; the raw value
 /// moves straight into the patch's `Zeroizing` field.
 fn secret_patch_from_spec(
     name: String,
@@ -1396,6 +1403,12 @@ fn secret_patch_from_spec(
         )));
     }
 
+    let violation_action = spec
+        .violation_action
+        .as_deref()
+        .map(crate::secret_builder::parse_violation_action)
+        .transpose()
+        .map_err(|error| Error::from_reason(format!("secret {name:?}: {}", error.reason)))?;
     let source = match (spec.env, spec.store) {
         (Some(var), _) => Some(SecretSource::Env { var }),
         (_, Some(reference)) => Some(SecretSource::Store { reference }),
@@ -1407,8 +1420,25 @@ fn secret_patch_from_spec(
         value: spec.value.unwrap_or_default().into(),
         placeholder: spec.placeholder,
         allowed_hosts: spec.allowed_hosts.unwrap_or_default(),
-        ..SecretModificationPatch::default()
+        substitution: spec.substitution.map(substitution_from_spec),
+        passthrough_hosts: spec.allow_placeholder_for.unwrap_or_default(),
+        violation_action,
+        require_tls_identity: spec.require_tls_identity,
     })
+}
+
+/// A supplied substitution replaces the whole stored rule, so omitted
+/// locations take the create defaults rather than the stored values.
+fn substitution_from_spec(
+    spec: SecretModifySubstitution,
+) -> microsandbox::sandbox::SecretSubstitution {
+    let defaults = microsandbox::sandbox::SecretSubstitution::default();
+    microsandbox::sandbox::SecretSubstitution {
+        headers: spec.headers.unwrap_or(defaults.headers),
+        header_fields: spec.header_fields.unwrap_or(defaults.header_fields),
+        query: spec.query.unwrap_or(defaults.query),
+        body: spec.body.unwrap_or(defaults.body),
+    }
 }
 
 /// Drive dry-run or apply and serialize the resulting plan to JSON.
@@ -1456,3 +1486,153 @@ fn consumed_error() -> napi::Error {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox::sandbox::{SecretSource, SecretSubstitution, SecretViolationAction};
+
+    use super::*;
+
+    fn spec() -> SecretModifySpec {
+        SecretModifySpec::default()
+    }
+
+    fn locations(substitution: Option<SecretSubstitution>) -> (bool, Vec<String>, bool, bool) {
+        let substitution = substitution.expect("substitution should be set");
+        (
+            substitution.headers,
+            substitution.header_fields,
+            substitution.query,
+            substitution.body,
+        )
+    }
+
+    #[test]
+    fn partial_substitution_takes_create_defaults() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                substitution: Some(SecretModifySubstitution {
+                    header_fields: Some(vec!["authorization".into()]),
+                    ..SecretModifySubstitution::default()
+                }),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            locations(patch.substitution),
+            (true, vec!["authorization".into()], false, false)
+        );
+
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                substitution: Some(SecretModifySubstitution {
+                    query: Some(true),
+                    ..SecretModifySubstitution::default()
+                }),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(locations(patch.substitution), (true, vec![], true, false));
+    }
+
+    #[test]
+    fn omitted_policy_fields_leave_the_stored_policy_alone() {
+        let patch = secret_patch_from_spec("API_KEY".into(), spec()).unwrap();
+        assert!(patch.substitution.is_none());
+        assert_eq!(patch.violation_action, None);
+        assert_eq!(patch.require_tls_identity, None);
+        assert!(patch.passthrough_hosts.is_empty());
+    }
+
+    #[test]
+    fn violation_action_parses_and_rejects_unknown_values() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                violation_action: Some("block-and-terminate".into()),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            patch.violation_action,
+            Some(SecretViolationAction::BlockAndTerminate)
+        );
+
+        let error = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                violation_action: Some("explode".into()),
+                ..spec()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            "secret \"API_KEY\": invalid secret violation action: explode"
+        );
+    }
+
+    #[test]
+    fn explicit_false_tls_identity_is_kept() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                require_tls_identity: Some(false),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(patch.require_tls_identity, Some(false));
+    }
+
+    #[test]
+    fn allow_placeholder_for_maps_to_passthrough_hosts() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                allow_placeholder_for: Some(vec!["api.anthropic.com".into()]),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(patch.passthrough_hosts, vec!["api.anthropic.com"]);
+    }
+
+    #[test]
+    fn secret_sources_stay_mutually_exclusive() {
+        let error = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                env: Some("HOST_KEY".into()),
+                value: Some("dummy".into()),
+                substitution: Some(SecretModifySubstitution::default()),
+                ..spec()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            "secret \"API_KEY\": \"env\" and \"value\" are mutually exclusive; set at most one"
+        );
+
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                env: Some("HOST_KEY".into()),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            patch.source,
+            Some(SecretSource::Env {
+                var: "HOST_KEY".into()
+            })
+        );
+    }
+}

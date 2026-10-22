@@ -31,13 +31,14 @@ pub trait Backend: Send + Sync + 'static {
     fn kind(&self) -> BackendKind;
 
     /// Return a secret-safe description of this backend.
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
+    /// Returns an error if backend resolution failed, rather than reporting a usable backend.
+    fn info(&self) -> crate::MicrosandboxResult<BackendInfo> {
+        Ok(BackendInfo {
             kind: self.kind(),
             api_url: None,
             source: BackendSelectionSource::Programmatic,
             profile: None,
-        }
+        })
     }
 
     /// Return the sandbox lifecycle backend.

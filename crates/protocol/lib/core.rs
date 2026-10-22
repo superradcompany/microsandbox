@@ -1,5 +1,6 @@
 //! Core protocol message payloads.
 
+use microsandbox_types::ExecLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady};
@@ -78,6 +79,10 @@ pub struct Ready {
     /// pause require the supported contract instead of assuming frame safety.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_transport_barrier_version: Option<u8>,
+
+    /// Runtime-authorized sandbox execution policy, absent on released older peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_limits: Option<ExecLimits>,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -378,6 +383,7 @@ pub struct RelayClientDisconnected {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::ExecLimits;
     use serde::{Deserialize, Serialize};
 
     use super::{Ready, RelayClientDisconnected};
@@ -406,6 +412,7 @@ mod tests {
             agent_version: "0.6.8".into(),
         };
         let current = Ready {
+            exec_limits: None,
             boot_time_ns: legacy.boot_time_ns,
             init_time_ns: legacy.init_time_ns,
             ready_time_ns: legacy.ready_time_ns,
@@ -426,6 +433,20 @@ mod tests {
         assert!(decoded.relay_lease.is_none());
         assert!(decoded.local_transport.is_none());
         assert!(decoded.workload_transport_barrier_version.is_none());
+        assert!(decoded.exec_limits.is_none());
+
+        let advertised = Ready {
+            exec_limits: Some(ExecLimits::default()),
+            ..current
+        };
+        let mut advertised_bytes = Vec::new();
+        ciborium::into_writer(&advertised, &mut advertised_bytes).unwrap();
+        let legacy_decoded: LegacyReady =
+            ciborium::from_reader(advertised_bytes.as_slice()).unwrap();
+        assert_eq!(
+            legacy_decoded, legacy,
+            "older clients must ignore the new policy field"
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ export {
 } from "./runtime.js";
 export type { BackendInfo, DefaultBackend } from "./runtime.js";
 export { SecretSource } from "./network-config.js";
-export type { OutboundProxy } from "./network-config.js";
+export type { OutboundProxy, SecretSubstitution } from "./network-config.js";
 export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution

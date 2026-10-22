@@ -10,13 +10,15 @@ use std::{
 
 use bytes::Bytes;
 use microsandbox_protocol::{
-    exec::{ExecResize, ExecSignal, ExecStdin},
+    exec::{ExecFailed, ExecResize, ExecSignal, ExecStdin},
     message::MessageType,
 };
-use tokio::sync::mpsc;
+
+use microsandbox_types::EnvVar;
 
 use crate::{MicrosandboxResult, agent::AgentClient};
-use microsandbox_types::EnvVar;
+
+use super::io::{self, EventReceiver, InputWindow};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -94,12 +96,16 @@ pub struct ExitStatus {
 }
 
 /// Handle to a streaming exec session.
+///
+/// Output buffering defaults to 1 MiB shared by stdout and stderr. Supported guests
+/// wait on a full buffer until output is consumed. Older guests warn and retain
+/// unlimited buffering. Collecting output is not size-limited.
 pub struct ExecHandle {
     /// Correlation ID for this session (protocol-level u32, exposed as String).
     id: u32,
 
-    /// Event receiver.
-    events: mpsc::UnboundedReceiver<ExecEvent>,
+    /// Event receiver; reading acknowledges consumed output to the guest.
+    events: EventReceiver,
 
     /// Stdin sink (only if `StdinMode::Pipe` was used).
     stdin: Option<ExecSink>,
@@ -112,8 +118,11 @@ pub struct ExecHandle {
 }
 
 struct StreamTimeout {
+    /// Requested timeout, measured from request dispatch.
     duration: Duration,
+    /// Whether the deadline elapsed, independently of application output reads.
     expired: AtomicBool,
+    /// Failure to deliver timeout termination, reported to the output consumer.
     failure: Mutex<Option<String>>,
 }
 
@@ -151,7 +160,7 @@ pub enum ExecEvent {
     /// Process failed to spawn (binary not found, permission
     /// denied, etc.). Distinct from `Exited` — `Failed` means the
     /// user code never ran. Terminal: no further events follow.
-    Failed(microsandbox_protocol::exec::ExecFailed),
+    Failed(ExecFailed),
 
     /// A stdin write to the child failed (e.g. broken pipe). Non-terminal:
     /// the session keeps running and may still emit further output and
@@ -163,6 +172,10 @@ pub enum ExecEvent {
 pub struct ExecSink {
     id: u32,
     client: Arc<AgentClient>,
+    /// Guest-advertised stdin allowance; absent for legacy buffering.
+    window: Option<Arc<io::InputWindow>>,
+    /// Serializes writes and EOF; true once EOF is committed to the transport queue.
+    write_lock: tokio::sync::Mutex<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -325,7 +338,7 @@ impl ExecHandle {
     /// Create a new exec handle.
     fn new(
         id: u32,
-        events: mpsc::UnboundedReceiver<ExecEvent>,
+        events: EventReceiver,
         stdin: Option<ExecSink>,
         client: Arc<AgentClient>,
         timeout: Option<Arc<StreamTimeout>>,
@@ -354,13 +367,7 @@ impl ExecHandle {
 
     /// Consume this handle into separately owned control, stdin, and event parts.
     #[cfg(feature = "ssh")]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ExecControl,
-        Option<ExecSink>,
-        mpsc::UnboundedReceiver<ExecEvent>,
-    ) {
+    pub(crate) fn into_parts(self) -> (ExecControl, Option<ExecSink>, EventReceiver) {
         (
             ExecControl {
                 id: self.id,
@@ -522,28 +529,67 @@ impl ExecControl {
 
 impl ExecSink {
     /// Create a new stdin sink.
-    pub(crate) fn new(id: u32, client: Arc<AgentClient>) -> Self {
-        Self { id, client }
+    fn new(id: u32, client: Arc<AgentClient>, window: Option<Arc<InputWindow>>) -> Self {
+        Self {
+            id,
+            client,
+            window,
+            write_lock: tokio::sync::Mutex::new(false),
+        }
     }
 
-    /// Write data to the process's stdin.
+    /// Write data to the process's stdin, waiting until all bytes have been sent.
+    /// A cancelled write may have queued a prefix that is still delivered.
     pub async fn write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        let payload = ExecStdin {
-            data: data.as_ref().to_vec(),
-        };
+        // Serialize chunks so concurrent writes and EOF keep their original operation order.
+        let mut closed = self.write_lock.lock().await;
+        let data = data.as_ref();
+        if *closed {
+            return if data.is_empty() {
+                Ok(())
+            } else {
+                Err(crate::MicrosandboxError::Runtime(
+                    "execution stdin closed".into(),
+                ))
+            };
+        }
+        if let Some(window) = &self.window {
+            window.wait_started().await?;
+        }
+        if data.is_empty() {
+            self.client
+                .send_and_commit(
+                    self.id,
+                    MessageType::ExecStdin,
+                    &ExecStdin { data: Vec::new() },
+                    || *closed = true,
+                )
+                .await?;
+            return Ok(());
+        }
+
+        if let Some(window) = &self.window {
+            window.send(&self.client, self.id, data).await?;
+            return Ok(());
+        }
+
         self.client
-            .send(self.id, MessageType::ExecStdin, &payload)
+            .send(
+                self.id,
+                MessageType::ExecStdin,
+                &ExecStdin {
+                    data: data.to_vec(),
+                },
+            )
             .await?;
         Ok(())
     }
 
     /// Close stdin (sends EOF to the process).
+    /// Waits for any current write to finish. Cancel a blocked write first if the process
+    /// is not consuming input; any prefix already sent may still arrive before EOF.
     pub async fn close(&self) -> MicrosandboxResult<()> {
-        let payload = ExecStdin { data: Vec::new() };
-        self.client
-            .send(self.id, MessageType::ExecStdin, &payload)
-            .await?;
-        Ok(())
+        self.write([]).await
     }
 }
 
@@ -563,7 +609,10 @@ pub(crate) mod agent {
 
     use bytes::Bytes;
     use microsandbox_protocol::{
-        exec::{ExecExited, ExecStarted, ExecStderr, ExecStdin, ExecStdout},
+        exec::{
+            EXEC_OUTPUT_EVENT_OVERHEAD, ExecExited, ExecFailed, ExecFailureKind, ExecSignal,
+            ExecStarted, ExecStderr, ExecStdinAck, ExecStdout,
+        },
         message::{Message, MessageType},
     };
     use tokio::{
@@ -573,12 +622,14 @@ pub(crate) mod agent {
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        sandbox::{SandboxConfig, build_exec_request},
+        agent::AgentClient,
+        sandbox::{SandboxConfig, build_exec_request, fs::agent::connect_agent},
     };
 
     use super::{
         ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
         StreamTimeout,
+        io::{self, EventReceiver},
     };
 
     pub(crate) async fn exec_stream(
@@ -600,7 +651,24 @@ pub(crate) mod agent {
         rows: u16,
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
-        let client = Arc::new(super::super::fs::agent::connect_agent(backend, name).await?);
+        let client = Arc::new(connect_agent(backend, name).await?);
+        let policy = client.ready()?.exec_limits;
+
+        if let Some(policy) = policy {
+            policy
+                .validate()
+                .map_err(|error| MicrosandboxError::Runtime(error.into()))?;
+        }
+
+        let controlled = policy.is_some() && client.supports(MessageType::ExecOutputAck);
+        if !controlled {
+            tracing::warn!(
+                sandbox = %name,
+                "guest does not support exec output backpressure; \
+                retaining legacy unbounded buffering"
+            );
+        }
+
         let ExecOptions {
             args,
             cwd,
@@ -643,10 +711,13 @@ pub(crate) mod agent {
         let req = build_exec_request(
             config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
         );
+        let input_window = policy.filter(|_| controlled).map(|policy| {
+            io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)
+        });
         let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         let stdin = match &stdin_mode {
-            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client))),
+            StdinMode::Pipe => Some(ExecSink::new(id, Arc::clone(&client), input_window.clone())),
             _ => None,
         };
 
@@ -658,26 +729,25 @@ pub(crate) mod agent {
             _ => None,
         };
         if let Some(data) = finite_input {
-            let bridge = Arc::clone(&client);
+            let sink = ExecSink::new(id, Arc::clone(&client), input_window.clone());
             tokio::spawn(async move {
                 if !data.is_empty() {
-                    let payload = ExecStdin { data };
-                    let _ = bridge.send(id, MessageType::ExecStdin, &payload).await;
+                    let _ = sink.write(data).await;
                 }
-                // Empty finite input and null both send exactly one ordered EOF. Keeping
-                // this producer independent also lets cancellation of wait preserve delivery.
-                let close = ExecStdin { data: Vec::new() };
-                let _ = bridge.send(id, MessageType::ExecStdin, &close).await;
+                let _ = sink.close().await;
             });
         }
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_rx, acknowledgements) = EventReceiver::new(event_rx, controlled);
         tokio::spawn(event_mapper_task(
             rx,
             event_tx,
             deadline.zip(timeout.clone()),
             Arc::downgrade(&client),
             id,
+            acknowledgements,
+            input_window,
         ));
 
         Ok(ExecHandle::new(id, event_rx, stdin, client, timeout))
@@ -715,9 +785,45 @@ pub(crate) mod agent {
         mut rx: mpsc::Receiver<Message>,
         tx: mpsc::UnboundedSender<ExecEvent>,
         timeout: Option<(Instant, Arc<StreamTimeout>)>,
-        client: Weak<crate::agent::AgentClient>,
+        client: Weak<AgentClient>,
         id: u32,
+        acknowledgements: Option<io::OutputAcknowledgements>,
+        input_window: Option<Arc<io::InputWindow>>,
     ) {
+        let policy = client
+            .upgrade()
+            .and_then(|client| client.ready().ok())
+            .and_then(|ready| ready.exec_limits);
+
+        let mut output_sent = 0_u64;
+        let discarded = acknowledgements
+            .as_ref()
+            .map(|acknowledgements| acknowledgements.consumed.clone());
+        let acknowledgement_client = client.clone();
+        let acknowledgement = async move {
+            match acknowledgements {
+                Some(acknowledgements) => {
+                    acknowledgements
+                        .run(|acknowledgement| {
+                            let client = acknowledgement_client.clone();
+                            async move {
+                                let client = client.upgrade().ok_or("exec connection closed")?;
+                                client
+                                    .send(id, MessageType::ExecOutputAck, &acknowledgement)
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            }
+                        })
+                        .await
+                }
+                None => std::future::pending().await,
+            }
+        };
+
+        let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(acknowledgement));
+        let acknowledgement = async move { worker.await.map_err(|error| error.to_string())? };
+        tokio::pin!(acknowledgement);
+
         let (started_tx, started_rx) = watch::channel(false);
         let monitor = async {
             let Some((deadline, state)) = &timeout else {
@@ -728,24 +834,34 @@ pub(crate) mod agent {
                     .upgrade()
                     .ok_or("exec connection closed before timeout termination")?;
                 client
-                    .send(
-                        id,
-                        MessageType::ExecSignal,
-                        &microsandbox_protocol::exec::ExecSignal { signal: 9 },
-                    )
+                    .send(id, MessageType::ExecSignal, &ExecSignal { signal: 9 })
                     .await
                     .map_err(|error| error.to_string())
             })
             .await
         };
-        tokio::pin!(monitor);
-        let mut deadline_done = false;
+        let mut monitor = Some(Box::pin(monitor));
+        let mut reader_closed = false;
         loop {
             let msg = tokio::select! {
-                // Dropping the session cancels its timer without retaining the connection.
-                _ = tx.closed() => break,
-                result = &mut monitor, if !deadline_done => {
-                    deadline_done = true;
+                // Preserve completion while a retained stdin/control handle owns the connection.
+                _ = tx.closed(), if !reader_closed => {
+                    reader_closed = true;
+                    continue;
+                },
+
+                result = &mut acknowledgement => {
+                    if let Err(error) = result
+                        && !tx.is_closed()
+                    {
+                        tracing::warn!(%error, "exec output acknowledgement delivery failed");
+                    }
+                    break;
+                }
+
+                result = async { monitor.as_mut().expect("active deadline").await }, if monitor.is_some() => {
+                    monitor = None;
+
                     if let Err(error) = result {
                         let diagnostic = format!("exec timeout termination failed; process exit is unconfirmed: {error}");
                         if let Some((_, state)) = &timeout {
@@ -758,10 +874,32 @@ pub(crate) mod agent {
                 }
                 msg = rx.recv() => match msg { Some(msg) => msg, None => break },
             };
+
             let event = match msg.t {
+                MessageType::ExecStdinAck => {
+                    if let Some(window) = &input_window {
+                        match msg.payload::<ExecStdinAck>() {
+                            Ok(acknowledgement) if window.acknowledge(acknowledgement.consumed) => {
+                            }
+                            _ => {
+                                tracing::warn!("invalid execution stdin acknowledgement");
+                                if let Some(client) = client.upgrade() {
+                                    client.abort().await;
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    continue;
+                }
                 MessageType::ExecStarted => match msg.payload::<ExecStarted>() {
                     Ok(started) => {
                         started_tx.send_replace(true);
+                        if let Some(window) = &input_window {
+                            window.mark_started();
+                        }
+
                         ExecEvent::Started { pid: started.pid }
                     }
                     Err(_) => continue,
@@ -781,12 +919,15 @@ pub(crate) mod agent {
                     break;
                 }
                 MessageType::ExecFailed => {
-                    if let Ok(failed) = msg.payload::<microsandbox_protocol::exec::ExecFailed>() {
+                    if let Ok(failed) = msg.payload::<ExecFailed>() {
                         let _ = tx.send(ExecEvent::Failed(failed));
                     }
                     break;
                 }
                 MessageType::ExecStdinError => {
+                    if let Some(window) = &input_window {
+                        window.close();
+                    }
                     match msg.payload::<microsandbox_protocol::exec::ExecStdinError>() {
                         Ok(payload) => ExecEvent::StdinError(payload),
                         Err(_) => continue,
@@ -794,9 +935,44 @@ pub(crate) mod agent {
                 }
                 _ => continue,
             };
-            if tx.send(event).is_err() {
-                break;
+
+            if let (Some(policy), Some(consumed)) = (policy, discarded.as_ref())
+                && let ExecEvent::Stdout(data) | ExecEvent::Stderr(data) = &event
+            {
+                let sent = output_sent
+                    .checked_add(data.len() as u64 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD));
+                if data.len() > policy.output_chunk_size as usize
+                    || sent.is_none_or(|sent| {
+                        sent.saturating_sub(consumed.borrow().consumed)
+                            > u64::from(policy.output_limit)
+                    })
+                {
+                    let _ = tx.send(ExecEvent::Failed(ExecFailed {
+                        kind: ExecFailureKind::Other,
+                        errno: None,
+                        errno_name: None,
+                        message: "guest output exceeds the advertised execution policy".into(),
+                        stage: Some("protocol".into()),
+                    }));
+
+                    if let Some(client) = client.upgrade() {
+                        client.abort().await;
+                    }
+
+                    break;
+                }
+                output_sent = sent.unwrap();
             }
+
+            if let Err(error) = tx.send(event)
+                && let Some(consumed) = &discarded
+            {
+                io::consume(consumed, &error.0);
+            }
+        }
+
+        if let Some(window) = input_window {
+            window.close();
         }
     }
 
@@ -838,6 +1014,355 @@ pub(crate) mod agent {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use super::*;
+        use microsandbox_protocol::{codec, core::Ready, message::PROTOCOL_VERSION};
+
+        const TEST_INPUT_LIMIT: u32 = 64 * 1024;
+
+        async fn flow_test_client() -> (Arc<AgentClient>, tokio::io::DuplexStream) {
+            flow_test_client_with_version(PROTOCOL_VERSION).await
+        }
+
+        async fn flow_test_client_with_version(
+            version: u8,
+        ) -> (Arc<AgentClient>, tokio::io::DuplexStream) {
+            use tokio::io::AsyncWriteExt;
+
+            let (host, mut peer) = tokio::io::duplex(1024);
+            let connect = AgentClient::connect_stream_with_timeout(host, Duration::from_secs(3));
+            let handshake = async {
+                peer.write_all(&1u32.to_be_bytes()).await.unwrap();
+                peer.write_all(&1024u32.to_be_bytes()).await.unwrap();
+                let mut ready =
+                    Message::with_payload(MessageType::Ready, 0, &Ready::default()).unwrap();
+                ready.v = version;
+                codec::write_message(&mut peer, &ready).await.unwrap();
+                peer
+            };
+            let (client, peer) = tokio::join!(connect, handshake);
+            (Arc::new(client.unwrap()), peer)
+        }
+
+        #[tokio::test]
+        async fn stdin_allowance_preserves_control_progress_and_eof_order() {
+            use microsandbox_protocol::{
+                codec,
+                exec::{ExecOutputAck, ExecStdin},
+            };
+            for chunk_size in [1024, 16384, 65536] {
+                let (client, mut peer) = flow_test_client().await;
+                let window = super::super::io::InputWindow::new(TEST_INPUT_LIMIT, chunk_size);
+                window.mark_started();
+                let sink = ExecSink::new(77, client.clone(), Some(window.clone()));
+                let total = 2 * TEST_INPUT_LIMIT as usize + 3;
+                let writer = async {
+                    sink.write(vec![7; total]).await.unwrap();
+                    sink.close().await.unwrap();
+                };
+                let reader = async {
+                    let mut received = 0;
+                    let allowance = TEST_INPUT_LIMIT as usize;
+                    while received < allowance {
+                        let msg = codec::read_message(&mut peer).await.unwrap();
+                        assert_eq!(msg.t, MessageType::ExecStdin);
+                        let data = msg.payload::<ExecStdin>().unwrap().data;
+                        assert!(!data.is_empty());
+                        assert!(data.len() <= chunk_size);
+                        assert!(data.iter().all(|byte| *byte == 7));
+                        received += data.len();
+                    }
+                    assert_eq!(received, allowance);
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(20),
+                            codec::read_message(&mut peer)
+                        )
+                        .await
+                        .is_err(),
+                        "stdin must wait until the guest acknowledges consumed bytes"
+                    );
+
+                    // Control traffic must pass while stdin is waiting for guest acknowledgement.
+                    let (sent, message) = tokio::join!(
+                        client.send(
+                            77,
+                            MessageType::ExecOutputAck,
+                            &ExecOutputAck { consumed: 256 }
+                        ),
+                        codec::read_message(&mut peer),
+                    );
+                    sent.unwrap();
+                    assert_eq!(message.unwrap().t, MessageType::ExecOutputAck);
+                    assert!(window.acknowledge(received as u64));
+
+                    loop {
+                        let msg = codec::read_message(&mut peer).await.unwrap();
+                        assert_eq!(msg.t, MessageType::ExecStdin);
+                        let data = msg.payload::<ExecStdin>().unwrap().data;
+                        if data.is_empty() {
+                            break;
+                        }
+                        assert!(data.iter().all(|byte| *byte == 7));
+                        received += data.len();
+                        assert!(window.acknowledge(received as u64));
+                    }
+                    assert_eq!(received, total, "EOF must follow every byte");
+                };
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(writer, reader);
+                })
+                .await
+                .unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn closing_stdin_wakes_waiting_writes() {
+            use microsandbox_protocol::{codec, exec::ExecStdin};
+            for started in [false, true] {
+                let (client, mut peer) = flow_test_client().await;
+                let window = super::super::io::InputWindow::new(TEST_INPUT_LIMIT, 16 * 1024);
+                if started {
+                    window.mark_started();
+                }
+                let sink = ExecSink::new(77, client, Some(window.clone()));
+                let writer = async {
+                    assert!(sink.write(vec![1; 256 * 1024]).await.is_err());
+                };
+                let reader = async {
+                    for _ in 0..if started { 4 } else { 0 } {
+                        let msg = codec::read_message(&mut peer).await.unwrap();
+                        assert!(!msg.payload::<ExecStdin>().unwrap().data.is_empty());
+                    }
+                    window.close();
+                };
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    tokio::join!(writer, reader);
+                })
+                .await
+                .expect("closed stdin must wake queued and in-flight writes");
+            }
+        }
+
+        #[tokio::test]
+        async fn cancelling_admitted_eof_keeps_stdin_closed() {
+            use microsandbox_protocol::exec::ExecStdin;
+            use std::future::{Future, poll_fn};
+            use std::task::Poll;
+
+            for controlled in [false, true] {
+                let (client, mut peer) = flow_test_client().await;
+                let window = controlled.then(|| {
+                    let window = super::super::io::InputWindow::new(TEST_INPUT_LIMIT, 16384);
+                    window.mark_started();
+                    window
+                });
+                let sink = ExecSink::new(77, client.clone(), window);
+                let mut close = Box::pin(sink.close());
+                // Queue EOF without yielding to the socket writer, then cancel its caller while
+                // the accepted frame still waits for physical delivery.
+                poll_fn(|cx| {
+                    assert!(close.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                drop(close);
+
+                let mut write = Box::pin(sink.write(b"after EOF"));
+                poll_fn(|cx| {
+                    assert!(
+                        matches!(write.as_mut().poll(cx), Poll::Ready(Err(_))),
+                        "an admitted EOF must reject subsequent writes even if close was cancelled"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
+                sink.close().await.unwrap();
+                let eof = codec::read_message(&mut peer).await.unwrap();
+                assert_eq!(eof.id, 77);
+                assert!(eof.payload::<ExecStdin>().unwrap().data.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn cancelled_stdin_respects_transport_admission() {
+            use microsandbox_protocol::exec::ExecStdin;
+            use std::future::{Future, poll_fn};
+            use std::task::Poll;
+
+            for limit in [16 * 1024, 32 * 1024, TEST_INPUT_LIMIT] {
+                let (client, mut peer) = flow_test_client().await;
+                let window = super::super::io::InputWindow::new(limit, 16 * 1024);
+                let filler = ExecStdin {
+                    data: vec![1; 4096],
+                };
+                let mut pending: Vec<_> = (100..132)
+                    .map(|id| Box::pin(client.send(id, MessageType::ExecStdin, &filler)))
+                    .collect();
+                // Fill the real bounded writer queue while the peer does not read.
+                poll_fn(|cx| {
+                    for send in &mut pending {
+                        assert!(send.as_mut().poll(cx).is_pending());
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+
+                for _ in 0..4 {
+                    let mut write = Box::pin(window.send(&client, 77, vec![2; 16 * 1024]));
+                    poll_fn(|cx| {
+                        assert!(write.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    drop(write);
+                }
+                drop(pending);
+
+                let receive = async {
+                    let mut bytes = 0;
+                    while bytes < limit as usize {
+                        let msg = codec::read_message(&mut peer).await.unwrap();
+                        if msg.id == 77 {
+                            let data = msg.payload::<ExecStdin>().unwrap().data;
+                            assert!(data.iter().all(|byte| *byte == 3));
+                            bytes += data.len();
+                        }
+                    }
+                    assert_eq!(bytes, limit as usize);
+                };
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    tokio::join!(
+                        async {
+                            window
+                                .send(&client, 77, vec![3; limit as usize])
+                                .await
+                                .unwrap();
+                        },
+                        receive
+                    );
+                })
+                .await
+                .expect("cancelled writes must not consume capacity");
+
+                let mut blocked = Box::pin(window.send(&client, 77, vec![5; 16 * 1024]));
+                poll_fn(|cx| {
+                    assert!(blocked.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_millis(20),
+                        codec::read_message(&mut peer),
+                    )
+                    .await
+                    .is_err(),
+                    "a full configured input window must not admit another chunk",
+                );
+                drop(blocked);
+
+                assert!(window.acknowledge(u64::from(limit)));
+                let mut write = Box::pin(window.send(&client, 77, vec![4; 16 * 1024]));
+                poll_fn(|cx| {
+                    assert!(write.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                // The frame is admitted, but the peer has not read it yet. Cancelling
+                // must keep its charge and allow the eventual acknowledgement.
+                drop(write);
+                let msg =
+                    tokio::time::timeout(Duration::from_secs(3), codec::read_message(&mut peer))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(msg.id, 77);
+                assert_eq!(msg.payload::<ExecStdin>().unwrap().data, vec![4; 16 * 1024]);
+                assert!(window.acknowledge(u64::from(limit) + 16 * 1024));
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn dropped_reader_preserves_timeout_and_output_flow() {
+            use microsandbox_protocol::exec::{
+                EXEC_OUTPUT_EVENT_OVERHEAD, ExecOutputAck, ExecRequest,
+            };
+
+            for controlled in [false, true] {
+                let (client, mut peer) = flow_test_client().await;
+                let request: ExecRequest = serde_json::from_value(
+                    serde_json::json!({"cmd":"cat", "output_limit":controlled.then_some(65536)}),
+                )
+                .unwrap();
+                let ((id, rx), _) = tokio::join!(
+                    async {
+                        client
+                            .stream(MessageType::ExecRequest, &request)
+                            .await
+                            .unwrap()
+                    },
+                    async {
+                        codec::read_message(&mut peer).await.unwrap();
+                    }
+                );
+                let (tx, events) = mpsc::unbounded_channel();
+                let (events, acknowledgements) =
+                    super::super::io::EventReceiver::new(events, controlled);
+                let pump = tokio::spawn(event_mapper_task(
+                    rx,
+                    tx,
+                    Some((Instant::now() + Duration::from_secs(10), Arc::new(state()))),
+                    Arc::downgrade(&client),
+                    id,
+                    acknowledgements,
+                    None,
+                ));
+                let handle = ExecHandle::new(id, events, None, client, None);
+                let control = handle.control();
+
+                let started =
+                    Message::with_payload(MessageType::ExecStarted, id, &ExecStarted { pid: 123 })
+                        .unwrap();
+                codec::write_message(&mut peer, &started).await.unwrap();
+
+                let output = Message::with_payload(
+                    MessageType::ExecStdout,
+                    id,
+                    &ExecStdout {
+                        data: vec![1; 4096],
+                    },
+                )
+                .unwrap();
+                codec::write_message(&mut peer, &output).await.unwrap();
+                drop(handle);
+
+                tokio::time::timeout(Duration::from_secs(20), async {
+                    if controlled {
+                        for chunks in 1..=2 {
+                            let expected = chunks * (4096 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD));
+                            let msg = codec::read_message(&mut peer).await.unwrap();
+                            assert_eq!(msg.t, MessageType::ExecOutputAck);
+                            assert_eq!(msg.payload::<ExecOutputAck>().unwrap().consumed, expected);
+                            if chunks == 1 {
+                                codec::write_message(&mut peer, &output).await.unwrap();
+                            }
+                        }
+                    }
+                    tokio::time::advance(Duration::from_secs(10)).await;
+                    let signal = codec::read_message(&mut peer).await.unwrap();
+                    assert_eq!(signal.t, MessageType::ExecSignal);
+                    assert_eq!(signal.payload::<ExecSignal>().unwrap().signal, 9);
+                    let exited =
+                        Message::with_payload(MessageType::ExecExited, id, &ExecExited { code: 0 })
+                            .unwrap();
+                    codec::write_message(&mut peer, &exited).await.unwrap();
+                    pump.await.unwrap();
+                })
+                .await
+                .expect("retained control handle must not strand the producer");
+                drop(control);
+            }
+        }
 
         fn state() -> StreamTimeout {
             StreamTimeout {
@@ -939,6 +1464,8 @@ pub(crate) mod agent {
                 Some((Instant::now() + Duration::from_secs(1), state.clone())),
                 Weak::new(),
                 1,
+                None,
+                None,
             )
             .await;
             assert!(matches!(
@@ -970,6 +1497,8 @@ pub(crate) mod agent {
                 Some((Instant::now(), state.clone())),
                 Weak::new(),
                 1,
+                None,
+                None,
             )
             .await;
             assert!(matches!(

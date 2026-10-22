@@ -57,10 +57,15 @@ This example enforces **two vCPUs and 1 GiB of memory** for new local and cloud 
 
 ## Understand policy coverage
 
+To require cloud execution, add `"allowed_backends": ["cloud"]` under `overrides`. Use `["local"]` for local only, or `["local", "cloud"]` for both. This checks permission even when an employee explicitly chooses a backend through the SDK. To also set the default, use `active_profile` to name a configured cloud profile.
+
+An empty list is invalid. An omitted field inherits the user restriction; `null` clears it. `msb context list` shows prohibited profiles, while attempting to use one returns an error naming the restriction and its source.
+
 Supported CLI and SDK backends apply managed settings on the employee device. The file does not configure the cloud service or its hosted SSH gateway.
 
 | Setting | Applies to |
 | --- | --- |
+| Allowed backends | Construction of local and cloud CLI/SDK backends |
 | Sandbox defaults, such as CPU and memory | Local creation and outgoing cloud create requests; unsupported cloud options fail |
 | Outbound proxy | Local sandboxes; cloud creation fails while a proxy is enforced |
 | Registry settings | Host image pulls; cloud pulls use explicit or cloud-stored credentials |
@@ -98,7 +103,7 @@ Your deployment tool must install the policy at the system location below and pr
 On macOS and Linux, backend construction fails if the file or its immediate parent directory is not root-owned or is group- or world-writable, or if their permissions cannot be checked. An administrator must correct the reported ownership or permissions before retrying. These checks do not inspect ACLs or other ancestor directories; Windows permissions are not checked. Protect the complete path.
 
 <Note>
-  Older CLI and SDK releases do not enforce managed settings. Include supported versions in your rollout. Local administrators can remove policy or replace the runtime.
+  Deploy CLI and SDK versions that support `allowed_backends` before relying on it. Older versions ignore this field, and saving user config with an older version can remove it. Managed policy is never saved by user-config commands. Local administrators can remove policy or replace the runtime.
 </Note>
 
 

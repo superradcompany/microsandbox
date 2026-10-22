@@ -25,9 +25,8 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_q
 use tokio::sync::Mutex;
 
 use super::LocalBackend;
-use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
-use crate::backend::{Backend, SnapshotBackend};
+use crate::backend::Backend;
 use crate::config::RegistryOptions;
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
@@ -46,6 +45,7 @@ use crate::sandbox::{
     validate_volume_mounts,
 };
 use crate::timing::{self, TARGET};
+use crate::{MicrosandboxError, MicrosandboxResult};
 use cleanup::CreationCleanup;
 
 //--------------------------------------------------------------------------------------------------
@@ -204,20 +204,14 @@ impl LocalBackend {
             );
         }
         builder = builder.deployment_profile(profile);
-        let mut config = builder.finish(
-            Some(&self.config),
+        let mut config = builder.finish_local(
+            &self.config,
             resolved_image
                 .as_ref()
                 .map(|image| crate::SandboxConfigPatch::from_image(&image.pull_result.config)),
         )?;
         config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
         super::super::host_paths::resolve_host_paths(&mut config)?;
-        // Compatibility callers can supply a snapshot reference alongside an image.
-        // Resolve it with this backend before replacement or child reservation can mutate state.
-        if let Some(reference) = config.snapshot_reference.take() {
-            SnapshotBackend::prepare_restore(self, backend.clone(), &mut config, reference).await?;
-            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-        }
 
         let timing_name = config.spec.name.clone();
         tracing::debug!(
@@ -249,114 +243,58 @@ impl LocalBackend {
         // unsupported requests from deleting a replace target before launch.
         launch_contract::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
-        // Preserve only the installed-snapshot source that existed on entry. Direct archive
-        // materialization below installs its checkpoint closure directly into child staging, so
-        // feeding that result through the installed-snapshot copier would copy the closure onto
-        // itself and destroy the eager restore source.
+        // Installed sources and archives have separate materialization paths.
         let installed_checkpoint_restore = config.checkpoint_restore.take();
         let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
-        // Decode once into a unique sibling before touching the replacement target.
-        // Archive metadata supplies effective runtime requirements; validating the
-        // builder alone misses those. Publication below is a rename, not another copy.
-        let mut archive_stage = None;
-        if let Some(archive) = config.snapshot_archive_source.clone() {
+
+        let archive_stage = if let Some(archive) = config.snapshot_archive_source.clone() {
             tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
             let stage = tempfile::Builder::new()
                 .prefix(".archive-restore-")
                 .tempdir_in(self.sandboxes_dir())?;
-            let stage_path = stage.path();
-            let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
-            // Archive decoding has a large async state machine. Keep it off the containing
-            // create future so native SDK debug builds fit ordinary Tokio worker stacks.
-            let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
-                self,
+
+            let materialized = Box::pin(self.materialize_archive_for_child(
                 &archive,
-                stage_path,
-                disk_only,
+                stage.path(),
+                config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly,
                 config.snapshot_base.as_deref(),
                 &config.restore_resources,
                 config.restore_boot_overrides,
             ))
             .await?;
-            config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
-            if config.spec.runtime.user.is_none() {
-                config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
-            }
-            crate::sandbox::apply_snapshot_guest_clock(&mut config, &materialized.manifest)?;
-            crate::sandbox::require_recorded_mounts(&config, &materialized.manifest)?;
-            crate::sandbox::require_guest_mounts(&config, materialized.required_bind_paths)?;
-            config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
-            crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
-            config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
-            crate::sandbox::apply_snapshot_root_layout(
-                &mut config,
-                &materialized.manifest.root_disk,
-            )?;
-            image_operations.push(materialized.cache_operation);
-            if let Some(restore) = materialized.checkpoint_restore {
-                let state = match &materialized.manifest.state {
-                    crate::snapshot::SnapshotState::Checkpoint(state) => state,
-                    crate::snapshot::SnapshotState::File(_) => {
-                        return Err(crate::MicrosandboxError::SnapshotIntegrity(
-                            "archive produced checkpoint construction state for file snapshot"
-                                .into(),
-                        ));
-                    }
-                };
-                let expected =
-                    microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
-                        .map_err(|error| {
-                            crate::MicrosandboxError::SnapshotIntegrity(error.to_string())
-                        })?;
-                let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
-                    &restore.closure,
-                    Some(&expected),
-                    self.config().fs_state_limit(),
-                )
-                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-                let overrides = config.restore_overrides;
-                crate::sandbox::apply_checkpoint_restore_constraints(
-                    &mut config,
-                    state,
-                    closure.checkpoint(),
-                    overrides,
-                )?;
-                config.checkpoint_restore = Some(restore);
-                config.snapshot_upper_layers = materialized.upper_layers;
-                config.suppress_launch_for_full_restore();
-            } else if !materialized.upper_layers.is_empty() {
-                config.snapshot_upper_layers = materialized.upper_layers;
-            } else if matches!(
-                materialized.manifest.state,
-                crate::snapshot::SnapshotState::File(_)
-            ) {
-                config.snapshot_upper_source =
-                    Some(stage_path.join(match &materialized.manifest.root_disk {
-                        SnapshotRootDisk::Managed => "upper.ext4",
-                        SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
-                        SnapshotRootDisk::Tmpfs { .. } => {
-                            unreachable!("file snapshots reject tmpfs roots")
-                        }
-                    }));
-            }
-            // Archive descriptors are resolved here, after the builder's initial validation.
-            // Do not let a disk archive turn an explicit CoW restore into a fresh boot, and
-            // reject it before replacement can remove the existing sandbox.
-            if config.forked && config.checkpoint_restore.is_none() {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "copy-on-write memory requires a full snapshot restore".into(),
+
+            let admitted = config
+                .restore_resources
+                .archive_manifest
+                .as_ref()
+                .ok_or_else(|| {
+                    MicrosandboxError::SnapshotIntegrity("archive metadata was not admitted".into())
+                })?;
+
+            if admitted.digest()? != materialized.manifest.digest()? {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot archive changed after configuration was built".into(),
                 ));
             }
 
-            // Archive metadata is now available. Check policy against captured state
-            // before admitting it or touching the replacement target. The archive path
-            // stays set so this check sees a disk-only restore's snapshot source.
-            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-            // Keep launch-time restore intent in this check, not just cold-start state.
+            image_operations.push(self.apply_materialized_archive(
+                &mut config,
+                stage.path(),
+                materialized,
+            )?);
+
+            validate_volume_mounts(&mut config.spec.mounts)?;
+            // Extracted checkpoint paths may introduce additional runtime requirements.
             launch_contract::validate_runtime_config(&config, self.config()).await?;
-            archive_stage = Some(stage);
-        }
+
+            config.snapshot_archive_source = None;
+            config.snapshot_base = None;
+
+            Some(stage)
+        } else {
+            None
+        };
 
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
@@ -447,7 +385,7 @@ impl LocalBackend {
             Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
                 .await?
                 .refuses_symlinked_bind_roots(),
-            Err(crate::MicrosandboxError::RuntimeNotInstalled(_)) => true,
+            Err(MicrosandboxError::RuntimeNotInstalled(_)) => true,
             Err(error) => return Err(error),
         };
         if enforce {
@@ -457,7 +395,7 @@ impl LocalBackend {
         if !installed_file_sources.is_empty() {
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
             let virtual_size = installed_file_virtual_size.ok_or_else(|| {
-                crate::MicrosandboxError::SnapshotIntegrity(
+                MicrosandboxError::SnapshotIntegrity(
                     "file snapshot is missing its root-disk capacity".into(),
                 )
             })?;
@@ -483,10 +421,9 @@ impl LocalBackend {
         }
         // All source payloads are now child-owned; runtime handles must not retain the source.
         config.snapshot_lease = None;
-        // Archive descriptors are intentionally inspected only while streaming into child
-        // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
-        // ownership here, before process creation, so a discovered full restore never receives an
-        // attached parent watchdog or Windows kill-on-close job.
+
+        // Re-evaluate ownership from the materialized restore state before process creation.
+        // A full restore must not receive an attached parent watchdog or Windows kill-on-close job.
         let mode = crate::sandbox::create_spawn_mode(&config, mode);
 
         // Resolve OCI images before spawning the sandbox process.
@@ -507,12 +444,12 @@ impl LocalBackend {
             // Flat roots bake patches into a private tree and are compatible with both paths.
             if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
                 if config.snapshot_upper_source.is_some() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
+                    return Err(MicrosandboxError::InvalidConfig(
                         "patches cannot be combined with from_snapshot".into(),
                     ));
                 }
                 if !config.snapshot_upper_layers.is_empty() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(
+                    return Err(MicrosandboxError::InvalidConfig(
                         "patches cannot be combined with full snapshot restore".into(),
                     ));
                 }
@@ -567,7 +504,7 @@ impl LocalBackend {
             if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
                 && pull_result.manifest_digest.to_string() != expected
             {
-                return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
                     "snapshot image digest mismatch: manifest pinned {}, resolved {}",
                     expected, pull_result.manifest_digest
                 )));
@@ -593,7 +530,7 @@ impl LocalBackend {
             if image_materialization.includes_layered() {
                 let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
                 if tokio::fs::metadata(&vmdk_path).await.is_err() {
-                    return Err(crate::MicrosandboxError::Custom(format!(
+                    return Err(MicrosandboxError::Custom(format!(
                         "VMDK not materialized: {}",
                         vmdk_path.display()
                     )));
@@ -614,7 +551,7 @@ impl LocalBackend {
                     fstype,
                 } => {
                     if fstype.as_deref().unwrap_or("ext4") != "ext4" {
-                        return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                        return Err(MicrosandboxError::InvalidConfig(format!(
                             "flat root disks currently require fstype=ext4, got {}",
                             fstype.as_deref().unwrap_or_default()
                         )));
@@ -628,13 +565,13 @@ impl LocalBackend {
                         let flat_ref = cache
                             .read_flat_ref(&pull_result.manifest_digest)?
                             .ok_or_else(|| {
-                                crate::MicrosandboxError::Custom(
+                                MicrosandboxError::Custom(
                                     "flat rootfs was not published by the image pull".into(),
                                 )
                             })?;
                         let artifact_digest: Digest =
                             flat_ref.artifact_digest.parse().map_err(|e| {
-                                crate::MicrosandboxError::Custom(format!(
+                                MicrosandboxError::Custom(format!(
                                     "invalid flat rootfs artifact digest in cache: {e}"
                                 ))
                             })?;
@@ -646,7 +583,7 @@ impl LocalBackend {
                             .map(|_| requested_mib)
                             .unwrap_or_else(|| requested_mib.max(minimum_mib));
                         let target_mib = u32::try_from(target_mib).map_err(|_| {
-                            crate::MicrosandboxError::InvalidConfig(
+                            MicrosandboxError::InvalidConfig(
                                 "flat root disk size exceeds supported MiB range".into(),
                             )
                         })?;
@@ -751,9 +688,7 @@ impl LocalBackend {
                         microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
                     })
                     .await
-                    .map_err(|e| {
-                        crate::MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
-                    })??;
+                    .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
                 }
             } else {
                 match &root_disk {
@@ -774,7 +709,7 @@ impl LocalBackend {
                     RootDisk::Tmpfs { .. } => {}
                     RootDisk::DiskImage { path, .. } => {
                         if tokio::fs::metadata(path).await.is_err() {
-                            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                            return Err(MicrosandboxError::InvalidConfig(format!(
                                 "root disk image not found: {}",
                                 path.display()
                             )));
@@ -794,14 +729,14 @@ impl LocalBackend {
             let metadata = match cached_metadata {
                 Some(metadata) => metadata,
                 None => {
-                    let image_ref = metadata_reference.parse::<Reference>().map_err(|error| {
-                        crate::MicrosandboxError::InvalidConfig(error.to_string())
-                    })?;
+                    let image_ref = metadata_reference
+                        .parse::<Reference>()
+                        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
                     cache
                         .read_image_metadata_async(&image_ref)
                         .await?
                         .ok_or_else(|| {
-                            crate::MicrosandboxError::ImageNotFound(metadata_reference.clone())
+                            MicrosandboxError::ImageNotFound(metadata_reference.clone())
                         })?
                 }
             };
@@ -904,7 +839,7 @@ impl LocalBackend {
                     &created_named_volumes,
                 )
                 .await
-                .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
+                .map_err(|cleanup| MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
                 return Err(creation_cleanup.finish_owned_failure(e).await);
             }
         };
@@ -927,7 +862,7 @@ impl LocalBackend {
         .await?
         {
             sandbox.terminate_creation_owner().await;
-            let error = crate::MicrosandboxError::Runtime(format!(
+            let error = MicrosandboxError::Runtime(format!(
                 "sandbox {:?} lost its Starting state before readiness publication",
                 sandbox.name()
             ));
@@ -960,7 +895,7 @@ impl LocalBackend {
                 &created_named_volumes,
             )
             .await
-            .map_err(|cleanup| crate::MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
+            .map_err(|cleanup| MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
             return Err(creation_cleanup.finish_owned_failure(err).await);
         }
 
@@ -971,7 +906,7 @@ impl LocalBackend {
             match sandbox.fs().stat(workdir).await {
                 Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
                 Ok(_) => {
-                    let error = crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = MicrosandboxError::InvalidConfig(format!(
                         "workdir is not a directory in guest: {workdir}"
                     ));
                     sandbox.terminate_creation_owner().await;
@@ -982,15 +917,13 @@ impl LocalBackend {
                         &created_named_volumes,
                     )
                     .await
-                    .map_err(|cleanup| {
-                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
-                    })?;
+                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
                     return Err(creation_cleanup.finish_owned_failure(error).await);
                 }
                 Err(cause) => {
                     // A fast-exiting startup command can close the transport during stat.
                     // Preserve that cause instead of claiming the directory is missing.
-                    let error = crate::MicrosandboxError::InvalidConfig(format!(
+                    let error = MicrosandboxError::InvalidConfig(format!(
                         "could not validate workdir in guest {workdir:?}: {cause}"
                     ));
                     sandbox.terminate_creation_owner().await;
@@ -1001,9 +934,7 @@ impl LocalBackend {
                         &created_named_volumes,
                     )
                     .await
-                    .map_err(|cleanup| {
-                        crate::MicrosandboxError::Runtime(format!("{error}; {cleanup}"))
-                    })?;
+                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
                     return Err(creation_cleanup.finish_owned_failure(error).await);
                 }
             }
@@ -1049,7 +980,7 @@ impl LocalBackend {
             sandbox_name,
         )?
         else {
-            return Err(crate::MicrosandboxError::Runtime(format!(
+            return Err(MicrosandboxError::Runtime(format!(
                 "startup cleanup pending: runtime still owns sandbox {sandbox_name:?}",
             )));
         };
@@ -1136,7 +1067,7 @@ impl LocalBackend {
 
     pub(crate) fn validate_completed_restore(config: &SandboxConfig) -> MicrosandboxResult<()> {
         if config.checkpoint_restore.is_some() {
-            return Err(crate::MicrosandboxError::InvalidConfig(format!(
+            return Err(MicrosandboxError::InvalidConfig(format!(
                 "sandbox {:?} has an incomplete restore; remove and recreate it from the snapshot; refusing a cold boot",
                 config.spec.name
             )));
@@ -1174,9 +1105,7 @@ impl LocalBackend {
                 .terminate_failed_startup()
                 .await
             {
-                return Err(crate::MicrosandboxError::Runtime(format!(
-                    "{error}; {cleanup}"
-                )));
+                return Err(MicrosandboxError::Runtime(format!("{error}; {cleanup}")));
             }
             // A legacy runtime can close telemetry before publishing its error. Once this
             // exact child is reaped, one final read also covers publication during teardown.
@@ -1206,9 +1135,7 @@ impl LocalBackend {
                     .terminate_failed_startup()
                     .await
                 {
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "{error}; {cleanup}"
-                    )));
+                    return Err(MicrosandboxError::Runtime(format!("{error}; {cleanup}")));
                 }
                 return Err(error);
             }
@@ -1231,7 +1158,7 @@ impl LocalBackend {
             )
             .await
             .unwrap_or_else(|_| {
-                Err(crate::MicrosandboxError::Runtime(
+                Err(MicrosandboxError::Runtime(
                     "startup deadline expired while reading restored resource targets".into(),
                 ))
             });
@@ -1241,9 +1168,7 @@ impl LocalBackend {
                     .terminate_failed_startup()
                     .await
                 {
-                    return Err(crate::MicrosandboxError::Runtime(format!(
-                        "{error}; {cleanup}"
-                    )));
+                    return Err(MicrosandboxError::Runtime(format!("{error}; {cleanup}")));
                 }
                 return Err(error);
             }
@@ -1253,7 +1178,7 @@ impl LocalBackend {
             let run = Self::load_latest_run(self.db().await?.read(), sandbox_id)
                 .await?
                 .ok_or_else(|| {
-                    crate::MicrosandboxError::Runtime("ready runtime has no run record".into())
+                    MicrosandboxError::Runtime("ready runtime has no run record".into())
                 })?;
             process.publish(
                 &self.sandboxes_dir().join(&config.spec.name).join("runtime"),
@@ -1345,7 +1270,7 @@ impl LocalBackend {
                                 "sandbox process exited ({status}) before agent relay became available"
                             ),
                         };
-                        return Err(crate::MicrosandboxError::BootStart {
+                        return Err(MicrosandboxError::BootStart {
                             name: sandbox_name.to_string(),
                             err: synthetic,
                         });
@@ -1410,8 +1335,8 @@ impl LocalBackend {
     fn read_boot_start_error(
         log_dir: &std::path::Path,
         sandbox_name: &str,
-    ) -> Option<crate::MicrosandboxError> {
-        Self::read_boot_error(log_dir).map(|err| crate::MicrosandboxError::BootStart {
+    ) -> Option<MicrosandboxError> {
+        Self::read_boot_error(log_dir).map(|err| MicrosandboxError::BootStart {
             name: sandbox_name.to_string(),
             err,
         })
@@ -1470,7 +1395,7 @@ impl LocalBackend {
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<ResolvedOciImage> {
         let manifest_digest: Digest = pinned_digest.parse().map_err(|e| {
-            crate::MicrosandboxError::SnapshotIntegrity(format!(
+            MicrosandboxError::SnapshotIntegrity(format!(
                 "invalid snapshot image digest {pinned_digest}: {e}"
             ))
         })?;
@@ -1481,10 +1406,10 @@ impl LocalBackend {
             .await?;
 
         let pinned_ref: Reference = pinned_reference.parse().map_err(|e| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid pinned reference: {e}"))
+            MicrosandboxError::InvalidConfig(format!("invalid pinned reference: {e}"))
         })?;
         let original_ref: Reference = reference.parse().map_err(|e| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+            MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
         if let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
             &cache,
@@ -1504,7 +1429,7 @@ impl LocalBackend {
         }
 
         if pull_policy == PullPolicy::Never {
-            return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+            return Err(MicrosandboxError::SnapshotIntegrity(format!(
                 "snapshot base image {pinned_digest} is not cached locally and pull policy is `never`; \
                  this snapshot cannot be restored losslessly"
             )));
@@ -1554,7 +1479,7 @@ impl LocalBackend {
         {
             Ok(result) => result,
             Err(err) => {
-                return Err(crate::MicrosandboxError::SnapshotIntegrity(format!(
+                return Err(MicrosandboxError::SnapshotIntegrity(format!(
                     "snapshot base image {pinned_digest} no longer available in registry \
                      (it may have been garbage-collected upstream); this snapshot \
                      cannot be restored losslessly: {err}"
@@ -1573,7 +1498,7 @@ impl LocalBackend {
     /// Build an immutable OCI reference using a captured manifest digest.
     fn digest_pinned_reference(reference: &str, pinned_digest: &str) -> MicrosandboxResult<String> {
         let parsed: Reference = reference.parse().map_err(|e| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+            MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
 
         Ok(Reference::with_digest(
@@ -1636,7 +1561,7 @@ impl LocalBackend {
     ) -> MicrosandboxResult<PullResult> {
         let platform = microsandbox_image::Platform::host_linux();
         let image_ref: Reference = reference.parse().map_err(|e| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
+            MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
         let options = PullOptions {
             pull_policy: Self::image_pull_policy(pull_policy),
@@ -1665,9 +1590,9 @@ impl LocalBackend {
 
         if let Some(sender) = progress {
             let task = registry.pull_with_sender(&image_ref, &options, sender);
-            let result = task.await.map_err(|e| {
-                crate::MicrosandboxError::Custom(format!("pull task panicked: {e}"))
-            })??;
+            let result = task
+                .await
+                .map_err(|e| MicrosandboxError::Custom(format!("pull task panicked: {e}")))??;
             Ok(result)
         } else {
             let result = registry.pull(&image_ref, &options).await?;
@@ -1695,14 +1620,14 @@ impl LocalBackend {
         match rootfs {
             RootfsSource::Bind { path, .. } => {
                 if !path.exists() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    return Err(MicrosandboxError::InvalidConfig(format!(
                         "rootfs bind path does not exist: {}",
                         path.display()
                     )));
                 }
 
                 if !path.is_dir() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    return Err(MicrosandboxError::InvalidConfig(format!(
                         "rootfs bind path is not a directory: {}",
                         path.display()
                     )));
@@ -1711,14 +1636,14 @@ impl LocalBackend {
             RootfsSource::Oci(_) => {}
             RootfsSource::DiskImage { path, .. } => {
                 if !path.exists() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    return Err(MicrosandboxError::InvalidConfig(format!(
                         "disk image does not exist: {}",
                         path.display()
                     )));
                 }
 
                 if !path.is_file() {
-                    return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    return Err(MicrosandboxError::InvalidConfig(format!(
                         "disk image is not a regular file: {}",
                         path.display()
                     )));
@@ -1741,7 +1666,7 @@ impl LocalBackend {
             .one(pools.read())
             .await?;
         if existing.is_some() || sandbox_dir.exists() {
-            return Err(crate::MicrosandboxError::SandboxAlreadyExists(format!(
+            return Err(MicrosandboxError::SandboxAlreadyExists(format!(
                 "sandbox '{name}' already exists; remove it, start the stopped sandbox, or recreate with .replace()"
             )));
         }
@@ -1768,7 +1693,7 @@ impl LocalBackend {
 
         if let Some(model) = existing {
             let sandboxes_dir = sandbox_dir.parent().ok_or_else(|| {
-                crate::MicrosandboxError::InvalidConfig(format!(
+                MicrosandboxError::InvalidConfig(format!(
                     "sandbox directory has no storage root: {}",
                     sandbox_dir.display()
                 ))
@@ -1802,7 +1727,7 @@ impl LocalBackend {
                 .and_then(|run| run.pid)
                 .is_some_and(Self::pid_is_alive)
             {
-                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                return Err(MicrosandboxError::SandboxStillRunning(format!(
                     "cannot replace sandbox {:?}: its recorded runtime process is still alive",
                     config.spec.name
                 )));
@@ -1812,7 +1737,7 @@ impl LocalBackend {
             // and legacy runtimes do not participate in lifecycle locking.
             #[cfg(unix)]
             if model.status == SandboxStatus::Starting && socket_paths.may_be_live().await? {
-                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                return Err(MicrosandboxError::SandboxStillRunning(format!(
                     "cannot replace sandbox {:?}: a runtime endpoint may still be live",
                     config.spec.name
                 )));
@@ -1836,7 +1761,7 @@ impl LocalBackend {
         .await?;
         #[cfg(unix)]
         if socket_paths.may_be_live().await? {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+            return Err(MicrosandboxError::SandboxStillRunning(format!(
                 "cannot replace sandbox {:?}: an untracked runtime endpoint may still be live",
                 config.spec.name
             )));
@@ -1916,7 +1841,7 @@ impl LocalBackend {
             }
             Self::wait_for_pids_to_exit(&pids, std::time::Duration::from_secs(5)).await;
             if pids.iter().any(|pid| !Self::pid_has_exited(*pid)) {
-                return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
+                return Err(MicrosandboxError::SandboxStillRunning(format!(
                     "cannot replace sandbox {:?}: runtime did not exit after SIGKILL",
                     sandbox.name
                 )));
@@ -2149,10 +2074,8 @@ impl LocalBackend {
             ext4::format_ext4_with_tree(&path, &ext4_options, overlay_tree)
         })
         .await
-        .map_err(|e| crate::MicrosandboxError::Custom(format!("ext4 format task failed: {e}")))?
-        .map_err(|e| {
-            crate::MicrosandboxError::Custom(format!("failed to create upper.ext4: {e}"))
-        })?;
+        .map_err(|e| MicrosandboxError::Custom(format!("ext4 format task failed: {e}")))?
+        .map_err(|e| MicrosandboxError::Custom(format!("failed to create upper.ext4: {e}")))?;
 
         Ok(())
     }
@@ -2215,7 +2138,7 @@ fn snapshot_root_layout_from_config(
     config: &SandboxConfig,
 ) -> MicrosandboxResult<SnapshotRootDisk> {
     let RootfsSource::Oci(oci) = &config.spec.image else {
-        return Err(crate::MicrosandboxError::SnapshotIntegrity(
+        return Err(MicrosandboxError::SnapshotIntegrity(
             "snapshot restore did not resolve to an OCI rootfs".into(),
         ));
     };
@@ -2226,7 +2149,7 @@ fn snapshot_root_layout_from_config(
             size_mib: *size_mib,
         },
         Some(RootDisk::DiskImage { .. }) => {
-            return Err(crate::MicrosandboxError::SnapshotIntegrity(
+            return Err(MicrosandboxError::SnapshotIntegrity(
                 "snapshot descriptor cannot select a user-owned disk-image root".into(),
             ));
         }
@@ -2238,8 +2161,8 @@ fn relay_readiness_timeout(
     sandbox_name: &str,
     timeout: std::time::Duration,
     last_error: &impl std::fmt::Display,
-) -> crate::MicrosandboxError {
-    crate::MicrosandboxError::Runtime(format!(
+) -> MicrosandboxError {
+    MicrosandboxError::Runtime(format!(
         "sandbox {sandbox_name:?} startup timed out after {} seconds before agent readiness; \
          restore preparation may still be pending; last connection error: {last_error}",
         timeout.as_secs_f64(),

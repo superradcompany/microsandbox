@@ -192,7 +192,10 @@ fn backend_scope(
 /// Return the active default backend kind.
 #[pyfunction]
 fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
-    let kind = match microsandbox::default_backend().kind() {
+    let kind = match microsandbox::default_backend_info()
+        .map_err(error::to_py_err)?
+        .kind
+    {
         microsandbox::BackendKind::Local => "local",
         microsandbox::BackendKind::Cloud => "cloud",
     };
@@ -201,14 +204,14 @@ fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
 
 /// Return secret-safe information about the active default backend.
 #[pyfunction]
-fn default_backend_info() -> PyBackendInfo {
-    let info = microsandbox::default_backend_info();
-    PyBackendInfo {
+fn default_backend_info() -> PyResult<PyBackendInfo> {
+    let info = microsandbox::default_backend_info().map_err(error::to_py_err)?;
+    Ok(PyBackendInfo {
         kind: info.kind.as_str().to_string(),
         api_url: info.api_url,
         source: info.source.as_str().to_string(),
         profile: info.profile,
-    }
+    })
 }
 
 /// Return the `msb` binary path the native resolver would currently use.

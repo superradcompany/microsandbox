@@ -65,6 +65,11 @@ char *msb_sandbox_create(uint64_t cancel_id,
  */
 bool msb_supports_port_modification(void);
 
+/**
+ * Capability marker for secret policy modification in the Go bindings.
+ */
+bool msb_supports_secret_policy_modification(void);
+
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,

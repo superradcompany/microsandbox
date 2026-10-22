@@ -5,6 +5,8 @@ use std::time::Duration;
 use clap::Args;
 use microsandbox::sandbox::{Sandbox, SandboxStatus, SandboxStopResult};
 
+use crate::ui::OutputFormat;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -24,8 +26,8 @@ pub struct WaitArgs {
     pub timeout: Option<String>,
 
     /// Output format (json). Exit code and signal are currently unavailable.
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -39,7 +41,7 @@ pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
             &args.name,
             job,
             args.timeout.as_deref(),
-            args.format.as_deref() == Some("json"),
+            args.format == Some(OutputFormat::Json),
         )
         .await;
     }
@@ -55,7 +57,7 @@ pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
         wait.await?
     };
 
-    print_result(&result, args.format.as_deref() == Some("json"))?;
+    print_result(&result, args.format == Some(OutputFormat::Json))?;
     Ok(())
 }
 
@@ -120,7 +122,7 @@ mod tests {
 
         assert_eq!(args.name, "worker");
         assert_eq!(args.timeout.as_deref(), Some("30s"));
-        assert_eq!(args.format.as_deref(), Some("json"));
+        assert_eq!(args.format, Some(OutputFormat::Json));
     }
 
     #[test]

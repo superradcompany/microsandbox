@@ -2686,6 +2686,9 @@ export interface SecretEntry {
  * secret name. `env` / `value` / `store` are mutually exclusive ways to
  * provide the secret material; setting more than one is rejected at the
  * boundary. Only `value` may carry raw secret material.
+ *
+ * Omitted policy fields keep the stored setting; a supplied `substitution`
+ * replaces the whole rule.
  */
 export interface SecretModifySpec {
   env?: string
@@ -2693,6 +2696,21 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+  substitution?: SecretModifySubstitution
+  violationAction?: string
+  requireTlsIdentity?: boolean
+  allowPlaceholderFor?: Array<string>
+}
+
+/**
+ * Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+ * take the create defaults.
+ */
+export interface SecretModifySubstitution {
+  headers?: boolean
+  headerFields?: Array<string>
+  query?: boolean
+  body?: boolean
 }
 
 /** Host-side source for secret material. */
@@ -2901,6 +2919,9 @@ export interface StreamOpenResult {
 
 /** Whether this native library understands published-port modification. */
 export declare function supportsPortModification(): boolean
+
+/** Whether this native library applies secret policy fields in modify specs. */
+export declare function supportsSecretPolicyModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

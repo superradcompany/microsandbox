@@ -8,7 +8,7 @@ use std::sync::Arc;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointGeometry, CheckpointManifest, ContentRef, DiskGenerationManifest,
     DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
-    MemoryManifest, ObjectId,
+    MemoryManifest, ObjectId, ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DiskLayer, DiskLayerId, FileSnapshotState, ImageRef, LayerFileKind,
@@ -17,11 +17,12 @@ use microsandbox_image::snapshot::{
 };
 use sea_orm::EntityTrait;
 
+use crate::BackendSelectionSource;
 use crate::backend::local::database;
 use crate::backend::local::snapshot::archive::{
     save_direct_checkpoint_snapshot, save_direct_file_snapshot,
 };
-use crate::config::{GlobalConfig, PathsConfig};
+use crate::config::GlobalConfig;
 use crate::sandbox::SandboxBuilder;
 use crate::snapshot::SnapshotReference;
 use crate::test_support::local_backend;
@@ -159,7 +160,22 @@ async fn checkpoint_archive(root: &Path) -> PathBuf {
         memory: memory_id,
         disks: vec![disk_id],
         devices: Vec::new(),
-        resources: Vec::new(),
+        resources: vec![ResourceDescriptor {
+            id: "agent".into(),
+            kind: "agent".into(),
+            treatment: ResourceTreatment::Reconnect,
+            binding: BTreeMap::from([(
+                "ready".into(),
+                serde_json::to_string(&microsandbox_protocol::core::Ready {
+                    exec_limits: Some(microsandbox_types::ExecLimits {
+                        max_executions: 7,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .unwrap(),
+            )]),
+        }],
         owned_volumes: Vec::new(),
         requires: Vec::new(),
     };
@@ -175,7 +191,12 @@ async fn checkpoint_archive(root: &Path) -> PathBuf {
             checkpoint_id: checkpoint.checkpoint_id,
             checkpoint_root: checkpoint_root.to_string(),
             restore_intents: vec!["clone".into(), "resume".into()],
-            requirements_summary: BTreeMap::new(),
+            requirements_summary: BTreeMap::from([
+                ("vcpus".into(), 1.into()),
+                ("max_vcpus".into(), 1.into()),
+                ("memory_mib".into(), 128.into()),
+                ("max_memory_mib".into(), 128.into()),
+            ]),
         }),
         capture: SnapshotCapture {
             created_at: "2026-09-17T00:00:00Z".into(),
@@ -221,15 +242,18 @@ async fn backend(root: &Path, patch: u8) -> Arc<LocalBackend> {
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let firmware = root.join("firmware");
     std::fs::write(&firmware, b"not launched").unwrap();
-    let backend = local_backend(GlobalConfig {
-        home: Some(root.join("home")),
-        paths: PathsConfig {
-            msb: Some(executable),
-            libkrunfw: Some(firmware),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
+    let backend = LocalBackend::from_backend_config(
+        crate::config::layers::BackendConfig::new(
+            serde_json::from_value(serde_json::json!({
+                "home": root.join("home"),
+                "paths": {"msb": executable, "libkrunfw": firmware}
+            }))
+            .unwrap(),
+            Default::default(),
+        ),
+        BackendSelectionSource::Programmatic,
+        None,
+    );
     backend.db().await.unwrap();
     Arc::new(backend)
 }
@@ -373,16 +397,16 @@ async fn corrupt_archive_does_not_replace_target() {
     std::fs::write(&archive, b"not a tar archive").unwrap();
     let backend = backend(root.path(), 18).await;
     let stage = tempfile::tempdir_in(root.path()).unwrap();
-    let reason = match crate::snapshot::materialize_archive_for_child(
-        &backend,
-        &archive,
-        stage.path(),
-        false,
-        None,
-        &Default::default(),
-        Default::default(),
-    )
-    .await
+    let reason = match backend
+        .materialize_archive_for_child(
+            &archive,
+            stage.path(),
+            false,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .await
     {
         Ok(_) => panic!("corrupt archive accepted"),
         Err(error) => error.to_string(),
@@ -534,17 +558,17 @@ async fn archive_publication_preserves_relative_disk_chain() {
     let archive = archive(root.path(), false, false).await;
     let backend = backend(root.path(), 18).await;
     let stage = tempfile::tempdir_in(root.path()).unwrap();
-    let materialized = crate::snapshot::materialize_archive_for_child(
-        &backend,
-        &archive,
-        stage.path(),
-        false,
-        None,
-        &Default::default(),
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let materialized = backend
+        .materialize_archive_for_child(
+            &archive,
+            stage.path(),
+            false,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     let mut config = SandboxConfig {
         snapshot_upper_layers: materialized.upper_layers,
         ..Default::default()
@@ -560,4 +584,132 @@ async fn archive_publication_preserves_relative_disk_chain() {
             microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path).unwrap();
         assert_eq!(pair[0].path, child.join(backing));
     }
+}
+
+#[tokio::test]
+async fn archive_settings_resolve_without_extracting_payloads() {
+    use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let source = checkpoint_archive(root.path()).await;
+    let mut local = backend(root.path(), 18).await;
+    let mut defaults = GlobalConfigPatch::from_present_fields(local.config().clone());
+    defaults.sandbox_defaults.cpus = Some(16);
+    defaults.sandbox_defaults.memory_mib = Some(8192);
+    Arc::get_mut(&mut local).unwrap().config = BackendConfig::new(defaults, Default::default());
+    {
+        let mut builder = SandboxBuilder::new("restore")
+            .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+            .max_cpus(1)
+            .max_memory(128);
+        builder.prepare(local.clone()).await.unwrap();
+        let config = builder.finish_local(local.config_sources(), None).unwrap();
+        assert_eq!(config.spec.resources.cpus, 1);
+        assert_eq!(config.spec.resources.memory_mib, 128);
+        // The captured guest's advertised policy rides along with the restore.
+        assert_eq!(config.exec_limits().max_executions, 7);
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/sh"));
+        assert!(config.checkpoint_restore.is_none());
+        assert!(config.snapshot_upper_layers.is_empty());
+        assert!(
+            std::fs::read_dir(local.sandboxes_dir())
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true)
+        );
+        let mut reused = SandboxBuilder::from(config);
+        reused.prepare(local.clone()).await.unwrap();
+        let reused = reused.finish_local(local.config_sources(), None).unwrap();
+        assert_eq!(reused.exec_limits().max_executions, 7);
+        assert!(reused.checkpoint_restore.is_none());
+    }
+}
+
+#[tokio::test]
+async fn replacing_prepared_full_archive_discards_its_checkpoint() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let full = checkpoint_archive(root.path()).await;
+    let disk = archive(root.path(), false, true).await;
+    let local = backend(root.path(), 18).await;
+    let mut builder = SandboxBuilder::new("restore")
+        .with_snapshot_reference(SnapshotReference::path(full.to_string_lossy()));
+    builder.prepare(local.clone()).await.unwrap();
+    let config = builder.finish_local(local.config_sources(), None).unwrap();
+    assert!(config.resumed_from_full_snapshot);
+    assert!(config.restore_resources.geometry.is_some());
+
+    let mut replacement = SandboxBuilder::from(config)
+        .with_snapshot_reference(SnapshotReference::path(disk.to_string_lossy()));
+    replacement.prepare(local.clone()).await.unwrap();
+    let config = replacement
+        .finish_local(local.config_sources(), None)
+        .unwrap();
+    assert!(config.checkpoint_restore.is_none());
+    assert!(!config.resumed_from_full_snapshot);
+    assert!(config.snapshot_upper_layers.is_empty());
+    assert!(config.snapshot_upper_source.is_none());
+    assert!(config.restore_resources.geometry.is_none());
+    assert!(config.restore_resources.agent_ready.is_none());
+}
+
+#[tokio::test]
+async fn archive_changes_after_build_preserve_replacement_target() {
+    for plain in [false, true] {
+        for missing in [false, true] {
+            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let source = archive(root.path(), false, plain).await;
+            let local = backend(root.path(), 18).await;
+            let mut builder = SandboxBuilder::new("replaceable")
+                .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+                .replace();
+            builder.prepare(local.clone()).await.unwrap();
+            let config = builder.finish_local(local.config_sources(), None).unwrap();
+
+            let reason = if missing {
+                std::fs::remove_file(&source).unwrap();
+                "cannot open snapshot archive"
+            } else {
+                // Same snapshot ID, different descriptor: identity is the digest, not the ID.
+                std::fs::remove_file(&source).unwrap();
+                archive(root.path(), true, plain).await;
+                "snapshot archive changed after configuration was built"
+            };
+            Box::pin(assert_request_preserves_target(local, config, reason)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let source = archive(root.path(), false, true).await;
+    let mut tar = tar::Archive::new(std::fs::File::open(&source).unwrap());
+    let payload_offset = tar
+        .entries()
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.path().unwrap().starts_with("layers"))
+        .unwrap()
+        .raw_file_position();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(payload_offset)).unwrap();
+    file.write_all(b"corrupt").unwrap();
+    drop(file);
+
+    let local = backend(root.path(), 18).await;
+    let mut request = replaceable_config();
+    request.snapshot_reference = Some(SnapshotReference::path(source.to_string_lossy()));
+    request.replace_existing = true;
+    let mut builder = SandboxBuilder::from(request);
+    builder.prepare(local.clone()).await.unwrap();
+    let config = builder.finish_local(local.config_sources(), None).unwrap();
+    Box::pin(assert_request_preserves_target(
+        local,
+        config,
+        "archive member transport integrity mismatch",
+    ))
+    .await;
 }

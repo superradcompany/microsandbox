@@ -113,6 +113,23 @@ impl LaunchContract {
             .await?;
         }
 
+        if self.machine
+            && matches!(
+                network.outbound_proxy,
+                Some(microsandbox_network::OutboundProxy::HttpConnect {
+                    credentials: Some(_),
+                    ..
+                })
+            )
+        {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.http_connect_proxy_auth,
+                "HTTP CONNECT proxy authentication",
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -574,6 +591,7 @@ pub(crate) async fn validate_runtime_config(
     contract
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
+    validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
@@ -677,6 +695,22 @@ pub(crate) async fn validate_http_deny_response(
         ));
     }
     Ok(())
+}
+
+/// A memory snapshot with a captured execution policy needs a runtime that can honor it.
+pub(crate) async fn validate_exec_limits(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let captured_policy = config
+        .restore_resources
+        .agent_ready
+        .as_ref()
+        .and_then(|ready| ready.exec_limits);
+    if captured_policy.is_none() {
+        return Ok(());
+    }
+    require_capability(path, |capabilities| capabilities.exec_limits, "exec").await
 }
 
 /// Probe guest clock support only when the caller turns host synchronization off.
@@ -1055,6 +1089,69 @@ mod tests {
 
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
+    async fn http_connect_credentials_require_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let network: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "proxy-user",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
+                }
+            }
+        }))
+        .unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        // A runtime that supports HTTP CONNECT but not its credentials would drop
+        // them and connect unauthenticated, so the launch must be refused.
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":false}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-http-connect-auth", response);
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP CONNECT"), "{error}");
+            assert!(error.to_string().contains("upgrade msb"), "{error}");
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-http-connect-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &network)
+            .await
+            .unwrap();
+
+        // An unauthenticated HTTP CONNECT proxy must not require the auth capability.
+        let plain: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {"protocol": "http_connect", "address": "127.0.0.1:3128"}
+        }))
+        .unwrap();
+        let without_auth = script(
+            dir.path(),
+            "http-connect-without-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&without_auth, &plain)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
     async fn http_connect_requires_runtime_support_before_launch() {
         use microsandbox_network::config::NetworkConfig;
 
@@ -1182,6 +1279,56 @@ mod tests {
         config.spec.network.http.deny_response_format =
             microsandbox_types::HttpDenyResponseFormat::Text;
         validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captured_execution_policy_requires_a_capable_runtime() {
+        use crate::config::layers::BackendConfig;
+        use crate::sandbox::SandboxBuilder;
+        use microsandbox_protocol::core::Ready;
+        use microsandbox_types::ExecLimits;
+
+        let sources = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-exec",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+        );
+        let current = script(
+            dir.path(),
+            "current-exec",
+            r#"printf '%s' '{"protocols":[2,1],"exec_limits":true}'"#,
+        );
+
+        let mut config = SandboxBuilder::new("compatibility")
+            .image("alpine")
+            .finish(Some(&sources), None)
+            .unwrap();
+
+        // A cold boot carries only built-in defaults; any released runtime accepts it.
+        validate_exec_limits(&old, &config).await.unwrap();
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A memory restore with a captured policy needs a runtime that can honor it.
+        config.restore_resources.agent_ready = Some(Ready {
+            exec_limits: Some(ExecLimits::default()),
+            ..Default::default()
+        });
+        let result = validate_exec_limits(&old, &config).await;
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("exec"));
+            assert!(error.to_string().contains("upgrade"));
+        }
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A captured guest without an advertised policy keeps the legacy path.
+        config.restore_resources.agent_ready = Some(Ready::default());
+        validate_exec_limits(&old, &config).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1894,6 +2041,9 @@ mod encoding {
             }],
             default_cwd: Some("/work".into()),
             security_profile: BootstrapSecurityProfile::Restricted,
+            // Real launches always carry the built-in limits; the legacy
+            // grammar must encode such a bootstrap by omitting them.
+            exec_limits: Some(microsandbox_types::ExecLimits::default()),
             ..Default::default()
         };
         for patch in [0, 4, 8, 9] {
