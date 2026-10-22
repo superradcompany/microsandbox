@@ -2458,9 +2458,14 @@ async fn restore_client_state(
         .extend(
             std::mem::take(&mut state.sessions)
                 .into_iter()
-                .map(|(id, mut session)| {
+                .filter_map(|(id, mut session)| {
                     session.detach_stdin();
-                    ((generation, id), session)
+                    // Completed readers already emitted their exit event. Once the old client
+                    // is detached, unread output must not keep their execution slots alive.
+                    if session.take_completed_exit().is_some() {
+                        return None;
+                    }
+                    Some(((generation, id), session))
                 }),
         );
     state.client_incarnations.clear();
@@ -4256,7 +4261,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use microsandbox_protocol::message::PROTOCOL_VERSION;
+    use microsandbox_protocol::{exec::ExecLimits, message::PROTOCOL_VERSION};
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_message(
@@ -6097,6 +6102,87 @@ mod tests {
                     matches!(envelope.output, SessionOutput::Stdout(ref data) if data == b"tail")
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_releases_completed_sessions_with_unread_output() {
+        for tty in [false, true] {
+            let mut state = AgentState::default();
+            let (mut sender, mut output) = SessionOutputSender::channel();
+            let mut activity = ActivityTracker::new();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let mut workload = WorkloadLatch::unavailable("test process has no workload cgroup");
+            let config = AgentdConfig {
+                exec_limits: Some(ExecLimits {
+                    max_executions: 1,
+                    ..Default::default()
+                }),
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let request = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf retained".into()],
+                env: vec![],
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![],
+            };
+            let mut encoded = Vec::new();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 1, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let reply = decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice()));
+            assert_eq!(reply.t, MessageType::ExecStarted, "{reply:?}");
+
+            // Consume the reader's real exit event, but leave its output unacknowledged.
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let envelope = output.recv().await.unwrap();
+                    if let SessionOutput::Exited(code) = envelope.output {
+                        assert_eq!(state.sessions.get_mut(&1).unwrap().finish(code), None);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            restore_client_state(&mut state, &mut sender).await.unwrap();
+            encoded.clear();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 2, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice())).t,
+                MessageType::ExecStarted,
+                "completed inherited output leaked the only execution slot"
+            );
+            assert!(state.detached_sessions.is_empty());
         }
     }
 
