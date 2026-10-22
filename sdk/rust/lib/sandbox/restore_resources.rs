@@ -1,20 +1,10 @@
 //! Operation-local resource authorization and captured agent state for snapshot restore.
 
 use std::collections::BTreeSet;
-#[cfg(feature = "local")]
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
 
-#[cfg(feature = "local")]
-use microsandbox_image::GlobalCache;
 #[cfg(feature = "local")]
 use microsandbox_image::checkpoint::CheckpointGeometry;
 use microsandbox_protocol::core::Ready;
-#[cfg(feature = "local")]
-use tempfile::TempDir;
 
 #[cfg(feature = "local")]
 use crate::MicrosandboxError;
@@ -26,9 +16,9 @@ use crate::{MicrosandboxResult, SandboxConfigPatch};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RestoreResources {
-    /// Validated archive files and cache leases retained until child publication.
+    /// Descriptor admitted during archive inspection, checked again before child publication.
     #[cfg(feature = "local")]
-    pub archive: Option<Arc<PreparedArchive>>,
+    pub archive_manifest: Option<std::sync::Arc<crate::snapshot::Manifest>>,
     /// Full restore requires captured external filesystems and additional disks unless waived.
     /// Kept operation-local: older SDK launches and direct branches retain their contract.
     pub require_complete: bool,
@@ -47,19 +37,6 @@ pub(crate) struct RestoreResources {
     pub agent_ready: Option<Ready>,
 }
 
-/// Private archive staging retained by built configs without installing a snapshot.
-#[cfg(feature = "local")]
-pub(crate) struct PreparedArchive {
-    /// Private decoded files; deleting the owner cleans up an unused build.
-    pub stage: TempDir,
-    /// Restore mode used when preparing the archive payload.
-    pub mode: super::config::SnapshotRestoreMode,
-    /// Archive selected when the retained files were decoded.
-    pub source: PathBuf,
-    /// Leases keep admitted cache entries alive through publication.
-    pub cache_operation: GlobalCache,
-}
-
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -70,7 +47,7 @@ impl RestoreResources {
     pub(crate) fn clear_captured(&mut self) {
         #[cfg(feature = "local")]
         {
-            self.archive = None;
+            self.archive_manifest = None;
             self.geometry = None;
         }
         self.agent_ready = None;
@@ -127,64 +104,5 @@ impl RestoreResources {
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "local")]
-impl PreparedArchive {
-    /// Consume unique staging or copy it when another built config still owns the source.
-    pub async fn into_stage(self: Arc<Self>, parent: &Path) -> MicrosandboxResult<TempDir> {
-        let parent = parent.to_path_buf();
-        let prepared = match Arc::try_unwrap(self) {
-            Ok(prepared) if prepared.stage.path().parent() == Some(parent.as_path()) => {
-                return Ok(prepared.stage);
-            }
-            Ok(prepared) => Arc::new(prepared),
-            Err(prepared) => prepared,
-        };
-        tokio::task::spawn_blocking(move || {
-            let stage = tempfile::Builder::new()
-                .prefix(".archive-restore-")
-                .tempdir_in(&parent)?;
-            let mut directories = vec![(
-                prepared.stage.path().to_path_buf(),
-                stage.path().to_path_buf(),
-            )];
-            while let Some((source, target)) = directories.pop() {
-                for entry in std::fs::read_dir(&source)? {
-                    let entry = entry?;
-                    let destination = target.join(entry.file_name());
-                    let kind = entry.file_type()?;
-                    if kind.is_dir() {
-                        std::fs::create_dir(&destination)?;
-                        directories.push((entry.path(), destination));
-                    } else if kind.is_file() {
-                        microsandbox_utils::copy::fast_copy(&entry.path(), &destination)?;
-                        std::fs::set_permissions(&destination, entry.metadata()?.permissions())?;
-                    } else {
-                        return Err(MicrosandboxError::SnapshotIntegrity(
-                            "archive staging contains a non-regular entry".into(),
-                        ));
-                    }
-                }
-            }
-            Ok(stage)
-        })
-        .await
-        .map_err(|error| MicrosandboxError::Custom(format!("copy archive staging: {error}")))?
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-#[cfg(feature = "local")]
-impl fmt::Debug for PreparedArchive {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedArchive")
-            .field("stage", &self.stage)
-            .finish_non_exhaustive()
     }
 }

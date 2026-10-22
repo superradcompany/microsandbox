@@ -1288,6 +1288,9 @@ impl SandboxBuilder {
     /// directly to preserve explicit workdir clears through image resolution.
     /// Reusing a concrete config supplies populated CPU and memory values explicitly.
     /// Keep builder patches sparse to inherit omitted settings from a memory snapshot.
+    ///
+    /// Local archive preparation reads metadata only. Keep the archive available until
+    /// creation finishes; payload validation and extraction happen during creation.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
         let backend = default_backend();
         #[cfg(feature = "cloud")]
@@ -1460,7 +1463,8 @@ impl SandboxBuilder {
 
     /// Open the deferred snapshot artifact and copy its pinned image
     /// reference, manifest digest, and upper-layer source path into the
-    /// config. Driven by build and create preparation.
+    /// config. Driven by build and create preparation. Archives contribute metadata here;
+    /// their payloads are extracted only during creation.
     async fn resolve_pending(
         &mut self,
         backend: std::sync::Arc<dyn crate::Backend>,
@@ -2260,7 +2264,7 @@ fn validate_config_script_name(name: &str) -> Result<(), String> {
 /// Apply the immutable VM geometry and effective guest network identity carried by a checkpoint.
 ///
 /// Installed snapshots call this while resolving the builder. Archive restores call it after the
-/// descriptor and closure have streamed into child staging.
+/// descriptor and checkpoint metadata have been inspected without extracting payloads.
 #[cfg(feature = "local")]
 pub(crate) fn apply_checkpoint_restore_constraints(
     config: &mut SandboxConfig,

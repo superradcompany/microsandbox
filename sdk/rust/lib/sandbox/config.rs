@@ -519,16 +519,8 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
-    /// Discard materialized restore paths before releasing their archive staging owner.
+    /// Discard captured metadata and source paths before selecting another restore source.
     pub(crate) fn clear_prepared_restore(&mut self) {
-        #[cfg(feature = "local")]
-        if let Some(prepared) = &self.restore_resources.archive {
-            let old_stage = prepared.stage.path();
-            self.spec.mounts.retain(|mount| {
-                !matches!(mount,
-                    microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(old_stage))
-            });
-        }
         #[cfg(feature = "local")]
         {
             self.checkpoint_restore = None;

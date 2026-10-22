@@ -397,16 +397,16 @@ async fn corrupt_archive_does_not_replace_target() {
     std::fs::write(&archive, b"not a tar archive").unwrap();
     let backend = backend(root.path(), 18).await;
     let stage = tempfile::tempdir_in(root.path()).unwrap();
-    let reason = match crate::snapshot::materialize_archive_for_child(
-        &backend,
-        &archive,
-        stage.path(),
-        false,
-        None,
-        &Default::default(),
-        Default::default(),
-    )
-    .await
+    let reason = match backend
+        .materialize_archive_for_child(
+            &archive,
+            stage.path(),
+            false,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .await
     {
         Ok(_) => panic!("corrupt archive accepted"),
         Err(error) => error.to_string(),
@@ -558,17 +558,17 @@ async fn archive_publication_preserves_relative_disk_chain() {
     let archive = archive(root.path(), false, false).await;
     let backend = backend(root.path(), 18).await;
     let stage = tempfile::tempdir_in(root.path()).unwrap();
-    let materialized = crate::snapshot::materialize_archive_for_child(
-        &backend,
-        &archive,
-        stage.path(),
-        false,
-        None,
-        &Default::default(),
-        Default::default(),
-    )
-    .await
-    .unwrap();
+    let materialized = backend
+        .materialize_archive_for_child(
+            &archive,
+            stage.path(),
+            false,
+            None,
+            &Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     let mut config = SandboxConfig {
         snapshot_upper_layers: materialized.upper_layers,
         ..Default::default()
@@ -587,7 +587,7 @@ async fn archive_publication_preserves_relative_disk_chain() {
 }
 
 #[tokio::test]
-async fn archive_settings_are_resolved_after_inspection_and_staging_survives_reuse() {
+async fn archive_settings_resolve_without_extracting_payloads() {
     use crate::config::{GlobalConfigPatch, layers::BackendConfig};
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let source = checkpoint_archive(root.path()).await;
@@ -608,20 +608,18 @@ async fn archive_settings_are_resolved_after_inspection_and_staging_survives_reu
         // The captured guest's advertised policy rides along with the restore.
         assert_eq!(config.exec_limits().max_executions, 7);
         assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/sh"));
-        let archive = config.restore_resources.archive.as_ref().unwrap().clone();
-        let retained_path = archive.stage.path().to_path_buf();
-        let copied = archive.into_stage(&local.sandboxes_dir()).await.unwrap();
-        assert!(retained_path.exists());
-        assert_ne!(copied.path(), retained_path);
-        assert!(std::fs::read_dir(copied.path()).unwrap().next().is_some());
+        assert!(config.checkpoint_restore.is_none());
+        assert!(config.snapshot_upper_layers.is_empty());
+        assert!(
+            std::fs::read_dir(local.sandboxes_dir())
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true)
+        );
         let mut reused = SandboxBuilder::from(config);
         reused.prepare(local.clone()).await.unwrap();
         let reused = reused.finish_local(local.config_sources(), None).unwrap();
         assert_eq!(reused.exec_limits().max_executions, 7);
-        let archive = reused.restore_resources.archive.unwrap();
-        let unique_path = archive.stage.path().to_path_buf();
-        let unique = archive.into_stage(&local.sandboxes_dir()).await.unwrap();
-        assert_eq!(unique.path(), unique_path);
+        assert!(reused.checkpoint_restore.is_none());
     }
 }
 
@@ -635,15 +633,8 @@ async fn replacing_prepared_full_archive_discards_its_checkpoint() {
         .with_snapshot_reference(SnapshotReference::path(full.to_string_lossy()));
     builder.prepare(local.clone()).await.unwrap();
     let config = builder.finish_local(local.config_sources(), None).unwrap();
-    assert!(config.checkpoint_restore.is_some());
-    let old_stage = config
-        .restore_resources
-        .archive
-        .as_ref()
-        .unwrap()
-        .stage
-        .path()
-        .to_path_buf();
+    assert!(config.resumed_from_full_snapshot);
+    assert!(config.restore_resources.geometry.is_some());
 
     let mut replacement = SandboxBuilder::from(config)
         .with_snapshot_reference(SnapshotReference::path(disk.to_string_lossy()));
@@ -653,25 +644,72 @@ async fn replacing_prepared_full_archive_discards_its_checkpoint() {
         .unwrap();
     assert!(config.checkpoint_restore.is_none());
     assert!(!config.resumed_from_full_snapshot);
-    let new_stage = config
-        .restore_resources
-        .archive
-        .as_ref()
-        .unwrap()
-        .stage
-        .path();
-    assert!(!config.snapshot_upper_layers.is_empty());
-    assert!(
-        config
-            .snapshot_upper_layers
-            .iter()
-            .all(|layer| { layer.path.starts_with(new_stage) && layer.path.is_file() })
-    );
+    assert!(config.snapshot_upper_layers.is_empty());
     assert!(config.snapshot_upper_source.is_none());
     assert!(config.restore_resources.geometry.is_none());
     assert!(config.restore_resources.agent_ready.is_none());
-    assert!(!old_stage.exists());
-    assert!(!config.spec.mounts.iter().any(|mount| matches!(mount,
-        microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(&old_stage)
-    )));
+}
+
+#[tokio::test]
+async fn archive_changes_after_build_preserve_replacement_target() {
+    for plain in [false, true] {
+        for missing in [false, true] {
+            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let source = archive(root.path(), false, plain).await;
+            let local = backend(root.path(), 18).await;
+            let mut builder = SandboxBuilder::new("replaceable")
+                .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+                .replace();
+            builder.prepare(local.clone()).await.unwrap();
+            let config = builder.finish_local(local.config_sources(), None).unwrap();
+
+            let reason = if missing {
+                std::fs::remove_file(&source).unwrap();
+                "cannot open snapshot archive"
+            } else {
+                // Same snapshot ID, different descriptor: identity is the digest, not the ID.
+                std::fs::remove_file(&source).unwrap();
+                archive(root.path(), true, plain).await;
+                "snapshot archive changed after configuration was built"
+            };
+            Box::pin(assert_request_preserves_target(local, config, reason)).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn corrupt_payload_is_deferred_to_create_without_replacing_target() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let source = archive(root.path(), false, true).await;
+    let mut tar = tar::Archive::new(std::fs::File::open(&source).unwrap());
+    let payload_offset = tar
+        .entries()
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.path().unwrap().starts_with("layers"))
+        .unwrap()
+        .raw_file_position();
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap();
+    file.seek(SeekFrom::Start(payload_offset)).unwrap();
+    file.write_all(b"corrupt").unwrap();
+    drop(file);
+
+    let local = backend(root.path(), 18).await;
+    let mut request = replaceable_config();
+    request.snapshot_reference = Some(SnapshotReference::path(source.to_string_lossy()));
+    request.replace_existing = true;
+    let mut builder = SandboxBuilder::from(request);
+    builder.prepare(local.clone()).await.unwrap();
+    let config = builder.finish_local(local.config_sources(), None).unwrap();
+    Box::pin(assert_request_preserves_target(
+        local,
+        config,
+        "archive member transport integrity mismatch",
+    ))
+    .await;
 }
