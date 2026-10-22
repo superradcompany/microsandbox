@@ -48,6 +48,14 @@ sdk/ruby/lib/microsandbox/*.so
 sdk/ruby/lib/microsandbox/*.bundle
 sdk/ruby/lib/microsandbox/[0-9].[0-9]/
 
+# Ruby runtime-data gem build inputs, staging trees, and packaged gems.
+# Release binaries must never be committed; `sdk/ruby-binaries/Rakefile`
+# recreates these from verified GitHub release bundles.
+sdk/ruby-binaries/downloads/
+sdk/ruby-binaries/libexec/
+sdk/ruby-binaries/pkg/
+sdk/ruby-binaries/*.gem
+
 # Python
 __pycache__/
 *.pyc

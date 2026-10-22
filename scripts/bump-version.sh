@@ -33,6 +33,8 @@
 #     name the per-version cache directory for libmicrosandbox_go_ffi)
 #   - sdk/ruby/lib/microsandbox/version.rb (gem version; the extension's
 #     Cargo manifest and exact Rust SDK pin are covered by the Rust step)
+#   - sdk/ruby-binaries/lib/microsandbox/binaries/version.rb (optional
+#     runtime companion gem; kept in lockstep with the SDK gem)
 #
 # Cargo.lock entries for workspace-versioned crates are bumped by sed,
 # but the script does not do a full cargo-driven regen — run `cargo
@@ -168,14 +170,19 @@ if [ -f "$GO_SETUP" ] && grep -q "sdkVersion = \"${OLD}\"" "$GO_SETUP"; then
   echo "  updated ${GO_SETUP}"
 fi
 
-# --- Ruby: gem version constant -----------------------------------------
-# The gemspec reads this separately from Cargo; both must match the exact
-# Rust SDK requirement checked by `rake version_check`.
-RUBY_VERSION_FILE="sdk/ruby/lib/microsandbox/version.rb"
-if [ -f "$RUBY_VERSION_FILE" ] && grep -Fq "VERSION = \"${OLD}\"" "$RUBY_VERSION_FILE"; then
-  inplace "s/VERSION = \"${OLD//./\\.}\"/VERSION = \"${NEW}\"/" "$RUBY_VERSION_FILE"
-  echo "  updated ${RUBY_VERSION_FILE}"
-fi
+# --- Ruby: gem version constants ----------------------------------------
+# The gemspecs read these separately from Cargo. The SDK gem must match the
+# exact Rust SDK requirement checked by `rake version_check`; the binaries
+# companion's own `rake version_check` holds it in lockstep with the SDK gem
+# and the workspace version.
+for RUBY_VERSION_FILE in \
+  sdk/ruby/lib/microsandbox/version.rb \
+  sdk/ruby-binaries/lib/microsandbox/binaries/version.rb; do
+  if [ -f "$RUBY_VERSION_FILE" ] && grep -Fq "VERSION = \"${OLD}\"" "$RUBY_VERSION_FILE"; then
+    inplace "s/VERSION = \"${OLD//./\\.}\"/VERSION = \"${NEW}\"/" "$RUBY_VERSION_FILE"
+    echo "  updated ${RUBY_VERSION_FILE}"
+  fi
+done
 
 echo
 echo "next steps:"
