@@ -6,13 +6,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use microsandbox_protocol::bootstrap::GuestBootstrap;
+use microsandbox_protocol::control::ControlError as FramedControlError;
+use microsandbox_protocol::resize::{ResizeRequest, ResizeResponse, ResizeTarget};
+use microsandbox_types::modify::{ResourceConvergenceState, ResourceKind, ResourceResizeStatus};
 use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
+use super::resize::ResizeTracker;
+use super::resize_observer::ResizeObserver;
 use crate::checkpoint::{CheckpointCoordinator, CheckpointResult, UserPause};
 use crate::control::*;
+use crate::metrics::ConfirmedMemoryLimit;
 use crate::vm::VmConfig;
-use microsandbox_protocol::bootstrap::GuestBootstrap;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -28,25 +34,28 @@ const RUNTIME_BOOT_ID_FILE: &str = "runtime-boot-id";
 
 /// One in-process authority for all host-owned runtime mutations.
 pub struct RuntimeControlExecutor {
-    signal_runtime: tokio::runtime::Handle,
+    pub(super) signal_runtime: tokio::runtime::Handle,
     signal_workload: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
     jobs: std::sync::Arc<crate::runner::jobs::JobManager>,
     pause_observation: std::sync::RwLock<ControlResponse>,
     resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    vm: msb_krun::VmControl,
+    pub(super) vm: msb_krun::VmControl,
+    pub(super) agent_sock: PathBuf,
     #[cfg(feature = "net")]
     secrets: Option<microsandbox_network::secrets::handle::SecretsHandle>,
-    state: Mutex<ExecutorState>,
+    pub(super) state: Mutex<ExecutorState>,
+    pub(super) resize_observer: ResizeObserver,
 }
 
-struct ExecutorState {
+pub(super) struct ExecutorState {
     runtime_boot_id: String,
+    pub(super) resize: ResizeTracker,
     revision: u64,
-    lifecycle: RuntimeLifecycle,
+    pub(super) lifecycle: RuntimeLifecycle,
     dedup: BTreeMap<String, DedupEntry>,
     dedup_order: VecDeque<String>,
     checkpoint: CheckpointCoordinator,
-    user_pause: Option<UserPause>,
+    pub(super) user_pause: Option<UserPause>,
 }
 
 #[derive(Clone)]
@@ -80,6 +89,7 @@ impl RuntimeControlExecutor {
             String,
             microsandbox_filesystem::OwnedDirectoryCheckpoint,
         >,
+        memory_limit: ConfirmedMemoryLimit,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         let jobs = crate::runner::jobs::JobManager::open(
@@ -117,9 +127,16 @@ impl RuntimeControlExecutor {
             }),
             resident_paused,
             vm,
+            agent_sock: agent_sock.to_path_buf(),
             #[cfg(feature = "net")]
             secrets,
+            resize_observer: ResizeObserver::new(
+                vm_config.memory_mib,
+                vm_config.max_memory_mib,
+                memory_limit,
+            ),
             state: Mutex::new(ExecutorState {
+                resize: ResizeTracker::new(runtime_boot_id.clone()),
                 runtime_boot_id,
                 revision: 0,
                 lifecycle: RuntimeLifecycle::Running,
@@ -139,7 +156,7 @@ impl RuntimeControlExecutor {
             return self.pause_observation.read().unwrap().clone();
         }
         let mut state = self.state.lock().unwrap();
-        let response = self.execute_locked(&mut state, command);
+        let response = self.execute_locked(&mut state, command, None);
         *self.pause_observation.write().unwrap() = pause_response(&state);
         response
     }
@@ -204,7 +221,7 @@ impl RuntimeControlExecutor {
         }
 
         let request_id = envelope.request_id;
-        let response = self.execute_locked(&mut state, envelope.command);
+        let response = self.execute_locked(&mut state, envelope.command, None);
         *self.pause_observation.write().unwrap() = pause_response(&state);
         let response = ControlEnvelopeResponse {
             request_id: request_id.clone(),
@@ -213,6 +230,92 @@ impl RuntimeControlExecutor {
         };
         remember_response(&mut state, request_id, fingerprint, response.clone());
         response
+    }
+
+    /// Read or apply an operation under the same authority as legacy setters.
+    pub(crate) fn resize_request(
+        &self,
+        request: ResizeRequest,
+    ) -> Result<ResizeResponse, FramedControlError> {
+        let mut state = self.state.lock().unwrap();
+        let (boot, id) = match &request {
+            ResizeRequest::Hello => (None, None),
+            ResizeRequest::Read {
+                runtime_boot_id,
+                id,
+            } => (Some(runtime_boot_id), Some(id)),
+            ResizeRequest::Apply {
+                runtime_boot_id, ..
+            } => (Some(runtime_boot_id), None),
+            ResizeRequest::Current { runtime_boot_id } => (Some(runtime_boot_id), None),
+        };
+        if boot.is_some_and(|boot| boot != &state.runtime_boot_id) {
+            return Err(FramedControlError::rejected(
+                "runtime_changed",
+                "resize history belongs to a different runtime incarnation",
+            ));
+        }
+        if id.is_some_and(|id| !valid_control_id(id)) {
+            return Err(FramedControlError::rejected(
+                "invalid_identifier",
+                "resize identity must be nonempty printable ASCII of at most 128 bytes",
+            ));
+        }
+        // The dispatcher serializes ordinary requests across connections. Releasing
+        // `state` before a synchronous guest query would still block that queue. Reads
+        // return retained evidence and coalesce a wake for the existing observer instead.
+        if matches!(
+            &request,
+            ResizeRequest::Read { .. } | ResizeRequest::Current { .. }
+        ) {
+            if state.lifecycle != RuntimeLifecycle::Running || state.user_pause.is_some() {
+                state.resize.mark_pending_paused();
+            }
+            self.resize_observer.wake.notify_one();
+        }
+        let operations = match request {
+            ResizeRequest::Hello => Vec::new(),
+            ResizeRequest::Apply { target, .. } => {
+                let id = format!("resize-{}", new_runtime_boot_id());
+                let command = match target {
+                    ResizeTarget::Cpus { online } => ControlRequest::CpuTarget { online },
+                    ResizeTarget::Memory { total_mib } => {
+                        ControlRequest::MemoryTarget { total_mib }
+                    }
+                };
+                let result = self.execute_locked(&mut state, command, Some(id.clone()));
+                if !result.ok {
+                    return Err(FramedControlError {
+                        code: result.error_code.unwrap_or_else(|| "resize_failed".into()),
+                        message: result
+                            .error
+                            .unwrap_or_else(|| "resize was not accepted".into()),
+                        effect: microsandbox_protocol::control::ErrorEffect::Unknown,
+                    });
+                }
+                vec![
+                    state
+                        .resize
+                        .get(&id)
+                        .expect("successful resize is recorded before reply")
+                        .clone(),
+                ]
+            }
+            ResizeRequest::Read { id, .. } => {
+                if state.resize.get(&id).is_none() {
+                    return Err(FramedControlError::rejected(
+                        "resize_history_unavailable",
+                        "resize identity is unknown or no longer retained in this runtime",
+                    ));
+                }
+                vec![state.resize.get(&id).unwrap().clone()]
+            }
+            ResizeRequest::Current { .. } => state.resize.current(),
+        };
+        Ok(ResizeResponse {
+            tracking: state.resize.tracking(),
+            operations,
+        })
     }
 
     /// Return the current immutable boot identity and mutation revision.
@@ -299,7 +402,24 @@ impl RuntimeControlExecutor {
         &self,
         state: &mut ExecutorState,
         request: ControlRequest,
+        resize_id: Option<String>,
     ) -> ControlResponse {
+        let resize_target = match &request {
+            ControlRequest::CpuTarget { online } => Some(ResizeTarget::Cpus { online: *online }),
+            ControlRequest::MemoryTarget { total_mib } => Some(ResizeTarget::Memory {
+                total_mib: *total_mib,
+            }),
+            _ => None,
+        };
+        if resize_target
+            .as_ref()
+            .is_some_and(|target| !state.resize.admits(target))
+        {
+            return control_error(
+                "resize_generation_exhausted",
+                "resize generation cannot advance",
+            );
+        }
         // Capturing an active job without its host ownership would restore an unattachable
         // process. Gate every full-capture entry point, including legacy and descriptor forms.
         if matches!(
@@ -372,6 +492,12 @@ impl RuntimeControlExecutor {
             );
         }
 
+        if mutation {
+            // Even a failed capture can pause and resume the VM without advancing the public
+            // revision. Invalidate in-flight guest evidence before attempting any mutation.
+            state.resize.invalidate_observation();
+            self.resize_observer.wake.notify_one();
+        }
         let pause_policy = match &request {
             ControlRequest::PauseWithGuestFlush { guest_flush } => Some(*guest_flush),
             _ => None,
@@ -619,6 +745,50 @@ impl RuntimeControlExecutor {
                 ..
             })
         );
+        if response.ok
+            && let Some(target) = resize_target
+        {
+            let (accepted, status) = match &target {
+                ResizeTarget::Cpus { online } => {
+                    let observed = response
+                        .cpu
+                        .as_ref()
+                        .expect("CPU setter returns its accepted state");
+                    (
+                        ResizeTarget::Cpus {
+                            online: observed.requested_online,
+                        },
+                        ResourceResizeStatus {
+                            resource: ResourceKind::Cpus,
+                            requested: online.to_string(),
+                            actual: observed.actual_online.to_string(),
+                            enforced: observed.enforced.to_string(),
+                            state: ResourceConvergenceState::Accepted,
+                        },
+                    )
+                }
+                ResizeTarget::Memory { total_mib } => {
+                    let observed = response
+                        .memory
+                        .as_ref()
+                        .expect("memory setter returns its accepted state");
+                    (
+                        ResizeTarget::Memory {
+                            total_mib: observed.target_mib,
+                        },
+                        ResourceResizeStatus {
+                            resource: ResourceKind::Memory,
+                            requested: format!("{total_mib} MiB"),
+                            actual: format!("{} MiB", observed.current_mib),
+                            enforced: format!("{} MiB", observed.current_mib),
+                            state: ResourceConvergenceState::Accepted,
+                        },
+                    )
+                }
+            };
+            let id = resize_id.unwrap_or_else(|| format!("legacy-{}", new_runtime_boot_id()));
+            state.resize.accepted(id, target, accepted, status);
+        }
         if mutation && (response.ok || partial) {
             match state.revision.checked_add(1) {
                 Some(revision) => state.revision = revision,
@@ -673,6 +843,7 @@ impl RuntimeControlExecutor {
                 control_protocols: Some(vec!["json".into(), "cbor".into()]),
                 ok: true,
                 capabilities: Some(ControlCapabilities {
+                    resize_operations: true,
                     cpu_resize: self.vm.cpu_resize_supported(),
                     memory_resize: self.vm.memory_resize_supported(),
                     secrets_update: self.secrets_update_supported(),
@@ -982,3 +1153,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "resize_read_tests.rs"]
+mod resize_read_tests;

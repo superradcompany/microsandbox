@@ -236,7 +236,7 @@ plan, err := sb.Modify(ctx, m.ModifyOptions{
 ```
 </CodeGroup>
 
-Use [`msb ps`](/cli/sandbox-commands#msb-status) to see allocation as `effective / max`, and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check real usage before resizing. The apply result reports each resource’s [resize state](/sdk/rust/sandbox#resourceresizestatus), so automation can wait for the guest to settle.
+Use [`msb ps`](/cli/sandbox-commands#msb-status) to inspect allocation and [`msb metrics`](/cli/sandbox-commands#msb-metrics) to check usage before resizing. A successful modification returns `accepted` for each resized resource: the runtime accepted its target, but guest completion has not been confirmed. `plan.applied` describes applying the modification request; it does not establish usable guest capacity. Do not infer completion from equal reported quantities or from current memory exceeding a shrink target.
 
 <span id="labels" />
 

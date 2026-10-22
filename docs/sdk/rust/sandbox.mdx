@@ -2030,7 +2030,7 @@ async fn apply(self) -> MicrosandboxResult<SandboxModificationPlan>
 
 Apply the changes. Live changes are made to the running sandbox first, and the new config is saved only after they succeed, so a failed apply leaves the old config in place. Changes for a stopped sandbox, or requested with [`next_start()`](#modification-next_start), are saved and take effect on the next start. With [`restart()`](#modification-restart), `apply()` stops and starts the sandbox so that restart-required changes take effect.
 
-A live CPU or memory resize can take a moment to settle. The returned plan's `resize_status` reports progress per resource; see [`ResourceResizeStatus`](#resourceresizestatus).
+A live CPU or memory resize can take a moment to settle. The immediate result's `resize_status` is `Accepted` after the runtime accepts each target; it does not confirm guest completion. `plan.applied` means the modification request was applied, not that the guest has usable capacity. See [`ResourceResizeStatus`](#resourceresizestatus).
 
 <p className="msb-label">Returns</p>
 
@@ -2040,6 +2040,31 @@ A live CPU or memory resize can take a moment to settle. The returned plan's `re
     <div className="msb-param-desc">The applied plan, with <code>applied: true</code> and live resize outcomes in <code>resize_status</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">modification.</span><span className="msb-hn">apply_with_resize_tracking()</span>
+
+```rust
+async fn apply_with_resize_tracking(self) -> MicrosandboxResult<SandboxModificationResult>
+```
+
+Apply with the same policy as `apply()`, returning `plan` plus `resize_operations: Option<Vec<ResizeOperation>>`. Missing tracking means no tracked live request was made, including supported modifications through older runtimes. Existing `apply()` retains its plan return value. Never replace absent identities with a later current operation.
+
+Both `Sandbox` and `SandboxHandle` provide:
+
+```rust
+async fn resize_operations(&self) -> MicrosandboxResult<Vec<ResizeOperation>>
+async fn wait_for_resize_operations(
+    &self,
+    operations: &[ResizeOperation],
+    timeout: Option<Duration>,
+) -> MicrosandboxResult<Vec<ResourceResizeStatus>>
+```
+
+Reading returns the latest operation per resource, or an empty list when none is recorded. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. Waiting revalidates supplied records against their runtime and operation identities. A later same-target request, expired history or runtime replacement cannot become successful completion. `None` waits indefinitely; zero performs one bounded check. `ResizeTimeout` carries the latest completed status per resource and does not undo the request. Observation unsupported by an older runtime or guest is an explicit error.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`MicrosandboxError::ResizeWait` carries `ResizeWaitError`: a machine-readable `reason`, optional sandbox/operation identity, verified `status` observations and the original error in its source chain. Reasons distinguish superseded, interrupted, unavailable history, invalid responses and unavailable transport observations. Supplied caller status is never accepted as evidence. Unknown future peer codes retain the original control-client error; timeout and unsupported-feature errors keep their established variants.
 
 #### <span className="msb-recv">modification.</span><span className="msb-hn">cpus()</span>
 
@@ -3226,7 +3251,7 @@ When or whether a planned change can take effect. Serializes as the quoted strin
 
 <p className="msb-backref">Used by <a href="#sandboxmodificationplan">SandboxModificationPlan.resize_status</a></p>
 
-Runtime convergence status for a live resource resize. Enforcement applies immediately; the guest converges asynchronously (onlining CPUs, plugging memory blocks).
+Resource status for a live resize. The immediate modification result reports `Accepted`; its existing requested, actual and enforced quantities do not establish operation-bound guest completion. In particular, plugged memory can still be offline, and memory above a shrink target does not mean the shrink finished.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -3240,7 +3265,7 @@ Runtime convergence status for a live resource resize. Enforcement applies immed
 |-------|-------------|
 | `Accepted` | The runtime accepted the request |
 | `Converging` | The guest and VMM are still converging on the requested state |
-| `Applied` | Desired, actual, and enforced state match |
+| `Applied` | Guest completion has been confirmed for the operation; not produced by the immediate target acknowledgement |
 | `GuestRefused` | The guest would not cooperate; the host enforces the new limit anyway |
 | `Failed` | The resize failed |
 

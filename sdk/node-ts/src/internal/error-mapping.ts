@@ -4,6 +4,8 @@ import {
   DatabaseError,
   ExecTimeoutError,
   StopTimeoutError,
+  ResizeTimeoutError,
+  ResizeWaitError,
   HttpError,
   ImageError,
   ImageInUseError,
@@ -37,7 +39,7 @@ import {
   VolumeNotFoundError,
 } from "../errors.js";
 
-// The recovery variant carries a JSON envelope after the usual tag; all others carry text.
+// Recovery and resize timeout variants carry a JSON envelope after the usual tag; all others carry text.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
 
 const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
@@ -62,6 +64,8 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["Nix", (m, c) => new NixError(m, { cause: c })],
   ["ExecTimeout", (m, c) => new ExecTimeoutError(m, parseTimeoutMs(m), { cause: c })],
   ["StopTimeout", (m, c) => new StopTimeoutError(m, { cause: c })],
+  ["ResizeWait", (m, c) => mapResizeWaitError(m, c)],
+  ["ResizeTimeout", (m, c) => mapResizeTimeoutError(m, c)],
   ["Terminal", (m, c) => new TerminalError(m, { cause: c })],
   ["SandboxFsOps", (m, c) => new SandboxFsOpsError(m, { cause: c })],
   ["ImageNotFound", (m, c) => new ImageNotFoundError(m, { cause: c })],
@@ -129,6 +133,35 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
     // Preserve the original refusal if a mismatched native binary sends an unknown envelope.
     return raw;
   }
+}
+
+function mapResizeWaitError(payload: string, raw: Error): MicrosandboxError {
+  try {
+    const value = JSON.parse(payload);
+    if (typeof value?.message === "string" &&
+        ["superseded", "interrupted", "history_unavailable", "invalid_response", "observation_unavailable"].includes(value.reason) &&
+        (value.sandbox === null || typeof value.sandbox === "string") &&
+        (value.operation_id === null || typeof value.operation_id === "string") &&
+        Array.isArray(value.status)) {
+      return new ResizeWaitError(value.message, value.reason, value.sandbox,
+        value.operation_id, value.status, { cause: raw });
+    }
+  } catch {
+    // Preserve malformed/unknown future payloads as errors, never guessed outcomes.
+  }
+  return new RuntimeError(payload, { cause: raw });
+}
+
+function mapResizeTimeoutError(payload: string, raw: Error): ResizeTimeoutError {
+  try {
+    const envelope = JSON.parse(payload);
+    if (typeof envelope?.message === "string" && Array.isArray(envelope.status)) {
+      return new ResizeTimeoutError(envelope.message, envelope.status, { cause: raw });
+    }
+  } catch {
+    // Older native bindings send only the message.
+  }
+  return new ResizeTimeoutError(payload, [], { cause: raw });
 }
 
 export async function withMappedErrors<T>(fn: () => Promise<T>): Promise<T> {

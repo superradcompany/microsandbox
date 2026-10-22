@@ -123,8 +123,10 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | Suffix | Unit | Description |
 | --- | --- | --- |
 | `cpu.utilization` | `1` | vCPU-seconds per wall-second. A fully used 2-vCPU sandbox reports `2.0`. |
-| `memory.usage` | `By` | Guest memory in use, measured against the live memory size when the runtime reports it. |
-| `memory.limit` | `By` | Effective guest memory limit: boot memory plus plugged memory. Follows live memory resizes. |
+| `memory.usage` | `By` | Confirmed configured allocation minus fresh guest-reported available memory. |
+| `memory.limit` | `By` | Last confirmed configured allocation, initially the boot allocation. Pending resize requests do not advance it. |
+| `memory.total` | `By` | Fresh guest-reported usable memory capacity; this can be smaller than the configured allocation. |
+| `memory.available` | `By` | Fresh guest-reported memory available for workloads. |
 | `memory.host_resident` | `By` | Host-resident memory backing the guest, when the VMM can report it. |
 | `disk.bytes_read` | `By` | Cumulative bytes read by the sandbox process. |
 | `disk.bytes_written` | `By` | Cumulative bytes written. |
@@ -135,9 +137,13 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
 | `uptime` | `s` | Sandbox uptime. |
 
-During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
+The runtime confirms a live allocation only when host device state and guest readiness agree. While a resize is pending or observation is unsupported, `memory.limit` retains its last confirmed value. A restored sandbox obtains fresh confirmation of captured hotplug capacity without creating a new resize operation.
 
-Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
+After the limit changes, usage waits for a new guest statistics response. A delayed response requested before confirmation cannot be combined with the new limit. Usage retains its configured-allocation basis; it is not computed as `memory.total - memory.available`. If available memory exceeds the confirmed limit during a transition, usage is unavailable rather than underflowing.
+
+Guest total, available memory and usage expire after the greater of three seconds or three guest reporting intervals. Reading, sampling and exporting do not renew that receipt time. Pause invalidates these observations immediately; resume and full restore require fresh observations. OTLP omits unavailable values, and stdout shows `N/A` for unavailable usage. The confirmed limit and independently reported host-resident memory remain available.
+
+Older runtimes retain their existing metrics behavior. New guest total and freshness guarantees require the updated runtime and native telemetry; unsupported resource observation is never treated as resize completion. Existing metric names and the shared-memory layout remain compatible. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
 
 ### Attributes
 

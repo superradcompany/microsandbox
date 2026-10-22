@@ -2,6 +2,7 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -171,6 +172,10 @@ const (
 	// ErrSandboxStopTimedOut indicates graceful shutdown was not observed
 	// before the SDK's deadline and may still complete asynchronously.
 	ErrSandboxStopTimedOut
+	// ErrResizeTimeout indicates a live resize did not converge before its deadline.
+	ErrResizeTimeout
+	// ErrResizeWait indicates observation failed without proving a final resize outcome.
+	ErrResizeWait
 )
 
 func (k ErrorKind) String() string {
@@ -195,6 +200,10 @@ func (k ErrorKind) String() string {
 		return "ExecTimeout"
 	case ErrStopTimeout:
 		return "StopTimeout"
+	case ErrResizeWait:
+		return "ResizeWait"
+	case ErrResizeTimeout:
+		return "ResizeTimeout"
 	case ErrExecFailed:
 		return "ExecFailed"
 	case ErrFilesystem:
@@ -302,6 +311,19 @@ func (e *SnapshotSourceRecoveryError) Error() string { return e.err.Error() }
 // Unwrap preserves access to the standard SDK error kind.
 func (e *SnapshotSourceRecoveryError) Unwrap() error { return e.err }
 
+// ResizeTimeoutError reports a live resize wait that expired, with the last
+// observed status. Status is empty when no read completed before the deadline.
+// Use errors.As to obtain this type; IsKind also recognizes ErrResizeTimeout.
+type ResizeTimeoutError struct {
+	Status []ResourceResizeStatus
+	err    *Error
+}
+
+func (e *ResizeTimeoutError) Error() string { return e.err.Error() }
+
+// Unwrap preserves access to the standard SDK error kind.
+func (e *ResizeTimeoutError) Unwrap() error { return e.err }
+
 // Error implements the error interface.
 //
 // The string form deliberately omits the Kind to avoid duplicating the
@@ -362,6 +384,24 @@ func wrapFFI(err error) error {
 				Recovery: recovery, err: &Error{Kind: ErrSnapshotSourceRecovery, Message: fe.Message},
 			}
 		}
+		if fe.Kind == ffi.KindResizeWait {
+			var details ResizeWaitError
+			if json.Unmarshal(fe.ResizeWait, &details) == nil && details.Reason != "" {
+				details.err = &Error{Kind: ErrResizeWait, Message: fe.Message}
+				return &details
+			}
+		}
+		if fe.Kind == ffi.KindResizeTimeout {
+			status := []ResourceResizeStatus{}
+			if len(fe.ResizeStatus) > 0 {
+				if parsed, err := parseResizeStatus(string(fe.ResizeStatus)); err == nil && parsed != nil {
+					status = parsed
+				}
+			}
+			return &ResizeTimeoutError{
+				Status: status, err: &Error{Kind: ErrResizeTimeout, Message: fe.Message},
+			}
+		}
 		return &Error{Kind: kindFromFFI(fe.Kind), Message: fe.Message}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -390,6 +430,10 @@ func kindFromFFI(kind string) ErrorKind {
 		return ErrExecTimeout
 	case ffi.KindStopTimeout:
 		return ErrStopTimeout
+	case ffi.KindResizeWait:
+		return ErrResizeWait
+	case ffi.KindResizeTimeout:
+		return ErrResizeTimeout
 	case ffi.KindNoDefaultCommand:
 		return ErrNoDefaultCommand
 	case ffi.KindFilesystem:

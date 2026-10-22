@@ -157,6 +157,55 @@ impl JsSandboxHandle {
         crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
     }
 
+    /// Apply once and retain exact operation identities; older runtimes return no tracking.
+    #[napi]
+    pub async fn modify_with_resize_tracking(
+        &self,
+        options: Option<SandboxModifyOptions>,
+    ) -> Result<String> {
+        let builder = crate::sandbox::configure_modify(self.inner.modify(), options.as_ref())?;
+        crate::resize::run_modify_tracked(builder, crate::sandbox::modify_dry_run(options.as_ref()))
+            .await
+    }
+
+    /// Read current operation identities without changing targets.
+    #[napi]
+    pub async fn resize_operations(&self) -> Result<String> {
+        crate::resize::operations_json(self.inner.resize_operations().await)
+    }
+
+    /// Wait on supplied operation identities without following later requests.
+    #[napi]
+    pub async fn wait_for_resize_operations(
+        &self,
+        operations_json: String,
+        timeout_ms: Option<f64>,
+    ) -> Result<String> {
+        let operations = crate::resize::parse_operations(&operations_json)?;
+        let timeout = crate::sandbox::resize_wait_timeout(timeout_ms)?;
+        crate::sandbox::resize_status_json(
+            self.inner
+                .wait_for_resize_operations(&operations, timeout)
+                .await,
+        )
+    }
+
+    /// Read the current live resize status as a JSON array.
+    #[napi]
+    pub async fn resize_status(&self) -> Result<String> {
+        crate::sandbox::resize_status_json(self.inner.resize_status().await)
+    }
+
+    /// Wait for live resizes to settle. Omitted waits without a deadline; `0` checks once.
+    #[napi]
+    pub async fn wait_until_resized(&self, timeout_ms: Option<f64>) -> Result<String> {
+        let timeout = crate::sandbox::resize_wait_timeout(timeout_ms)?;
+        crate::sandbox::resize_status_json(match timeout {
+            Some(timeout) => self.inner.wait_until_resized_with_timeout(timeout).await,
+            None => self.inner.wait_until_resized().await,
+        })
+    }
+
     /// Compact root and owned-data disk prefixes of a running or stopped sandbox.
     #[napi]
     pub async fn compact(

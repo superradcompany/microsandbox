@@ -1571,6 +1571,7 @@ jobs:
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_lifecycle_evidence.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
       - name: Snapshot and branch live smoke
@@ -1678,6 +1679,7 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
       - name: Prepare pre-built agentd
+        id: integration_ready
         # upload-artifact normalizes executable bits. The runtime build already
         # produced agentd; restore its mode instead of compiling it again here.
         run: chmod +x build/agentd
@@ -1715,7 +1717,8 @@ jobs:
             --test-threads 2
 
       - name: Managed-job integration fixtures
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/managed-job-integration.py \
@@ -1736,7 +1739,8 @@ jobs:
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 scripts/smoke/cli/catalog-history.py \
@@ -1756,7 +1760,8 @@ jobs:
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
-        if: ${{ !cancelled() }}
+        # A failed test may be followed by independent fixtures; failed setup may not.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/smoke/cli/checkpoint-integration.py \
@@ -1969,6 +1974,7 @@ jobs:
           path: sdk/python/dist/
 
       - name: Install Python development environment
+        id: python_ready
         working-directory: sdk/python
         run: |
           uv sync --group dev --no-install-project
@@ -1986,7 +1992,8 @@ jobs:
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Python managed-job and null-stdin regression
-        if: ${{ !cancelled() }}
+        # Run after test failures only when artifacts and the Python environment are ready.
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         timeout-minutes: 5
         run: |
           chmod +x build/msb build/agentd

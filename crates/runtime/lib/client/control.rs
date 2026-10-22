@@ -303,6 +303,9 @@ pub struct RootDiskGrowthResult {
 /// resize-capable and secrets-incapable.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct ControlCapabilities {
+    /// Operation-bound resize tracking over the framed host-control extension.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resize_operations: bool,
     /// Explicit guest writeback policy and same-pause filesystem coverage checks.
     #[serde(default)]
     pub guest_flush_policy: bool,
@@ -522,6 +525,7 @@ mod tests {
         let response = ControlResponse {
             ok: true,
             capabilities: Some(ControlCapabilities {
+                resize_operations: false,
                 guest_flush_policy: true,
                 optional_disk_integrity: true,
                 root_disk_grow: true,

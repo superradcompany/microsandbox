@@ -22,7 +22,7 @@ use crate::{
 };
 
 #[cfg(feature = "local")]
-use super::SandboxModificationBuilder;
+use super::{ResourceResizeStatus, SandboxModificationBuilder};
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -320,6 +320,94 @@ impl SandboxHandle {
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+    }
+
+    /// Read the current live CPU and memory resize status.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status.
+    #[cfg(feature = "local")]
+    pub async fn resize_status(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::resize_status(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Read latest per-resource operation identities and evidence without applying a target.
+    #[cfg(feature = "local")]
+    pub async fn resize_operations(&self) -> MicrosandboxResult<Vec<super::ResizeOperation>> {
+        super::resize::resize_operations(&self.backend, &self.name, &self.identity()).await
+    }
+
+    /// Wait for exact operations returned by `apply_with_resize_tracking`.
+    ///
+    /// A replaced runtime, expired operation or supersession is an error. `None`
+    /// waits without a deadline; timing out does not undo the resize.
+    #[cfg(feature = "local")]
+    pub async fn wait_for_resize_operations(
+        &self,
+        operations: &[super::ResizeOperation],
+        timeout: Option<std::time::Duration>,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_for_operations(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            Some(operations),
+            timeout,
+        )
+        .await
+    }
+
+    /// Binding hook for one check after identity lookup has consumed part of its budget.
+    ///
+    /// The remaining setup/read budget never enables polling. Timeout errors retain each
+    /// completed resource reply and report the original zero-timeout single-check request.
+    #[doc(hidden)]
+    #[cfg(feature = "local")]
+    pub async fn check_resize_operations_with_budget(
+        &self,
+        operations: Option<&[super::ResizeOperation]>,
+        budget: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_for_operations_with_budget(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            operations,
+            Some(std::time::Duration::ZERO),
+            Some(budget),
+        )
+        .await
+    }
+
+    /// Wait for the initially selected operations to be guest-confirmed.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Keeps polling
+    /// while a guest never converges; use `wait_until_resized_with_timeout` to
+    /// bound the wait.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized(&self) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(&self.backend, &self.name, &self.identity(), None).await
+    }
+
+    /// Wait for the initially selected operations to be guest-confirmed within `timeout`.
+    ///
+    /// Returns an error when the sandbox is not running, and
+    /// `Unsupported` when its runtime cannot report resize status. Expiry returns
+    /// [`MicrosandboxError::ResizeTimeout`] with the last observed status, which is empty when no read
+    /// completed before the deadline.
+    #[cfg(feature = "local")]
+    pub async fn wait_until_resized_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MicrosandboxResult<Vec<ResourceResizeStatus>> {
+        super::resize::wait_until_resized(
+            &self.backend,
+            &self.name,
+            &self.identity(),
+            Some(timeout),
+        )
+        .await
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.

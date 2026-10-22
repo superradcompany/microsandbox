@@ -122,6 +122,8 @@ typedef char *(*msb_sandbox_handle_wait_until_stopped_fn)(uint64_t cancel_id, co
 typedef char *(*msb_sandbox_handle_ping_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_touch_fn)(uint64_t cancel_id, const char *name, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_handle_modify_fn)(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_resize_status_fn)(uint64_t cancel_id, const char *name, const char *expected_id, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_handle_wait_until_resized_fn)(uint64_t cancel_id, const char *name, const char *expected_id, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_close_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_detach_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_stop_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
@@ -199,6 +201,9 @@ typedef char *(*msb_sandbox_owns_lifecycle_fn)(uint64_t handle, uint8_t *buf, si
 typedef char *(*msb_sandbox_ping_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_touch_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_modify_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_resize_operations_fn)(uint64_t cancel_id, uint64_t handle, const char *name, const char *expected_id, const char *request_json, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_resize_status_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
+typedef char *(*msb_sandbox_wait_until_resized_fn)(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len);
 
 typedef char *(*msb_sandbox_attach_fn)(uint64_t cancel_id, uint64_t handle, const char *cmd, const char *opts_json, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_attach_default_fn)(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len);
@@ -302,6 +307,8 @@ static msb_sandbox_handle_wait_until_stopped_fn ptr_msb_sandbox_handle_wait_unti
 static msb_sandbox_handle_ping_fn ptr_msb_sandbox_handle_ping = NULL;
 static msb_sandbox_handle_touch_fn ptr_msb_sandbox_handle_touch = NULL;
 static msb_sandbox_handle_modify_fn ptr_msb_sandbox_handle_modify = NULL;
+static msb_sandbox_handle_resize_status_fn ptr_msb_sandbox_handle_resize_status = NULL;
+static msb_sandbox_handle_wait_until_resized_fn ptr_msb_sandbox_handle_wait_until_resized = NULL;
 static msb_sandbox_close_fn      ptr_msb_sandbox_close      = NULL;
 static msb_sandbox_detach_fn     ptr_msb_sandbox_detach     = NULL;
 static msb_sandbox_stop_fn       ptr_msb_sandbox_stop       = NULL;
@@ -370,6 +377,9 @@ static msb_sandbox_owns_lifecycle_fn ptr_msb_sandbox_owns_lifecycle = NULL;
 static msb_sandbox_ping_fn       ptr_msb_sandbox_ping       = NULL;
 static msb_sandbox_touch_fn      ptr_msb_sandbox_touch      = NULL;
 static msb_sandbox_modify_fn     ptr_msb_sandbox_modify     = NULL;
+static msb_sandbox_resize_status_fn ptr_msb_sandbox_resize_status = NULL;
+static msb_sandbox_resize_operations_fn ptr_msb_sandbox_resize_operations = NULL;
+static msb_sandbox_wait_until_resized_fn ptr_msb_sandbox_wait_until_resized = NULL;
 static msb_exec_collect_fn         ptr_msb_exec_collect         = NULL;
 static msb_exec_wait_fn            ptr_msb_exec_wait            = NULL;
 static msb_exec_kill_fn            ptr_msb_exec_kill            = NULL;
@@ -508,6 +518,8 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_handle_ping);
 	RESOLVE(msb_sandbox_handle_touch);
 	RESOLVE(msb_sandbox_handle_modify);
+	RESOLVE_OPTIONAL(msb_sandbox_handle_resize_status);
+	RESOLVE_OPTIONAL(msb_sandbox_handle_wait_until_resized);
 	RESOLVE(msb_sandbox_close);
 	RESOLVE(msb_sandbox_detach);
 	RESOLVE(msb_sandbox_stop);
@@ -577,6 +589,9 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE(msb_sandbox_ping);
 	RESOLVE(msb_sandbox_touch);
 	RESOLVE(msb_sandbox_modify);
+	RESOLVE_OPTIONAL(msb_sandbox_resize_status);
+	RESOLVE_OPTIONAL(msb_sandbox_resize_operations);
+	RESOLVE_OPTIONAL(msb_sandbox_wait_until_resized);
 	RESOLVE(msb_exec_collect);
 	RESOLVE(msb_exec_wait);
 	RESOLVE(msb_exec_kill);
@@ -735,6 +750,20 @@ char *call_msb_sandbox_handle_touch(uint64_t cancel_id, const char *name, uint8_
 }
 char *call_msb_sandbox_handle_modify(uint64_t cancel_id, const char *name, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_handle_modify ? ptr_msb_sandbox_handle_modify(cancel_id, name, opts_json, buf, buf_len) : NULL;
+}
+bool has_resize_operations(void) { return ptr_msb_sandbox_resize_operations != NULL; }
+char *call_msb_sandbox_resize_operations(uint64_t cancel_id, uint64_t handle, const char *name, const char *expected_id, const char *request_json, uint8_t *buf, size_t buf_len) {
+    return ptr_msb_sandbox_resize_operations ? ptr_msb_sandbox_resize_operations(cancel_id, handle, name, expected_id, request_json, buf, buf_len) : NULL;
+}
+bool has_resize_wait(void) {
+	return ptr_msb_sandbox_handle_resize_status && ptr_msb_sandbox_handle_wait_until_resized
+		&& ptr_msb_sandbox_resize_status && ptr_msb_sandbox_wait_until_resized;
+}
+char *call_msb_sandbox_handle_resize_status(uint64_t cancel_id, const char *name, const char *expected_id, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_resize_status ? ptr_msb_sandbox_handle_resize_status(cancel_id, name, expected_id, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_handle_wait_until_resized(uint64_t cancel_id, const char *name, const char *expected_id, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_handle_wait_until_resized ? ptr_msb_sandbox_handle_wait_until_resized(cancel_id, name, expected_id, timeout_ms, buf, buf_len) : NULL;
 }
 char *call_msb_sandbox_close(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_close ? ptr_msb_sandbox_close(cancel_id, handle, buf, buf_len) : NULL;
@@ -948,6 +977,12 @@ char *call_msb_sandbox_touch(uint64_t cancel_id, uint64_t handle, uint8_t *buf, 
 }
 char *call_msb_sandbox_modify(uint64_t cancel_id, uint64_t handle, const char *opts_json, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_modify ? ptr_msb_sandbox_modify(cancel_id, handle, opts_json, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_resize_status(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_resize_status ? ptr_msb_sandbox_resize_status(cancel_id, handle, buf, buf_len) : NULL;
+}
+char *call_msb_sandbox_wait_until_resized(uint64_t cancel_id, uint64_t handle, uint64_t timeout_ms, uint8_t *buf, size_t buf_len) {
+	return ptr_msb_sandbox_wait_until_resized ? ptr_msb_sandbox_wait_until_resized(cancel_id, handle, timeout_ms, buf, buf_len) : NULL;
 }
 char *call_msb_exec_collect(uint64_t cancel_id, uint64_t exec_handle, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_exec_collect ? ptr_msb_exec_collect(cancel_id, exec_handle, buf, buf_len) : NULL;
@@ -1163,6 +1198,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1273,12 +1309,14 @@ const fsStreamBufSize = 6 << 20
 const logsBufSize = 48 << 20
 
 // Error is the typed error surfaced across the FFI boundary. The Rust side
-// serialises {kind, message} JSON with optional recovery metadata; this type unmarshals it. The public SDK
-// maps Kind back into microsandbox.ErrorKind.
+// serialises {kind, message} JSON with optional recovery or resize status metadata; this type unmarshals it.
+// The public SDK maps Kind back into microsandbox.ErrorKind.
 type Error struct {
-	Kind     string                         `json:"kind"`
-	Message  string                         `json:"message"`
-	Recovery *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	Kind         string                         `json:"kind"`
+	Message      string                         `json:"message"`
+	Recovery     *SnapshotSourceRecoveryDetails `json:"recovery,omitempty"`
+	ResizeWait   json.RawMessage                `json:"resize_wait,omitempty"`
+	ResizeStatus json.RawMessage                `json:"resize_status,omitempty"`
 	// Local volume errors retain host errno/Win32 identity. Older libraries omit it.
 	OSError *int32 `json:"os_error,omitempty"`
 }
@@ -1315,6 +1353,8 @@ const (
 	KindVolumeAlreadyExists    = "volume_already_exists"
 	KindExecTimeout            = "exec_timeout"
 	KindStopTimeout            = "stop_timeout"
+	KindResizeTimeout          = "resize_timeout"
+	KindResizeWait             = "resize_wait"
 	KindNoDefaultCommand       = "no_default_command"
 	KindInvalidConfig          = "invalid_config"
 	KindInvalidArgument        = "invalid_argument"
@@ -2677,6 +2717,85 @@ func ModifySandboxByName(ctx context.Context, name, optsJSON string) (string, er
 	})
 }
 
+// ResizeStatusSandboxByName returns the raw live resize status JSON array
+// for the sandbox named name whose identity is id.
+func ResizeStatusSandboxByName(ctx context.Context, name, id string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if err := requireResizeWait(); err != nil {
+		return "", err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_resize_status(cancelID, cName, cID, buf, bufLen)
+	})
+}
+
+// WaitUntilResizedSandboxByName waits for live resizes on the sandbox named
+// name whose identity is id to settle within timeoutMs.
+func WaitUntilResizedSandboxByName(ctx context.Context, name, id string, timeoutMs uint64) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if err := requireResizeWait(); err != nil {
+		return "", err
+	}
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cID := C.CString(id)
+	defer C.free(unsafe.Pointer(cID))
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_handle_wait_until_resized(cancelID, cName, cID, C.uint64_t(timeoutMs), buf, bufLen)
+	})
+}
+
+// ResizeOperationsSandboxByName dispatches one new operation after native capability admission.
+func ResizeOperationsSandboxByName(ctx context.Context, name, id, request string) (string, error) {
+	return resizeOperations(ctx, 0, name, id, request)
+}
+
+// ResizeOperations dispatches one new operation on a retained live handle.
+func (s *Sandbox) ResizeOperations(ctx context.Context, request string) (string, error) {
+	handle := s.h()
+	if handle == 0 {
+		return "", &Error{Kind: KindInvalidHandle, Message: "sandbox handle already closed"}
+	}
+	// Zero selects name lookup in the native entry point. Keep the admitted handle
+	// instead of reading it again after a concurrent Close or Detach clears it.
+	return resizeOperations(ctx, handle, "", "", request)
+}
+
+func resizeOperations(ctx context.Context, handle C.uint64_t, name, id, request string) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if !bool(C.has_resize_operations()) {
+		return "", &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support resize operation tracking; update the native SDK"}
+	}
+	cName, cID, cRequest := C.CString(name), C.CString(id), C.CString(request)
+	defer C.free(unsafe.Pointer(cName))
+	defer C.free(unsafe.Pointer(cID))
+	defer C.free(unsafe.Pointer(cRequest))
+	// call sends exactly once, including buffer or cancellation errors after dispatch.
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_resize_operations(cancelID, handle, cName, cID, cRequest, buf, bufLen)
+	})
+}
+
+// ResizeWaitUnbounded is the timeoutMs value that waits without a deadline; 0 checks once.
+const ResizeWaitUnbounded = math.MaxUint64
+
+func requireResizeWait() error {
+	if !bool(C.has_resize_wait()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support live resize status; update the native SDK"}
+	}
+	return nil
+}
+
 // OwnsLifecycle reports whether this handle owns the sandbox VM lifecycle.
 // When true, closing or stopping the handle terminates the sandbox.
 func (s *Sandbox) OwnsLifecycle() (bool, error) {
@@ -3117,6 +3236,32 @@ func (s *Sandbox) Modify(ctx context.Context, optsJSON string) (string, error) {
 	defer C.free(unsafe.Pointer(cOpts))
 	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
 		return C.call_msb_sandbox_modify(cancelID, s.h(), cOpts, buf, bufLen)
+	})
+}
+
+// ResizeStatus returns the raw live resize status JSON array.
+func (s *Sandbox) ResizeStatus(ctx context.Context) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if err := requireResizeWait(); err != nil {
+		return "", err
+	}
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_resize_status(cancelID, s.h(), buf, bufLen)
+	})
+}
+
+// WaitUntilResized waits for live resizes to settle within timeoutMs.
+func (s *Sandbox) WaitUntilResized(ctx context.Context, timeoutMs uint64) (string, error) {
+	if err := ensureLoaded(); err != nil {
+		return "", err
+	}
+	if err := requireResizeWait(); err != nil {
+		return "", err
+	}
+	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+		return C.call_msb_sandbox_wait_until_resized(cancelID, s.h(), C.uint64_t(timeoutMs), buf, bufLen)
 	})
 }
 

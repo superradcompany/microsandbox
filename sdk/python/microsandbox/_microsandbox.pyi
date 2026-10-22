@@ -34,9 +34,12 @@ from microsandbox.types import (
     PullEventType,
     PullPolicy,
     RegistryAuth,
+    ResizeOperation,
+    ResourceResizeStatus,
     Rlimit,
     RootDiskConfig,
     SandboxModificationPlan,
+    SandboxModificationResult,
     SandboxStatus,
     SecretEntry,
     SecretModifySpec,
@@ -447,6 +450,34 @@ class Sandbox:
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...
+    async def modify_with_resize_tracking(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        root_disk_size: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        secrets: Mapping[str, SecretModifySpec] | None = None,
+        secrets_rm: list[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        ports_rm: Sequence[PortEndpoint] | None = None,
+        policy: ModificationPolicy | None = None,
+        dry_run: bool = False,
+    ) -> SandboxModificationResult: ...
+    async def resize_status(self) -> list[ResourceResizeStatus]: ...
+    async def resize_operations(self) -> list[ResizeOperation]: ...
+    async def wait_for_resize_operations(
+        self, operations: list[ResizeOperation], *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
+    async def wait_until_resized(
+        self, *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
     async def metrics_stream(self, interval: float = 1.0) -> MetricsStream: ...
     async def logs(
         self,
@@ -592,6 +623,34 @@ class SandboxHandle:
         policy: ModificationPolicy | None = None,
         dry_run: bool = False,
     ) -> SandboxModificationPlan: ...
+    async def modify_with_resize_tracking(
+        self,
+        *,
+        cpus: int | None = None,
+        max_cpus: int | None = None,
+        memory: int | None = None,
+        max_memory: int | None = None,
+        root_disk_size: int | None = None,
+        env: Mapping[str, str] | None = None,
+        env_rm: list[str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        labels_rm: list[str] | None = None,
+        workdir: str | None = None,
+        secrets: Mapping[str, SecretModifySpec] | None = None,
+        secrets_rm: list[str] | None = None,
+        ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+        ports_rm: Sequence[PortEndpoint] | None = None,
+        policy: ModificationPolicy | None = None,
+        dry_run: bool = False,
+    ) -> SandboxModificationResult: ...
+    async def resize_status(self) -> list[ResourceResizeStatus]: ...
+    async def resize_operations(self) -> list[ResizeOperation]: ...
+    async def wait_for_resize_operations(
+        self, operations: list[ResizeOperation], *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
+    async def wait_until_resized(
+        self, *, timeout: float | None = None
+    ) -> list[ResourceResizeStatus]: ...
     async def logs(
         self,
         tail: int | None = None,

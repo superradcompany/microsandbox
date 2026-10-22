@@ -34,6 +34,9 @@ pub struct Capabilities {
 /// with a struct literal keep compiling. This additive record is returned to generation-two peers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
+    /// Operation-bound resize tracking; resource observation support is reported separately.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resize_operations: bool,
     /// Runtime supports online root-disk growth over its extended control API.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub root_disk_grow: bool,

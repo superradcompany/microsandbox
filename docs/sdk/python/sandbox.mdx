@@ -637,7 +637,7 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 | `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
 | `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
+A live CPU or memory resize can take a moment to settle. The immediate result's `resize_status` reports `accepted` after the runtime accepts each target; it does not confirm guest completion. The plan's `applied` field describes applying the modification request, not usable guest capacity.
 
 <p className="msb-label">Parameters</p>
 
@@ -708,6 +708,63 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>dry_run=True</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">modify_with_resize_tracking()</span>
+
+```python
+async def modify_with_resize_tracking(self, **modify_options) -> SandboxModificationResult
+```
+
+Accepts the same keyword arguments as [`modify()`](#sb-modify). Returns `plan` and `resize_operations`, the exact requests dispatched by this call. `resize_operations` is `None` for dry runs, changes without tracked live resizes, and supported changes through older runtimes. Missing identities must not be replaced by a later current operation. The existing `modify()` return shape is unchanged.
+
+<Accordion title="Example">
+
+```python
+result = await sb.modify_with_resize_tracking(cpus=4)
+operations = result["resize_operations"]
+if operations is not None:
+    statuses = await sb.wait_for_resize_operations(operations, timeout=30)
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_operations()</span>
+
+```python
+async def resize_operations(self) -> list[ResizeOperation]
+```
+
+Read the latest recorded operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. An empty list means no recorded request. Each record contains `id`, `runtime_boot_id`, `generation`, `requested_target`, `accepted_target`, `status`, `outcome` and `observation`. Targets use `ResourceKind.CPUS` with `online`, or `ResourceKind.MEMORY` with `total_mib`. Status retains requested/actual/enforced quantities and convergence state. Outcome is `ResizeOutcome.PENDING`, `APPLIED` or `SUPERSEDED`; observation is `ResizeObservation.AVAILABLE`, `UNSUPPORTED`, `PAUSED` or `UNAVAILABLE`.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_for_resize_operations()</span>
+
+```python
+async def wait_for_resize_operations(
+    self, operations: list[ResizeOperation], *, timeout: float | None = None
+) -> list[ResourceResizeStatus]
+```
+
+Wait for the supplied one or two operation records. Reconnecting to the same runtime is supported; a replaced runtime, expired identity or superseded operation fails instead of following a newer target. Caller-supplied status is rechecked and is never proof of completion. `timeout` is seconds: `None` has no deadline and zero performs one bounded check. Expiry raises `ResizeTimeoutError` with the last completed per-resource reads; it does not undo the resize. Unsupported observation reports an error without claiming success.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`ResizeWaitError` exposes `reason`, `sandbox`, `operation_id` and verified `status`. Its reasons are `superseded`, `interrupted`, `history_unavailable`, `invalid_response` and `observation_unavailable`; none proves rollback or final failure of the resize. Timeout and unsupported-feature errors remain separate. Unknown future peer errors retain their ordinary error mapping.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">resize_status()</span>
+
+```python
+async def resize_status(self) -> list[ResourceResizeStatus]
+```
+
+Return current per-resource status without operation identities. Use `resize_operations()` when a later wait must stay bound to those records.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">wait_until_resized()</span>
+
+```python
+async def wait_until_resized(self, *, timeout: float | None = None) -> list[ResourceResizeStatus]
+```
+
+Select the operations present at the first read and wait for those identities. This does not identify which caller submitted them; use the result of `modify_with_resize_tracking()` for a wait tied to your modification. Timeout semantics match `wait_for_resize_operations()`.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
@@ -1437,6 +1494,32 @@ Plan or apply a configuration change; same kwargs as [`modify()`](#sb-modify). D
 
 `Awaitable[`[`SandboxModificationPlan`](#sandboxmodificationplan)`]`
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">modify_with_resize_tracking()</span>
+
+```python
+async def modify_with_resize_tracking(self, **modify_options) -> SandboxModificationResult
+```
+
+Same options and result as [`sb.modify_with_resize_tracking()`](#sb-modify_with_resize_tracking). Stopped and next-start changes return no live operation identities.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resize_operations()</span>
+
+```python
+async def resize_operations(self) -> list[ResizeOperation]
+```
+
+Same retained identities and evidence as [`sb.resize_operations()`](#sb-resize_operations). Does not start a stopped sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">wait_for_resize_operations()</span>
+
+```python
+async def wait_for_resize_operations(
+    self, operations: list[ResizeOperation], *, timeout: float | None = None
+) -> list[ResourceResizeStatus]
+```
+
+Same exact-operation and timeout contract as [`sb.wait_for_resize_operations()`](#sb-wait_for_resize_operations). The handle's sandbox identity must still match.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
 
 ```python
@@ -2087,7 +2170,7 @@ Observed convergence state for an accepted live resize.
 |--------|-------|-------------|
 | `ResourceConvergenceState.ACCEPTED` | `"accepted"` | Runtime accepted the request |
 | `ResourceConvergenceState.CONVERGING` | `"converging"` | Guest and VMM are still converging |
-| `ResourceConvergenceState.APPLIED` | `"applied"` | Desired, actual, and enforced values match |
+| `ResourceConvergenceState.APPLIED` | `"applied"` | Guest completion has been confirmed for the operation; not produced by the immediate target acknowledgement |
 | `ResourceConvergenceState.GUEST_REFUSED` | `"guest-refused"` | Guest refused or failed to cooperate |
 | `ResourceConvergenceState.FAILED` | `"failed"` | Resize failed |
 

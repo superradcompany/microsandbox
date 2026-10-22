@@ -590,7 +590,7 @@ Env and workdir changes affect future execs only. Stopped roots grow before the 
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The immediate result's `resizeStatus` reports `"accepted"` after the runtime accepts each target; it does not confirm guest completion. The plan's `applied` field describes applying the modification request, not usable guest capacity. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -609,6 +609,65 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>dryRun: true</code>.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">modifyWithResizeTracking()</span>
+
+```typescript
+modifyWithResizeTracking(opts?: ModifyOptions): Promise<SandboxModificationResult>
+```
+
+Accepts the same options as `modify()` and returns `{ plan, resizeOperations }`. The records identify this call's accepted live requests. Tracking is `null` for dry runs, non-live changes and supported changes through older runtimes; it must not be replaced with a later current operation. Existing `modify()` output is unchanged. A missing native method refuses before mutation, and a dispatched mutation is never retried through another API.
+
+<Accordion title="Example">
+
+```typescript
+const result = await sandbox.modifyWithResizeTracking({ cpus: 4 });
+if (result.resizeOperations !== null) {
+  await sandbox.waitForResizeOperations(result.resizeOperations, 30_000);
+}
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resizeOperations()</span>
+
+```typescript
+resizeOperations(): Promise<ResizeOperation[]>
+```
+
+Read the latest recorded operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. An empty list means no recorded request. Records contain `id`, `runtimeBootId`, `generation`, `requestedTarget`, `acceptedTarget`, `status`, `outcome` and `observation`. Generation is a `bigint`; memory targets use `{ resource: "memory", totalMib: bigint }`, and CPU targets use `{ resource: "cpus", online: number }`. Status preserves requested, actual, enforced and convergence quantities. Outcome is `pending`, `applied` or `superseded`; observation is `available`, `unsupported`, `paused` or `unavailable`.
+
+Keep bigint fields intact when storing records for reconnection; ordinary `JSON.stringify` cannot serialize bigint. Use a bigint-aware serializer that restores those fields as bigint, not JavaScript numbers.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForResizeOperations()</span>
+
+```typescript
+waitForResizeOperations(
+  operations: readonly ResizeOperation[], timeoutMs?: number,
+): Promise<ResourceResizeStatus[]>
+```
+
+Wait on the supplied one or two records, rechecking their identities against the runtime. Reconnection to the same runtime is supported. Runtime replacement, expired history or supersession fails instead of following a new request; caller-supplied applied status is not proof. An omitted timeout waits indefinitely and zero performs one bounded check. Expiry raises `ResizeTimeoutError` with completed per-resource reads and does not undo the resize. Unsupported observation is an error, never successful completion.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+`ResizeWaitError` exposes `reason`, `sandbox`, `operationId`, verified `status` and the native error as `cause`. Reasons distinguish `superseded`, `interrupted`, `history_unavailable`, `invalid_response` and `observation_unavailable`. None implies rollback or final failure of the resize. Timeout and unsupported-feature errors remain separate; unknown future peer errors retain their ordinary mapping.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">resizeStatus()</span>
+
+```typescript
+resizeStatus(): Promise<ResourceResizeStatus[]>
+```
+
+Read current resource status without operation identities. Use `resizeOperations()` when a later wait must remain tied to those records.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitUntilResized()</span>
+
+```typescript
+waitUntilResized(timeoutMs?: number): Promise<ResourceResizeStatus[]>
+```
+
+Select the operations present at the first read and wait for those identities. This does not establish which caller submitted them; use the result of `modifyWithResizeTracking()` for a wait tied to your modification.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
@@ -2454,6 +2513,32 @@ Plan or apply a configuration change; same options as [`modify()`](#sandbox-modi
 
 `Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>`
 
+#### <span className="msb-recv">handle.</span><span className="msb-hn">modifyWithResizeTracking()</span>
+
+```typescript
+modifyWithResizeTracking(opts?: ModifyOptions): Promise<SandboxModificationResult>
+```
+
+Same options and result as [`sandbox.modifyWithResizeTracking()`](#sandbox-modifywithresizetracking). Stopped and next-start changes return no live operation identities.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">resizeOperations()</span>
+
+```typescript
+resizeOperations(): Promise<ResizeOperation[]>
+```
+
+Same records as [`sandbox.resizeOperations()`](#sandbox-resizeoperations). Does not start a stopped sandbox.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">waitForResizeOperations()</span>
+
+```typescript
+waitForResizeOperations(
+  operations: readonly ResizeOperation[], timeoutMs?: number,
+): Promise<ResourceResizeStatus[]>
+```
+
+Same exact-operation and timeout contract as [`sandbox.waitForResizeOperations()`](#sandbox-waitforresizeoperations). The handle's sandbox identity must still match.
+
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
 <Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -3124,7 +3209,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | allowHosts | `string[]` | Allowed hosts after the requested change |
 | reason | `string \| null` | Human-readable reason for the classification, when useful |
 
-`ResourceResizeStatus` reports runtime convergence for a live resize; enforcement applies immediately, the guest converges asynchronously:
+`ResourceResizeStatus` describes a live resize. The immediate modification result reports `"accepted"`; equal reported quantities do not establish operation-bound guest completion, and plugged memory may still be offline:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -3132,7 +3217,7 @@ Secret change in a modification plan. Values are omitted by construction; `befor
 | requested | `string` | Requested value |
 | actual | `string` | Actual value observed in the guest/runtime |
 | enforced | `string` | Host/VMM-enforced value |
-| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway) |
+| state | `"accepted" \| "converging" \| "applied" \| "guest-refused" \| "failed"` | The immediate modification result reports `"accepted"`. `"applied"` requires confirmed guest completion for the operation; equal quantities alone are insufficient |
 
 ### SandboxPingResult
 

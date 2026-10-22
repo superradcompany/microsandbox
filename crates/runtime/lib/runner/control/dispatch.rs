@@ -289,6 +289,17 @@ impl Dispatcher {
                     "invalid exec control payload",
                 )),
             }
+        } else if envelope.t == microsandbox_protocol::resize::RESIZE_REQUEST && generation >= 2 {
+            match envelope.payload::<microsandbox_protocol::resize::ResizeRequest>() {
+                Ok(request) => match self.handler.handle_resize(request) {
+                    Ok(value) => Reply::Resize(value),
+                    Err(error) => Reply::Error(error),
+                },
+                Err(_) => Reply::Error(ControlError::rejected(
+                    "invalid_request",
+                    "invalid resize payload",
+                )),
+            }
         } else if envelope.t == microsandbox_protocol::jobs::JOB_REQUEST && generation >= 2 {
             // Keep the released, exhaustively matchable control enums source-compatible.
             match envelope.payload::<microsandbox_protocol::jobs::JobRequest>() {

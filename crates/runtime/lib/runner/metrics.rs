@@ -13,7 +13,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use microsandbox_metrics::{MetricsError, MetricsSlotWriter, SampleWrite};
+use microsandbox_metrics::{GuestMemoryObservation, MetricsError, MetricsSlotWriter, SampleWrite};
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{GetLastError, NO_ERROR},
@@ -86,10 +86,21 @@ pub struct MetricsSamplerSpec {
     pub krun_metrics: msb_krun::MetricsHandle,
     /// VM control for live memory size and pause-aware residency sampling.
     pub vm_control: msb_krun::VmControl,
+    /// Last guest-confirmed configured allocation, shared with the resize authority.
+    pub memory_limit: ConfirmedMemoryLimit,
     /// Optional runtime network byte counters.
     pub network_metrics: Option<Box<dyn NetworkMetrics>>,
     /// Host path of the writable upper image, when one exists.
     pub upper_host_path: Option<std::path::PathBuf>,
+}
+
+/// Device allocation and a separately timestamped guest observation. Allocation
+/// is not a substitute for guest-reported usable total.
+#[derive(Default)]
+struct MemorySample<'a> {
+    confirmed: Option<&'a ConfirmedMemoryLimit>,
+    observation: Option<GuestMemoryObservation>,
+    source: Option<&'a msb_krun::MetricsHandle>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -107,9 +118,11 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         max_cpus,
         krun_metrics,
         vm_control,
+        memory_limit,
         network_metrics,
         upper_host_path,
     } = spec;
+    connect_guest_memory_invalidation(&krun_metrics, &writer);
     let interval = Duration::from_millis(interval_ms.get());
     let upper_stale_after = upper_filesystem_stale_after(interval);
     let mut previous = paired_snapshot(&krun_metrics, &vm_control).await;
@@ -120,7 +133,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
         &writer,
         None,
         &previous.metrics,
-        vm_control.memory_state(),
+        memory_sample(&krun_metrics, &vm_control, &memory_limit),
         network_metrics.as_deref(),
         upper_host_path,
         upper_stale_after,
@@ -182,7 +195,7 @@ pub async fn run_metrics_sampler(spec: MetricsSamplerSpec) {
             &writer,
             cpu_percent,
             &current.metrics,
-            vm_control.memory_state(),
+            memory_sample(&krun_metrics, &vm_control, &memory_limit),
             network_metrics.as_deref(),
             upper_host_path,
             upper_stale_after,
@@ -265,6 +278,51 @@ fn pairing_is_reliable(pairing_skew_secs: f64, wall_secs: f64) -> bool {
     wall_secs > 0.0 && pairing_skew_secs <= wall_secs * MAX_PAIRING_SKEW_RATIO
 }
 
+fn connect_guest_memory_invalidation(
+    metrics: &msb_krun::MetricsHandle,
+    writer: &MetricsSlotWriter,
+) {
+    let writer = writer.clone();
+    metrics.register_guest_memory_invalidator(move || {
+        // Native invalidation owns the same lock as publication. This callback
+        // only touches the mapped slot; no I/O, VM control or device lock is taken.
+        match writer.invalidate_guest_memory() {
+            Ok(()) | Err(MetricsError::GenerationMismatch { .. }) => {}
+            Err(error) => tracing::warn!(%error, "invalidate published guest memory"),
+        }
+    });
+}
+
+fn memory_sample<'a>(
+    metrics: &'a msb_krun::MetricsHandle,
+    control: &msb_krun::VmControl,
+    confirmed: &'a ConfirmedMemoryLimit,
+) -> MemorySample<'a> {
+    // Read device/execution state before entering the native observation lock.
+    // A racing pause is fenced by native invalidation; an already-paused or
+    // indeterminate VM conservatively publishes no observation.
+    let running = matches!(
+        control.execution_state(),
+        Some(msb_krun::VmExecutionState::Running { .. })
+    );
+    MemorySample {
+        confirmed: Some(confirmed),
+        observation: None,
+        source: running.then_some(metrics),
+    }
+}
+
+fn guest_memory_observation(report: msb_krun::GuestMemoryObservation) -> GuestMemoryObservation {
+    // Both libraries use the same host-wide platform clock. Copy the original
+    // receipt and guest cadence; host sampling must never renew either value.
+    GuestMemoryObservation {
+        total_bytes: report.total_bytes,
+        available_bytes: report.available_bytes,
+        received_at: report.received_at,
+        reporting_interval: report.reporting_interval,
+    }
+}
+
 enum SampleWriteError {
     Generation,
     Other(MetricsError),
@@ -274,7 +332,7 @@ fn write_sample(
     writer: &MetricsSlotWriter,
     cpu_percent: Option<f32>,
     krun: &msb_krun::VmMetrics,
-    memory_state: Option<msb_krun::VmMemoryState>,
+    memory: MemorySample<'_>,
     network_metrics: Option<&dyn NetworkMetrics>,
     upper_host_path: Option<&Path>,
     upper_stale_after: Duration,
@@ -285,15 +343,14 @@ fn write_sample(
     };
     let (upper_used_bytes, upper_free_bytes) =
         upper_filesystem_metrics(krun, upper_stale_after, chrono::Utc::now());
-    let memory_limit_bytes = live_memory_limit_bytes(memory_state.as_ref());
-    let sample = SampleWrite {
+    let mut sample = SampleWrite {
         sampled_at: chrono::Utc::now(),
         cpu_percent,
         vcpu_time_ns: krun.cpu.vcpu_time_ns,
-        memory_bytes: live_memory_used_bytes(krun, memory_limit_bytes),
+        memory_bytes: None,
         memory_available_bytes: krun.memory.available_bytes,
         memory_host_resident_bytes: krun.memory.host_resident_bytes,
-        memory_limit_bytes,
+        memory_limit_bytes: None,
         disk_read_bytes: krun.block.read_bytes,
         disk_write_bytes: krun.block.write_bytes,
         net_rx_bytes: rx,
@@ -302,24 +359,32 @@ fn write_sample(
         upper_free_bytes,
         upper_host_allocated_bytes: upper_host_allocated_bytes(upper_host_path),
     };
-    match writer.write_sample(sample) {
+    // All filesystem work and counter collection is complete. Only mapped
+    // atomic stores run under the native publication/invalidation fence.
+    let mut publish = |limit: Option<u64>, after: Option<Duration>| {
+        sample.memory_limit_bytes = limit;
+        let write = |report: Option<GuestMemoryObservation>| {
+            // A ready-device reply and a balloon sample are independent observations.
+            // Do not subtract an availability value received before this limit changed.
+            let report =
+                report.filter(|report| after.is_none_or(|boundary| report.received_at > boundary));
+            writer.write_sample_with_guest_memory(sample, report)
+        };
+        match memory.source {
+            Some(metrics) => metrics.with_guest_memory_observation(|report| {
+                write(report.map(guest_memory_observation))
+            }),
+            None => write(memory.observation),
+        }
+    };
+    let result = match memory.confirmed {
+        Some(confirmed) => confirmed.publish(|bytes, after| publish(Some(bytes), after)),
+        None => publish(None, None),
+    };
+    match result {
         Ok(()) => Ok(()),
         Err(MetricsError::GenerationMismatch { .. }) => Err(SampleWriteError::Generation),
         Err(other) => Err(SampleWriteError::Other(other)),
-    }
-}
-
-/// Guest memory currently usable by the VM, boot plus plugged.
-fn live_memory_limit_bytes(state: Option<&msb_krun::VmMemoryState>) -> Option<u64> {
-    state.map(|state| state.current_mib.saturating_mul(1024 * 1024))
-}
-
-/// Guest memory in use against the live limit. Unavailable while the guest's
-/// available-memory statistic still exceeds a limit that just shrank.
-fn live_memory_used_bytes(krun: &msb_krun::VmMetrics, limit_bytes: Option<u64>) -> Option<u64> {
-    match (limit_bytes, krun.memory.available_bytes) {
-        (Some(limit), Some(available)) => limit.checked_sub(available),
-        _ => krun.memory.used_bytes,
     }
 }
 
@@ -557,7 +622,7 @@ mod tests {
                 &writer,
                 None,
                 &krun,
-                None,
+                MemorySample::default(),
                 None,
                 None,
                 Duration::from_secs(3)
@@ -603,7 +668,7 @@ mod tests {
                     &writer,
                     Some(0.0),
                     &krun,
-                    None,
+                    MemorySample::default(),
                     None,
                     None,
                     Duration::from_secs(3)
@@ -653,7 +718,7 @@ mod tests {
                 &writer,
                 None,
                 &krun,
-                None,
+                MemorySample::default(),
                 None,
                 None,
                 Duration::from_secs(3)
@@ -668,15 +733,6 @@ mod tests {
         cleanup_shm(&name);
     }
 
-    fn memory_state_mib(boot: u64, target: u64, current: u64) -> msb_krun::VmMemoryState {
-        msb_krun::VmMemoryState {
-            boot_mib: boot,
-            target_mib: target,
-            current_mib: current,
-            max_mib: 32_768,
-        }
-    }
-
     fn krun_memory(used: Option<u64>, available: Option<u64>) -> msb_krun::VmMetrics {
         msb_krun::VmMetrics {
             memory: msb_krun::MemoryMetrics {
@@ -689,120 +745,216 @@ mod tests {
     }
 
     #[test]
-    fn live_memory_limit_follows_plugged_memory() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-
-        assert_eq!(live_memory_limit_bytes(None), None);
-        assert_eq!(
-            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 32_768, 16_384))),
-            Some(16 * GIB)
-        );
-        assert_eq!(
-            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 8_192, 16_384))),
-            Some(16 * GIB)
-        );
-        assert_eq!(
-            live_memory_limit_bytes(Some(&memory_state_mib(8_192, 32_768, 32_768))),
-            Some(32 * GIB)
-        );
-    }
-
-    #[test]
-    fn live_memory_used_bytes_uses_live_total() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-
-        let krun = krun_memory(Some(6 * GIB), Some(2 * GIB));
-        assert_eq!(
-            live_memory_used_bytes(&krun, Some(32 * GIB)),
-            Some(30 * GIB)
-        );
-        assert_eq!(live_memory_used_bytes(&krun, None), Some(6 * GIB));
-
-        let krun = krun_memory(Some(0), Some(4 * GIB));
-        assert_eq!(live_memory_used_bytes(&krun, Some(2 * GIB)), None);
-    }
-
-    #[test]
-    fn write_sample_publishes_live_memory_limit() {
-        let name = unique_shm_name("memlim");
+    fn confirmed_limit_requires_post_confirmation_statistics() {
+        let name = unique_shm_name("cfmlim");
         let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
         let reserved = registry
             .reserve(ReserveSlot {
-                sandbox_id: 9,
-                name: "memlim",
-                memory_limit_bytes: 512 * 1024 * 1024,
+                sandbox_id: 14,
+                name: "confirmed-limit",
+                memory_limit_bytes: 256 << 20,
             })
             .unwrap();
         let writer = registry
             .activate_writer(ActivateSlot {
                 slot: reserved.slot,
                 generation: reserved.generation,
-                run_id: 11,
+                run_id: 15,
                 pid: std::process::id() as i32,
                 started_at: chrono::Utc::now(),
             })
             .unwrap();
-        let krun = krun_memory(Some(256 * 1024 * 1024), Some(256 * 1024 * 1024));
+        let native = MetricsWriter::default();
+        let handle = native.handle();
+        let confirmed = ConfirmedMemoryLimit::boot(256 << 20, handle.clone());
+        connect_guest_memory_invalidation(&handle, &writer);
+        let krun = krun_memory(Some(999), Some(999));
+        let publish = || {
+            assert!(
+                write_sample(
+                    &writer,
+                    None,
+                    &krun,
+                    MemorySample {
+                        confirmed: Some(&confirmed),
+                        source: Some(&handle),
+                        observation: None,
+                    },
+                    None,
+                    None,
+                    Duration::from_secs(3)
+                )
+                .is_ok()
+            );
+            registry.snapshot().unwrap().remove(0)
+        };
+        assert!(native.record_guest_memory_observation(
+            native.guest_memory_epoch(),
+            240 << 20,
+            128 << 20,
+            Duration::from_secs(1)
+        ));
+        let boot = publish();
+        assert_eq!(boot.memory_limit_bytes, 256 << 20);
+        assert_eq!(boot.memory_bytes, 128 << 20);
 
-        assert!(
-            write_sample(
-                &writer,
-                None,
-                &krun,
-                Some(memory_state_mib(512, 1_024, 1_024)),
-                None,
-                None,
-                Duration::from_secs(3),
-            )
-            .is_ok()
+        // Fresh intermediate guest statistics cannot advance the configured allocation.
+        let old_epoch = native.guest_memory_epoch();
+        assert!(native.record_guest_memory_observation(
+            old_epoch,
+            740 << 20,
+            512 << 20,
+            Duration::from_secs(1)
+        ));
+        let pending = publish();
+        assert_eq!(pending.memory_limit_bytes, 256 << 20);
+        assert!(!pending.memory_bytes_reported);
+        assert!(confirmed.confirm(768 << 20));
+        // A reply to a pre-confirmation request must be rejected even if it arrives now.
+        assert!(!native.record_guest_memory_observation(
+            old_epoch,
+            740 << 20,
+            512 << 20,
+            Duration::from_secs(1)
+        ));
+        let changed = publish();
+        assert_eq!(changed.memory_limit_bytes, 768 << 20);
+        assert_eq!(changed.memory_total_bytes, None);
+        assert!(!changed.memory_bytes_reported);
+        assert!(native.record_guest_memory_observation(
+            native.guest_memory_epoch(),
+            740 << 20,
+            512 << 20,
+            Duration::from_secs(1)
+        ));
+        let grown = publish();
+        assert_eq!(grown.memory_total_bytes, Some(740 << 20));
+        assert_eq!(grown.memory_available_bytes, Some(512 << 20));
+        assert_eq!(
+            grown.memory_bytes,
+            256 << 20,
+            "usage keeps configured allocation as its basis"
         );
 
-        let snapshot = registry.snapshot().unwrap();
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].memory_limit_bytes, 1_024 * 1024 * 1024);
-        assert!(snapshot[0].memory_limit_live);
-        assert_eq!(snapshot[0].memory_bytes, 768 * 1024 * 1024);
-        assert!(snapshot[0].memory_bytes_reported);
+        assert!(confirmed.confirm(256 << 20));
+        let shrunk = publish();
+        assert_eq!(shrunk.memory_limit_bytes, 256 << 20);
+        assert!(!shrunk.memory_bytes_reported);
+        assert!(native.record_guest_memory_observation(
+            native.guest_memory_epoch(),
+            240 << 20,
+            128 << 20,
+            Duration::from_secs(1)
+        ));
+        assert_eq!(publish().memory_bytes, 128 << 20);
+        let receipt = handle.guest_memory_observation().unwrap();
+        assert!(confirmed.confirm(256 << 20));
+        assert_eq!(handle.guest_memory_observation(), Some(receipt));
+        cleanup_shm(&name);
+    }
 
-        let krun = krun_memory(Some(0), Some(2_048 * 1024 * 1024));
-        assert!(
-            write_sample(
-                &writer,
-                None,
-                &krun,
-                Some(memory_state_mib(512, 512, 1_024)),
-                None,
-                None,
-                Duration::from_secs(3),
-            )
-            .is_ok()
-        );
+    #[test]
+    fn native_guest_report_keeps_its_receipt_and_expires_despite_host_sampling() {
+        let name = unique_shm_name("guest-age");
+        let registry = MetricsRegistry::open_or_create(&name, 1).unwrap();
+        let reserved = registry
+            .reserve(ReserveSlot {
+                sandbox_id: 12,
+                name: "guest-age",
+                memory_limit_bytes: 1024 << 20,
+            })
+            .unwrap();
+        let writer = registry
+            .activate_writer(ActivateSlot {
+                slot: reserved.slot,
+                generation: reserved.generation,
+                run_id: 13,
+                pid: std::process::id() as i32,
+                started_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        let native = MetricsWriter::default();
+        let handle = native.handle();
+        connect_guest_memory_invalidation(&handle, &writer);
+        // Deliberately different legacy counters ensure publication uses the
+        // coherent pair, not fields independently sampled from VmMetrics.
+        native.set_memory_total_bytes(256 << 20);
+        native.set_memory_available_bytes(64 << 20);
+        assert!(native.record_guest_memory_observation(
+            native.guest_memory_epoch(),
+            768 << 20,
+            128 << 20,
+            Duration::from_secs(1),
+        ));
+        let original = handle.guest_memory_observation().unwrap();
+        let mut krun = krun_memory(Some(192 << 20), Some(64 << 20));
+        krun.memory.host_resident_bytes = Some(32 << 20);
+        for _ in 0..2 {
+            assert!(
+                write_sample(
+                    &writer,
+                    None,
+                    &krun,
+                    MemorySample {
+                        confirmed: None,
+                        source: Some(&handle),
+                        observation: handle
+                            .guest_memory_observation()
+                            .map(guest_memory_observation),
+                    },
+                    None,
+                    None,
+                    Duration::from_secs(3),
+                )
+                .is_ok()
+            );
+            let row = registry.snapshot().unwrap().remove(0);
+            assert_eq!(row.memory_total_bytes, Some(768 << 20));
+            assert_eq!(row.memory_available_bytes, Some(128 << 20));
+            // Preserve configured allocation minus available, not total minus available.
+            assert_eq!(row.memory_bytes, 896 << 20);
+            assert_eq!(
+                row.guest_memory_observation.unwrap().received_at,
+                original.received_at
+            );
+        }
 
-        let snapshot = registry.snapshot().unwrap();
-        assert_eq!(snapshot[0].memory_bytes, 0);
-        assert!(!snapshot[0].memory_bytes_reported);
-        assert_eq!(snapshot[0].memory_limit_bytes, 1_024 * 1024 * 1024);
-        assert!(snapshot[0].memory_limit_live);
-
-        // The limit remains usable even before guest memory statistics arrive.
-        let krun = krun_memory(None, None);
-        assert!(
-            write_sample(
-                &writer,
-                None,
-                &krun,
-                Some(memory_state_mib(512, 2_048, 2_048)),
-                None,
-                None,
-                Duration::from_secs(3),
-            )
-            .is_ok()
-        );
-
-        let snapshot = registry.snapshot().unwrap();
-        assert!(!snapshot[0].memory_bytes_reported);
-        assert_eq!(snapshot[0].memory_limit_bytes, 2_048 * 1024 * 1024);
-        assert!(snapshot[0].memory_limit_live);
+        let mut expired = guest_memory_observation(original);
+        expired.received_at = expired.received_at.saturating_sub(Duration::from_secs(4));
+        handle.invalidate_guest_memory_observation();
+        // Invalidation must be visible before another sampler tick/publication.
+        let invalidated = registry.snapshot().unwrap().remove(0);
+        assert_eq!(invalidated.memory_total_bytes, None);
+        assert!(!invalidated.memory_bytes_reported);
+        for report in [
+            Some(expired),
+            handle
+                .guest_memory_observation()
+                .map(guest_memory_observation),
+        ] {
+            assert!(
+                write_sample(
+                    &writer,
+                    Some(0.0),
+                    &krun,
+                    MemorySample {
+                        confirmed: None,
+                        source: None,
+                        observation: report,
+                    },
+                    None,
+                    None,
+                    Duration::from_secs(3),
+                )
+                .is_ok()
+            );
+            let row = registry.snapshot().unwrap().remove(0);
+            assert_eq!(row.memory_total_bytes, None);
+            assert_eq!(row.memory_available_bytes, None);
+            assert!(!row.memory_bytes_reported);
+            assert_eq!(row.memory_host_resident_bytes, Some(32 << 20));
+            assert_eq!(row.memory_limit_bytes, 1024 << 20);
+        }
         cleanup_shm(&name);
     }
 
@@ -854,3 +1006,9 @@ mod tests {
         assert_eq!(snapshot.metrics.memory.host_resident_bytes, Some(0));
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use super::metrics_memory::ConfirmedMemoryLimit;

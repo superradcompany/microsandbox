@@ -17,6 +17,7 @@ pub mod heartbeat;
 pub(crate) mod jobs;
 pub(crate) mod logging;
 pub mod metrics;
+pub(crate) mod metrics_memory;
 pub mod policy;
 pub(crate) mod progress;
 pub mod relay;

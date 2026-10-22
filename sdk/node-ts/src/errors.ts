@@ -1,3 +1,5 @@
+import type { ResourceResizeStatus } from "./modify.js";
+
 export type MicrosandboxErrorCode =
   | "io"
   | "http"
@@ -20,6 +22,8 @@ export type MicrosandboxErrorCode =
   | "nix"
   | "execTimeout"
   | "stopTimeout"
+  | "resizeTimeout"
+  | "resizeWait"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -172,6 +176,38 @@ export class ExecTimeoutError extends MicrosandboxError {
 export class StopTimeoutError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("stopTimeout", message, options);
+  }
+}
+
+/**
+ * A live resize did not converge before its deadline; completion is unconfirmed and the resize is not undone.
+ * `status` is the last observed resize status, empty when no read completed before the deadline.
+ */
+export class ResizeTimeoutError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly status: ResourceResizeStatus[] = [],
+    options?: ErrorOptions,
+  ) {
+    super("resizeTimeout", message, options);
+  }
+}
+
+export type ResizeWaitFailure =
+  | "superseded" | "interrupted" | "history_unavailable"
+  | "invalid_response" | "observation_unavailable";
+
+/** Observation failed; no rollback or successful completion is implied. */
+export class ResizeWaitError extends MicrosandboxError {
+  constructor(
+    message: string,
+    readonly reason: ResizeWaitFailure,
+    readonly sandbox: string | null,
+    readonly operationId: string | null,
+    readonly status: ResourceResizeStatus[],
+    options?: ErrorOptions,
+  ) {
+    super("resizeWait", message, options);
   }
 }
 

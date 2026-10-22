@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+mod resize;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -186,6 +188,23 @@ pub enum MicrosandboxError {
         /// Total budget including dispatch and ownership observation.
         timeout: std::time::Duration,
     },
+
+    /// A live resize did not converge before the caller's deadline.
+    #[error(
+        "timed out after {timeout:?} waiting for sandbox {name:?} live resize to converge; completion is unconfirmed and the resize has not been undone"
+    )]
+    ResizeTimeout {
+        /// Sandbox name.
+        name: String,
+        /// Wait budget.
+        timeout: std::time::Duration,
+        /// Last observed resize status; empty when no read completed before the deadline.
+        status: Vec<microsandbox_types::modify::ResourceResizeStatus>,
+    },
+
+    /// An accepted resize could not be confirmed, with a structured reason and original cause.
+    #[error(transparent)]
+    ResizeWait(Box<ResizeWaitError>),
 
     /// The sandbox process exited before the agent relay became
     /// available. Carries the sandbox name and the structured
@@ -878,3 +897,9 @@ mod tests {
         );
     }
 }
+
+//--------------------------------------------------------------------------------------------------
+// Re-Exports
+//--------------------------------------------------------------------------------------------------
+
+pub use resize::{ResizeWaitError, ResizeWaitFailure};

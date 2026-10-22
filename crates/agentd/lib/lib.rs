@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod exec_output;
 mod mount_checkpoint;
+mod resources;
 mod rlimit;
 mod root_disk;
 mod workload;

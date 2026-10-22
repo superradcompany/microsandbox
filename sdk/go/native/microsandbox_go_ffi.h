@@ -1086,6 +1086,58 @@ char *msb_jobs(uint64_t cancel_id,
                uintptr_t buf_len);
 
 /**
+ * Read live resize status for the sandbox `expected_id` names.
+ * Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_handle_resize_status(uint64_t cancel_id,
+                                       const char *name,
+                                       const char *expected_id,
+                                       unsigned char *buf,
+                                       uintptr_t buf_len);
+
+/**
+ * Wait for live resizes on the sandbox `expected_id` names to settle.
+ * `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_handle_wait_until_resized(uint64_t cancel_id,
+                                            const char *name,
+                                            const char *expected_id,
+                                            uint64_t timeout_ms,
+                                            unsigned char *buf,
+                                            uintptr_t buf_len);
+
+/**
+ * Read live resize status. Output: a `ResourceResizeStatus` JSON array.
+ */
+char *msb_sandbox_resize_status(uint64_t cancel_id,
+                                Handle handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Wait for live resizes to settle. `u64::MAX` waits without a deadline; 0 checks once.
+ */
+char *msb_sandbox_wait_until_resized(uint64_t cancel_id,
+                                     Handle handle,
+                                     uint64_t timeout_ms,
+                                     unsigned char *buf,
+                                     uintptr_t buf_len);
+
+/**
+ * Apply with tracking, read current operations, or wait on supplied identities.
+ * A nonzero handle retains its backend; zero uses the supplied name. Reads and waits require
+ * the expected sandbox identity. Modify preserves the existing fresh-by-name planning contract.
+ * The optional symbol itself advertises support; no mutation is replayed through an older ABI.
+ */
+char *msb_sandbox_resize_operations(uint64_t cancel_id,
+                                    Handle handle,
+                                    const char *name,
+                                    const char *expected_id,
+                                    const char *request_json,
+                                    unsigned char *buf,
+                                    uintptr_t buf_len);
+
+/**
  * Restore a detached sandbox through a dedicated C entry point.
  */
 char *msb_sandbox_restore(uint64_t cancel_id,

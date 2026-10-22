@@ -178,6 +178,11 @@ impl Protocol for AgentProtocol {
     }
 
     fn prepare(ready: &AgentReady, wire_name: &str) -> ClientResult<SendMetadata> {
+        // Guest generation alone is insufficient: older relays can decode the
+        // new reply as a fatal transport error. Select before allocating/sending.
+        if wire_name == MessageType::ObserveResources.as_str() {
+            crate::resources::ensure_observation_support(ready)?;
+        }
         let flags = match MessageType::from_wire_str(wire_name) {
             Some(message_type) => {
                 Self::ensure_version_compat_for(message_type, ready.negotiated_version)?;

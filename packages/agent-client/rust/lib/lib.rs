@@ -25,6 +25,7 @@ pub mod message;
 #[doc(hidden)]
 pub mod optimized;
 pub mod protocol;
+pub mod resources;
 pub mod stream;
 pub mod transport;
 

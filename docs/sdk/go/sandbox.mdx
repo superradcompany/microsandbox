@@ -626,7 +626,7 @@ Env and workdir changes affect future execs only. Stopped roots grow before the 
 
 Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
 
-A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
+A live CPU or memory resize can take a moment to settle. The immediate result's `ResizeStatus` reports `"accepted"` after the runtime accepts each target; it does not confirm guest completion. The plan's `Applied` field describes applying the modification request, not usable guest capacity. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
 <p className="msb-label">Parameters</p>
 
@@ -645,6 +645,66 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
     <div className="msb-param-desc">The modification plan, applied unless <code>DryRun</code> is set.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ModifyWithResizeTracking()</span>
+
+```go
+func (s *Sandbox) ModifyWithResizeTracking(ctx context.Context, opts ModifyOptions) (*SandboxModificationResult, error)
+```
+
+Accepts the same options as `Modify()` and returns `Plan` plus `ResizeOperations`, the exact live requests accepted by this call. Nil tracking means a dry run, a non-live change or a supported change through an older runtime. It must not be replaced with a later current operation. Existing `Modify()` output is unchanged. An older native library refuses the new method before mutation; dispatched mutations are never replayed through a legacy method.
+
+<Accordion title="Example">
+
+```go
+result, err := sb.ModifyWithResizeTracking(ctx, microsandbox.ModifyOptions{CPUs: 4})
+if err != nil {
+    return err
+}
+if result.ResizeOperations != nil {
+    _, err = sb.WaitForResizeOperationsWithTimeout(ctx, result.ResizeOperations, 30*time.Second)
+}
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ResizeOperations()</span>
+
+```go
+func (s *Sandbox) ResizeOperations(ctx context.Context) ([]ResizeOperation, error)
+```
+
+Read the latest operation per resource without changing targets. Reads return retained evidence and request a background refresh; they do not wait for a new guest sample. Use an operation-specific wait to await confirmed completion. Empty means no recorded request. Each record contains `ID`, `RuntimeBootID`, `Generation`, `RequestedTarget`, `AcceptedTarget`, `Status`, `Outcome` and `Observation`. Generation is uint64. Targets contain `Resource` with either `Online` (CPU count) or `TotalMiB` (uint64 memory allocation). Status preserves requested, actual, enforced and convergence quantities. Outcome is `ResizePending`, `ResizeApplied` or `ResizeSuperseded`; observation is available, unsupported, paused or unavailable. JSON round trips through these typed structs preserve integer precision.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitForResizeOperations()</span>
+
+```go
+func (s *Sandbox) WaitForResizeOperations(ctx context.Context, operations []ResizeOperation) ([]ResourceResizeStatus, error)
+func (s *Sandbox) WaitForResizeOperationsWithTimeout(ctx context.Context, operations []ResizeOperation, timeout time.Duration) ([]ResourceResizeStatus, error)
+```
+
+Wait on the supplied one or two records, rechecking identities and immutable request fields. Reconnection to the same runtime is supported. Runtime replacement, expired history and supersession fail instead of following a newer request; supplied applied status is not proof. The first method has no built-in deadline; cancel its context to stop waiting. The timed method treats zero or negative duration as one bounded check. `ResizeTimeoutError.Status` retains completed resource reads. Cancellation and timeout do not undo the resize. Unsupported observation is an error, never successful completion.
+
+The runtime retains at most 256 operation records, protecting the latest CPU and memory records from eviction. Older records can expire; restarting the runtime clears its history. Resident pause preserves the history. An expired identity cannot establish completion.
+
+Use `errors.As` with `*ResizeWaitError` to inspect `Reason`, optional `Sandbox`/`OperationID` and verified `Status`; `IsKind` recognizes `ErrResizeWait`. Reasons distinguish supersession, interrupted continuity, unavailable history, invalid responses and unavailable observations. Timeout and unsupported-feature errors remain separate. An observation failure does not undo the resize or prove that it failed.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ResizeStatus()</span>
+
+```go
+func (s *Sandbox) ResizeStatus(ctx context.Context) ([]ResourceResizeStatus, error)
+```
+
+Read current status without identities. Use `ResizeOperations()` when a later wait must remain tied to those records.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">WaitUntilResized()</span>
+
+```go
+func (s *Sandbox) WaitUntilResized(ctx context.Context) ([]ResourceResizeStatus, error)
+func (s *Sandbox) WaitUntilResizedWithTimeout(ctx context.Context, timeout time.Duration) ([]ResourceResizeStatus, error)
+```
+
+Select the operations present at the first read and wait for those identities. This does not establish which caller submitted them; use the result of `ModifyWithResizeTracking()` to wait on your modification.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Metrics()</span>
 
@@ -2426,6 +2486,31 @@ Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as 
 
 `(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)`
 
+#### <span className="msb-recv">h.</span><span className="msb-hn">ModifyWithResizeTracking()</span>
+
+```go
+func (h *SandboxHandle) ModifyWithResizeTracking(ctx context.Context, opts ModifyOptions) (*SandboxModificationResult, error)
+```
+
+Same options and result as [`sb.ModifyWithResizeTracking()`](#sb-modifywithresizetracking), preserving `Modify()`'s fresh-by-name planning. Stopped and next-start changes have no live operation identities.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">ResizeOperations()</span>
+
+```go
+func (h *SandboxHandle) ResizeOperations(ctx context.Context) ([]ResizeOperation, error)
+```
+
+Read records for this exact sandbox. Same-name replacement is rejected; a stopped sandbox is not started implicitly.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">WaitForResizeOperations()</span>
+
+```go
+func (h *SandboxHandle) WaitForResizeOperations(ctx context.Context, operations []ResizeOperation) ([]ResourceResizeStatus, error)
+func (h *SandboxHandle) WaitForResizeOperationsWithTimeout(ctx context.Context, operations []ResizeOperation, timeout time.Duration) ([]ResourceResizeStatus, error)
+```
+
+Same exact-operation contract as [`sb.WaitForResizeOperations()`](#sb-waitforresizeoperations). The handle identity must match; catalog lookup shares the wait deadline. Cancellation and timeout end waiting only.
+
 #### <span className="msb-recv">h.</span><span className="msb-hn">Metrics()</span>
 
 <Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -2932,7 +3017,7 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | AllowHosts | `[]string` | Allowed hosts after the requested change (secret entries) |
 | Reason | `*string` | Human-readable reason for the classification, when useful |
 
-`ResourceResizeStatus` reports runtime convergence for a live resize; enforcement applies immediately, the guest converges asynchronously:
+`ResourceResizeStatus` describes a live resize. The immediate modification result reports `"accepted"`; equal reported quantities do not establish operation-bound guest completion, and plugged memory may still be offline:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -2940,7 +3025,7 @@ Dry-run or apply plan for a sandbox modification. Values never appear in a plan:
 | Requested | `string` | Requested value |
 | Actual | `string` | Actual value observed in the guest/runtime |
 | Enforced | `string` | Host/VMM-enforced value |
-| State | `string` | `"applied"` when requested, actual, and enforced match; `"converging"` while the guest is still onlining CPUs or plugging memory; `"guest-refused"` when the guest would not cooperate (the host enforces the new limit anyway); `"accepted"` or `"failed"` otherwise |
+| State | `string` | The immediate modification result reports `"accepted"`. `"applied"` requires confirmed guest completion for the operation; equal quantities alone are insufficient |
 
 ### SandboxPage
 

@@ -57,7 +57,7 @@ pub use crate::launch::{
     STARTUP_FD, StartupCommand,
 };
 use crate::logging::LogLevel;
-use crate::metrics::run_metrics_sampler;
+use crate::metrics::{ConfirmedMemoryLimit, run_metrics_sampler};
 use crate::relay::{self, AgentRelay};
 use crate::{RuntimeError, RuntimeResult};
 
@@ -1124,6 +1124,10 @@ fn run(
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
     // Restore constructs the executor now but withholds both public endpoints until the guest has
     // crossed its VMGenID/workload activation barrier.
+    let confirmed_memory_limit = ConfirmedMemoryLimit::boot(
+        u64::from(config.vm.memory_mib) << 20,
+        krun_metrics_handle.clone(),
+    );
     let restore_endpoint_publication = {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
@@ -1146,6 +1150,7 @@ fn run(
                 .as_mut()
                 .and_then(|agent| agent.inherited_memory.take()),
             owned_directory_checkpoints,
+            confirmed_memory_limit.clone(),
         );
         let context = super::control::ControlContext {
             executor: match executor {
@@ -1158,6 +1163,9 @@ fn run(
                 }
             },
         };
+        // Fresh evidence also confirms restored hotplug capacity without inventing a resize
+        // operation in the new runtime. Sleeping observers cannot retain a finished runtime.
+        context.executor.start_resize_observer();
         if restored_agent.is_some() {
             Some(RestoreEndpointPublication {
                 agent_sock_path: config.agent_sock_path.clone(),
@@ -1352,6 +1360,7 @@ fn run(
                         max_cpus: metrics_max_cpus,
                         krun_metrics: krun_metrics_handle,
                         vm_control: metrics_vm_control,
+                        memory_limit: confirmed_memory_limit,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
                     }));

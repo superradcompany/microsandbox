@@ -7,7 +7,10 @@ documented keyword arguments (for direct Python construction).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .types import ResourceResizeStatus
 
 
 class MicrosandboxError(Exception):
@@ -78,6 +81,48 @@ class ExecTimeoutError(MicrosandboxError):
 class StopTimeoutError(MicrosandboxError, TimeoutError):
     """Graceful shutdown did not complete within its budget; no kill was requested."""
     code = "stop-timeout"
+
+
+class ResizeTimeoutError(MicrosandboxError, TimeoutError):
+    """A live resize did not converge within its budget; completion is unconfirmed.
+
+    The resize is not undone.
+
+    ``status`` is the last observed resize status, empty when no read completed
+    before the deadline.
+    """
+    code = "resize-timeout"
+
+    def __init__(
+        self, message: str, *, status: list[ResourceResizeStatus] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status: list[ResourceResizeStatus] = list(status) if status is not None else []
+
+
+ResizeWaitFailure = Literal[
+    "superseded", "interrupted", "history_unavailable",
+    "invalid_response", "observation_unavailable",
+]
+
+
+class ResizeWaitError(MicrosandboxError):
+    """Observation failed; this does not undo a resize or establish its final outcome."""
+    code = "resize-wait"
+
+    def __init__(
+        self, message: str, *, reason: ResizeWaitFailure, sandbox: str | None = None,
+        operation_id: str | None = None, status: list[ResourceResizeStatus] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.sandbox = sandbox
+        self.operation_id = operation_id
+        self.status = list(status) if status is not None else []
+
+    @classmethod
+    def _from_native(cls, payload: dict) -> ResizeWaitError:
+        return cls(**payload)
 
 
 class ExecFailedError(MicrosandboxError):

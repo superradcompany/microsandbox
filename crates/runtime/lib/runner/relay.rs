@@ -52,6 +52,9 @@ use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
 };
+use microsandbox_protocol::resources::{
+    RESOURCE_OBSERVATION_RELAY_VERSION, ResourceRelayAdvertisement,
+};
 use microsandbox_protocol::tcp::{TcpConnect, TcpFailed};
 #[cfg(unix)]
 use microsandbox_protocol::transport::LocalTransportReady;
@@ -62,6 +65,8 @@ use microsandbox_protocol::transport::{
     try_decode_relay_client_disconnected_ack_from_bytes,
 };
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
+use microsandbox_protocol::wire::Envelope;
+
 #[cfg(test)]
 use microsandbox_types::ExecLimits;
 #[cfg(unix)]
@@ -853,26 +858,34 @@ impl GuestFrameMerger {
             return self.push_raw(lane_frame);
         }
 
-        let message = decode_frame(lane_frame.frame.data.as_ref())?;
-        let key = (incarnation, message.id);
-        match message.t {
-            MessageType::BulkAccepted => {
+        // Route well-formed future names opaquely. A typed Message decoder
+        // rejects an unknown name and used to tear down the whole VM here.
+        // Bulk ordering still applies to terminal frames regardless of name.
+        let message =
+            Envelope::decode(&lane_frame.frame.data[LEN_PREFIX_SIZE + FRAME_HEADER_SIZE..])
+                .map_err(|error| {
+                    RuntimeError::Custom(format!("decode routing envelope: {error}"))
+                })?;
+        let id = lane_frame.frame.id;
+        let key = (incarnation, id);
+        match MessageType::from_wire_str(&message.t) {
+            Some(MessageType::BulkAccepted) => {
                 let accepted: BulkAccepted = message.payload().map_err(|error| {
                     RuntimeError::Custom(format!("decode bulk acceptance: {error}"))
                 })?;
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    if self.is_retired(incarnation, message.id) {
+                    if self.is_retired(incarnation, id) {
                         return Ok(Vec::new());
                     }
                     return Err(RuntimeError::Custom(format!(
                         "bulk acceptance for unregistered correlation {}",
-                        message.id
+                        id
                     )));
                 };
                 if flow.accepted_forwarded {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate bulk acceptance for correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 flow.accepted_forwarded = true;
@@ -880,7 +893,7 @@ impl GuestFrameMerger {
                 if !flow.guest_to_host && !flow.pending_raw.is_empty() {
                     return Err(RuntimeError::Custom(format!(
                         "guest sent raw records for disabled flow {}",
-                        message.id
+                        id
                     )));
                 }
 
@@ -888,7 +901,7 @@ impl GuestFrameMerger {
                 self.drain_flow(key, &mut ready)?;
                 Ok(ready)
             }
-            MessageType::BulkFinish => {
+            Some(MessageType::BulkFinish) => {
                 let finish: BulkFinish = message.payload().map_err(|error| {
                     RuntimeError::Custom(format!("decode bulk finish: {error}"))
                 })?;
@@ -897,12 +910,12 @@ impl GuestFrameMerger {
                 }
 
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Err(RuntimeError::Custom(format!(
                             "bulk finish for unregistered correlation {}",
-                            message.id
+                            id
                         )))
                     };
                 };
@@ -917,7 +930,7 @@ impl GuestFrameMerger {
                 if !flow.accepted_forwarded || !flow.guest_to_host {
                     return Err(RuntimeError::Custom(format!(
                         "bulk finish arrived for inactive guest-to-host flow {}",
-                        message.id
+                        id
                     )));
                 }
                 if finish.final_offset < flow.next_raw_offset {
@@ -929,7 +942,7 @@ impl GuestFrameMerger {
                 if flow.pending_finish.is_some() {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate bulk finish for correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 flow.pending_finish = Some((finish.final_offset, lane_frame));
@@ -937,14 +950,14 @@ impl GuestFrameMerger {
                 self.drain_flow(key, &mut ready)?;
                 Ok(ready)
             }
-            MessageType::BulkCancel => {
+            Some(MessageType::BulkCancel) => {
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Err(RuntimeError::Custom(format!(
                             "bulk cancellation for unregistered correlation {}",
-                            message.id
+                            id
                         )))
                     };
                 };
@@ -956,7 +969,7 @@ impl GuestFrameMerger {
             }
             _ if lane_frame.frame.flags & FLAG_TERMINAL != 0 => {
                 let Some(flow) = self.flows.get_mut(&key) else {
-                    return if self.is_retired(incarnation, message.id) {
+                    return if self.is_retired(incarnation, id) {
                         Ok(Vec::new())
                     } else {
                         Ok(vec![lane_frame])
@@ -972,13 +985,13 @@ impl GuestFrameMerger {
                     || flow.pending_finish.is_none()
                 {
                     self.flows.remove(&key);
-                    self.retire(incarnation, message.id)?;
+                    self.retire(incarnation, id)?;
                     return Ok(vec![lane_frame]);
                 }
                 if flow.pending_terminal.replace(lane_frame).is_some() {
                     return Err(RuntimeError::Custom(format!(
                         "duplicate terminal frame for bulk correlation {}",
-                        message.id
+                        id
                     )));
                 }
                 Ok(Vec::new())
@@ -2133,7 +2146,10 @@ impl AgentRelay {
                                     endpoint: crate::control::control_socket_path_for(&self.endpoint).to_string_lossy().into_owned(),
                                     connection: connection.token(),
                                 };
-                                let advertisement = ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability };
+                                let advertisement = ResourceRelayAdvertisement {
+                                    ready: ExecControlAdvertisement { ready: &ready_payload, exec_control: &capability },
+                                    relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
+                                };
                                 let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
                                     .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready: {error}")))?;
                                 ready.v = ready_message.v;
@@ -2141,7 +2157,22 @@ impl AgentRelay {
                                 codec::encode_to_buf(&ready, &mut encoded)
                                     .map_err(|error| RuntimeError::Custom(format!("encode exec control Ready frame: {error}")))?;
                                 encoded
-                            } else { ready_frame.clone() };
+                            } else {
+                                // Older guests remain usable; the SDK separately checks their
+                                // generation before sending the new query. The host owns this
+                                // field: guest Ready is decoded into Ready before this wrapping.
+                                let advertisement = ResourceRelayAdvertisement {
+                                    ready: &ready_payload,
+                                    relay_resource_observation: RESOURCE_OBSERVATION_RELAY_VERSION,
+                                };
+                                let mut ready = Message::with_payload(MessageType::Ready, 0, &advertisement)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode resource relay Ready: {error}")))?;
+                                ready.v = ready_message.v;
+                                let mut encoded = Vec::new();
+                                codec::encode_to_buf(&ready, &mut encoded)
+                                    .map_err(|error| RuntimeError::Custom(format!("encode resource relay Ready frame: {error}")))?;
+                                encoded
+                            };
 
                             let mut handshake = Vec::with_capacity(8 + ready_frame.len());
                             handshake.extend_from_slice(&id_start.to_be_bytes());
@@ -7430,6 +7461,69 @@ mod tests {
             assert!(clients.lock().await.is_empty());
             assert!(used_slots.lock().await.is_empty());
         }
+    }
+
+    #[test]
+    fn guest_merger_routes_unknown_names_without_losing_bulk_order() {
+        let id = 19;
+        let budget = Arc::new(Semaphore::new(64 * 1024));
+        let mut merger = GuestFrameMerger::default();
+        // A future ordinary reply must not require a typed Message variant.
+        let envelope = Envelope::new(10, "future.observation", &serde_json::json!({})).unwrap();
+        let mut ordinary = Vec::new();
+        codec::encode_raw_to_buf(&envelope.frame(id, 0).unwrap(), &mut ordinary).unwrap();
+        assert_eq!(merger.push(lane_frame(ordinary, &budget)).unwrap().len(), 1);
+
+        merger.register(TEST_INCARNATION, id).unwrap();
+        merger
+            .push(lane_frame(
+                encoded_message_id(MessageType::BulkAccepted, id, &bulk_accepted()),
+                &budget,
+            ))
+            .unwrap();
+        assert!(
+            merger
+                .push(lane_frame(
+                    encoded_message_id(
+                        MessageType::BulkFinish,
+                        id,
+                        &BulkFinish {
+                            kind: BulkKind::Filesystem,
+                            flow: BulkFlow::GuestToHost,
+                            final_offset: 3,
+                        },
+                    ),
+                    &budget,
+                ))
+                .unwrap()
+                .is_empty()
+        );
+        let mut terminal = Vec::new();
+        codec::encode_raw_to_buf(&envelope.frame(id, FLAG_TERMINAL).unwrap(), &mut terminal)
+            .unwrap();
+        assert!(
+            merger
+                .push(lane_frame(terminal.clone(), &budget))
+                .unwrap()
+                .is_empty()
+        );
+        let ready = merger
+            .push(lane_frame(encoded_raw(id, 0, b"abc"), &budget))
+            .unwrap();
+        assert_eq!(ready.len(), 3);
+        assert_eq!(ready[2].frame.data.as_ref(), terminal);
+        assert!(!merger.flows.contains_key(&(TEST_INCARNATION, id)));
+        // A completed future operation must not poison later, known traffic.
+        assert_eq!(
+            merger
+                .push(lane_frame(
+                    encoded_message_id(MessageType::Pong, id + 1, &serde_json::json!({})),
+                    &budget,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

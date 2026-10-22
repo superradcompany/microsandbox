@@ -26,6 +26,14 @@ func TestStorageMissingOptionalSymbols(t *testing.T) {
 			"usage":         func() error { _, err := StorageUsage(context.Background()); return err },
 			"prune":         func() error { _, err := PruneStorage(context.Background(), StoragePruneOptions{}); return err },
 			"sandbox usage": func() error { _, err := sandbox.StorageUsage(context.Background()); return err },
+			"sandbox resize tracking": func() error {
+				_, err := sandbox.ResizeOperations(context.Background(), `{"operation":"read"}`)
+				return err
+			},
+			"named resize tracking": func() error {
+				_, err := ResizeOperationsSandboxByName(context.Background(), "missing", "local:42", `{"operation":"read"}`)
+				return err
+			},
 		} {
 			var nativeError *Error
 			if err := operation(); !errors.As(err, &nativeError) || nativeError.Kind != KindUnsupportedOperation {

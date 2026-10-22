@@ -95,7 +95,7 @@ microsandbox-protocol = { version = "=0.7.8", path = "crates/protocol" }
 microsandbox-runtime = { version = "=0.7.8", path = "crates/runtime", default-features = false }
 microsandbox-utils = { version = "=0.7.8", path = "crates/utils" }
 microsandbox-vsock = { version = "=0.7.8", path = "crates/vsock" }
-# Keep runtime APIs and shared metrics types on the same published release.
+# Keep runtime APIs and shared metrics types on the same release and Git patch.
 msb_krun = "=0.1.41"
 msb_krun_utils = "=0.1.41"
 test-macros = { path = "crates/testing/macros" }
@@ -220,3 +220,10 @@ parking_lot = "0.12"
 rpassword = "7"
 russh = "0.64.0"
 russh-sftp = "2.3.0"
+
+# Temporary native APIs from libkrun PR #173, pinned for reproducible builds.
+# Replace these patches with the maintainer's published native version before
+# publishing dependent crates: workspace patches do not propagate to consumers.
+[patch.crates-io]
+msb_krun = { git = "https://github.com/superradcompany/libkrun", rev = "04b154eed3c2163c268ce4694082b8d4b461b9be" }
+msb_krun_utils = { git = "https://github.com/superradcompany/libkrun", rev = "04b154eed3c2163c268ce4694082b8d4b461b9be" }

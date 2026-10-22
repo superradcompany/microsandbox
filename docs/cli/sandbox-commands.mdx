@@ -599,11 +599,13 @@ msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
 </CodeGroup>
 
-Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`.
+Like create/run, modify accepts `-c`/`--cpus`, `-m`/`--memory`, `-e`/`--env`, and `-w`/`--workdir`. Use `--wait` to wait for resize completion and `-t`/`--timeout SECS` to bound that wait (default 60 seconds). The timeout option requires `--wait`.
 
 Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. They default to the initial CPU and memory allocation; increasing the ceilings requires a restart.
 
-Resize can take time. The output and JSON `resize_status` report each resource’s [resize state](/sdk/rust/sandbox#resourceresizestatus). With `guest-refused`, the host still enforces the new limit.
+Resize can take time. The immediate output and JSON `resize_status` report the [`accepted` resize state](/sdk/rust/sandbox#resourceresizestatus) after the runtime accepts a target. The plan's `applied` field means the modification request was applied; it does not confirm usable guest capacity. Equal reported quantities, or current memory above a shrink target, do not prove guest completion.
+
+On runtimes that support guest confirmation, pending resizes are observed in the background even when no caller waits. CPU and memory share one bounded query; paused sandboxes wait for resume, and unsupported guests receive no observation request. A response from before an intervening runtime change cannot confirm completion afterward. When `--restart` actually restarts the sandbox, `--wait` returns after that startup completes; it does not wait for live-resize history in the fresh runtime.
 
 Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
 

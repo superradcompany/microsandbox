@@ -591,6 +591,27 @@ mod tests {
 
     #[tokio::test]
     async fn pending_snapshot_publication_roots_survive_prune_until_abandoned() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_PENDING_PUBLICATION_PRUNE").is_none() {
+            // A parallel test's fork can temporarily inherit the publisher lease.
+            // Isolate this immediate-reclamation assertion so dropping the publisher
+            // really removes the last owner before the second prune.
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "image::cleanup::tests::pending_snapshot_publication_roots_survive_prune_until_abandoned",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_PENDING_PUBLICATION_PRUNE", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated publication prune test failed: {status}"
+            );
+            return;
+        }
+
         use sea_orm::Set;
         let home = tempfile::tempdir().unwrap();
         let local = local(home.path()).await;

@@ -7,6 +7,7 @@ mod image;
 mod jobs;
 mod logs;
 mod metrics;
+mod resize;
 mod sandbox;
 mod sandbox_handle;
 mod setup;

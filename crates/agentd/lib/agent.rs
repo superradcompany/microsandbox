@@ -2530,6 +2530,42 @@ async fn handle_message_with_charge(
     // queued output after a disconnect instead of relabelling it with a recycled correlation ID.
     let session_tx = root_session_tx.with_incarnation(client_incarnation_for_id(state, msg.id));
     match msg.t {
+        MessageType::ObserveResources => {
+            if !MessageType::ObservedResources.is_available_at(msg.v) {
+                return encode_core_error_if_supported(
+                    &msg,
+                    msg.id,
+                    CoreErrorKind::UnsupportedProtocolGeneration,
+                    "resource observations require protocol generation 11".into(),
+                    Some(msg.t.as_str().into()),
+                    out_buf,
+                );
+            }
+            let Some(request) = decode_payload_or_core_error::<
+                microsandbox_protocol::resources::ObserveResources,
+            >(&msg, out_buf)?
+            else {
+                return Ok(());
+            };
+            // Kernel readiness reads are bounded and non-mutating. Keep filesystem work off
+            // the async executor and entirely separate from the independent liveness pulse.
+            let observation =
+                tokio::task::spawn_blocking(move || crate::resources::observe(request))
+                    .await
+                    .map_err(|e| {
+                        AgentdError::ExecSession(format!("resource observation worker: {e}"))
+                    })?;
+            let mut reply =
+                Message::with_payload(MessageType::ObservedResources, msg.id, &observation)
+                    .map_err(|e| {
+                        AgentdError::ExecSession(format!("encode resource observation: {e}"))
+                    })?;
+            reply.v = msg.v;
+            codec::encode_to_buf(&reply, out_buf).map_err(|e| {
+                AgentdError::ExecSession(format!("encode resource observation frame: {e}"))
+            })?;
+        }
+
         MessageType::RootDiskPrepare | MessageType::RootDiskGrow => {
             let Some(request) = decode_payload_or_core_error::<
                 microsandbox_protocol::core::RootDiskGrow,
@@ -3297,6 +3333,7 @@ fn message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
         MessageType::ClockSync
+            | MessageType::ObserveResources
             | MessageType::Ping
             | MessageType::Touch
             | MessageType::WorkloadFreeze
@@ -3315,6 +3352,7 @@ fn guest_message_refreshes_idle_timer(t: &MessageType) -> bool {
     !matches!(
         t,
         MessageType::Pong
+            | MessageType::ObservedResources
             | MessageType::Touched
             | MessageType::WorkloadFrozen
             | MessageType::WorkloadThawed
@@ -5699,6 +5737,9 @@ mod tests {
     fn maintenance_messages_do_not_implicitly_refresh_idle_timer() {
         assert!(!message_refreshes_idle_timer(&MessageType::ClockSync));
         assert!(!message_refreshes_idle_timer(&MessageType::Ping));
+        assert!(!message_refreshes_idle_timer(
+            &MessageType::ObserveResources
+        ));
         assert!(!message_refreshes_idle_timer(&MessageType::Touch));
         assert!(message_refreshes_idle_timer(&MessageType::ExecRequest));
     }
@@ -5706,6 +5747,9 @@ mod tests {
     #[test]
     fn maintenance_replies_do_not_refresh_idle_timer() {
         assert!(!guest_message_refreshes_idle_timer(&MessageType::Pong));
+        assert!(!guest_message_refreshes_idle_timer(
+            &MessageType::ObservedResources
+        ));
         assert!(!guest_message_refreshes_idle_timer(&MessageType::Touched));
         assert!(!guest_message_refreshes_idle_timer(&MessageType::CoreError));
         assert!(guest_message_refreshes_idle_timer(&MessageType::ExecStdout));

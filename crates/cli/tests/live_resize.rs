@@ -7,7 +7,7 @@
 //! `cp target/debug/msb /tmp/msb-signed && codesign --entitlements msb-entitlements.plist -s - --force /tmp/msb-signed`.
 //!
 //! The uncooperative-guest test additionally needs `MSB_TEST_LIVE_RESIZE_OLD_KERNEL` set to a libkrunfw dylib/so WITHOUT the guest drivers (a pre-5.5.0 prebuilt); it is
-//! exported as `MSB_LIBKRUNFW_PATH` so the sandbox boots a guest that never converges, which must surface as a `converging` resize state rather than a hang or a lie.
+//! exported as `MSB_LIBKRUNFW_PATH`. The target acknowledgement remains `accepted`; stronger completion observation must report unsupported rather than inventing convergence.
 
 use std::process::Output;
 use std::time::{Duration, Instant};
@@ -37,7 +37,11 @@ const CONVERGE_DEADLINE: Duration = Duration::from_secs(60);
 async fn msb(args: &[&str]) -> Output {
     timeout(
         Duration::from_secs(90),
-        Command::new(env!("CARGO_BIN_EXE_msb")).args(args).output(),
+        Command::new(
+            std::env::var_os("MSB_PATH").unwrap_or_else(|| env!("CARGO_BIN_EXE_msb").into()),
+        )
+        .args(args)
+        .output(),
     )
     .await
     .unwrap_or_else(|_| panic!("msb {args:?} timed out after 90s"))
@@ -246,10 +250,10 @@ async fn over_capacity_refusal_exits_nonzero() {
     cleanup(name).await;
 }
 
-/// Uncooperative guest: a kernel without `virtio_msb_cpu` never acts on resize requests. The runtime must report `converging` honestly (never `applied`), keep the guest's
-/// own view unchanged, and stay reachable.
+/// A driverless guest cannot confirm completion. Target acknowledgement stays
+/// accepted, the guest view stays unchanged, and existing exec remains usable.
 #[msb_test]
-async fn uncooperative_guest_reports_converging() {
+async fn uncooperative_guest_reports_accepted() {
     let Some(old_kernel) = std::env::var_os(OLD_KERNEL_ENV) else {
         eprintln!("skipping: {OLD_KERNEL_ENV} not set (needs a driverless libkrunfw)");
         return;
@@ -317,6 +321,187 @@ async fn uncooperative_guest_reports_converging() {
     assert_eq!(status["actual"], "2");
     assert_eq!(status["enforced"], "3");
     assert_ne!(status["state"], "applied");
+
+    drop(sandbox);
+    cleanup(name).await;
+}
+
+/// `msb modify --wait` blocks until the guest converges, so the returned status is already `applied` and the guest agrees without polling.
+#[msb_test]
+async fn live_cpu_wait_converges() {
+    let name = "live-resize-cpu-wait";
+    cleanup(name).await;
+
+    let sandbox = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(2)
+        .max_cpus(4)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let boot = poll_exec(name, &["nproc"], CONVERGE_DEADLINE, |out| out == "2").await;
+    assert_eq!(boot.as_deref(), Some("2"));
+
+    let out = msb(&[
+        "modify",
+        name,
+        "--cpus",
+        "4",
+        "--wait",
+        "--timeout",
+        "60",
+        "--format",
+        "json",
+    ])
+    .await;
+    assert!(
+        out.status.success(),
+        "modify --cpus 4 --wait failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let status = first_resize_status(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(status["state"], "applied", "--wait must return converged");
+    assert_eq!(status["actual"], "4");
+    assert_eq!(status["enforced"], "4");
+    assert_eq!(try_exec(name, &["nproc"]).await.as_deref(), Some("4"));
+
+    drop(sandbox);
+    cleanup(name).await;
+}
+
+/// A memory shrink is only `applied` once the guest has released the memory; readback and wait must agree with that rule.
+#[msb_test]
+async fn live_memory_shrink_reports_accepted_then_applies() {
+    let name = "live-resize-mem-shrink";
+    cleanup(name).await;
+
+    let sandbox = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(1)
+        .memory(512)
+        .max_memory(1536)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let ready = poll_exec(name, &["true"], CONVERGE_DEADLINE, |_| true).await;
+    assert!(ready.is_some(), "guest should accept execs");
+
+    let out = msb(&[
+        "modify", name, "--memory", "1G", "--wait", "--format", "json",
+    ])
+    .await;
+    assert!(
+        out.status.success(),
+        "modify --memory 1G --wait failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let grown = first_resize_status(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(grown["state"], "applied");
+
+    let out = msb(&["modify", name, "--memory", "512M", "--format", "json"]).await;
+    assert!(
+        out.status.success(),
+        "modify --memory 512M failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shrink = first_resize_status(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(
+        shrink["state"], "accepted",
+        "a setter reply is not guest completion"
+    );
+
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    let settled = handle
+        .wait_until_resized_with_timeout(CONVERGE_DEADLINE)
+        .await
+        .expect("memory shrink should converge");
+    let memory = settled
+        .iter()
+        .find(|status| status.resource == microsandbox::sandbox::ResourceKind::Memory)
+        .expect("memory status");
+    assert_eq!(
+        memory.state,
+        microsandbox::sandbox::ResourceConvergenceState::Applied
+    );
+    assert_eq!(memory.actual, memory.enforced);
+
+    drop(sandbox);
+    cleanup(name).await;
+}
+
+/// `--wait` against a driverless guest must reject unsupported observation,
+/// preserve the accepted target, and leave the original guest reachable.
+#[msb_test]
+async fn uncooperative_guest_wait_reports_unsupported() {
+    let Some(old_kernel) = std::env::var_os(OLD_KERNEL_ENV) else {
+        eprintln!("skipping: {OLD_KERNEL_ENV} not set (needs a driverless libkrunfw)");
+        return;
+    };
+    // SAFETY: each #[msb_test] runs in its own process under cargo-nextest, so this only affects this test and the sandbox it spawns. Must run before the first create.
+    unsafe {
+        std::env::set_var("MSB_LIBKRUNFW_PATH", &old_kernel);
+    }
+
+    let name = "live-resize-oldk-wait";
+    cleanup(name).await;
+
+    let sandbox = Sandbox::builder(name)
+        .image(IMAGE)
+        .cpus(2)
+        .max_cpus(4)
+        .memory(512)
+        .replace()
+        .create()
+        .await
+        .expect("create sandbox");
+
+    let boot = poll_exec(name, &["nproc"], CONVERGE_DEADLINE, |out| out == "2").await;
+    assert_eq!(boot.as_deref(), Some("2"));
+
+    let started = Instant::now();
+    let out = msb(&[
+        "modify",
+        name,
+        "--cpus",
+        "1",
+        "--wait",
+        "--timeout",
+        "3",
+        "--format",
+        "json",
+    ])
+    .await;
+    assert!(
+        !out.status.success(),
+        "an unconverged --wait must exit non-zero"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "--timeout must bound the wait"
+    );
+    let status = first_resize_status(&String::from_utf8_lossy(&out.stdout));
+    assert_eq!(status["actual"], "2");
+    assert_eq!(
+        status["enforced"], "1",
+        "host must still enforce the shrink"
+    );
+    assert_eq!(status["state"], "accepted");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot wait for resize"));
+    let handle = Sandbox::get(name).await.expect("get sandbox");
+    let error = handle
+        .wait_until_resized_with_timeout(CONVERGE_DEADLINE)
+        .await
+        .expect_err("driverless guest must not confirm completion");
+    assert!(
+        matches!(error, microsandbox::MicrosandboxError::Unsupported { .. }),
+        "{error}"
+    );
+    assert_eq!(try_exec(name, &["nproc"]).await.as_deref(), Some("2"));
 
     drop(sandbox);
     cleanup(name).await;

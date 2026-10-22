@@ -1,16 +1,25 @@
 //! `msb modify` command — plan and apply sandbox configuration changes.
 
+use std::time::Duration;
+
 use clap::Args;
 use console::style;
+use microsandbox::MicrosandboxError;
 use microsandbox::sandbox::{
     ChangeKind, ConfigPlannedChange, ModificationDisposition, ModificationWarning, PlannedChange,
-    ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
-    SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind, SecretPlannedChange,
-    SecretSource,
+    ResizeOperation, ResourceConvergenceState, ResourceKind, ResourceResizeStatus, Sandbox,
+    SandboxHandle, SandboxModificationBuilder, SandboxModificationPlan, SecretChangeKind,
+    SecretPlannedChange, SecretSource,
 };
 
 use super::common;
 use crate::ui::{self, OutputFormat};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+const DEFAULT_RESIZE_WAIT_SECS: u64 = 60;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -125,6 +134,14 @@ pub struct ModifyArgs {
     #[arg(long)]
     pub restart: bool,
 
+    /// Wait for this command's live resizes, or the current operations when no target is changed.
+    #[arg(long, conflicts_with_all = ["dry_run", "next_start", "compact"])]
+    pub wait: bool,
+
+    /// Resize wait budget in seconds (default 60; 0 checks once).
+    #[arg(short = 't', long, requires = "wait", value_name = "SECS")]
+    pub timeout: Option<u64>,
+
     /// Output format.
     #[arg(long, value_name = "FORMAT", value_enum)]
     pub format: Option<OutputFormat>,
@@ -207,14 +224,154 @@ pub async fn run(args: ModifyArgs) -> anyhow::Result<()> {
         return Err(ui::AlreadyRenderedError.into());
     }
 
-    let applied = builder.apply().await?;
+    let (mut applied, operations) = if args.wait {
+        let result = builder.apply_with_resize_tracking().await?;
+        (result.plan, result.resize_operations)
+    } else {
+        (builder.apply().await?, None)
+    };
+    let mut resized = false;
+    if args.wait && !modification_restarted(&applied) {
+        let budget = resize_wait_budget(args.timeout);
+        let (result, confirmed) = wait_for_resize(
+            &handle,
+            &applied.resize_status,
+            operations.as_deref(),
+            budget,
+        )
+        .await;
+        resized = confirmed;
+        match result {
+            Ok(status) => {
+                applied.resize_status = status;
+            }
+            Err(MicrosandboxError::ResizeTimeout {
+                timeout, status, ..
+            }) => {
+                applied.resize_status = timeout_resize_status(applied.resize_status, status);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&applied)?);
+                } else {
+                    ui::success("Modified", &applied.sandbox);
+                    print_resize_status(&applied.resize_status);
+                }
+                print_resize_timeout(&args.name, timeout);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+            Err(MicrosandboxError::Unsupported { .. }) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&applied)?);
+                } else {
+                    ui::success("Modified", &applied.sandbox);
+                    print_resize_status(&applied.resize_status);
+                }
+                print_resize_unsupported(&args.name);
+                return Err(ui::AlreadyRenderedError.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&applied)?);
     } else {
-        print_apply_success(&applied);
+        print_apply_success(&applied, resized);
     }
 
     Ok(())
+}
+
+/// Restart completion is already awaited by apply. A fresh runtime has no live resize
+/// operation to confirm; waiting on its empty history would turn success into failure.
+fn modification_restarted(plan: &SandboxModificationPlan) -> bool {
+    plan.applied
+        && plan.policy == microsandbox::sandbox::ModificationPolicy::Restart
+        && matches!(plan.status.as_str(), "running" | "draining")
+        && plan_has_restart_required(plan)
+}
+
+fn resize_wait_budget(timeout_secs: Option<u64>) -> Duration {
+    Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_RESIZE_WAIT_SECS))
+}
+
+/// Wait for live resize convergence within one budget, returning whether to confirm a resize.
+///
+/// The SDK owns the single deadline and operation selection, including reconnect checks.
+async fn wait_for_resize(
+    handle: &SandboxHandle,
+    applied: &[ResourceResizeStatus],
+    operations: Option<&[ResizeOperation]>,
+    budget: Duration,
+) -> (Result<Vec<ResourceResizeStatus>, MicrosandboxError>, bool) {
+    if !applied.is_empty() {
+        let result = match operations {
+            Some(operations) => {
+                handle
+                    .wait_for_resize_operations(operations, Some(budget))
+                    .await
+            }
+            None => Err(MicrosandboxError::unsupported(
+                microsandbox::Operation::SandboxModify,
+                microsandbox::UnsupportedReason::NotAvailable(
+                    "the selected runtime accepted the resize but cannot track its completion"
+                        .into(),
+                ),
+            )),
+        };
+        return (result, true);
+    }
+
+    // No new live resize: the SDK binds the current IDs once. A separate preliminary
+    // read followed by a new wait could otherwise switch to a concurrent request.
+    (handle.wait_until_resized_with_timeout(budget).await, false)
+}
+
+/// Prefer each observed resource, preserving apply acknowledgement for unread resources.
+fn timeout_resize_status(
+    mut applied: Vec<ResourceResizeStatus>,
+    observed: Vec<ResourceResizeStatus>,
+) -> Vec<ResourceResizeStatus> {
+    for status in observed {
+        if let Some(previous) = applied
+            .iter_mut()
+            .find(|entry| entry.resource == status.resource)
+        {
+            *previous = status;
+        } else {
+            applied.push(status);
+        }
+    }
+    applied
+}
+
+fn print_resize_timeout(name: &str, timeout: Duration) {
+    let title = format!(
+        "resize did not converge within {}s",
+        timeout.as_secs_f64().round() as u64
+    );
+    let retry = format!(
+        "run `msb modify {name} --wait --timeout 600` to wait for the current resize requests"
+    );
+    ui::error_with_lines(
+        &title,
+        &[
+            ui::ErrorLine::Cause(
+                "the requested resize has not been undone; completion is unconfirmed",
+            ),
+            ui::ErrorLine::Hint("the guest may still converge"),
+            ui::ErrorLine::Hint(&retry),
+        ],
+    );
+}
+
+fn print_resize_unsupported(name: &str) {
+    let restart = format!("check runtime and guest support for {name} before waiting again");
+    ui::error_with_lines(
+        "cannot wait for resize: the running sandbox does not report resize status",
+        &[
+            ui::ErrorLine::Cause("the modification was accepted; guest completion is unconfirmed"),
+            ui::ErrorLine::Hint(&restart),
+        ],
+    );
 }
 
 fn apply_resource_args(
@@ -435,16 +592,11 @@ fn apply_blocker(args: &ModifyArgs, plan: &SandboxModificationPlan) -> Option<Ap
         .into_iter()
         .map(BlockerLine::cause)
         .collect::<Vec<_>>();
+    let [restart, next_start] = restart_commands(args);
     lines.push(BlockerLine::hint("no changes were applied"));
+    lines.push(BlockerLine::hint(format!("run `{restart}` to apply now")));
     lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--restart` to apply now",
-        args.name,
-        replayed_args(args)
-    )));
-    lines.push(BlockerLine::hint(format!(
-        "run `msb modify {} {}--next-start` to save for the next start",
-        args.name,
-        replayed_args(args)
+        "run `{next_start}` to save for the next start"
     )));
 
     Some(ApplyBlocker {
@@ -514,7 +666,7 @@ fn print_apply_blocker(blocked: &ApplyBlocker) {
     ui::error_with_lines(&blocked.title, &lines);
 }
 
-fn print_apply_success(plan: &SandboxModificationPlan) {
+fn print_apply_success(plan: &SandboxModificationPlan, resized: bool) {
     if plan.policy == microsandbox::sandbox::ModificationPolicy::Restart
         && plan_has_restart_required(plan)
     {
@@ -530,6 +682,10 @@ fn print_apply_success(plan: &SandboxModificationPlan) {
         };
 
         ui::success("Modified", &target);
+    }
+
+    if resized && !plan.resize_status.is_empty() {
+        ui::success("Resized", &plan.sandbox);
     }
 
     if should_render_resize_status(&plan.resize_status) {
@@ -679,6 +835,14 @@ fn parse_key_value(entry: &str, flag: &str) -> anyhow::Result<(String, String)> 
         anyhow::bail!("{flag} key must not be empty");
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+fn restart_commands(args: &ModifyArgs) -> [String; 2] {
+    let replayed = replayed_args(args);
+    [
+        format!("msb modify {} {replayed}--restart", args.name),
+        format!("msb modify {} {replayed}--next-start", args.name),
+    ]
 }
 
 fn replayed_args(args: &ModifyArgs) -> String {
@@ -840,6 +1004,60 @@ mod tests {
             vec!["api", "--compact", "--restart"],
         ] {
             assert!(TestCli::try_parse_from(std::iter::once("msb").chain(flags)).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_wait_and_timeout() {
+        let args = parse_modify_args(&["api", "--cpus", "4", "--wait", "--timeout", "30"]);
+        assert!(args.wait);
+        assert_eq!(args.timeout, Some(30));
+        assert_eq!(resize_wait_budget(args.timeout), Duration::from_secs(30));
+        assert_eq!(
+            resize_wait_budget(None),
+            Duration::from_secs(DEFAULT_RESIZE_WAIT_SECS)
+        );
+        assert_eq!(resize_wait_budget(Some(0)), Duration::ZERO);
+    }
+
+    #[test]
+    fn restart_hints_parse() {
+        let args = parse_modify_args(&[
+            "api",
+            "--cpus",
+            "4",
+            "--memory",
+            "4G",
+            "--label",
+            "tier=web",
+            "--secret",
+            "API_KEY@api.example.com",
+            "--wait",
+            "--timeout",
+            "30",
+        ]);
+        for command in restart_commands(&args) {
+            assert!(!command.contains("--wait") && !command.contains("--timeout"));
+            let parsed = TestCli::try_parse_from(command.split_whitespace().skip(1))
+                .unwrap_or_else(|error| panic!("`{command}` does not parse: {error}"));
+            assert_eq!(parsed.args.cpus, Some(4));
+        }
+    }
+
+    #[test]
+    fn timeout_requires_wait() {
+        let flags = ["msb", "api", "--cpus", "4", "--timeout", "30"];
+        assert!(TestCli::try_parse_from(flags).is_err());
+    }
+
+    #[test]
+    fn wait_conflicts_with_dry_run() {
+        for flags in [
+            vec!["msb", "api", "--cpus", "4", "--wait", "--dry-run"],
+            vec!["msb", "api", "--cpus", "4", "--wait", "--next-start"],
+            vec!["msb", "api", "--compact", "--wait"],
+        ] {
+            assert!(TestCli::try_parse_from(flags).is_err());
         }
     }
 
@@ -1039,6 +1257,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn successful_restart_does_not_wait_for_new_runtime_resize_history() {
+        let mut plan = restart_blocked_plan();
+        plan.applied = true;
+        plan.policy = microsandbox::sandbox::ModificationPolicy::Restart;
+        assert!(modification_restarted(&plan));
+        plan.status = "draining".into();
+        assert!(modification_restarted(&plan));
+        plan.status = "stopped".into();
+        assert!(!modification_restarted(&plan));
+        plan.status = "running".into();
+        plan.applied = false;
+        assert!(!modification_restarted(&plan));
+        plan.applied = true;
+        // Merely selecting the restart policy is insufficient: live or unchanged
+        // targets still use operation-specific waiting in the original runtime.
+        plan.changes.clear();
+        assert!(!modification_restarted(&plan));
+    }
+
     fn restart_hints(flags: &[&str]) -> Vec<String> {
         let mut argv = vec!["api"];
         for flag in flags {
@@ -1127,6 +1365,35 @@ mod tests {
             enforced: "4".to_string(),
             state,
         }
+    }
+
+    #[test]
+    fn resize_timeout_keeps_apply_status_without_a_read() {
+        let applied = vec![resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Accepted,
+        )];
+        let observed = vec![resize_entry(
+            ResourceKind::Cpus,
+            ResourceConvergenceState::Converging,
+        )];
+        assert_eq!(timeout_resize_status(applied.clone(), Vec::new()), applied);
+        assert_eq!(timeout_resize_status(applied, observed.clone()), observed);
+    }
+
+    #[test]
+    fn partial_timeout_preserves_unread_resource_acknowledgement() {
+        let cpu = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Accepted);
+        let memory = resize_entry(ResourceKind::Memory, ResourceConvergenceState::Accepted);
+        let observed = resize_entry(ResourceKind::Cpus, ResourceConvergenceState::Applied);
+        assert_eq!(
+            timeout_resize_status(vec![cpu, memory.clone()], vec![observed.clone()]),
+            vec![observed.clone(), memory]
+        );
+        assert_eq!(
+            timeout_resize_status(Vec::new(), vec![observed.clone()]),
+            vec![observed]
+        );
     }
 
     #[test]

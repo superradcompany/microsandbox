@@ -40,6 +40,8 @@ pub(crate) use patch::{
 pub(crate) mod pause;
 #[cfg(all(feature = "local", windows))]
 mod reap;
+#[cfg(feature = "local")]
+mod resize;
 mod restore_builder;
 pub(crate) mod restore_resources;
 #[cfg(feature = "ssh")]
@@ -213,13 +215,19 @@ pub(crate) use external_mounts::{
     resolve_external_mounts,
 };
 #[cfg(feature = "local")]
+pub use microsandbox_protocol::resize::{
+    ResizeObservation, ResizeOperation, ResizeOutcome, ResizeTarget, ResizeTracking,
+};
+#[cfg(feature = "local")]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, PublishedPortKey,
     ResourceConvergenceState, ResourceKind, ResourceResizeStatus, SandboxModificationBuilder,
-    SandboxModificationPatch, SandboxModificationPlan, SecretChangeKind, SecretModificationPatch,
-    SecretPatchBuilder, SecretPlannedChange, SecretSource,
+    SandboxModificationPatch, SandboxModificationPlan, SandboxModificationResult, SecretChangeKind,
+    SecretModificationPatch, SecretPatchBuilder, SecretPlannedChange, SecretSource,
 };
+#[cfg(feature = "local")]
+pub use resize::DEFAULT_RESIZE_READ_TIMEOUT;
 #[cfg(feature = "ssh")]
 pub use ssh::{
     DEFAULT_SSH_HOST, DEFAULT_SSH_PORT, SandboxSshOps, SftpClient, SshAttachOptionsBuilder,

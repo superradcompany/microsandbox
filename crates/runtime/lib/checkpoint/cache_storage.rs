@@ -705,6 +705,29 @@ mod tests {
 
     #[test]
     fn age_boundary_is_inclusive_and_future_mtime_stays_protected() {
+        // A parallel fork can inherit the fixture's short-lived handoff lock and
+        // turn the age assertion into an unrelated PendingHandoff observation.
+        // Isolate this exact boundary check; retain all original assertions below.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "checkpoint::cache_storage::tests::isolated_age_boundary_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess-only age boundary assertions"]
+    fn isolated_age_boundary_worker() {
         let root = tempfile::tempdir().unwrap();
         let path = branch(root.path(), "age");
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
