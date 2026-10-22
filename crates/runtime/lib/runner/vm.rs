@@ -5,6 +5,7 @@
 //! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
 //! `_exit()` on guest shutdown after running exit observers.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZero;
 #[cfg(unix)]
@@ -18,9 +19,10 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
-use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_filesystem::{
-    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
+    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs,
+    StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 #[cfg(feature = "net")]
@@ -373,7 +375,14 @@ pub struct VmConfig {
     pub vsock: Vec<microsandbox_types::VsockRouteSpec>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
-    #[cfg(unix)]
+    ///
+    /// VM construction consumes these backends, appending them after the runtime and
+    /// ordinary mounts in the supplied order. Tags must be unique across all filesystems,
+    /// nonempty, NUL-free, and at most 36 bytes. Guest mounting is configured separately
+    /// through `bootstrap.dir_mounts` or performed by the guest.
+    ///
+    /// These in-process backends have no checkpoint resource provider: full capture/fork
+    /// is refused by resource admission, and they cannot be supplied during full restore.
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
@@ -577,7 +586,6 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk_runtime_owned", &self.rootfs_disk_runtime_owned)
             .field("mounts", &self.mounts)
             .field("disks", &self.disks);
-        #[cfg(unix)]
         debug.field("backends", &format!("[{} backend(s)]", self.backends.len()));
         debug
             .field("init_path", &self.init_path)
@@ -911,7 +919,7 @@ fn run(
         numa_topology: resolved_numa_topology,
     };
     let build_result = build_vm(
-        &config,
+        &mut config,
         console_backends,
         move |exit_code: i32| {
             use microsandbox_db::entity::sandbox as sandbox_entity;
@@ -1835,7 +1843,7 @@ struct VmBuildRuntime {
 }
 
 fn build_vm(
-    config: &Config,
+    config: &mut Config,
     console_backends: AgentConsoleBackends,
     on_exit: impl Fn(i32) + Send + 'static,
     on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
@@ -1855,6 +1863,7 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
+    validate_custom_backends(vm)?;
     let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
@@ -2708,6 +2717,12 @@ fn build_vm(
     // Exit observer — runs synchronously before _exit() for DB cleanup.
     builder = builder.on_placement(on_placement).on_exit(on_exit);
 
+    // Append without shifting the transport identities of existing filesystem mounts.
+    // Transfer ownership only after the configuration has been borrowed for setup.
+    for (tag, backend) in config.vm.backends.drain(..) {
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
+    }
+
     let mut vm = builder
         .build()
         .map_err(|e| RuntimeError::Custom(format!("build VM: {e}")))?;
@@ -2755,6 +2770,41 @@ fn build_vm(
         restored_agent,
         owned_directory_checkpoints,
     ))
+}
+
+fn validate_custom_backends(vm: &VmConfig) -> RuntimeResult<()> {
+    if vm.backends.is_empty() {
+        return Ok(());
+    }
+    if vm.checkpoint_restore.is_some() {
+        return Err(RuntimeError::Custom(
+            "custom filesystem backends are not supported during checkpoint restore".into(),
+        ));
+    }
+
+    let mut tags = BTreeSet::from(["/dev/root", microsandbox_protocol::RUNTIME_FS_TAG]);
+    for mount in vm
+        .mounts
+        .iter()
+        .chain(vm.file_mounts.iter().map(|m| &m.mount))
+    {
+        if let Some((tag, _)) = mount.split_once(':') {
+            tags.insert(tag);
+        }
+    }
+    for (tag, _) in &vm.backends {
+        if tag.is_empty() || tag.len() > 36 || tag.as_bytes().contains(&0) {
+            return Err(RuntimeError::Custom(
+                "custom filesystem tag must contain 1..36 bytes without NUL".into(),
+            ));
+        }
+        if !tags.insert(tag) {
+            return Err(RuntimeError::Custom(format!(
+                "custom filesystem tag {tag:?} conflicts with another filesystem"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
@@ -3738,6 +3788,10 @@ fn agent_kernel_cmdline(
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "vm_tests/custom_backends.rs"]
+mod custom_backend_tests;
 
 #[cfg(test)]
 mod tests {
