@@ -6,6 +6,7 @@ mod cloud;
 mod command;
 mod domain;
 mod error;
+mod exec;
 
 #[doc(hidden)]
 pub mod compat;
@@ -60,6 +61,7 @@ pub use domain::{
     WELL_KNOWN_NAT64_PREFIX, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
+pub use exec::{EXEC_OUTPUT_EVENT_OVERHEAD, ExecLimits};
 pub use guest_flush::GuestFlush;
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,

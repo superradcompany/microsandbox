@@ -102,20 +102,23 @@ pub fn pop_default_backend(token: u32) -> napi::Result<()> {
 
 /// Return the active default backend kind (`"local"` or `"cloud"`).
 #[napi(js_name = "defaultBackendKind")]
-pub fn default_backend_kind() -> &'static str {
-    microsandbox::default_backend().kind().as_str()
+pub fn default_backend_kind() -> napi::Result<&'static str> {
+    let info = microsandbox::default_backend_info()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(info.kind.as_str())
 }
 
 /// Return secret-safe information about the active default backend.
 #[napi(js_name = "defaultBackendInfo")]
-pub fn default_backend_info() -> JsBackendInfo {
-    let info = microsandbox::default_backend_info();
-    JsBackendInfo {
+pub fn default_backend_info() -> napi::Result<JsBackendInfo> {
+    let info = microsandbox::default_backend_info()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(JsBackendInfo {
         kind: info.kind.as_str().to_string(),
         api_url: info.api_url,
         source: info.source.as_str().to_string(),
         profile: info.profile,
-    }
+    })
 }
 
 fn build_backend(

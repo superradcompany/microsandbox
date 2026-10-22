@@ -579,6 +579,14 @@ _, err = handle.Wait(ctx)
 
 </CodeGroup>
 
+## Output and stdin buffering
+
+Each command has a 1 MiB output buffer, shared by stdout and stderr. When it fills, the guest stops reading the command's output; once the guest pipe buffers also fill, the command's writes block (or return `EAGAIN` for nonblocking writers) until you consume output. Nothing is dropped, and other threads in the guest keep running.
+
+Read output while the command runs; waiting for a completion marker before reading can leave the command blocked. Collecting complete output uses memory proportional to its size. To let a command finish without a reader, redirect its output to a file. This applies to SDK, CLI, and SSH execution.
+
+Stdin has a 64 KiB allowance per command. Writes wait for capacity and send straight from your buffer; cancelling a write can leave an already-delivered prefix. When a command both reads input and writes output, send and read concurrently so neither side blocks the other.
+
 ## Session IDs
 
 Each streaming exec creates a session ID that you can use to correlate stream events and persisted log entries.

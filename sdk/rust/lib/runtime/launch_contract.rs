@@ -574,6 +574,7 @@ pub(crate) async fn validate_runtime_config(
     contract
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
+    validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
@@ -677,6 +678,22 @@ pub(crate) async fn validate_http_deny_response(
         ));
     }
     Ok(())
+}
+
+/// A memory snapshot with a captured execution policy needs a runtime that can honor it.
+pub(crate) async fn validate_exec_limits(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let captured_policy = config
+        .restore_resources
+        .agent_ready
+        .as_ref()
+        .and_then(|ready| ready.exec_limits);
+    if captured_policy.is_none() {
+        return Ok(());
+    }
+    require_capability(path, |capabilities| capabilities.exec_limits, "exec").await
 }
 
 /// Probe guest clock support only when the caller turns host synchronization off.
@@ -1182,6 +1199,56 @@ mod tests {
         config.spec.network.http.deny_response_format =
             microsandbox_types::HttpDenyResponseFormat::Text;
         validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captured_execution_policy_requires_a_capable_runtime() {
+        use crate::config::layers::BackendConfig;
+        use crate::sandbox::SandboxBuilder;
+        use microsandbox_protocol::core::Ready;
+        use microsandbox_types::ExecLimits;
+
+        let sources = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-exec",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+        );
+        let current = script(
+            dir.path(),
+            "current-exec",
+            r#"printf '%s' '{"protocols":[2,1],"exec_limits":true}'"#,
+        );
+
+        let mut config = SandboxBuilder::new("compatibility")
+            .image("alpine")
+            .finish(Some(&sources), None)
+            .unwrap();
+
+        // A cold boot carries only built-in defaults; any released runtime accepts it.
+        validate_exec_limits(&old, &config).await.unwrap();
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A memory restore with a captured policy needs a runtime that can honor it.
+        config.restore_resources.agent_ready = Some(Ready {
+            exec_limits: Some(ExecLimits::default()),
+            ..Default::default()
+        });
+        let result = validate_exec_limits(&old, &config).await;
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("exec"));
+            assert!(error.to_string().contains("upgrade"));
+        }
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A captured guest without an advertised policy keeps the legacy path.
+        config.restore_resources.agent_ready = Some(Ready::default());
+        validate_exec_limits(&old, &config).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1894,6 +1961,9 @@ mod encoding {
             }],
             default_cwd: Some("/work".into()),
             security_profile: BootstrapSecurityProfile::Restricted,
+            // Real launches always carry the built-in limits; the legacy
+            // grammar must encode such a bootstrap by omitting them.
+            exec_limits: Some(microsandbox_types::ExecLimits::default()),
             ..Default::default()
         };
         for patch in [0, 4, 8, 9] {

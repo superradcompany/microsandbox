@@ -162,6 +162,7 @@ See [Managed deployment](/enterprise/managed-configuration) for deployment, prec
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `snapshots` | [reference](#snapshots) | Full snapshot capture and restore limits |
 | `active_profile` | `null` | Default [backend profile](#profiles) name |
+| `allowed_backends` | `null` | Permitted backends: `["local"]`, `["cloud"]`, or both; `null` allows both and an empty list is invalid |
 | `profiles` | [reference](#profiles) | Named [backend profiles](/operations/backends#profiles) |
 
 ## `deployment_profile`

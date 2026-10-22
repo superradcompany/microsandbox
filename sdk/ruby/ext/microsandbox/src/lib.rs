@@ -21,9 +21,7 @@ use microsandbox_core::{
     AgentClientError, BackendKind, MicrosandboxError, MicrosandboxResult, Operation,
     PublishedSnapshotArtifact, SnapshotArtifactKind, SnapshotSourceRecoveryError,
     UnsupportedReason,
-    backend::{
-        CloudBackend, LocalBackend, default_backend, resolve_default_backend, set_default_backend,
-    },
+    backend::{CloudBackend, LocalBackend, resolve_default_backend, set_default_backend},
     image::{Image, ImageHandle},
     logs::{LogEntry, LogOptions, LogSource},
     sandbox::{
@@ -2089,12 +2087,10 @@ fn set_runtime_libkrunfw_path(path: String) {
     microsandbox_core::config::set_sdk_libkrunfw_path(path);
 }
 
-fn default_backend_kind_str() -> String {
-    match default_backend().kind() {
-        BackendKind::Local => "local",
-        BackendKind::Cloud => "cloud",
-    }
-    .to_owned()
+fn default_backend_kind_str(ruby: &Ruby) -> Result<String, Error> {
+    let info =
+        microsandbox_core::default_backend_info().map_err(|error| core_error(ruby, error))?;
+    Ok(info.kind.as_str().to_owned())
 }
 
 fn remember_backend_selection(ruby: &Ruby, selection: BackendSelection) -> Result<(), Error> {

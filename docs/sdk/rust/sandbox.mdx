@@ -888,6 +888,10 @@ The builder uses the active backend's cached configuration when `build()` or `cr
 
 `build()` returns a concrete `SandboxConfig` without pulling image metadata. On local creation, `workdir: None` inherits global defaults, then image defaults if global workdir is omitted. A concrete config cannot distinguish omission from an explicit clear; use direct builder `create()` to preserve sparse clears through image resolution. Managed overrides apply last in both paths.
 
+Reusing a concrete config supplies its populated CPU and memory values explicitly, including defaults. For memory restores, these values must match the snapshot; use a sparse builder patch to let omitted settings inherit the captured values.
+
+Local snapshot archives are decoded before settings are merged and validated. The built config retains temporary restore files until it is used or dropped.
+
 `SandboxConfigPatch` patches the SDK configuration. Its `spec` field is a `SandboxSpecPatch` for shared settings such as image, resources, and networking. Create-time options, including registry credentials, replacement settings, and the requested slug, live alongside `spec`.
 
 <Accordion title="Example">

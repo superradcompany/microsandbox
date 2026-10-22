@@ -19,8 +19,23 @@ Show the selected backend, API endpoint, and how it was selected. Credentials ar
 ```bash Shell
 msb context
 msb context --format json
+msb context list
+msb context use work
+msb context reset
 ```
 </CodeGroup>
+
+| Subcommand | Purpose |
+| --- | --- |
+| `list` | List profiles, the selected profile, and whether each backend is allowed |
+| `use <name>` | Save an existing profile as your preference |
+| `reset` | Remove your saved preference |
+
+All forms accept `--format json`. Listing and preference changes do not resolve credentials, contact cloud, or open the sandbox database. Incomplete or prohibited profiles remain visible. Plain `msb context` resolves the backend and reports configuration or credential errors.
+
+Environment variables and managed selection can override your saved preference; the command warns when they do. `reset` leaves those overrides and backend restrictions in effect. Add profiles in [config.json](/configuration#profiles); there is no `context add` command.
+
+An invalid configuration or empty backend allowlist stops these commands. To recover from a user restriction that leaves no usable profile, edit `allowed_backends` in your config file. For managed restrictions, contact your administrator.
 
 ## msb self
 

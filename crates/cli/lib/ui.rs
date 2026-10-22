@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use clap::ValueEnum;
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use microsandbox_image::PullProgress;
@@ -31,6 +32,14 @@ const BRAILLE_TICKS: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦"
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
+
+/// Explicit output formats for commands supporting `--format`.
+/// Omitting the option keeps the command's human-readable output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Structured JSON output.
+    Json,
+}
 
 /// Ephemeral braille spinner for long-running operations.
 pub struct Spinner {

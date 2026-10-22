@@ -263,8 +263,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::*;
+    use crate::config::layers::BackendConfig;
     use crate::runtime::launch_contract;
-    use crate::{SandboxConfig, test_support};
+    use crate::{BackendSelectionSource, LocalBackend, SandboxConfig, test_support};
 
     //--------------------------------------------------------------------------------------------------
     // Constants
@@ -499,22 +500,20 @@ mod tests {
         use std::sync::Arc;
 
         let home = std::env::var("MSB_CATALOG_TEST_HOME").expect("explicit disposable test home");
-        let local = Arc::new(crate::test_support::local_backend(
-            crate::config::GlobalConfig {
-                home: Some(std::path::PathBuf::from(&home)),
-                // This isolated backend does not read environment paths. Supply the
-                // released runtime pair selected by the previous fixture explicitly.
-                paths: crate::config::PathsConfig {
-                    msb: Some(std::env::var_os("MSB_PATH").expect("previous msb").into()),
-                    libkrunfw: Some(
-                        std::env::var_os("MSB_LIBKRUNFW_PATH")
-                            .expect("previous firmware")
-                            .into(),
-                    ),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+        let local = Arc::new(LocalBackend::from_backend_config(
+            BackendConfig::new(
+                serde_json::from_value(serde_json::json!({
+                    "home": home,
+                    "paths": {
+                        "msb": std::env::var("MSB_PATH").expect("previous msb"),
+                        "libkrunfw": std::env::var("MSB_LIBKRUNFW_PATH").expect("previous firmware")
+                    }
+                }))
+                .unwrap(),
+                Default::default(),
+            ),
+            BackendSelectionSource::Programmatic,
+            None,
         ));
 
         let expected = launch_contract::resolve(

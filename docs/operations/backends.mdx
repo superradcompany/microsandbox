@@ -124,6 +124,14 @@ A managed `active_profile` set to `null` or an empty string clears saved and env
 
 Selecting a cloud profile with `MSB_PROFILE` or `active_profile` is explicit cloud intent when that profile has `"backend": "cloud"`. `MSB_BACKEND=cloud` without a usable API key or cloud profile returns a configuration error; it never falls back to local execution.
 
+### Permit local, cloud, or both
+
+Set `"allowed_backends": ["local"]`, `["cloud"]`, or `["local", "cloud"]` in user config or managed overrides. The default is both. An empty list is invalid; `null` removes the restriction. Managed values replace user values.
+
+Permission is separate from selection. A cloud-only policy rejects local selection; it does not select cloud for you. Checks apply when standard SDK or CLI backends are constructed, including explicitly supplied backends. Existing backend instances keep their captured settings.
+
+Use `msb context list` to inspect profiles without loading credentials, `msb context use <name>` to save a preference, and `msb context reset` to remove it. See [context commands](/cli/management#msb-context) for precedence and recovery.
+
 ## Verify
 
 Use `msb context` to inspect the backend kind, selection source, profile, and cloud API URL without exposing the API key:
@@ -146,7 +154,7 @@ console.log(sandbox.backendKind);
 ```
 
 ```rust Rust
-let info = microsandbox::default_backend_info();
+let info = microsandbox::default_backend_info()?;
 println!("{}", info.kind.as_str());
 println!("{}", sandbox.backend_kind().as_str());
 ```
@@ -174,5 +182,7 @@ puts Microsandbox.default_backend_kind
 puts sandbox.backend
 ```
 </CodeGroup>
+
+Backend diagnostics return configuration errors when selection fails or policy prohibits the selected backend. Successful output keeps the same fields.
 
 For global defaults and profile storage, see [Configuration](/operations/configuration). For backend feature differences, see [Cloud compatibility](/cloud/overview#compatibility).

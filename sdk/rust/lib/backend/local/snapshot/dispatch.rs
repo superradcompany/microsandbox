@@ -5,15 +5,195 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
+use microsandbox_image::snapshot::SnapshotRootDisk;
 
 use super::{archive, artifact, copy, create, group, store, verify};
 use crate::backend::{Backend, LocalBackend, SnapshotBackend};
-use crate::sandbox::SandboxConfig;
+use crate::sandbox::config::SnapshotRestoreMode;
+use crate::sandbox::restore_resources::PreparedArchive;
+use crate::sandbox::{RootfsSource, SandboxConfig};
 use crate::snapshot::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, Snapshot, SnapshotArchive, SnapshotConfig,
     SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation};
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl LocalBackend {
+    /// Inspect a restore source; caller options remain separate from resolved settings.
+    pub(crate) async fn prepare_local_restore(
+        &self,
+        backend: Arc<dyn Backend>,
+        config: &mut SandboxConfig,
+        mut reference: SnapshotReference,
+    ) -> MicrosandboxResult<()> {
+        if !config.local_restore_paths_resolved {
+            super::super::host_paths::resolve_snapshot_reference(&mut reference)?;
+            super::super::host_paths::resolve_host_paths(config)?;
+        }
+        // Existing bare archive names were promoted to absolute paths at admission.
+        // Remaining bare names must not be shadowed by a file in a later cwd.
+        let may_be_archive = match &reference {
+            SnapshotReference::Path(_) => true,
+            SnapshotReference::Auto(value) => store::looks_like_path(value),
+            SnapshotReference::Id(_) => false,
+        };
+        let selector = local_selector(self, reference).await?;
+        if may_be_archive && Path::new(&selector).is_file() {
+            config.snapshot_archive_source = Some(PathBuf::from(selector));
+        } else {
+            let artifact = store::open_snapshot_leased(self, &selector).await?;
+            config.snapshot_lease = artifact.lease.clone();
+            let snapshot = from_artifact(backend, artifact);
+            crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
+        }
+        // The create path also admits deferred references; successful preparation
+        // consumes this one so restore builders do not validate/materialize twice.
+        config.snapshot_reference = None;
+        self.prepare_archive_restore(config).await
+    }
+
+    /// Decode an archive once before resolving settings; retain its private files until creation.
+    pub(crate) async fn prepare_archive_restore(
+        &self,
+        config: &mut SandboxConfig,
+    ) -> MicrosandboxResult<()> {
+        if self.reuse_prepared_archive(config)? {
+            return Ok(());
+        }
+        let Some(archive) = config.snapshot_archive_source.clone() else {
+            return Ok(());
+        };
+
+        tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
+        let stage = tempfile::Builder::new()
+            .prefix(".archive-restore-")
+            .tempdir_in(self.sandboxes_dir())?;
+        let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
+        // Archive decoding has a large async state machine. Keep it off the containing
+        // create future so native SDK debug builds fit ordinary Tokio worker stacks.
+        let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
+            self,
+            &archive,
+            stage.path(),
+            disk_only,
+            config.snapshot_base.as_deref(),
+            &config.restore_resources,
+            config.restore_boot_overrides,
+        ))
+        .await?;
+        let cache_operation =
+            self.apply_materialized_archive(config, stage.path(), materialized)?;
+        // Do not let a disk archive turn an explicit CoW restore into a fresh boot, and
+        // reject it before replacement can remove the existing sandbox.
+        if config.forked && config.checkpoint_restore.is_none() {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "copy-on-write memory requires a full snapshot restore".into(),
+            ));
+        }
+
+        config.restore_resources.archive = Some(Arc::new(PreparedArchive {
+            stage,
+            mode: config.snapshot_restore_mode,
+            source: archive,
+            cache_operation,
+        }));
+        Ok(())
+    }
+
+    /// Reuse retained archive staging when it still matches this restore;
+    /// otherwise discard every piece of the stale prepared state.
+    fn reuse_prepared_archive(&self, config: &mut SandboxConfig) -> MicrosandboxResult<bool> {
+        let Some(prepared) = &config.restore_resources.archive else {
+            return Ok(false);
+        };
+        if prepared.mode == config.snapshot_restore_mode
+            && config.snapshot_archive_source.as_ref() == Some(&prepared.source)
+            && prepared.stage.path().parent() == Some(self.sandboxes_dir().as_path())
+        {
+            config.restore_boot_overrides.validate_scope(
+                if config.restore_resources.geometry.is_some() {
+                    crate::snapshot::SnapshotScope::Full
+                } else {
+                    crate::snapshot::SnapshotScope::Disk
+                },
+                config.snapshot_restore_mode,
+            )?;
+            return Ok(true);
+        }
+
+        config.clear_prepared_restore();
+        Ok(false)
+    }
+
+    /// Apply the decoded manifest, checkpoint, and disk state to the config.
+    /// Returns the cache leases the retained staging must keep alive.
+    fn apply_materialized_archive(
+        &self,
+        config: &mut SandboxConfig,
+        stage_path: &Path,
+        materialized: super::archive::ArchiveChildMaterialization,
+    ) -> MicrosandboxResult<microsandbox_image::GlobalCache> {
+        config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
+        if config.spec.runtime.user.is_none() {
+            config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
+        }
+
+        crate::sandbox::apply_snapshot_guest_clock(config, &materialized.manifest)?;
+        crate::sandbox::require_recorded_mounts(config, &materialized.manifest)?;
+        crate::sandbox::require_guest_mounts(config, materialized.required_bind_paths)?;
+        config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
+        crate::snapshot::apply_additional_disks(config, materialized.disk_mounts);
+        config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
+        crate::sandbox::apply_snapshot_root_layout(config, &materialized.manifest.root_disk)?;
+        let cache_operation = materialized.cache_operation;
+        if let Some(restore) = materialized.checkpoint_restore {
+            let state = match &materialized.manifest.state {
+                crate::snapshot::SnapshotState::Checkpoint(state) => state,
+                crate::snapshot::SnapshotState::File(_) => {
+                    return Err(crate::MicrosandboxError::SnapshotIntegrity(
+                        "archive produced checkpoint construction state for file snapshot".into(),
+                    ));
+                }
+            };
+            let expected = microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
+                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+            let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
+                &restore.closure,
+                Some(&expected),
+                self.config().fs_state_limit(),
+            )
+            .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+            crate::sandbox::apply_checkpoint_restore_constraints(
+                config,
+                state,
+                closure.checkpoint(),
+            )?;
+
+            config.checkpoint_restore = Some(restore);
+            config.snapshot_upper_layers = materialized.upper_layers;
+            config.suppress_launch_for_full_restore();
+        } else if !materialized.upper_layers.is_empty() {
+            config.snapshot_upper_layers = materialized.upper_layers;
+        } else if matches!(
+            materialized.manifest.state,
+            crate::snapshot::SnapshotState::File(_)
+        ) {
+            config.snapshot_upper_source =
+                Some(stage_path.join(match &materialized.manifest.root_disk {
+                    SnapshotRootDisk::Managed => "upper.ext4",
+                    SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
+                    SnapshotRootDisk::Tmpfs { .. } => {
+                        unreachable!("file snapshots reject tmpfs roots")
+                    }
+                }));
+        }
+        Ok(cache_operation)
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
@@ -102,34 +282,9 @@ impl SnapshotBackend for LocalBackend {
         &'a self,
         backend: Arc<dyn Backend>,
         config: &'a mut SandboxConfig,
-        mut reference: SnapshotReference,
+        reference: SnapshotReference,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        Box::pin(async move {
-            if !config.local_restore_paths_resolved {
-                super::super::host_paths::resolve_snapshot_reference(&mut reference)?;
-                super::super::host_paths::resolve_host_paths(config)?;
-            }
-            // Existing bare archive names were promoted to absolute paths at admission.
-            // Remaining bare names must not be shadowed by a file in a later cwd.
-            let may_be_archive = match &reference {
-                SnapshotReference::Path(_) => true,
-                SnapshotReference::Auto(value) => store::looks_like_path(value),
-                SnapshotReference::Id(_) => false,
-            };
-            let selector = local_selector(self, reference).await?;
-            if may_be_archive && Path::new(&selector).is_file() {
-                config.snapshot_archive_source = Some(PathBuf::from(selector));
-            } else {
-                let artifact = store::open_snapshot_leased(self, &selector).await?;
-                config.snapshot_lease = artifact.lease.clone();
-                let snapshot = from_artifact(backend, artifact);
-                crate::sandbox::prepare_local_snapshot_restore(config, &snapshot)?;
-            }
-            // The create path also admits deferred references; successful preparation
-            // consumes this one so restore builders do not validate/materialize twice.
-            config.snapshot_reference = None;
-            Ok(())
-        })
+        Box::pin(async move { self.prepare_local_restore(backend, config, reference).await })
     }
 
     fn path<'a>(&self, reference: &'a SnapshotReference) -> MicrosandboxResult<&'a Path> {
@@ -579,19 +734,7 @@ mod tests {
                         .snapshot_resolved("untrusted-hint", &upper)
                         .image("alpine:latest")
                 };
-                let mut config = builder.build().await.unwrap();
-                let reference = config
-                    .snapshot_reference
-                    .clone()
-                    .expect("resolved helper must queue an artifact reference");
-                SnapshotBackend::prepare_restore(
-                    local.as_ref(),
-                    backend.clone(),
-                    &mut config,
-                    reference,
-                )
-                .await
-                .unwrap();
+                let config = builder.build().await.unwrap();
                 assert!(config.snapshot_reference.is_none());
                 assert_eq!(
                     config.manifest_digest.as_deref(),

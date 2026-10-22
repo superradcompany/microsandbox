@@ -452,7 +452,7 @@ Writer for sending data to a running process's stdin. Obtained from [`ExecHandle
 write(data)
 ```
 
-*(async)* Write bytes to the process's stdin
+*(async)* Write bytes to the process's stdin. The write completes once the guest accepts the data, so it waits while the command is slow to read. For a command that also produces output, read output concurrently to avoid blocking each other.
 
 #### <span className="msb-recv">sink.</span><span className="msb-hn">close()</span>
 

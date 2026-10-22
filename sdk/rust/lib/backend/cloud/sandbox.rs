@@ -86,14 +86,22 @@ impl CloudBackend {
         builder: SandboxBuilder,
         start: bool,
     ) -> MicrosandboxResult<Sandbox> {
-        let config = self.build_sandbox_config(builder).await?;
-        let (req, config) = cloud_create_body_and_config(config)?;
+        let (req, config) = self.build_create_request(builder).await?;
         let cloud = self.create_sandbox(&req, start).await?;
         if start {
             ensure_cloud_sandbox_ready(&cloud)?;
         }
 
         Ok(Sandbox::from_cloud(backend, cloud, config))
+    }
+
+    /// Resolve the request body and runtime config for a cloud create.
+    pub(in crate::backend) async fn build_create_request(
+        &self,
+        builder: SandboxBuilder,
+    ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+        let config = self.build_sandbox_config(builder).await?;
+        cloud_create_body_and_config(config)
     }
 
     /// Resolve cloud request settings for both explicit build and immediate creation.
@@ -113,7 +121,7 @@ impl CloudBackend {
         }
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
-        builder.finish(Some(self.config_sources()), None)
+        builder.finish_cloud(self.config_sources())
     }
 }
 

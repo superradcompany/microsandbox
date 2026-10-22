@@ -8,7 +8,7 @@ use microsandbox_utils::format::format_bytes;
 
 use crate::{
     commands::restore::{self, RestoreArgs},
-    ui,
+    ui::{self, OutputFormat},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -142,8 +142,8 @@ pub struct SnapshotListArgs {
     pub group: Option<String>,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Show only digests.
     #[arg(short, long)]
@@ -260,8 +260,8 @@ pub struct SnapshotHeadArgs {
     pub selector: String,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -391,7 +391,7 @@ async fn list(args: SnapshotListArgs) -> anyhow::Result<()> {
         })
         .collect();
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         let entries: Vec<serde_json::Value> = snapshots
             .iter()
             .map(|s| {
@@ -652,7 +652,7 @@ async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
 
 async fn head(args: SnapshotHeadArgs) -> anyhow::Result<()> {
     let update = Snapshot::group_head(&args.selector).await?;
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&update)?);
     } else {
         ui::detail_kv("Group", &update.group);
@@ -1152,7 +1152,7 @@ mod tests {
             panic!("expected head command");
         };
         assert_eq!(args.selector, "work:baseline");
-        assert_eq!(args.format.as_deref(), Some("json"));
+        assert_eq!(args.format, Some(OutputFormat::Json));
     }
 
     #[test]

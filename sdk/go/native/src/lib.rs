@@ -6190,7 +6190,7 @@ pub unsafe extern "C" fn msb_default_backend_info(
     buf_len: usize,
 ) -> *mut c_char {
     run(buf, buf_len, || {
-        serde_json::to_string(&microsandbox::default_backend_info())
+        serde_json::to_string(&microsandbox::default_backend_info()?)
             .map_err(|error| FfiError::internal(format!("serialize backend info: {error}")))
     })
 }

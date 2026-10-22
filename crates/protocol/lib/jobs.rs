@@ -90,6 +90,20 @@ pub struct JobInfo {
     pub timed_out: bool,
 }
 
+/// Origin of one captured output record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobOutputSource {
+    /// Command stdout.
+    Stdout,
+    /// Command stderr.
+    Stderr,
+    /// Combined PTY stream.
+    Output,
+    /// Guest notice that a stdin write failed; not command output.
+    StdinError,
+}
+
 /// Byte-preserving output record. Sequence numbers remain monotonic across log rotation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -98,8 +112,8 @@ pub struct JobOutput {
     pub sequence: u64,
     /// Unix milliseconds at capture.
     pub timestamp: i64,
-    /// `stdout`, `stderr`, `output` (PTY), or `stdin_error`.
-    pub source: String,
+    /// Where the bytes came from.
+    pub source: JobOutputSource,
     /// Original bytes, encoded explicitly for portable persisted JSON.
     pub data_base64: String,
 }
@@ -345,9 +359,38 @@ impl JobInfo {
     }
 }
 
+impl JobOutputSource {
+    /// Stable textual form, identical to the serialized spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Output => "output",
+            Self::StdinError => "stdin_error",
+        }
+    }
+
+    /// Whether these bytes were charged against the guest's output allowance
+    /// and must be acknowledged back once consumed.
+    pub fn charged(self) -> bool {
+        !matches!(self, Self::StdinError)
+    }
+}
+
+impl std::fmt::Display for JobOutputSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl JobOutput {
     /// Construct one captured output record.
-    pub fn new(sequence: u64, timestamp: i64, source: String, data_base64: String) -> Self {
+    pub fn new(
+        sequence: u64,
+        timestamp: i64,
+        source: JobOutputSource,
+        data_base64: String,
+    ) -> Self {
         Self {
             sequence,
             timestamp,
