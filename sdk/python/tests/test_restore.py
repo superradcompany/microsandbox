@@ -6,7 +6,9 @@ from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
 
 
 @pytest.mark.parametrize(
-    "option", ["image", "network", "cmd", "replace", "detached", "entrypoint"],
+    "option", [
+        "image", "network", "foreground_command", "replace", "detached", "background_command",
+    ],
 )
 def test_restore_rejects_create_options(option):
     with pytest.raises(TypeError, match="unexpected restore option"):
@@ -173,3 +175,110 @@ def test_fork_public_surface_and_outcome_alias():
     for cls in (Sandbox, SandboxHandle):
         for method in ("fork", "fork_many", "branch", "branch_many"):
             assert callable(getattr(cls, method))
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+def test_restore_rejects_unknown_guest_clock(method):
+    with pytest.raises(ValueError, match="guest_clock must be sync or off"):
+        getattr(Sandbox, method)("missing", name="clock-invalid", guest_clock="unknown")
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+@pytest.mark.parametrize("value", [42, {"cmd": "/sbin/init", "args": [42]}])
+def test_restore_init_reuses_create_validation(method, value):
+    with pytest.raises(TypeError):
+        getattr(Sandbox, method)("missing", name="init-validation", init=value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+@pytest.mark.parametrize("init", [
+    "auto", {"cmd": "/sbin/init", "args": ["--flag"], "env": {"KEY": "value"}},
+])
+async def test_restore_boot_controls_reach_source_validation(tmp_path, method, init):
+    with pytest.raises(FileNotFoundError):
+        options = {"name": "boot-controls", "init": init, "hostname": "child", "disk_only": True}
+        if method == "restore":
+            await Sandbox.restore(tmp_path / "missing", **options)
+        else:
+            progress = Sandbox.restore_with_progress(tmp_path / "missing", **options)
+            await progress.result()
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+@pytest.mark.parametrize("option, value", [
+    ("max_cpus", -1), ("max_cpus", 256), ("max_memory", -1), ("max_memory", 2**32),
+])
+def test_restore_rejects_unrepresentable_resource_ceilings(method, option, value):
+    with pytest.raises(OverflowError):
+        getattr(Sandbox, method)("missing", name="ceiling-validation", **{option: value})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_restore_ceilings_reach_source_validation(tmp_path, method):
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="ceiling-validation", max_cpus=2, max_memory=512,
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_restore_destination_options_reach_source_validation(tmp_path, method):
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="label-validation",
+            labels={"team": "dev"},
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_destination_command_defaults_reach_source_validation(tmp_path, method):
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="command-defaults", workdir="/root", shell="/bin/ash",
+            entrypoint=[], cmd=[], env={"KEY": "", "OTHER": "literal"},
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+@pytest.mark.parametrize("field", ["workdir", "shell", "entrypoint", "cmd", "env"])
+def test_destination_command_defaults_reject_wrong_types(field):
+    with pytest.raises(TypeError):
+        Sandbox.restore("missing", name="command-defaults", **{field: 42})
+
+
+@pytest.mark.parametrize("method", ["create", "restore"])
+@pytest.mark.parametrize("policy", ["always", "if-missing", "never"])
+def test_pull_policy_uses_existing_enum_contract_before_dispatch(method, policy):
+    from microsandbox import PullPolicy
+
+    # Without an event loop, valid parsing reaches the async boundary but cannot launch.
+    def call(**kwargs):
+        if method == "create":
+            return Sandbox.create("policy-probe", image="alpine", **kwargs)
+        return Sandbox.restore("saved", name="policy-probe", **kwargs)
+    with pytest.raises(RuntimeError) as baseline:
+        call()
+    with pytest.raises(RuntimeError) as selected:
+        call(pull_policy=PullPolicy(policy))
+    assert type(selected.value) is type(baseline.value)
+    with pytest.raises(TypeError, match="expected PullPolicy"):
+        call(pull_policy="invalid")

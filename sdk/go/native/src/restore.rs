@@ -18,11 +18,23 @@ use super::{
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RestoreOptions {
+pub(super) struct RestoreOptions {
     snapshot: String,
+    pull_policy: Option<String>,
     snapshot_reference_kind: Option<String>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,
+    max_cpus: Option<u8>,
+    max_memory_mib: Option<u32>,
+    labels: Option<HashMap<String, String>>,
+    workdir: Option<String>,
+    shell: Option<String>,
+    entrypoint: Option<Vec<String>>,
+    cmd: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    init: Option<super::InitOpts>,
+    hostname: Option<String>,
+    proxy: Option<super::OutboundProxyOpts>,
     #[serde(default, deserialize_with = "deserialize_network_policy")]
     network_policy: Option<CustomNetworkPolicy>,
     #[serde(alias = "max_connections")]
@@ -31,9 +43,10 @@ struct RestoreOptions {
     #[serde(default)]
     disable_network: bool,
     security_profile: Option<String>,
+    guest_clock: Option<microsandbox::sandbox::GuestClockPolicy>,
     max_duration_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
-    creation_progress: Option<u64>,
+    pub(super) creation_progress: Option<u64>,
     #[serde(default)]
     forked: bool,
     #[serde(default)]
@@ -90,7 +103,7 @@ where
         .transpose()
 }
 
-fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiError> {
+pub(super) fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiError> {
     let reference = super::parse_snapshot_reference(
         opts.snapshot.clone(),
         opts.snapshot_reference_kind.as_deref().unwrap_or(""),
@@ -101,6 +114,90 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     if let Some(memory) = opts.memory_mib {
         builder = builder.memory(memory);
+    }
+    if let Some(max_cpus) = opts.max_cpus {
+        builder = builder.max_cpus(max_cpus);
+    }
+    if let Some(max_memory) = opts.max_memory_mib {
+        builder = builder.max_memory(max_memory);
+    }
+    if let Some(labels) = &opts.labels {
+        builder = builder.labels(labels);
+    }
+    if let Some(value) = &opts.workdir {
+        builder = builder.workdir(value);
+    }
+    if let Some(value) = &opts.shell {
+        builder = builder.shell(value);
+    }
+    if let Some(value) = &opts.entrypoint {
+        builder = builder.entrypoint(value);
+    }
+    if let Some(value) = &opts.cmd {
+        builder = builder.cmd(value);
+    }
+    if let Some(value) = &opts.env {
+        builder = builder.envs(value);
+    }
+    if let Some(init) = &opts.init {
+        builder = builder.init_with(&init.cmd, |options| {
+            options.args(init.args.clone()).envs(init.env.clone())
+        });
+    }
+    if let Some(hostname) = &opts.hostname {
+        builder = builder.hostname(hostname);
+    }
+    if let Some(policy) = &opts.pull_policy {
+        builder = builder.pull_policy(super::parse_pull_policy(policy)?);
+    }
+    if let Some(proxy) = opts.proxy.clone() {
+        if proxy.protocol != "socks5"
+            && (proxy.username.is_some() || proxy.password_source.is_some())
+        {
+            return Err(FfiError::invalid_argument(
+                "credentials are only supported for SOCKS5 proxies",
+            ));
+        }
+        if let Some(source) = &proxy.password_source
+            && source.kind != "env"
+        {
+            return Err(FfiError::invalid_argument(format!(
+                "unsupported SOCKS5 password source {:?}; only env is supported",
+                source.kind
+            )));
+        }
+        builder = match proxy.protocol.as_str() {
+            "http_connect" => builder.proxy(move |p| p.http_connect(proxy.address)),
+            "socks4" => builder.proxy(move |p| {
+                let proxy_builder = p.socks4(proxy.address);
+                match proxy.user_id {
+                    Some(user_id) => proxy_builder.user_id(user_id),
+                    None => proxy_builder,
+                }
+            }),
+            "socks5" => builder.proxy(move |p| {
+                let proxy_builder = p.socks5(proxy.address);
+                match (proxy.username, proxy.password_source) {
+                    (Some(username), Some(password)) if password.kind == "env" => proxy_builder
+                        .credentials(
+                            username,
+                            microsandbox::sandbox::SecretSource::env(
+                                password.var.unwrap_or_default(),
+                            ),
+                        ),
+                    (None, None) => proxy_builder,
+                    _ => proxy_builder.credentials(
+                        String::new(),
+                        microsandbox::sandbox::SecretSource::env(String::new()),
+                    ),
+                }
+            }),
+            protocol => {
+                return Err(FfiError::invalid_argument(format!(
+                    "unsupported outbound proxy protocol {protocol:?}"
+                )));
+            }
+        };
     }
     if let Some(policy) = &opts.network_policy {
         builder = builder.network_policy(parse_custom_network_policy(policy, Vec::new())?);
@@ -116,6 +213,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     if let Some(profile) = &opts.security_profile {
         builder = builder.security(parse_security_profile(profile)?);
+    }
+    if let Some(policy) = opts.guest_clock {
+        builder = builder.guest_clock(policy);
     }
     if let Some(seconds) = opts.max_duration_secs {
         builder = builder.max_duration(seconds);
@@ -224,17 +324,99 @@ pub unsafe extern "C" fn msb_sandbox_restore(
 mod tests {
     use super::*;
     #[test]
+    fn restore_pull_policy_reuses_existing_parser_before_dispatch() {
+        for value in ["always", "if-missing", "if_missing", "never"] {
+            let options: RestoreOptions = serde_json::from_value(
+                serde_json::json!({"snapshot":"saved", "pull_policy":value}),
+            )
+            .unwrap();
+            assert!(builder("child".into(), &options).is_ok());
+        }
+        let invalid: RestoreOptions = serde_json::from_value(
+            serde_json::json!({"snapshot":"saved", "pull_policy":"invalid"}),
+        )
+        .unwrap();
+        assert!(builder("child".into(), &invalid).is_err());
+    }
+
+    #[test]
+    fn restore_guest_clock_preserves_explicit_policy_and_omission() {
+        for (value, expected) in [
+            (serde_json::Value::Null, None),
+            (
+                serde_json::json!("sync"),
+                Some(microsandbox::sandbox::GuestClockPolicy::Sync),
+            ),
+            (
+                serde_json::json!("off"),
+                Some(microsandbox::sandbox::GuestClockPolicy::Off),
+            ),
+        ] {
+            let options: RestoreOptions = serde_json::from_value(
+                serde_json::json!({"snapshot":"saved", "guest_clock":value}),
+            )
+            .unwrap();
+            assert_eq!(options.guest_clock, expected);
+            assert!(builder("destination".into(), &options).is_ok());
+        }
+        assert!(
+            serde_json::from_value::<RestoreOptions>(
+                serde_json::json!({"snapshot":"saved", "guest_clock":"invalid"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restore_proxy_rejects_unsupported_auth_before_dispatch() {
+        for proxy in [
+            serde_json::json!({"protocol":"socks4", "address":"127.0.0.1:1080", "username":"user"}),
+            serde_json::json!({"protocol":"socks5", "address":"127.0.0.1:1080", "password_source":{"kind":"literal"}}),
+            serde_json::json!({"protocol":"invalid", "address":"127.0.0.1:1080"}),
+        ] {
+            let options: RestoreOptions =
+                serde_json::from_value(serde_json::json!({"snapshot":"saved", "proxy":proxy}))
+                    .unwrap();
+            assert!(builder("child".into(), &options).is_err());
+        }
+        for protocol in ["socks4", "socks5", "http_connect"] {
+            let options: RestoreOptions = serde_json::from_value(serde_json::json!({"snapshot":"saved", "proxy":{"protocol":protocol, "address":"127.0.0.1:1080"}})).unwrap();
+            assert!(builder("child".into(), &options).is_ok());
+        }
+    }
+
+    #[test]
     fn restore_rejects_fresh_boot_options() {
         for field in [
             "image",
             "network",
-            "cmd",
+            "foreground_command",
             "replace",
             "detached",
-            "entrypoint",
+            "background_command",
         ] {
             let mut value = serde_json::json!({"snapshot":"saved"});
             value[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<RestoreOptions>(value).is_err(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_command_defaults_keep_empty_argv_and_reject_invalid_shapes() {
+        let options: RestoreOptions = serde_json::from_value(serde_json::json!({
+            "snapshot":"saved", "workdir":"/root", "shell":"/bin/ash",
+            "entrypoint":[], "cmd":[], "env":{"KEY":"", "OTHER":"literal"}
+        }))
+        .unwrap();
+        assert_eq!(options.entrypoint, Some(vec![]));
+        assert_eq!(options.cmd, Some(vec![]));
+        assert!(builder("child".into(), &options).is_ok());
+        for field in ["workdir", "shell", "entrypoint", "cmd", "env"] {
+            let mut value = serde_json::json!({"snapshot":"saved"});
+            value[field] = serde_json::json!(42);
             assert!(
                 serde_json::from_value::<RestoreOptions>(value).is_err(),
                 "{field}"
@@ -257,6 +439,34 @@ mod tests {
         assert_eq!(options.max_duration_secs, Some(0));
         assert_eq!(options.idle_timeout_secs, Some(0));
         assert!(builder("destination".into(), &options).is_ok());
+    }
+
+    #[test]
+    fn restore_ceilings_preserve_omission_and_reject_unrepresentable_values() {
+        let omitted: RestoreOptions =
+            serde_json::from_value(serde_json::json!({"snapshot": "saved"})).unwrap();
+        assert!(omitted.max_cpus.is_none() && omitted.max_memory_mib.is_none());
+        for (field, invalid) in [("max_cpus", 256_u64), ("max_memory_mib", 1_u64 << 32)] {
+            for value in [
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(invalid),
+            ] {
+                let mut raw = serde_json::json!({"snapshot": "saved"});
+                raw[field] = value;
+                assert!(serde_json::from_value::<RestoreOptions>(raw).is_err());
+            }
+        }
+        for (cpus, memory) in [(0, 0), (2, 512)] {
+            let options: RestoreOptions = serde_json::from_value(serde_json::json!({
+                "snapshot": "saved", "max_cpus": cpus, "max_memory_mib": memory,
+            }))
+            .unwrap();
+            // Zero stays explicit so ordinary SDK resource admission can reject it.
+            assert_eq!(options.max_cpus, Some(cpus));
+            assert_eq!(options.max_memory_mib, Some(memory));
+            assert!(builder("child".into(), &options).is_ok());
+        }
     }
 
     #[test]

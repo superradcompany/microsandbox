@@ -39,7 +39,7 @@ import {
 } from "./sandbox.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
-import { Snapshot } from "./snapshot.js";
+import { snapshotCreateResult, type SnapshotCreateResult, SnapshotCaptureOptions } from "./snapshot-group.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 
 export interface SandboxStopResult {
@@ -340,19 +340,16 @@ export class SandboxHandle {
     return new LogStream(raw);
   }
 
-  /**
-   * Snapshot this sandbox's disk under a bare name. Resolves under
-   * `~/.microsandbox/snapshots/<name>/`. For an explicit filesystem
-   * destination, move the artifact with `Snapshot.save`/`Snapshot.load`.
-   *
-   * Live sources use automatic guest writeback. A paused source needs a matching
-   * prior flush and is never resumed implicitly. Use Snapshot.builder to select
-   * another guestFlush policy.
-   */
-  async snapshot(name: string): Promise<Snapshot> {
-    const raw = await withMappedErrors(() => this.inner.snapshot(name));
-    return new Snapshot(raw);
+  /** Create a new history and its exact initial checkpoint; existing names are refused. */
+  async snapshot(name: string): Promise<SnapshotCreateResult> {
+    return this.snapshotWith(name, (options) => options);
   }
+
+  async snapshotWith(name: string, configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult> {
+    const options = configure(new SnapshotCaptureOptions()).toNative();
+    return snapshotCreateResult(await withMappedErrors(() => this.inner.snapshot(name, options)));
+  }
+
 }
 
 function sandboxStopResultFromNapi(result: {

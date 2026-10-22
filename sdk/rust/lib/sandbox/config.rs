@@ -133,6 +133,17 @@ pub struct SandboxConfig {
     #[cfg(feature = "local")]
     #[serde(skip)]
     pub(crate) snapshot_lease: Option<microsandbox_image::storage_lease::StorageLease>,
+    /// Descriptor selected by a retained local checkpoint receiver. Validate under its
+    /// reader lease before child preparation; this constraint never crosses the runtime ABI.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_expected_digest: Option<String>,
+    /// Private archive staging and image leases for one canonical path-set launch.
+    /// Retained through child materialization, never written to persisted/runtime state.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) snapshot_prepared_sources:
+        Option<std::sync::Arc<crate::backend::local::snapshot::PreparedLaunchSource>>,
     /// Operation-local observer; never persisted or retained as a stream owner.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -238,6 +249,11 @@ pub struct SandboxConfig {
     /// Guest-visible capacity of `snapshot_root_layer_sources`.
     #[serde(skip)]
     pub(crate) snapshot_root_virtual_size: Option<u64>,
+
+    /// Explicit canonical launch capacity, applied only to the private child disk before boot.
+    /// Never sent to a runtime or persisted as an unfinished storage operation.
+    #[serde(skip)]
+    pub(crate) snapshot_root_growth_mib: Option<u32>,
 
     /// Archive to materialize directly into child staging during create.
     ///
@@ -659,6 +675,7 @@ impl SandboxConfig {
             config.snapshot_owned_source = None;
         }
         config.snapshot_root_virtual_size = None;
+        config.snapshot_root_growth_mib = None;
         #[cfg(feature = "local")]
         {
             config.snapshot_upper_layers.clear();
@@ -1160,6 +1177,10 @@ impl Default for SandboxConfig {
             creation_progress: None,
             #[cfg(feature = "local")]
             snapshot_lease: None,
+            #[cfg(feature = "local")]
+            snapshot_expected_digest: None,
+            #[cfg(feature = "local")]
+            snapshot_prepared_sources: None,
             insecure: false,
             ca_certs: Vec::new(),
             replace_existing: false,
@@ -1174,6 +1195,7 @@ impl Default for SandboxConfig {
             #[cfg(feature = "local")]
             snapshot_owned_source: None,
             snapshot_root_virtual_size: None,
+            snapshot_root_growth_mib: None,
             snapshot_archive_source: None,
             snapshot_parent: None,
             snapshot_base: None,
@@ -1643,6 +1665,7 @@ mod tests {
         let config = SandboxConfig {
             restore_boot_overrides: super::super::restore_builder::RestoreBootOverrides {
                 security: true,
+                ..Default::default()
             },
             ..Default::default()
         };

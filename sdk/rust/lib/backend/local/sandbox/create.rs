@@ -8,6 +8,7 @@
 #[cfg(all(test, unix))]
 mod archive_tests;
 mod cleanup;
+mod root_growth;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -247,14 +248,14 @@ impl LocalBackend {
         // preparation already placed its checkpoint closure in private child staging, so
         // feeding that result through the installed-snapshot copier would copy the closure onto
         // itself and destroy the eager restore source.
-        let installed_checkpoint_restore = if config.restore_resources.archive.is_none() {
+        let mut installed_checkpoint_restore = if config.restore_resources.archive.is_none() {
             config.checkpoint_restore.take()
         } else {
             None
         };
-        let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
+        let mut installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
-        let archive_stage = if let Some(archive) = config.restore_resources.archive.take() {
+        let mut archive_stage = if let Some(archive) = config.restore_resources.archive.take() {
             image_operations.push(archive.cache_operation.clone());
             let source = archive.stage.path().to_path_buf();
             let stage = archive.into_stage(&self.sandboxes_dir()).await?;
@@ -263,6 +264,80 @@ impl LocalBackend {
         } else {
             None
         };
+
+        if config.snapshot_root_growth_mib.is_some() {
+            // The complete disk/filesystem rewrite must succeed before replacement can
+            // stop the old sandbox. The worker owns staging and source leases through
+            // caller cancellation; publication later moves the directory without copying.
+            let prepared = root_growth::prepare(
+                config,
+                std::mem::take(&mut installed_file_sources),
+                installed_file_virtual_size,
+                installed_checkpoint_restore.take(),
+                archive_stage.take(),
+                self.sandboxes_dir(),
+                self.config().fs_state_limit(),
+            )
+            .await?;
+            config = prepared.0;
+            archive_stage = Some(prepared.1);
+        }
+
+        // Resolve the captured base while the old destination is still intact. In particular,
+        // an offline cache miss must not stop/delete a sandbox before returning an error.
+        // Keep the image's cache lease through the existing materialization/publication path.
+        // Branch capture resolves its source later, so leave that path's ordering unchanged.
+        let has_snapshot_image = config.snapshot_upper_source.is_some()
+            || config.checkpoint_restore.is_some()
+            || !config.snapshot_upper_layers.is_empty()
+            || installed_checkpoint_restore.is_some()
+            || !installed_file_sources.is_empty();
+        if resolved_image.is_none()
+            && has_snapshot_image
+            && config.branch_source.is_none()
+            && let RootfsSource::Oci(oci) = &config.spec.image
+        {
+            // Preserve option admission ahead of image/cache effects. Direct resolved
+            // snapshot inputs can bypass the public builder's reference-based check.
+            if !config.spec.patches.is_empty()
+                && !matches!(oci.root_disk, Some(RootDisk::Flat { .. }))
+            {
+                let source = if config.snapshot_upper_source.is_some() {
+                    "from_snapshot"
+                } else {
+                    "full snapshot restore"
+                };
+                return Err(crate::MicrosandboxError::InvalidConfig(format!(
+                    "patches cannot be combined with {source}"
+                )));
+            }
+            let materialization = if matches!(oci.root_disk, Some(RootDisk::Flat { .. })) {
+                RootfsMaterialization::Flat
+            } else {
+                RootfsMaterialization::Layered
+            };
+            let registry = RegistryOptions {
+                auth: config.registry_auth.clone(),
+                insecure: config.insecure,
+                ca_certs: config.ca_certs.clone(),
+                ..Default::default()
+            };
+            resolved_image = Some(
+                timing::measure(
+                    &timing_name,
+                    "image_resolution",
+                    self.resolve_oci_image_for_create(
+                        &oci.reference,
+                        config.spec.pull_policy,
+                        registry,
+                        config.manifest_digest.as_deref(),
+                        materialization,
+                        progress.clone(),
+                    ),
+                )
+                .await?,
+            );
+        }
 
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the
@@ -389,6 +464,9 @@ impl LocalBackend {
         }
         // All source payloads are now child-owned; runtime handles must not retain the source.
         config.snapshot_lease = None;
+        // Keep private archive staging and bundled-image leases through image resolution,
+        // but do not transfer them to the returned sandbox's long-lived configuration.
+        let _prepared_snapshot_sources = config.snapshot_prepared_sources.take();
         // Archive descriptors are intentionally inspected only while streaming into child
         // staging, after outer builder dispatch has selected its provisional mode. Re-evaluate
         // ownership here, before process creation, so a discovered full restore never receives an
@@ -797,9 +875,12 @@ impl LocalBackend {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
-        let created = self
-            .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
-            .await;
+        // Keep the large launch future out of this outer future's inline storage.
+        // Nested group restores can otherwise exhaust a default-sized thread stack
+        // in debug builds. Poll it here so ownership and cancellation stay unchanged.
+        let created =
+            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard)))
+                .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
@@ -1392,13 +1473,16 @@ impl LocalBackend {
         let original_ref: Reference = reference.parse().map_err(|e| {
             crate::MicrosandboxError::InvalidConfig(format!("invalid image reference: {e}"))
         })?;
-        if let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
-            &cache,
-            &[pinned_ref.clone(), original_ref],
-            &manifest_digest,
-            materialization,
-        )
-        .await?
+        // Explicit Always revalidates the immutable registry reference even when
+        // metadata is cached. The other policies may restore entirely offline.
+        if pull_policy != PullPolicy::Always
+            && let Some((pull_result, metadata)) = Registry::pull_snapshot_cached(
+                &cache,
+                &[pinned_ref.clone(), original_ref],
+                &manifest_digest,
+                materialization,
+            )
+            .await?
         {
             Self::emit_cached_pull_progress(progress.as_ref(), reference, &metadata);
             return Ok(ResolvedOciImage {
@@ -2792,6 +2876,114 @@ mod tests {
         backend
             .validate_sandbox_name_for_runtime("sdk-socket-test")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_root_growth_policy_refuses_before_staging_or_replacement() {
+        // Keep policy admission ahead of the unrelated Unix socket path-length guard.
+        #[cfg(unix)]
+        let temp = tempfile::Builder::new()
+            .prefix("msb-growth-policy-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        #[cfg(not(unix))]
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(
+            home.join("managed.json"),
+            r#"{"overrides":{"sandbox_defaults":{"oci":{"root_disk":{"kind":"managed","size_mib":512}}}}}"#,
+        )
+        .unwrap();
+        // Managed policy is security-sensitive; do not depend on the host's umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(home.join("managed.json"), fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let backend = Arc::new(
+            crate::test_support::local_backend_builder(&home)
+                .build()
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&backend.config().sandbox_defaults.oci.root_disk).unwrap()["size_mib"],
+            512
+        );
+        let pools = backend.db().await.unwrap();
+        let mut config = test_config_with_rootfs(
+            "protected",
+            RootfsSource::oci("example.invalid/saved:latest"),
+        );
+        let RootfsSource::Oci(image) = &mut config.spec.image else {
+            unreachable!()
+        };
+        image.root_disk = Some(crate::sandbox::RootDisk::managed(256));
+        config.spec.pull_policy = PullPolicy::Never;
+        let id = LocalBackend::insert_sandbox_record_with_status(
+            pools.write(),
+            &config,
+            SandboxStatus::Stopped,
+        )
+        .await
+        .unwrap();
+        let original = sandbox_entity::Entity::find_by_id(id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        let directory = backend.sandboxes_dir().join("protected");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("keep"), b"existing destination").unwrap();
+
+        // The policy check must win before even opening a snapshot disk. An invalid
+        // sentinel makes accidental filesystem preparation fail with a different error.
+        let source = temp.path().join("sealed.raw");
+        fs::write(&source, b"sealed source must not be opened for growth").unwrap();
+        config.snapshot_parent = Some("captured".into());
+        config.snapshot_upper_layers = vec![microsandbox_runtime::launch::RootfsUpperLayerConfig {
+            path: source.clone(),
+            format: "raw".into(),
+        }];
+        config.snapshot_root_growth_mib = Some(1024);
+        config.replace_existing = true;
+        let error = match backend
+            .create_sandbox(backend.clone(), config, SpawnMode::Attached, None)
+            .await
+        {
+            Ok(_) => panic!("managed disk policy must reject conflicting growth"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("1024 MiB conflicts with managed root capacity 512 MiB"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            b"sealed source must not be opened for growth"
+        );
+        assert_eq!(
+            fs::read(directory.join("keep")).unwrap(),
+            b"existing destination"
+        );
+        assert_eq!(
+            sandbox_entity::Entity::find_by_id(id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read_dir(backend.sandboxes_dir()).unwrap().count(),
+            1,
+            "policy refusal must not create a private staging directory"
+        );
     }
 
     #[tokio::test]

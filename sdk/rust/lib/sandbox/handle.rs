@@ -681,22 +681,25 @@ impl SandboxHandle {
         self.connect().await?.touch().await
     }
 
-    /// Snapshot this sandbox under a bare name using the handle's backend.
-    ///
-    /// Captures disk only with automatic guest writeback for live sources. A paused
-    /// source must already have a matching flushed boundary; it is never resumed
-    /// implicitly. Use `Snapshot::builder` to choose another guest-flush policy.
-    /// Cloud uses managed storage and its own disk-capture admission rules.
-    pub async fn snapshot(
+    /// Create a new source-bound history and its initial disk checkpoint.
+    pub async fn snapshot(&self, group: &str) -> MicrosandboxResult<crate::SnapshotCreateResult> {
+        self.snapshot_with(group, |capture| capture).await
+    }
+
+    /// Configure initial capture. An existing group cannot turn this call into append.
+    pub async fn snapshot_with(
         &self,
-        name: &str,
-    ) -> MicrosandboxResult<super::super::snapshot::Snapshot> {
-        use super::super::snapshot::Snapshot;
-        let config = Snapshot::builder(name).from_sandbox(&self.name).build()?;
-        self.backend
-            .snapshots()
-            .create(self.backend.clone(), config)
-            .await
+        group: &str,
+        configure: impl FnOnce(crate::SnapshotCaptureOptions) -> crate::SnapshotCaptureOptions,
+    ) -> MicrosandboxResult<crate::SnapshotCreateResult> {
+        crate::Snapshot::create_for(
+            self.backend.clone(),
+            &self.name,
+            self.id(),
+            group,
+            configure(crate::SnapshotCaptureOptions::default()),
+        )
+        .await
     }
 
     /// Request graceful shutdown and wait indefinitely for this run's runtime ownership release.

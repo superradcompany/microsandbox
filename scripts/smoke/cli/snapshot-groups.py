@@ -2,7 +2,7 @@
 """Opt-in live snapshot-group qualification in an isolated MSB_HOME.
 
 Set MSB_PATH and GROUP_TEST_OUT; optionally GROUP_TEST_LAYOUT=512M, flat:512M, or tmpfs:128M.
-All created VMs are stopped in finally, and every command/timing is retained.
+All created VMs are stopped and removed in finally; fixtures and command evidence remain.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -15,20 +15,25 @@ import time
 binary = os.environ["MSB_PATH"]
 # Match CI's public mirror; callers may select an explicit local fixture instead.
 image = os.environ.get("MSB_TEST_IMAGE", "mirror.gcr.io/library/alpine:latest")
-root = Path(os.environ["GROUP_TEST_OUT"])
+root = Path(os.environ["GROUP_TEST_OUT"]).resolve()
 root.mkdir(parents=True, exist_ok=False)
 home = root / "home"
-env = dict(os.environ, MSB_HOME=str(home))
+env = {key: value for key, value in os.environ.items()
+       if key not in ("MSB_HOME", "MSB_CONFIG_PATH", "MSB_BACKEND", "MSB_PROFILE")}
+env.update(MSB_HOME=str(home), MSB_BACKEND="local",
+           MSB_CONFIG_PATH=str(home / "absent.json"), NO_COLOR="1")
 layout = os.environ.get("GROUP_TEST_LAYOUT", "flat:512M")
 full_only = layout.startswith("tmpfs:")
 rows = []
 names = []
+groups = set()
+passed = False
 
 
 def run(label, *args, fail=False):
     started = time.perf_counter()
     result = subprocess.run([binary, *map(str, args)], env=env, capture_output=True,
-                            text=True, timeout=180)
+                            text=True, stdin=subprocess.DEVNULL, timeout=180)
     row = {"case": label, "ms": round((time.perf_counter() - started) * 1000, 2),
            "exit": result.returncode}
     rows.append(row)
@@ -44,11 +49,13 @@ def guest(label, name, script):
     return run(label, "exec", name, "--", "sh", "-ec", script)
 
 
-def create(name, snapshot=None, forked=False):
+def create(name, snapshot=None, forked=False, checkpoint=None):
     names.append(name)
     args = ["create", "--name", name]
     if snapshot:
         args += ["--from-snapshot", snapshot]
+        if checkpoint is not None:
+            args += ["--checkpoint", checkpoint]
     else:
         args += [image, "--root-disk", layout, "--memory", "256M", "--cpus", "2"]
     if forked:
@@ -57,12 +64,17 @@ def create(name, snapshot=None, forked=False):
 
 
 def capture(label, source, member, group="work", full=False, fail=False):
-    args = ["snapshot", "create", member, "--from-sandbox", source, "--group", group]
+    # Initial creation binds a group. Later capture checks that exact source;
+    # a restored child gets its own history even when it has shared ancestry.
+    args = (["snapshot", "checkpoint", group] if group in groups
+            else ["snapshot", "create", group])
+    args += ["--sandbox", source, "--name", member, "--integrity"]
     if full or full_only:
         args.append("--full")
     output = run(label, *args, fail=fail)
     if fail:
         return None
+    groups.add(group)
     path = Path(output.splitlines()[-1])
     descriptor = json.loads((path / "snapshot.json").read_text())
     assert path.parent == home / "snapshots" / group, path
@@ -70,8 +82,13 @@ def capture(label, source, member, group="work", full=False, fail=False):
     return path, descriptor
 
 
-def head(label, selector):
-    return json.loads(run(label, "snapshot", "head", selector, "--format", "json"))
+def head(label, group):
+    return json.loads(run(label, "snapshot", "head", group, "--format", "json"))
+
+
+def select(label, group, member):
+    return json.loads(run(label, "snapshot", "modify", group, "--set-head", member,
+                          "--format", "json"))
 
 
 try:
@@ -85,38 +102,40 @@ try:
     assert d2["parent"] == d1["snapshot_id"]
     assert head("advanced-head", "work")["head"] == d2["snapshot_id"]
 
-    create("old-child", "work:cp1")
+    create("old-child", "work", checkpoint="cp1")
     assert guest("read-old-child", "old-child", "cat /disk-marker") == "one"
-    branch, db = capture("capture-old-child", "old-child", "experiment")
+    capture("cross-source-refused", "old-child", "forbidden", fail=True)
+    branch, db = capture("capture-old-child", "old-child", "experiment", group="experiment-history")
     assert db["parent"] == d1["snapshot_id"]
     assert head("sibling-keeps-head", "work")["head"] == d2["snapshot_id"]
-    assert head("select-sibling", "work:experiment")["head"] == db["snapshot_id"]
-    create("selected-child", "work")
+    assert head("separate-child-head", "experiment-history")["head"] == db["snapshot_id"]
+    create("selected-child", "experiment-history")
     assert guest("read-selected-head", "selected-child", "cat /disk-marker") == "one"
     run("stop-selected-child", "stop", "selected-child")
-    head("select-cp2", "work:cp2")
+    select("select-cp2", "work", "cp2")
 
-    # Same source serialization creates ancestry; different children of one head are siblings.
-    create("race-a", "work:cp2")
-    create("race-b", "work:cp2")
+    # Different children retain sibling ancestry, but never share a source-bound group.
+    create("race-a", "work", checkpoint="cp2")
+    create("race-b", "work", checkpoint="cp2")
     with ThreadPoolExecutor(max_workers=2) as pool:
-        pending = [pool.submit(capture, "capture-" + child, child, child)
+        pending = [pool.submit(capture, "capture-" + child, child, child, group=child + "-history")
                    for child in ("race-a", "race-b")]
         siblings = [future.result() for future in pending]
     ids = {desc["snapshot_id"] for _, desc in siblings}
     assert all(desc["parent"] == d2["snapshot_id"] for _, desc in siblings)
-    assert head("race-head", "work")["head"] in ids
+    assert head("race-keeps-source-head", "work")["head"] == d2["snapshot_id"]
+    assert len(ids) == 2
     assert all(path.exists() for path, _ in siblings)
     for name in ("old-child", "race-a", "race-b"):
         run("stop-" + name, "stop", name)
-    head("select-cp2-again", "work:cp2")
+    select("select-cp2-again", "work", "cp2")
 
     # Full capture, direct local branch ancestry, and paused-source preservation.
     full1, f1 = capture("capture-full1", "source", "full1", full=True)
     assert f1["parent"] == d2["snapshot_id"]
     names.append("local-child")
     run("local-branch", "branch", "source", "--name", "local-child")
-    local_snap, dl = capture("capture-local-child", "local-child", "local-child", full=True)
+    local_snap, dl = capture("capture-local-child", "local-child", "local-child", group="local-history", full=True)
     assert dl["parent"] == f1["snapshot_id"]
     guest("source-three", "source", "echo three > /disk-marker; echo ram-three > /dev/shm/marker; sync")
     run("pause-source", "pause", "source")
@@ -137,35 +156,43 @@ try:
 
     base_archive = root / "base.msb"
     delta_archive = root / "delta.msb"
-    run("export-base", "snapshot", "save", full1, base_archive)
-    run("export-delta", "snapshot", "save", full2, delta_archive, "--since", full1)
+    run("export-base", "snapshot", "save", "work", base_archive, "--checkpoint", "full1")
+    run("export-delta", "snapshot", "save", "work", delta_archive, "--checkpoint", "full2", "--since", full1)
     inventory = json.loads(subprocess.check_output(["tar", "-xOf", str(delta_archive), "archive.json"]))
     dependent = inventory["completeness"] == "dependent"
     # A RAM-only cut can have no reusable objects: --since then emits a standalone archive.
     # Require a base exactly when the archive actually omitted required payloads.
     run("missing-base" + ("-refused" if dependent else "-not-needed"), "snapshot", "load",
-        delta_archive, "--group", "missing", fail=dependent)
+        "missing", "--file", delta_archive, fail=dependent)
     if dependent:
         assert not (home / "snapshots" / "missing").exists()
-    imported_base = Path(run("import-base", "snapshot", "load", base_archive,
-                             "--group", "received").splitlines()[-1])
-    imported_delta = Path(run("import-delta", "snapshot", "load", delta_archive,
-                              "--group", "received", "--base", "received:full1").splitlines()[-1])
-    assert imported_base.name == f1["snapshot_id"] and imported_delta.name == f2["snapshot_id"]
+    run("import-base", "snapshot", "load", "received", "--file", base_archive)
+    run("import-delta", "snapshot", "load", "received", "--file", delta_archive,
+        "--base", "received:full1")
     assert head("import-advanced-head", "received")["head"] == f2["snapshot_id"]
-    run("reimport-old", "snapshot", "load", base_archive, "--group", "received")
+    # Imported history has no source binding, even while the original still exists.
+    run("unbound-capture-refused", "snapshot", "checkpoint", "received", fail=True)
+    run("reimport-old", "snapshot", "load", "received", "--file", base_archive)
     assert head("old-import-kept-head", "received")["head"] == f2["snapshot_id"]
-    run("reimport-set-head", "snapshot", "load", base_archive, "--group", "received", "--set-head")
+    run("reimport-set-head", "snapshot", "load", "received", "--file", base_archive, "--set-head")
     assert head("old-import-explicit-head", "received")["head"] == f1["snapshot_id"]
-    run("head-removal-refused", "snapshot", "remove", "received:full1", "--force", fail=True)
+    select("select-removal-head", "received", "full2")
+    run("remove-head", "snapshot", "remove", "received", "--checkpoint", "full2", "--force")
+    assert head("head-parent-fallback", "received")["head"] == f1["snapshot_id"]
+    run("restore-removed-member", "snapshot", "load", "received", "--file", delta_archive)
+    run("clear-head", "snapshot", "modify", "received", "--clear-head")
+    assert head("cleared-head", "received")["head"] is None
+    run("headless-spawn-refused", "create", "--name", "headless-child",
+        "--from-snapshot", "received", fail=True)
+    select("restore-head-selection", "received", "full2")
 
-    duplicate = Path(run("import-second-group", "snapshot", "load", base_archive).splitlines()[-1])
-    assert duplicate.name == imported_base.name and duplicate.parent != imported_base.parent
-    run("ambiguous-id-refused", "snapshot", "inspect", f1["snapshot_id"], fail=True)
+    run("import-second-group", "snapshot", "load", "duplicate", "--file", base_archive)
+    run("inspect-exact-duplicate", "snapshot", "inspect", "duplicate", "--checkpoint", f1["snapshot_id"])
+    assert head("duplicate-keeps-identity", "duplicate")["head"] == f1["snapshot_id"]
     run("reindex", "snapshot", "reindex")
     for mode in ("eager", "forked"):
         child = "restored-" + mode
-        create(child, "received:full2", forked=mode == "forked")
+        create(child, "received", forked=mode == "forked", checkpoint="full2")
         assert guest("restored-state-" + mode, child,
                      "cat /disk-marker; cat /dev/shm/marker") == "three\nram-three"
         run("stop-" + child, "stop", child)
@@ -173,7 +200,7 @@ try:
     # Direct archive capture records ancestry but never creates an installed member.
     before_members = sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json"))
     direct = root / "direct.msb"
-    run("direct-capture", "snapshot", "create", "direct", "--from-sandbox", "source", "--full", "--output", direct)
+    run("direct-capture", "snapshot", "create", "--sandbox", "source", "--name", "direct", "--full", "--output", direct)
     assert sorted(str(p) for p in (home / "snapshots").rglob("snapshot.json")) == before_members
     create("direct-restored", str(direct), forked=True)
     assert guest("direct-restored-state", "direct-restored", "cat /dev/shm/marker") == "ram-three"
@@ -185,12 +212,26 @@ try:
     else:
         stopped, stopped_desc = capture("stopped-capture", "source", "stopped")
         assert stopped_desc["parent"] != f3["snapshot_id"], "direct archive did not advance source ancestry"
-        create("stopped-restored", "work:stopped")
+        create("stopped-restored", "work", checkpoint="stopped")
         assert guest("stopped-restored-state", "stopped-restored", "cat /disk-marker") == "three"
-    print(json.dumps({"pass": True, "layout": layout, "commands": len(rows)}), flush=True)
+    passed = True
 finally:
+    cleanup = []
     for name in reversed(names):
-        result = subprocess.run([binary, "stop", name], env=env, capture_output=True,
-                                text=True, timeout=30)
-        (root / ("cleanup-" + name + ".log")).write_text(result.stdout + result.stderr)
+        for action in ("stop", "rm"):
+            try:
+                result = subprocess.run([binary, action, name], env=env, capture_output=True,
+                                        text=True, stdin=subprocess.DEVNULL, timeout=30)
+                cleanup.append({"name": name, "action": action, "exit": result.returncode})
+                (root / ("cleanup-" + action + "-" + name + ".log")).write_text(result.stdout + result.stderr)
+                if result.returncode:
+                    passed = False
+            except subprocess.TimeoutExpired:
+                cleanup.append({"name": name, "action": action, "timeout": True})
+                passed = False
     (root / "results.json").write_text(json.dumps(rows, indent=2))
+    report = {"pass": passed, "layout": layout, "commands": len(rows), "cleanup": cleanup}
+    (root / "report.json").write_text(json.dumps(report, indent=2))
+    print(json.dumps(report), flush=True)
+if not passed:
+    raise RuntimeError("group qualification or cleanup failed; inspect report.json")

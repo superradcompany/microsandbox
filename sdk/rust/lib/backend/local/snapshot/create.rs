@@ -44,6 +44,13 @@ struct CapturedFullSnapshot {
     source_recovery: Option<SnapshotSourceRecoveryError>,
 }
 
+/// Admission mode is local control flow, not part of the portable capture configuration.
+enum CaptureGroupMode {
+    Legacy,
+    New(crate::sandbox::SandboxId),
+    Existing,
+}
+
 /// A complete operation-owned artifact, not yet a durable group member.
 #[derive(Debug)]
 struct StagedSnapshot {
@@ -121,7 +128,44 @@ impl Drop for SnapshotDiskClosure {
 
 pub(super) async fn create_snapshot(
     local: &LocalBackend,
+    config: SnapshotConfig,
+) -> MicrosandboxResult<Snapshot> {
+    create_snapshot_inner(local, config, CaptureGroupMode::Legacy).await
+}
+
+/// Create a new history, never append through the group-creation API.
+pub(super) async fn create_group(
+    local: &LocalBackend,
+    config: SnapshotConfig,
+    source_id: crate::sandbox::SandboxId,
+) -> MicrosandboxResult<Snapshot> {
+    create_snapshot_inner(local, config, CaptureGroupMode::New(source_id)).await
+}
+
+pub(super) async fn create_checkpoint(
+    local: &LocalBackend,
     mut config: SnapshotConfig,
+) -> MicrosandboxResult<Snapshot> {
+    let root = config
+        .dest_dir
+        .clone()
+        .unwrap_or_else(|| local.snapshots_dir());
+    let (group, source) = super::group::capture_source(
+        local,
+        &root,
+        config.group.as_deref(),
+        (!config.source_sandbox.is_empty()).then_some(config.source_sandbox.as_str()),
+    )
+    .await?;
+    config.group = Some(group);
+    config.source_sandbox = source;
+    create_snapshot_inner(local, config, CaptureGroupMode::Existing).await
+}
+
+async fn create_snapshot_inner(
+    local: &LocalBackend,
+    mut config: SnapshotConfig,
+    mode: CaptureGroupMode,
 ) -> MicrosandboxResult<Snapshot> {
     if config.force {
         return Err(MicrosandboxError::InvalidConfig(
@@ -134,6 +178,18 @@ pub(super) async fn create_snapshot(
     }
     validate_snapshot_name(&config.name)?;
     let lineage = super::lineage::begin(local, &config.source_sandbox).await?;
+    if let CaptureGroupMode::New(expected) = &mode {
+        // The sequencer also excludes removal/recreation. Check the receiver identity
+        // here, before creating a group or asking the guest to capture anything.
+        let actual = crate::sandbox::SandboxId::local(lineage.sandbox_id());
+        if expected != &actual {
+            return Err(MicrosandboxError::SandboxReplaced {
+                name: config.source_sandbox.clone(),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+    }
     let root = config
         .dest_dir
         .take()
@@ -142,10 +198,39 @@ pub(super) async fn create_snapshot(
         .group
         .take()
         .unwrap_or_else(|| config.source_sandbox.clone());
-    let group_dir = super::group::ensure(&root, Some(&group_name)).await?;
+    let source = super::source::Source::capture(
+        local.db().await?.write(),
+        lineage.sandbox_id(),
+        &config.source_sandbox,
+    )
+    .await?;
+    let (group_dir, reservation) = match mode {
+        CaptureGroupMode::Existing => (
+            super::group::ensure_checkpoint(&root, &group_name, source.clone()).await?,
+            None,
+        ),
+        CaptureGroupMode::New(_) => {
+            let reservation =
+                super::group::ensure_new_capture(&root, &group_name, source.clone()).await?;
+            (reservation.directory().to_path_buf(), Some(reservation))
+        }
+        CaptureGroupMode::Legacy => (
+            super::group::ensure_capture(&root, &group_name, source.clone()).await?,
+            None,
+        ),
+    };
+    super::publication::complete_batch(local.db().await?.write(), &group_dir).await?;
+    let target = if reservation.is_none() {
+        Some(super::group::CaptureTarget::admit(&group_dir, source).await?)
+    } else {
+        // Initial group reservation already retains writer ownership through capture.
+        None
+    };
+    // Capture may continue while a group generation is exchanged. Its private staging
+    // must therefore live beside the group, never inside the directory being replaced.
     let staging = tempfile::Builder::new()
         .prefix(".capture-")
-        .tempdir_in(&group_dir)?;
+        .tempdir_in(&root)?;
     let name = config.name.clone();
     let source_sandbox = config.source_sandbox.clone();
     config.dest_dir = Some(staging.path().to_path_buf());
@@ -154,9 +239,9 @@ pub(super) async fn create_snapshot(
         local,
         captured,
         staging,
+        (group_dir, reservation, target),
         lineage,
-        name,
-        generated_name,
+        (name, generated_name),
         &source_sandbox,
     )
     .await
@@ -168,20 +253,19 @@ async fn publish_snapshot_group(
     local: &LocalBackend,
     captured: StagedSnapshot,
     staging: tempfile::TempDir,
+    (group_dir, reservation, target): (
+        PathBuf,
+        Option<super::group::CaptureReservation>,
+        Option<super::group::CaptureTarget>,
+    ),
     lineage: super::lineage::CaptureLineage,
-    name: String,
-    generated_name: bool,
+    (name, generated_name): (String, bool),
     source_sandbox: &str,
 ) -> MicrosandboxResult<Snapshot> {
     let StagedSnapshot {
         snapshot: mut captured,
         source_recovery,
     } = captured;
-    let group_dir = staging
-        .path()
-        .parent()
-        .expect("group staging has a parent")
-        .to_path_buf();
     let published = async {
     lineage.validate_source(local, source_sandbox).await?;
     // Ancestry belongs to the immutable descriptor, not to the group head or export base.
@@ -199,22 +283,33 @@ async fn publish_snapshot_group(
     // release the source lock while a blocking group commit is still running in the background.
     let publication_db = local.db().await?.write().clone();
     let captured = tokio::spawn(async move {
+        // A detached publisher owns the initial reservation even if its caller
+        // cancels. Reuse admission instead of deadlocking on our own writer lease.
+        let _reservation = reservation;
+        let writer = match &_reservation {
+            Some(reservation) => reservation.writer(),
+            None => super::writer::WriterLease::acquire(&group_dir).await?,
+        };
+        if let Some(target) = target {
+            target.validate(&group_dir).await?;
+        }
         let destination = group_dir.join(captured.id().as_str());
         let _publication = microsandbox_image::storage_lease::StorageLease::shared_async(destination.clone()).await?;
         super::publication::prepare(&publication_db, &destination, captured.digest(), captured.manifest()).await?;
-        let update = publish_with_name_retry(
+        let update = publish_with_name_retry_admitted(
             &group_dir,
             staging.path(),
             captured.id(),
             name,
             generated_name,
             || format!("msb-{:08x}", rand::random::<u32>()),
+            writer.clone(),
         ).await?;
         captured.path = group_dir.join(captured.id().as_str());
         super::publication::complete(&publication_db, captured.path(), captured.digest(), captured.manifest()).await?;
         captured.lease = Some(super::lease::reader_async(captured.path.clone()).await?);
         lineage.commit(captured.id()).await?;
-        tracing::info!(group = %update.group, head = %update.head, reason = ?update.reason, "snapshot group publication");
+        tracing::info!(group = %update.group, head = ?update.head, reason = ?update.reason, "snapshot group publication");
         captured.head_update = Some(update);
         Ok::<_, MicrosandboxError>(captured)
     }).await.map_err(|error| MicrosandboxError::Runtime(format!("snapshot publication task: {error}")))??;
@@ -224,17 +319,48 @@ async fn publish_snapshot_group(
 }
 
 /// Retry generated local names against the same captured artifact; explicit names remain strict.
+#[cfg(test)]
 pub(super) async fn publish_with_name_retry(
+    group_dir: &Path,
+    staged: &Path,
+    snapshot_id: &SnapshotId,
+    name: String,
+    generated_name: bool,
+    next_name: impl FnMut() -> String,
+) -> MicrosandboxResult<super::group::HeadUpdate> {
+    let writer = super::writer::WriterLease::acquire(group_dir).await?;
+    publish_with_name_retry_admitted(
+        group_dir,
+        staged,
+        snapshot_id,
+        name,
+        generated_name,
+        next_name,
+        writer,
+    )
+    .await
+}
+
+async fn publish_with_name_retry_admitted(
     group_dir: &Path,
     staged: &Path,
     snapshot_id: &SnapshotId,
     mut name: String,
     generated_name: bool,
     mut next_name: impl FnMut() -> String,
+    writer: super::writer::WriterLease,
 ) -> MicrosandboxResult<super::group::HeadUpdate> {
     loop {
         let aliases = BTreeMap::from([(snapshot_id.to_string(), name)]);
-        match super::group::publish(group_dir, staged, &aliases, snapshot_id, false).await {
+        match super::group::publish_admitted(
+            group_dir,
+            staged,
+            &aliases,
+            snapshot_id,
+            writer.clone(),
+        )
+        .await
+        {
             Err(MicrosandboxError::SnapshotAlreadyExists(_)) if generated_name => {
                 // Alias conflicts are preflight errors: no staged payload was moved and the
                 // descriptor's identity/ancestry remain unchanged, so no recapture is needed.
@@ -868,6 +994,7 @@ async fn publish_full_archive(
             path: archive.path().to_path_buf(),
             snapshot_id: archive.id().to_string(),
             digest: archive.descriptor_digest().to_string(),
+            head_update: None,
         }
     })
 }
@@ -1058,6 +1185,7 @@ fn installed_artifact(snapshot: &Snapshot) -> PublishedSnapshotArtifact {
         path: snapshot.path().to_path_buf(),
         snapshot_id: snapshot.id().to_string(),
         digest: snapshot.digest().to_string(),
+        head_update: snapshot.head_update.clone(),
     }
 }
 
@@ -2445,6 +2573,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captured_checkpoint_is_not_published_into_a_recreated_group() {
+        for detail in [None, Some("source resume failed")] {
+            let temp = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap();
+            fixture_source(&local).await;
+            let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+            let source = super::super::source::Source::capture(
+                local.db().await.unwrap().write(),
+                lineage.sandbox_id(),
+                "box",
+            )
+            .await
+            .unwrap();
+            let group =
+                super::super::group::ensure_capture(&local.snapshots_dir(), "box", source.clone())
+                    .await
+                    .unwrap();
+            let target = super::super::group::CaptureTarget::admit(&group, source.clone())
+                .await
+                .unwrap();
+            let staging = tempfile::Builder::new()
+                .prefix(".capture-")
+                .tempdir_in(local.snapshots_dir())
+                .unwrap();
+            let staged_path = staging.path().join("snapshot");
+            let captured = captured_fixture(&temp.path().join("checkpoint"), detail);
+            let staged = stage_full_snapshot(
+                SnapshotDestination {
+                    name: "snapshot",
+                    path: &staged_path,
+                    force: false,
+                },
+                "box",
+                captured,
+                staging.path().to_path_buf(),
+                Instant::now(),
+                0,
+            )
+            .await
+            .unwrap();
+            // Reuse the source binding too: comparing only the sandbox ID cannot detect
+            // that this name now denotes a different checkpoint history.
+            std::fs::remove_dir_all(&group).unwrap();
+            super::super::group::ensure_capture(&local.snapshots_dir(), "box", source)
+                .await
+                .unwrap();
+            let group_before = std::fs::read(group.join("group.json")).unwrap();
+            let error = publish_snapshot_group(
+                &local,
+                staged,
+                staging,
+                (group.clone(), None, Some(target)),
+                lineage,
+                ("snapshot".into(), false),
+                "box",
+            )
+            .await
+            .unwrap_err();
+            let publication_error = match (detail, error) {
+                (Some(detail), MicrosandboxError::SnapshotSourceRecovery(failure)) => {
+                    assert_eq!(failure.detail, detail);
+                    assert!(failure.artifact.is_none());
+                    failure
+                        .publication_error
+                        .expect("group publication failure")
+                }
+                (None, error) => error.to_string(),
+                (_, error) => panic!("source recovery details were lost: {error}"),
+            };
+            assert!(
+                publication_error.contains("removed or replaced during capture"),
+                "{publication_error}"
+            );
+            assert_eq!(
+                std::fs::read(group.join("group.json")).unwrap(),
+                group_before
+            );
+            assert!(
+                super::super::store::list_indexed(&local)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!staged_path.exists());
+            assert!(!std::fs::read_dir(&group).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("snap_")
+            }));
+        }
+    }
+
+    #[tokio::test]
     async fn recovery_failure_preserves_published_installed_snapshot() {
         for detail in [
             "source resume failed",
@@ -2461,12 +2687,21 @@ mod tests {
             let snapshot_id = captured.manifest.snapshot_id.clone();
             fixture_source(&local).await;
             let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
-            let group = super::super::group::ensure(&local.snapshots_dir(), Some("box"))
-                .await
-                .unwrap();
+            let source = super::super::source::Source::capture(
+                local.db().await.unwrap().write(),
+                lineage.sandbox_id(),
+                "box",
+            )
+            .await
+            .unwrap();
+            let reservation =
+                super::super::group::ensure_new_capture(&local.snapshots_dir(), "box", source)
+                    .await
+                    .unwrap();
+            let group = reservation.directory().to_path_buf();
             let staging = tempfile::Builder::new()
                 .prefix(".capture-")
-                .tempdir_in(&group)
+                .tempdir_in(local.snapshots_dir())
                 .unwrap();
             let staged_path = staging.path().join("snapshot");
             let staged = stage_full_snapshot(
@@ -2494,9 +2729,9 @@ mod tests {
                 &local,
                 staged,
                 staging,
+                (group.clone(), Some(reservation), None),
                 lineage,
-                "snapshot".into(),
-                false,
+                ("snapshot".into(), false),
                 "box",
             )
             .await
@@ -2509,6 +2744,17 @@ mod tests {
             assert!(failure.publication_error.is_none());
             let artifact = failure.artifact.unwrap();
             assert_eq!(artifact.kind, SnapshotArtifactKind::Installed);
+            let outcome = artifact
+                .head_update
+                .as_ref()
+                .expect("published head outcome");
+            assert_eq!(outcome.head.as_deref(), Some(snapshot_id.as_str()));
+            assert_eq!(outcome.previous, None);
+            assert_eq!(
+                outcome.reason,
+                crate::snapshot::HeadUpdateReason::Initialized
+            );
+            assert!(outcome.changed);
             assert_eq!(artifact.path, destination);
             assert_ne!(artifact.path, staged_path);
             assert!(!staged_path.exists());
@@ -2521,6 +2767,8 @@ mod tests {
             assert_eq!(
                 super::super::group::resolve(&local.snapshots_dir(), "box")
                     .await
+                    .unwrap()
+                    .canonicalize()
                     .unwrap(),
                 destination
             );
@@ -2553,6 +2801,15 @@ mod tests {
                     .unwrap();
             assert_eq!(artifact.snapshot_id, reopened.id().to_string());
             assert_eq!(artifact.digest, reopened.digest());
+            // Another operation may change the head before the caller handles this error.
+            // The captured outcome must still describe the publication that failed recovery.
+            super::super::group::change_head(&group, None)
+                .await
+                .unwrap();
+            assert_eq!(outcome.head.as_deref(), Some(artifact.snapshot_id.as_str()));
+            let serialized = serde_json::to_value(&artifact).unwrap();
+            assert_eq!(serialized["head_update"]["head"], artifact.snapshot_id);
+            assert_eq!(serialized["head_update"]["reason"], "initialized");
         }
     }
 
@@ -2592,6 +2849,13 @@ mod tests {
         assert!(failure.publication_error.is_none());
         let artifact = failure.artifact.unwrap();
         assert_eq!(artifact.kind, SnapshotArtifactKind::Archive);
+        assert!(artifact.head_update.is_none());
+        assert!(
+            serde_json::to_value(&artifact)
+                .unwrap()
+                .get("head_update")
+                .is_none()
+        );
         assert_eq!(artifact.path, out);
         let restored = super::super::archive::materialize_archive_for_child(
             &local,
@@ -2884,11 +3148,20 @@ mod tests {
             assert!(!root.exists());
         }
         drop(guard);
-        assert!(
-            microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
-                .unwrap()
-                .is_some()
-        );
+        // Concurrent fork/exec tests can briefly retain an inherited CLOEXEC handle.
+        // Require release within a bound; the held-guard assertions above stay immediate.
+        let _reacquired = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(guard) =
+                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box").unwrap()
+                {
+                    break guard;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("capture lifecycle ownership did not release");
     }
 
     #[test]
@@ -2951,11 +3224,22 @@ mod tests {
                 // The sentinel runs after the detached capture on the same one-thread queue.
                 tokio::task::spawn_blocking(|| {}).await.unwrap();
                 assert!(weak.upgrade().is_none());
-                assert!(
-                    microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
-                        .unwrap()
-                        .is_some()
-                );
+                // Unrelated subprocess tests can temporarily inherit this
+                // descriptor between fork and exec. The Rust worker is gone;
+                // require bounded OS release rather than a zero-latency probe.
+                let _reacquired = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Some(guard) =
+                            microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run, "box")
+                                .unwrap()
+                        {
+                            break guard;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("cancelled capture leaked lifecycle ownership");
                 assert!(std::fs::read_dir(&sandbox).unwrap().all(|entry| {
                     !entry
                         .unwrap()

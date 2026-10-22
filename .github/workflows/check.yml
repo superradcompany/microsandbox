@@ -1570,6 +1570,8 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_restore_resource_intent.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_compatibility.py
+          python3 -m unittest discover -s scripts/smoke/cli -p test_checkpoint_integration.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_catalog_history.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_managed_job_integration.py
 
@@ -1678,6 +1680,7 @@ jobs:
           ln -sf libkrunfw.so.${{ env.LIBKRUNFW_ABI }} ~/.microsandbox/lib/libkrunfw.so
 
       - name: Prepare pre-built agentd
+        id: integration_ready
         # upload-artifact normalizes executable bits. The runtime build already
         # produced agentd; restore its mode instead of compiling it again here.
         run: chmod +x build/agentd
@@ -1691,6 +1694,10 @@ jobs:
       - name: Run integration tests
         env:
           MSB_TEST_ISOLATE_HOME: "1"
+          # Self-provisioning fixtures may select a fresh backend home. Resolve the
+          # downloaded runtime explicitly instead of looking inside that empty home.
+          MSB_PATH: ${{ github.workspace }}/build/msb
+          MSB_LIBKRUNFW_PATH: ${{ github.workspace }}/build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           MSB_AGENTD_PATH: ${{ github.workspace }}/build/agentd
         run: |
           export PATH="$HOME/.microsandbox/bin:$PATH"
@@ -1706,16 +1713,21 @@ jobs:
           # historical binaries, existing VMs, and dummy secrets. The jobs binary also requires
           # MSB_JOB_TEST_SANDBOX and an idle, caller-provisioned VM, with serial execution and
           # an explicit restart opt-in. Keep these out of this self-provisioning batch; the
-          # catalog and managed-job fixtures are provisioned separately below.
+          # catalog and managed-job fixtures are provisioned separately below. Snapshot unit
+          # helpers are invoked by their parent crash/cancellation tests, not standalone;
+          # historical readers get a pinned release in the dedicated fixture below. The
+          # artifact-dependent live snapshot diagnostics remain explicit qualification tests.
           cargo-nextest nextest run \
             --archive-file build/rust-integration-tests.tar.zst \
             --workspace-remap "${{ github.workspace }}" \
             --run-ignored=only \
-            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
+            -E 'not (binary(=jobs) or binary(=creation_progress_live) or binary(=eager_lifecycle_live) or test(/^backend::local::control::.*::live_/) or test(/^runtime::launch_contract::tests::released_/) or test(/^backend::local::snapshot::/) or test(/^backend::local::database::tests::live_sdk_upgrades_catalog_with_previous_version_runtime$/))' \
             --test-threads 2
 
       - name: Managed-job integration fixtures
-        if: ${{ !cancelled() }}
+        # Keep independent test results after a test failure, but never launch fixtures
+        # when admission/download/install failed and their binaries are unavailable.
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 15
         run: |
           python3 scripts/smoke/cli/managed-job-integration.py \
@@ -1736,7 +1748,7 @@ jobs:
       # This fixture needs a released runtime, not the candidate installed above.
       # Keep its signal even when an unrelated test in the generic batch fails.
       - name: Historical catalog compatibility (v0.6.18)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         timeout-minutes: 10
         run: |
           python3 scripts/smoke/cli/catalog-history.py \
@@ -1753,10 +1765,27 @@ jobs:
           path: build/catalog-history-results/*.log
           if-no-files-found: ignore
 
+      - name: Snapshot reader compatibility (v0.7.8)
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          python3 scripts/smoke/cli/snapshot-compatibility.py \
+            --archive build/rust-integration-tests.tar.zst \
+            --workspace "${{ github.workspace }}" \
+            --output build/snapshot-compatibility-results
+
+      - name: Upload snapshot compatibility results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: snapshot-compatibility-results
+          path: build/snapshot-compatibility-results/
+          if-no-files-found: warn
+
       # These tests require a captured guest and scoped fault injection; run every case
       # explicitly, including all three eager modes, even if the general batch failed.
       - name: Checkpoint lifecycle integration fixtures
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.integration_ready.outcome == 'success' }}
         run: |
           export LD_LIBRARY_PATH="${{ github.workspace }}/build:$HOME/.microsandbox/lib"
           python3 scripts/smoke/cli/checkpoint-integration.py \
@@ -1969,6 +1998,7 @@ jobs:
           path: sdk/python/dist/
 
       - name: Install Python development environment
+        id: python_ready
         working-directory: sdk/python
         run: |
           uv sync --group dev --no-install-project
@@ -1986,7 +2016,8 @@ jobs:
           uv run --project sdk/python --no-sync pytest --import-mode=importlib -n 2 --dist loadscope sdk/python/integration
 
       - name: Python managed-job and null-stdin regression
-        if: ${{ !cancelled() }}
+        # Run after test failures only when artifacts and the Python environment are ready.
+        if: ${{ !cancelled() && steps.python_ready.outcome == 'success' }}
         timeout-minutes: 5
         run: |
           chmod +x build/msb build/agentd

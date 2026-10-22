@@ -635,14 +635,22 @@ fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
 
 /// Compute a sparse-aware fixed-leaf Merkle root without reading unallocated holes.
 pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
-    let started = std::time::Instant::now();
     let mut file = File::open(path)?;
+    sparse_file_integrity_from_file(&mut file)
+}
+
+/// Hash an already-open payload using the unchanged checkpoint-file/1 format.
+///
+/// Verification callers retain this descriptor through hashing and alias checks so a path
+/// replacement cannot redirect the read. The file cursor is unspecified after this operation.
+pub fn sparse_file_integrity_from_file(file: &mut File) -> ImageResult<SparseFileIntegrity> {
+    let started = std::time::Instant::now();
     let logical_size = file.metadata()?.len();
     let logical_leaves = logical_size.div_ceil(FILE_MERKLE_LEAF_SIZE as u64).max(1);
     let tree_leaves = logical_leaves.next_power_of_two();
     let tree_height = tree_leaves.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(&file)?;
+    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(file)?;
     let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaves);
     let mut accumulator = MerkleAccumulator::new(tree_height);
     let mut cursor = 0u64;

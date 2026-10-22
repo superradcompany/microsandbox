@@ -42,6 +42,8 @@ use crate::config::layers::BackendConfig;
 use crate::config::{GlobalConfig, GlobalConfigPatch};
 #[cfg(feature = "local")]
 use crate::runtime::SpawnMode;
+#[cfg(feature = "local")]
+use crate::snapshot::SnapshotId;
 use crate::snapshot::SnapshotReference;
 use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Mebibytes};
 
@@ -61,6 +63,8 @@ pub struct SandboxBuilder {
     /// Snapshot restore progress: an explicit reference awaits backend resolution during async
     /// `build()`, then becomes inspected state kept separate from the caller's sparse options.
     restore: RestoreState,
+    /// Canonical launch checks explicit boot choices separately from deprecated restore.
+    canonical_snapshot_launch: bool,
 }
 
 /// Lifecycle of a snapshot restore flowing through the builder.
@@ -71,6 +75,9 @@ enum RestoreState {
     None,
     /// Reference awaiting backend resolution during async `build()`.
     Pending(SnapshotReference),
+    /// Explicit local archive/artifact set, resolved without publishing an installed group.
+    #[cfg(feature = "local")]
+    PendingPaths(Vec<PathBuf>, Option<SnapshotId>),
     /// Inspected snapshot state, kept separate from the caller's sparse options until finishing.
     Prepared(Box<SandboxConfigPatch>),
 }
@@ -137,11 +144,18 @@ impl SandboxBuilder {
             build_error: None,
             config_scripts: BTreeMap::new(),
             restore: RestoreState::default(),
+            canonical_snapshot_launch: false,
         }
     }
 
     /// Overlay sparse sandbox configuration on the hardcoded and global defaults.
     pub fn overlay(mut self, patch: SandboxConfigPatch) -> Self {
+        self.record_prepared_boot_override(|boot| {
+            boot.security |= patch.spec.security_profile.is_some();
+            boot.init |= patch.spec.init.is_some();
+            boot.hostname |= patch.spec.runtime.hostname.is_some();
+            boot.thp |= patch.spec.resources.thp.is_some();
+        });
         self.config.overlay_mut(patch);
         self
     }
@@ -231,6 +245,115 @@ impl SandboxBuilder {
         self
     }
 
+    /// Apply already-classified explicit snapshot paths for canonical CLI launch.
+    /// This internal adapter does not extend legacy restore's selector grammar.
+    #[doc(hidden)]
+    #[cfg(feature = "local")]
+    pub fn override_snapshot_paths(
+        mut self,
+        paths: Vec<PathBuf>,
+        checkpoint: Option<SnapshotId>,
+    ) -> Self {
+        self.config.spec.image = Some(RootfsSource::oci(""));
+        self.config.local_restore_paths_resolved = Some(false);
+        self.restore = RestoreState::PendingPaths(paths, checkpoint);
+        // Match explicit restore resource admission; ambient defaults must not grant
+        // host access merely because a new source grammar was used.
+        self.config.spec.mounts.get_or_insert_default();
+        self.config.spec.network.ports.get_or_insert_default();
+        self.config
+            .restore_resources
+            .get_or_insert_with(Default::default)
+            .require_complete = true;
+        self
+    }
+
+    /// Apply canonical create/run mode controls without extending deprecated restore.
+    #[doc(hidden)]
+    pub fn snapshot_launch_options(mut self, disk_only: bool, cow_memory: bool) -> Self {
+        self.canonical_snapshot_launch = true;
+        if disk_only {
+            self = self.disk_only();
+        }
+        if cow_memory {
+            self = self.forked();
+        }
+        self.config.spec.mounts.get_or_insert_default();
+        self.config.spec.network.ports.get_or_insert_default();
+        self.config
+            .restore_resources
+            .get_or_insert_with(Default::default)
+            .require_complete = true;
+        self
+    }
+
+    /// Whether the shared CLI mount adapter should accept captured-disk selectors.
+    #[doc(hidden)]
+    pub fn is_snapshot_launch(&self) -> bool {
+        self.canonical_snapshot_launch
+    }
+
+    /// Apply explicit resource authorization to canonical create/run preparation.
+    #[doc(hidden)]
+    pub fn snapshot_resource_options(
+        mut self,
+        allow_missing: bool,
+        inherit: bool,
+        policy: Option<super::ExternalMountRestorePolicy>,
+    ) -> Self {
+        let resources = self
+            .config
+            .restore_resources
+            .get_or_insert_with(Default::default);
+        resources.allow_missing = allow_missing;
+        resources.require_complete = !allow_missing;
+        resources.inherit = inherit;
+        if let Some(policy) = policy {
+            self = self.external_mount_policy(policy);
+        }
+        self
+    }
+
+    /// Share restore's explicit binding/private captured-disk selection semantics.
+    #[doc(hidden)]
+    pub fn snapshot_volume(
+        mut self,
+        guest: impl Into<String>,
+        configure: impl FnOnce(MountBuilder) -> MountBuilder,
+    ) -> Self {
+        let resources = self
+            .config
+            .restore_resources
+            .get_or_insert_with(Default::default);
+        let mounts = self.config.spec.mounts.get_or_insert_with(Vec::new);
+        match configure(MountBuilder::new(guest)).build_restore() {
+            Ok(Ok(mount)) => {
+                let guest = mount.guest();
+                resources.captured.remove(guest);
+                resources.mapped.insert(guest.into());
+                mounts.retain(|existing| existing.guest() != guest);
+                mounts.push(mount);
+            }
+            Ok(Err(guest)) => {
+                resources.mapped.remove(&guest);
+                mounts.retain(|existing| existing.guest() != guest);
+                resources.captured.insert(guest);
+            }
+            Err(error) => self.build_error = Some(error),
+        }
+        self
+    }
+
+    /// Bind the CLI's selected member to its descriptor before deferred preparation.
+    #[doc(hidden)]
+    #[cfg(feature = "local")]
+    pub fn override_snapshot_member(mut self, checkpoint: &crate::snapshot::Checkpoint) -> Self {
+        self.config.spec.image = Some(RootfsSource::oci(""));
+        self = self.with_snapshot_reference(checkpoint.reference());
+        self.config.snapshot_expected_digest = Some(checkpoint.digest().to_owned());
+        self
+    }
+
     /// Record a deferred configuration error, surfaced at `build()`. Keeps the
     /// first error so the earliest misconfiguration wins.
     pub(super) fn config_error(mut self, message: impl Into<String>) -> Self {
@@ -241,6 +364,7 @@ impl SandboxBuilder {
     }
 
     /// Set a managed root disk of the given size for an OCI rootfs.
+    /// Canonical snapshot launch instead grows the captured root layout in child-only storage.
     ///
     /// Sugar for `root_disk_with(|d| d.size(size))`.
     pub fn root_disk(self, size: impl Into<Mebibytes>) -> Self {
@@ -273,6 +397,19 @@ impl SandboxBuilder {
                 return self;
             }
         };
+        if self.canonical_snapshot_launch {
+            // A size-only request grows the captured layout; it must not select a new
+            // managed root and accidentally discard a captured flat filesystem.
+            match root_disk {
+                microsandbox_types::RootDisk::Managed { size_mib: Some(size) } => {
+                    self.config.snapshot_root_growth_mib = Some(size);
+                }
+                _ => return self.config_error(
+                    "snapshot launch accepts only a root-disk capacity; replacing its layout, format or backing file is unsupported",
+                ),
+            }
+            return self;
+        }
         let mut image = self.config.spec.image.clone().unwrap_or_default();
         match &mut image {
             RootfsSource::Oci(oci) if !oci.reference.is_empty() => {
@@ -370,6 +507,7 @@ impl SandboxBuilder {
     /// request them. `Always` can improve large anonymous-memory workloads at
     /// the cost of coarser memory allocation, while `Never` disables THP.
     pub fn thp(mut self, policy: super::TransparentHugePagePolicy) -> Self {
+        self.record_prepared_boot_override(|boot| boot.thp = true);
         self.config.spec.resources.thp = Some(policy);
         self
     }
@@ -589,6 +727,7 @@ impl SandboxBuilder {
     /// PID 1; `entrypoint` is the user workload that agentd exec's
     /// per request. They can be combined freely.
     pub fn init(mut self, cmd: impl Into<String>) -> Self {
+        self.record_prepared_boot_override(|boot| boot.init = true);
         self.config.spec.init = Some(HandoffInit {
             cmd: cmd.into(),
             args: Vec::new(),
@@ -616,6 +755,7 @@ impl SandboxBuilder {
         cmd: impl Into<String>,
         f: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
     ) -> Self {
+        self.record_prepared_boot_override(|boot| boot.init = true);
         let (args, env) = f(InitOptionsBuilder::default()).build();
         self.config.spec.init = Some(HandoffInit {
             cmd: cmd.into(),
@@ -628,6 +768,7 @@ impl SandboxBuilder {
     /// Set the guest hostname. Limited to 64 UTF-8 bytes (the Linux UTS
     /// limit). Defaults to a sandbox-name-derived form when unset.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.record_prepared_boot_override(|boot| boot.hostname = true);
         self.config.spec.runtime.hostname = Some(hostname.into());
         self
     }
@@ -1145,6 +1286,7 @@ impl SandboxBuilder {
 
     /// Set the in-guest security profile.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
+        self.record_prepared_boot_override(|boot| boot.security = true);
         self.config.spec.security_profile = Some(profile);
         self
     }
@@ -1171,6 +1313,11 @@ impl SandboxBuilder {
         guest_path: impl Into<String>,
         f: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self {
+        // Snapshot destinations replace a binding at the same guest path. Fresh
+        // image creation retains its existing append-and-validate behavior.
+        if self.canonical_snapshot_launch {
+            return self.snapshot_volume(guest_path, f);
+        }
         match f(MountBuilder::new(guest_path)).build() {
             Ok(mount) => {
                 self.config.spec.mounts.get_or_insert_default().push(mount);
@@ -1238,7 +1385,7 @@ impl SandboxBuilder {
 
     /// Defer snapshot resolution to the selected backend.
     ///
-    /// References returned by [`crate::snapshot::Snapshot::reference`] and
+    /// References returned by [`crate::snapshot::Checkpoint::reference`] and
     /// [`SnapshotHandle::reference`](crate::snapshot::SnapshotHandle::reference)
     /// preserve whether the selected backend resolves the value as an
     /// identifier or a path.
@@ -1372,6 +1519,26 @@ impl SandboxBuilder {
                 "managed settings conflict with the snapshot's captured root disk layout".into(),
             ));
         }
+        // Growth is a transient operation, so ordinary root-disk layering cannot
+        // enforce its capacity later: the private-disk worker would overwrite the
+        // managed value. Compare against managed policy itself (not ordinary defaults
+        // or the captured disk's old size) before staging or replacement begins.
+        if let Some(requested) = sandbox.snapshot_root_growth_mib
+            && let Some(required) = backend_config.and_then(|settings| {
+                match settings.root_disk_layers().build().into_config().root_disk {
+                    Some(
+                        microsandbox_types::RootDisk::Managed { size_mib }
+                        | microsandbox_types::RootDisk::Flat { size_mib, .. },
+                    ) => size_mib,
+                    _ => None,
+                }
+            })
+            && requested != required
+        {
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshot root capacity {requested} MiB conflicts with managed root capacity {required} MiB"
+            )));
+        }
         self.materialize_config_scripts(&mut sandbox);
         self.validate(&mut sandbox)?;
 
@@ -1428,6 +1595,19 @@ impl SandboxBuilder {
         backend: &dyn crate::Backend,
     ) -> MicrosandboxResult<()> {
         if backend.as_local().is_some() {
+            if let RestoreState::PendingPaths(paths, _) = &mut self.restore {
+                let base = std::env::current_dir()?;
+                for path in paths {
+                    if path.as_os_str().is_empty() {
+                        return Err(MicrosandboxError::InvalidConfig(
+                            "snapshot path must not be empty".into(),
+                        ));
+                    }
+                    if !path.is_absolute() {
+                        *path = base.join(&*path);
+                    }
+                }
+            }
             let captured = self.config.local_restore_paths_resolved == Some(true);
             crate::backend::local::host_paths::resolve_patch_paths(&mut self.config)?;
             if !captured && let RestoreState::Pending(reference) = &mut self.restore {
@@ -1465,19 +1645,50 @@ impl SandboxBuilder {
         &mut self,
         backend: std::sync::Arc<dyn crate::Backend>,
     ) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        let mut snapshot_paths = None;
         let pending = match std::mem::take(&mut self.restore) {
             RestoreState::Pending(reference) => Some(reference),
+            #[cfg(feature = "local")]
+            RestoreState::PendingPaths(paths, target) => {
+                snapshot_paths = Some((paths, target));
+                None
+            }
             other => {
                 self.restore = other;
                 None
             }
         };
 
-        let explicit_source = pending.is_some();
-        let snapshot_ref = pending.or_else(|| self.config.snapshot_reference.clone());
+        #[cfg(feature = "local")]
+        let has_paths = snapshot_paths.is_some();
+        #[cfg(not(feature = "local"))]
+        let has_paths = false;
+        let explicit_source = pending.is_some() || has_paths;
+        let snapshot_ref = if has_paths {
+            None
+        } else {
+            pending.or_else(|| self.config.snapshot_reference.clone())
+        };
         let archive_source = self.config.snapshot_archive_source.clone();
-        if snapshot_ref.is_none() && archive_source.is_none() {
+        if snapshot_ref.is_none() && archive_source.is_none() && !has_paths {
             return Ok(());
+        }
+        if self.canonical_snapshot_launch
+            && let Some(RootfsSource::Oci(oci)) = &mut self.config.spec.image
+            && oci.reference.is_empty()
+            && let Some(disk) = oci.root_disk.take()
+        {
+            // Configuration-file size choices have the same meaning as the CLI's
+            // size-only flag. Ambient backend root defaults are merged only afterward.
+            match disk {
+                microsandbox_types::RootDisk::Managed { size_mib: Some(size) } => {
+                    self.config.snapshot_root_growth_mib.get_or_insert(size);
+                }
+                _ => return Err(MicrosandboxError::InvalidConfig(
+                    "snapshot launch accepts only a root-disk capacity; replacing its layout, format or backing file is unsupported".into(),
+                )),
+            }
         }
         if explicit_source && self.has_explicit_rootfs_source() && archive_source.is_none() {
             return Err(MicrosandboxError::InvalidConfig(
@@ -1496,6 +1707,32 @@ impl SandboxBuilder {
             ));
         }
 
+        if self.canonical_snapshot_launch {
+            // Inspect the sparse request before merging ambient defaults: even explicit
+            // builtin/default boot choices cannot be silently discarded on full resume.
+            let boot = self
+                .config
+                .restore_boot_overrides
+                .get_or_insert_with(Default::default);
+            boot.security |= self.config.spec.security_profile.is_some();
+            boot.init |= self.config.spec.init.is_some();
+            boot.hostname |= self.config.spec.runtime.hostname.is_some();
+            boot.thp |= self.config.spec.resources.thp.is_some();
+            boot.new_command |= self
+                .config
+                .launch_intent
+                .as_ref()
+                .is_some_and(|intent| !matches!(intent, super::config::LaunchIntent::None));
+        }
+        #[cfg(feature = "local")]
+        if has_paths && backend.as_local().is_none() {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SnapshotOps,
+                UnsupportedReason::NotAvailable(
+                    "snapshot path sets require a local backend".into(),
+                ),
+            ));
+        }
         #[cfg(feature = "cloud")]
         if backend.as_cloud().is_some() {
             self.config.snapshot_reference = snapshot_ref;
@@ -1504,7 +1741,7 @@ impl SandboxBuilder {
 
         let mut config = SandboxConfig::default();
         // A newly selected source replaces an archive retained by a concrete config round-trip.
-        if snapshot_ref.is_some() {
+        if snapshot_ref.is_some() || has_paths {
             self.config.snapshot_archive_source = None;
         }
 
@@ -1519,14 +1756,22 @@ impl SandboxBuilder {
         inspection.spec.resources = Default::default();
         inspection.apply_to(&mut config);
         config.snapshot_reference = snapshot_ref.clone();
-        if snapshot_ref.is_some() {
+        if snapshot_ref.is_some() || has_paths {
             config.clear_prepared_restore();
         }
 
         #[cfg(feature = "local")]
         if let Some(local) = backend.as_local() {
             crate::backend::local::host_paths::resolve_host_paths(&mut config)?;
-            if let Some(snapshot_ref) = snapshot_ref {
+            if let Some((paths, target)) = snapshot_paths {
+                crate::backend::local::snapshot::prepare_snapshot_sources(
+                    backend.clone(),
+                    &mut config,
+                    paths,
+                    target,
+                )
+                .await?;
+            } else if let Some(snapshot_ref) = snapshot_ref {
                 local
                     .prepare_local_restore(backend.clone(), &mut config, snapshot_ref)
                     .await?;
@@ -1548,12 +1793,40 @@ impl SandboxBuilder {
                 .await?;
         }
 
+        #[cfg(feature = "local")]
+        if self.canonical_snapshot_launch
+            && config.checkpoint_restore.is_none()
+            && !config.restore_resources.captured.is_empty()
+        {
+            // File snapshots record external mount paths, not their disk bytes.
+            // An explicit missing-resource waiver must not silently discard a
+            // request to materialize a captured disk that the source never saved.
+            return Err(MicrosandboxError::InvalidConfig(format!(
+                "snapshot has no captured additional disks for {:?}; provide explicit destination bindings",
+                config.restore_resources.captured
+            )));
+        }
         // Carry only prepared state forward. The original caller patch remains on the builder.
         self.config.snapshot_reference = None;
         let prepared = SandboxConfigPatch::from_present_fields(config);
         self.restore = RestoreState::Prepared(Box::new(prepared));
 
         Ok(())
+    }
+
+    /// A prepared config may be rebuilt before activation. Preserve explicit
+    /// follow-up requests without mistaking all its concrete defaults for requests.
+    fn record_prepared_boot_override(
+        &mut self,
+        update: impl FnOnce(&mut super::restore_builder::RestoreBootOverrides),
+    ) {
+        if self.config.resumed_from_full_snapshot == Some(true) {
+            update(
+                self.config
+                    .restore_boot_overrides
+                    .get_or_insert_with(Default::default),
+            );
+        }
     }
 
     fn has_explicit_rootfs_source(&self) -> bool {
@@ -1637,7 +1910,10 @@ impl SandboxBuilder {
         let (handle, sender) = crate::progress::channel();
         self.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(crate::backend::with_backend(backend, async move {
-            if matches!(self.restore, RestoreState::Pending(_)) {
+            if matches!(
+                self.restore,
+                RestoreState::Pending(_) | RestoreState::PendingPaths(..)
+            ) {
                 let _ = sender.try_send(crate::CreationProgress::Startup(
                     crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
                 ));
@@ -1752,6 +2028,15 @@ impl SandboxBuilder {
     fn validate(&mut self, sandbox: &mut SandboxConfig) -> MicrosandboxResult<()> {
         if let Some(err) = self.build_error.take() {
             return Err(err);
+        }
+
+        if sandbox.resumed_from_full_snapshot {
+            let mut boot = sandbox.restore_boot_overrides;
+            boot.new_command |= !matches!(sandbox.launch_intent, super::config::LaunchIntent::None);
+            boot.validate_scope(
+                crate::snapshot::SnapshotScope::Full,
+                sandbox.snapshot_restore_mode,
+            )?;
         }
 
         if sandbox.spec.name.is_empty() {
@@ -2071,13 +2356,27 @@ impl SandboxBuilder {
 #[cfg(feature = "local")]
 pub(crate) fn prepare_local_snapshot_restore(
     config: &mut SandboxConfig,
-    snap: &crate::snapshot::Snapshot,
+    snap: &crate::snapshot::Checkpoint,
 ) -> MicrosandboxResult<()> {
     // A security profile is a boot-time guest policy, not a host-side restore override.
     // Validate the caller's explicit intent before preparing any snapshot resources.
     config
         .restore_boot_overrides
         .validate_scope(snap.manifest().scope, config.snapshot_restore_mode)?;
+    if config.snapshot_root_growth_mib.is_some() {
+        if snap.manifest().scope == crate::snapshot::SnapshotScope::Full
+            && config.snapshot_restore_mode != SnapshotRestoreMode::DiskOnly
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "root-disk growth requires disk-only mode for a full snapshot".into(),
+            ));
+        }
+        if matches!(snap.manifest().root_disk, SnapshotRootDisk::Tmpfs { .. }) {
+            return Err(MicrosandboxError::InvalidConfig(
+                "snapshot root-disk growth requires an ext4 disk".into(),
+            ));
+        }
+    }
     if config.spec.runtime.user.is_none() {
         config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
     }
@@ -2443,6 +2742,7 @@ impl From<SandboxConfig> for SandboxBuilder {
             build_error: None,
             config_scripts: BTreeMap::new(),
             restore: RestoreState::default(),
+            canonical_snapshot_launch: false,
         }
     }
 }
@@ -2454,8 +2754,8 @@ impl From<SandboxConfig> for SandboxBuilder {
 #[cfg(all(test, feature = "local"))]
 mod tests {
     use super::{
-        BackendConfig, RestoreState, SandboxBuilder, SandboxConfig, SandboxConfigPatch,
-        checkpoint_network_override_conflicts,
+        BackendConfig, RestoreState, RootfsSource, SandboxBuilder, SandboxConfig,
+        SandboxConfigPatch, SecurityProfile, checkpoint_network_override_conflicts,
     };
     use crate::config::GlobalConfigPatch;
     #[cfg(feature = "local")]
@@ -2942,6 +3242,198 @@ mod tests {
                 "{field} must remain transient"
             );
         }
+    }
+
+    #[test]
+    fn canonical_snapshot_root_capacity_is_transient_and_rejects_layout_changes() {
+        use crate::sandbox::RootDiskBuilder;
+
+        let builder = SandboxBuilder::new("grow-child")
+            .snapshot_launch_options(false, false)
+            .root_disk(512_u32);
+        assert_eq!(builder.config.snapshot_root_growth_mib, Some(512));
+        assert!(builder.config.spec.image.is_none());
+        assert!(builder.build_error.is_none());
+        for disk in [
+            RootDiskBuilder::default().tmpfs(),
+            RootDiskBuilder::default().flat(),
+            RootDiskBuilder::default().disk_image("/tmp/replacement.raw"),
+        ] {
+            let builder = SandboxBuilder::new("grow-child")
+                .snapshot_launch_options(false, false)
+                .root_disk_with(|_| disk);
+            assert!(
+                builder
+                    .build_error
+                    .unwrap()
+                    .to_string()
+                    .contains("only a root-disk capacity")
+            );
+        }
+        let config = SandboxConfig {
+            snapshot_root_growth_mib: Some(512),
+            ..Default::default()
+        };
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("snapshot_root_growth_mib")
+                .is_none()
+        );
+        assert_eq!(
+            SandboxConfigPatch::from_present_fields(config).snapshot_root_growth_mib,
+            Some(512)
+        );
+    }
+
+    #[test]
+    fn snapshot_root_growth_respects_managed_capacity_without_promoting_defaults() {
+        use microsandbox_types::RootDisk;
+
+        for (disk, policy) in [
+            (
+                RootDisk::managed(256),
+                serde_json::json!({"root_disk": {"kind": "managed", "size_mib": 512}}),
+            ),
+            (
+                RootDisk::managed(256),
+                serde_json::json!({"upper_size_mib": 512}),
+            ),
+            (
+                RootDisk::Flat {
+                    size_mib: Some(256),
+                    fstype: Some("ext4".into()),
+                    clone: Default::default(),
+                },
+                serde_json::json!({"root_disk": {"kind": "flat", "size_mib": 512}}),
+            ),
+        ] {
+            let patch: GlobalConfigPatch =
+                serde_json::from_value(serde_json::json!({"sandbox_defaults": {"oci": policy}}))
+                    .unwrap();
+            let make = |requested| {
+                let mut config = SandboxConfig::default();
+                config.spec.name = "growth-policy".into();
+                config.spec.image = RootfsSource::oci("alpine");
+                let RootfsSource::Oci(image) = &mut config.spec.image else {
+                    unreachable!()
+                };
+                image.root_disk = Some(disk.clone());
+                config.snapshot_parent = Some("captured".into());
+                config.snapshot_root_growth_mib = Some(requested);
+                SandboxBuilder::from(config)
+            };
+            let managed = BackendConfig::new(Default::default(), patch.clone());
+            let error = make(1024).finish(Some(&managed), None).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("1024 MiB conflicts with managed root capacity 512 MiB"),
+                "{error}"
+            );
+            assert_eq!(
+                make(512)
+                    .finish(Some(&managed), None)
+                    .unwrap()
+                    .snapshot_root_growth_mib,
+                Some(512)
+            );
+
+            // User defaults and the captured 256 MiB disk are not administrator constraints.
+            let ordinary = BackendConfig::new(patch, Default::default());
+            assert_eq!(
+                make(1024)
+                    .finish(Some(&ordinary), None)
+                    .unwrap()
+                    .snapshot_root_growth_mib,
+                Some(1024)
+            );
+            assert_eq!(
+                make(1024)
+                    .finish(None, None)
+                    .unwrap()
+                    .snapshot_root_growth_mib,
+                Some(1024)
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_snapshot_resources_keep_authorizations_independent() {
+        let builder = SandboxBuilder::new("resource-child")
+            .snapshot_launch_options(false, false)
+            .snapshot_resource_options(
+                true,
+                true,
+                Some(super::super::ExternalMountRestorePolicy::Relaxed),
+            )
+            .volume("/data", |mount| mount.captured())
+            .volume("/data", |mount| mount.bind("/destination").readonly());
+        let resources = builder.config.restore_resources.as_ref().unwrap();
+        assert!(resources.allow_missing && resources.inherit);
+        assert!(!resources.require_complete);
+        assert!(resources.mapped.contains("/data"));
+        assert!(!resources.captured.contains("/data"));
+        assert_eq!(builder.config.spec.mounts.as_ref().unwrap().len(), 1);
+
+        let builder = builder.volume("/data", |mount| mount.captured());
+        let resources = builder.config.restore_resources.as_ref().unwrap();
+        assert!(resources.captured.contains("/data"));
+        assert!(!resources.mapped.contains("/data"));
+        assert!(builder.config.spec.mounts.as_ref().unwrap().is_empty());
+
+        // Relaxed object matching alone must not permit missing backing or
+        // authorize access through a surviving source's host bindings.
+        let strict = SandboxBuilder::new("strict-child")
+            .snapshot_launch_options(false, false)
+            .snapshot_resource_options(
+                false,
+                false,
+                Some(super::super::ExternalMountRestorePolicy::Relaxed),
+            );
+        let resources = strict.config.restore_resources.as_ref().unwrap();
+        assert!(resources.require_complete);
+        assert!(!resources.allow_missing && !resources.inherit);
+        assert!(strict.config.spec.mounts.as_ref().unwrap().is_empty());
+
+        // The captured-only shorthand remains invalid for ordinary image creation.
+        let fresh = SandboxBuilder::new("fresh").volume("/data", |mount| mount.captured());
+        assert!(fresh.build_error.is_some());
+    }
+
+    #[test]
+    fn prepared_full_restore_cannot_gain_boot_overrides_or_a_new_command() {
+        let mut config = SandboxConfig::default();
+        config.spec.name = "prepared-full".into();
+        config.spec.image = RootfsSource::oci("alpine");
+        config.resumed_from_full_snapshot = true;
+        let builders = [
+            SandboxBuilder::from(config.clone()).hostname("replacement"),
+            SandboxBuilder::from(config.clone()).init("auto"),
+            SandboxBuilder::from(config.clone()).init_with("auto", |init| init),
+            SandboxBuilder::from(config.clone()).security(SecurityProfile::Default),
+            SandboxBuilder::from(config.clone())
+                .thp(super::super::TransparentHugePagePolicy::Never),
+            SandboxBuilder::from(config.clone()).foreground_command(["echo", "new"]),
+            SandboxBuilder::from(config.clone()).background_command(["echo", "new"]),
+            SandboxBuilder::from(config.clone()).overlay(
+                SandboxConfigPatch::new().spec(
+                    microsandbox_types::SandboxSpecPatch::new().runtime(
+                        microsandbox_types::SandboxRuntimeOptionsPatch::new()
+                            .hostname("replacement".into()),
+                    ),
+                ),
+            ),
+        ];
+        for builder in builders {
+            let error = builder.finish(None, None).unwrap_err();
+            assert!(error.to_string().contains("disk-only"), "{error}");
+        }
+        // Existing/new-exec defaults remain applicable without replaying captured processes.
+        SandboxBuilder::from(config)
+            .user("1000")
+            .finish(None, None)
+            .unwrap();
     }
 
     #[test]

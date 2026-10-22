@@ -181,25 +181,24 @@ tunnel. HTTP CONNECT proxy authentication and UDP are not supported.
 
 ## Snapshots
 
-Snapshot operations use the selected backend and preserve whether a snapshot
-reference is an ID or a path. Existing static save calls remain available, and
-opened snapshots and live handles can save through the backend they retain:
+`Snapshot` represents a source-bound group; `Checkpoint` represents one immutable artifact. A sandbox's `snapshot` call creates a new group and returns its exact initial checkpoint and head update. Use the group's `checkpoint` method to append later captures.
 
 ```ruby
-snapshot = Microsandbox::Snapshot.open("after-pip-install")
-snapshot.save_to("/tmp/after-pip-install.tar.zst", with_image: true)
+source = Microsandbox::Sandbox.get("app")
+created = source.snapshot("history", initial_checkpoint: "base", record_integrity: true)
+group = created.snapshot
+later = group.checkpoint(name: "ready", record_integrity: true)
 
-handle = Microsandbox::Snapshot.get("after-pip-install")
-handle.save_to("/tmp/after-pip-install.tar.zst")
-
-Microsandbox::Snapshot.save(
-  "after-pip-install",
-  "/tmp/after-pip-install.tar.zst",
-  plain_tar: false
-)
+checkpoint = group.get_checkpoint("base")
+checkpoint.save("/tmp/base.msb", with_image: true)
+group.clear_head                 # Preserves every checkpoint.
+group.head                       # nil until another head is selected.
+group.set_head("ready")
 ```
 
-Snapshot archive operations are currently local-only. With the cloud backend, `save`, `save_to`, direct directory enumeration, reindexing, archive loading, and payload verification raise an unsupported-operation error. Capture, lookup, listing, open, and removal remain backend-neutral. The Ruby SDK does not yet expose dedicated sandbox restoration; use another SDK or the CLI for that operation.
+Group operations retain their selected backend. Imported groups and groups whose original source has been removed remain readable, but capture refuses rather than binding a different sandbox with the same name. `Snapshot.get` and `Snapshot.list` select groups. Artifact lookup and legacy static export are available through `Checkpoint.open`, `Checkpoint.get`, and `Checkpoint.save`; `Checkpoint#save` and `save_to` export their exact receiver. This is a 0.8 SDK interface change: callers that previously used `Snapshot` for artifact operations must migrate to `Checkpoint`, and callers of `SandboxHandle#snapshot` must read `result.checkpoint` instead of treating the result as an artifact.
+
+Archive operations and the new source-bound group workflow currently require the local backend; unsupported backends return an explicit error. The Ruby SDK does not yet expose dedicated sandbox restoration; use another SDK or the CLI for that operation.
 
 ## Supported surface
 

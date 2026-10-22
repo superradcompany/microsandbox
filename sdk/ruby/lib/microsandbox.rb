@@ -61,6 +61,22 @@ module Microsandbox
     end
   end
 
+  # Progress is best effort. Always call result to obtain the sandbox or failure.
+  class PullSession
+    include Enumerable
+
+    def each
+      return enum_for(:each) unless block_given?
+
+      while (event = next_event)
+        yield event
+      end
+      self
+    end
+
+    def progress = enum_for(:each)
+  end
+
   class SandboxBuilder
     def http
       settings = HttpBuilder.new

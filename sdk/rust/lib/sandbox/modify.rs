@@ -5399,7 +5399,11 @@ mod tests {
         };
         assert_eq!(change.field, SECRET_FIELD);
         assert_eq!(change.change, SecretChangeKind::Added);
+        #[cfg(feature = "net")]
         assert_eq!(change.disposition, ModificationDisposition::RequiresRestart);
+        // A build without network support must still redact a refused secret plan.
+        #[cfg(not(feature = "net"))]
+        assert_eq!(change.disposition, ModificationDisposition::Unsupported);
     }
 
     //----------------------------------------------------------------------------------------------

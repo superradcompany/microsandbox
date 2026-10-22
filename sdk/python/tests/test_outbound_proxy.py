@@ -80,3 +80,27 @@ def test_native_create_accepts_socks4_proxy() -> None:
     )
 
     assert type(error) is type(baseline), f"top-level SOCKS4 proxy rejected: {error!r}"
+
+
+@pytest.mark.parametrize("method", ["create", "restore"])
+def test_native_authenticated_proxy_uses_serialized_secret_source(method):
+    def parse_error(**kwargs):
+        with pytest.raises(RuntimeError) as error:
+            if method == "create":
+                Sandbox.create("proxy-parse-probe", image="alpine", **kwargs)
+            else:
+                Sandbox.restore("saved", name="proxy-parse-probe", **kwargs)
+        return type(error.value)
+
+    # No event loop means neither operation can launch a VM. Parsing must reach
+    # the same async boundary as the proxy-free call, rather than reject its dicts.
+    baseline = parse_error()
+    proxy = OutboundProxy.socks5("127.0.0.1:1080").credentials(
+        "fixture", SecretSource.env("PROXY_PARSE_PASSWORD")
+    )
+    assert parse_error(proxy=proxy) is baseline
+    with pytest.raises(TypeError, match="expected OutboundProxy"):
+        if method == "create":
+            Sandbox.create("proxy-parse-probe", image="alpine", proxy=proxy._to_dict())
+        else:
+            Sandbox.restore("saved", name="proxy-parse-probe", proxy=proxy._to_dict())

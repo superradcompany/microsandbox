@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use microsandbox::backend::{Backend, LocalBackend};
-use microsandbox::{MicrosandboxResult, SaveOpts, Snapshot, SnapshotReference};
+use microsandbox::{Checkpoint as Snapshot, MicrosandboxResult, SaveOpts, SnapshotReference};
 use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
     FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
@@ -549,7 +549,7 @@ async fn save_batch_fixtures(parent: &Path, artifacts: &[PathBuf]) -> Vec<PathBu
     let mut archives = Vec::new();
     for (index, artifact) in artifacts.iter().enumerate() {
         let archive = parent.join(format!("batch-{index}.msb"));
-        Snapshot::save(
+        Snapshot::save_by_reference(
             artifact.to_string_lossy().as_ref(),
             &archive,
             microsandbox::snapshot::SaveOpts {
@@ -644,10 +644,14 @@ async fn indexed_handle_can_remove_a_missing_local_artifact() {
         microsandbox::with_backend(backend, async {
             let handle = if grouped {
                 let archive = tmp.path().join("snapshot.msb");
-                Snapshot::save(source.to_str().unwrap(), &archive, SaveOpts::default())
-                    .await
-                    .unwrap();
-                Snapshot::remove(source.to_str().unwrap(), false)
+                Snapshot::save_by_reference(
+                    source.to_str().unwrap(),
+                    &archive,
+                    SaveOpts::default(),
+                )
+                .await
+                .unwrap();
+                Snapshot::remove_by_reference(source.to_str().unwrap(), false)
                     .await
                     .unwrap();
 
@@ -993,6 +997,293 @@ async fn verify_reports_not_recorded_without_reading_payload_contents() {
         report.upper,
         microsandbox::snapshot::UpperVerifyStatus::NotRecorded
     ));
+    assert_eq!(
+        report.coverage,
+        microsandbox::snapshot::SnapshotVerifyCoverage::Incomplete {
+            unrecorded: vec![snapshot.path().unwrap().join(DEFAULT_UPPER_FILE)],
+        }
+    );
+}
+
+/// Install fixtures in the released group layout without running an import that would reject
+/// corruption first. These tests exercise the public reader against already-damaged storage.
+fn verification_group(home: &Path, members: &[PathBuf], head: Option<&str>) -> PathBuf {
+    let group = home.join("snapshots/verification");
+    std::fs::create_dir_all(&group).unwrap();
+    std::fs::write(
+        group.join("group.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "microsandbox.snapshot-group/1", "head": head,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for member in members {
+        std::fs::rename(member, group.join(artifact_id(member))).unwrap();
+    }
+    group
+}
+
+#[tokio::test]
+async fn group_verify_headless_members_share_only_physical_hashes() {
+    use microsandbox::snapshot::SnapshotVerificationState;
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, _) = make_artifact_with_integrity(tmp.path(), "first", b"original", true);
+    let (second, _) = make_artifact_with_integrity(tmp.path(), "second", b"original", true);
+    let (third, _) = make_artifact_with_integrity(tmp.path(), "third", b"original", true);
+    std::fs::remove_file(second.join(DEFAULT_UPPER_FILE)).unwrap();
+    std::fs::hard_link(
+        first.join(DEFAULT_UPPER_FILE),
+        second.join(DEFAULT_UPPER_FILE),
+    )
+    .unwrap();
+    verification_group(&home, &[first, second, third], None);
+    microsandbox::with_backend(backend, async {
+        let group = microsandbox::Snapshot::get("verification").await.unwrap();
+        assert!(group.head().await.unwrap().is_none());
+        let report = group.verify().await.unwrap();
+        assert_eq!(report.state, SnapshotVerificationState::Complete);
+        assert_eq!(report.checkpoints.len(), 3);
+        assert_eq!(report.payload_hashes, 2);
+        assert!(
+            report
+                .checkpoints
+                .iter()
+                .all(|member| member.report.is_some() && member.findings.is_empty())
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn group_verify_errors_keep_valid_corrupt_and_missing_members_in_report() {
+    use microsandbox::snapshot::{SnapshotVerificationFindingKind, SnapshotVerificationState};
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (first, _) = make_artifact_with_integrity(tmp.path(), "first", b"original", true);
+    let first_id = artifact_id(&first);
+    let (second, _) = make_artifact_with_integrity(tmp.path(), "second", b"original", true);
+    std::fs::write(second.join(DEFAULT_UPPER_FILE), b"tampered").unwrap();
+    let missing = format!("snap_{:032x}", 999);
+    verification_group(&home, &[first, second], Some(&missing));
+    microsandbox::with_backend(backend, async {
+        let group = microsandbox::Snapshot::get("verification").await.unwrap();
+        assert!(group.head().await.is_err());
+        let microsandbox::MicrosandboxError::SnapshotVerification(report) =
+            group.verify().await.unwrap_err()
+        else {
+            panic!("group failures must preserve the full report");
+        };
+        assert_eq!(report.state, SnapshotVerificationState::Invalid);
+        assert_eq!(report.checkpoints.len(), 3);
+        assert_eq!(report.payload_hashes, 2);
+        assert_eq!(
+            report
+                .checkpoints
+                .iter()
+                .find(|member| member.id.as_ref().is_some_and(|id| id.as_str() == first_id))
+                .unwrap()
+                .state,
+            SnapshotVerificationState::Complete
+        );
+        assert!(
+            report
+                .checkpoints
+                .iter()
+                .flat_map(|member| &member.findings)
+                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Missing)
+        );
+        assert!(
+            report
+                .checkpoints
+                .iter()
+                .flat_map(|member| &member.findings)
+                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Invalid)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn group_verify_empty_and_unrecorded_are_explicit() {
+    use microsandbox::snapshot::SnapshotVerificationState;
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let directory = verification_group(&home, &[], None);
+    microsandbox::with_backend(backend, async {
+        let group = microsandbox::Snapshot::get("verification").await.unwrap();
+        let empty = group.verify().await.unwrap();
+        assert_eq!(empty.state, SnapshotVerificationState::Empty);
+        assert!(empty.checkpoints.is_empty());
+        assert_eq!(empty.payload_hashes, 0);
+        let (member, _) = make_artifact(tmp.path(), "unrecorded", b"original");
+        std::fs::rename(&member, directory.join(artifact_id(&member))).unwrap();
+        let report = group.verify().await.unwrap();
+        assert_eq!(report.state, SnapshotVerificationState::Incomplete);
+        assert_eq!(report.payload_hashes, 0);
+        assert_eq!(report.checkpoints.len(), 1);
+        assert!(report.checkpoints[0].report.is_some());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn group_verify_reports_malformed_and_unsupported_members() {
+    use microsandbox::snapshot::SnapshotVerificationFindingKind;
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let backend = isolated_backend(&home).await;
+    let (member, _) = make_artifact_with_unknown_require(tmp.path(), "future", b"original");
+    let directory = verification_group(&home, &[member], None);
+    std::fs::create_dir(directory.join("broken")).unwrap();
+    let legacy = directory.join(format!("snap_{:032x}", 997));
+    std::fs::create_dir(&legacy).unwrap();
+    std::fs::write(legacy.join("manifest.json"), b"{}").unwrap();
+    // A non-directory entry bearing a member ID must not disappear from the report.
+    std::fs::write(directory.join(format!("snap_{:032x}", 998)), b"wrong kind").unwrap();
+    microsandbox::with_backend(backend, async {
+        let group = microsandbox::Snapshot::get("verification").await.unwrap();
+        let microsandbox::MicrosandboxError::SnapshotVerification(report) =
+            group.verify().await.unwrap_err()
+        else {
+            panic!("group failures must preserve the full report");
+        };
+        assert_eq!(report.checkpoints.len(), 4);
+        assert_eq!(report.payload_hashes, 0);
+        assert_eq!(std::fs::read(legacy.join("manifest.json")).unwrap(), b"{}");
+        assert!(
+            !legacy.join(DESCRIPTOR_FILENAME).exists(),
+            "verification must not migrate a descriptor"
+        );
+        assert!(
+            report
+                .checkpoints
+                .iter()
+                .flat_map(|member| &member.findings)
+                .any(|finding| finding.kind == SnapshotVerificationFindingKind::Unsupported)
+        );
+        assert!(
+            report
+                .checkpoints
+                .iter()
+                .all(|member| member.report.is_none())
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn verified_head_does_not_hide_unrecorded_ancestor_integrity() {
+    use microsandbox::snapshot::{SnapshotVerifyCoverage, UpperVerifyStatus};
+
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact(tmp.path(), "mixed-coverage", &[42; 512]);
+    let descriptor = dir.join(DESCRIPTOR_FILENAME);
+    let mut manifest = Manifest::from_bytes(&std::fs::read(&descriptor).unwrap()).unwrap();
+    let SnapshotState::File(file) = &mut manifest.state else {
+        unreachable!()
+    };
+    let base = file.layers[0].clone();
+    std::fs::create_dir_all(dir.join("layers")).unwrap();
+    let base_path = dir.join(file.layer_path(&base));
+    std::fs::rename(dir.join(DEFAULT_UPPER_FILE), &base_path).unwrap();
+    let head = DiskLayerId::new(format!("layer_{:032x}", 98)).unwrap();
+    file.disk_format = SnapshotFormat::Qcow2;
+    file.head = head.clone();
+    file.layers.push(DiskLayer {
+        layer_id: head,
+        format: SnapshotFormat::Qcow2,
+        virtual_size: file.virtual_size,
+        backing: Some(base.layer_id),
+        payload: LayerPayload {
+            file_kind: LayerFileKind::Regular,
+            integrity: None,
+        },
+    });
+    let head_path = dir.join(file.layer_path(&file.layers[1]));
+    microsandbox_image::checkpoint::create_qcow2_overlay(
+        &head_path,
+        file.virtual_size,
+        &base_path,
+        "raw",
+    )
+    .await
+    .unwrap();
+    file.layers[1].payload.integrity = Some(UpperIntegrity::Sha256 {
+        digest: format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(std::fs::read(&head_path).unwrap()))
+        ),
+    });
+    std::fs::write(&descriptor, manifest.to_canonical_bytes().unwrap()).unwrap();
+
+    let snapshot = Snapshot::open(dir.to_str().unwrap()).await.unwrap();
+    let report = snapshot.verify().await.unwrap();
+    assert!(matches!(report.upper, UpperVerifyStatus::Verified { .. }));
+    assert_eq!(
+        report.coverage,
+        SnapshotVerifyCoverage::Incomplete {
+            unrecorded: vec![
+                snapshot
+                    .path()
+                    .unwrap()
+                    .join("layers")
+                    .join(base_path.file_name().unwrap())
+            ],
+        }
+    );
+
+    // Recording the ancestor changes coverage; subsequently corrupting it is still an error,
+    // never a successful report carrying only the independently valid head checksum.
+    let SnapshotState::File(file) = &mut manifest.state else {
+        unreachable!()
+    };
+    file.layers[0].payload.integrity = Some(UpperIntegrity::Sha256 {
+        digest: format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(std::fs::read(&base_path).unwrap()))
+        ),
+    });
+    std::fs::write(&descriptor, manifest.to_canonical_bytes().unwrap()).unwrap();
+    let snapshot = Snapshot::open(dir.to_str().unwrap()).await.unwrap();
+    assert_eq!(
+        snapshot.verify().await.unwrap().coverage,
+        SnapshotVerifyCoverage::Complete
+    );
+    std::fs::write(&base_path, [43; 512]).unwrap();
+    assert!(
+        snapshot
+            .verify()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("integrity mismatch")
+    );
+}
+
+#[tokio::test]
+async fn verification_cannot_attest_to_unknown_required_extension_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let (dir, _) = make_artifact_with_integrity(tmp.path(), "unknown-required", b"payload", true);
+    let descriptor = dir.join(DESCRIPTOR_FILENAME);
+    let mut manifest = Manifest::from_bytes(&std::fs::read(&descriptor).unwrap()).unwrap();
+    manifest.requires.push("example.future-payload".into());
+    manifest.extensions.insert(
+        "example.future-payload".into(),
+        serde_json::json!({"version": 1}),
+    );
+    std::fs::write(&descriptor, manifest.to_canonical_bytes().unwrap()).unwrap();
+    let snapshot = Snapshot::open(dir.to_str().unwrap()).await.unwrap();
+    let error = snapshot.verify().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown required extensions: example.future-payload")
+    );
 }
 
 #[tokio::test]
@@ -1283,7 +1574,7 @@ async fn save_then_load_round_trips_via_plain_tar() {
     let (dir, original_digest) = make_artifact(tmp.path(), "src-plain", b"plain tar bytes");
 
     let archive = tmp.path().join("bundle.tar");
-    Snapshot::save(
+    Snapshot::save_by_reference(
         dir.to_string_lossy().as_ref(),
         &archive,
         microsandbox::snapshot::SaveOpts {
@@ -1310,7 +1601,7 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
     let reexport = tmp.path().join("renamed.msb");
 
     microsandbox::with_backend(backend, async {
-        Snapshot::save(
+        Snapshot::save_by_reference(
             source.to_string_lossy().as_ref(),
             &archive,
             microsandbox::snapshot::SaveOpts::default(),
@@ -1368,7 +1659,7 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         assert_eq!(another.id(), first.id());
         assert_eq!(Snapshot::list().await.unwrap().len(), 3);
 
-        Snapshot::save(
+        Snapshot::save_by_reference(
             "work:clean",
             &reexport,
             microsandbox::snapshot::SaveOpts::default(),
@@ -1388,11 +1679,11 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         assert_eq!(renamed.id(), snapshot_id);
         assert_eq!(
             Snapshot::group_head("renamed").await.unwrap().head,
-            snapshot_id
+            Some(snapshot_id.clone())
         );
 
         // Removing one installed copy does not erase another group's membership or payload.
-        Snapshot::remove(&format!("{}:clean", fresh.group().unwrap()), false)
+        Snapshot::remove_by_reference(&format!("{}:clean", fresh.group().unwrap()), false)
             .await
             .unwrap();
         assert!(!fresh.path().unwrap().exists());
@@ -1420,7 +1711,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
 
     microsandbox::with_backend(backend, async {
         for (source, destination) in [(&first, &archive), (&second, &competing)] {
-            Snapshot::save(
+            Snapshot::save_by_reference(
                 source.to_string_lossy().as_ref(),
                 destination,
                 microsandbox::snapshot::SaveOpts::default(),
@@ -1431,7 +1722,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
 
         let renamed_source = first.with_file_name("renamed");
         std::fs::rename(&first, &renamed_source).unwrap();
-        Snapshot::save(
+        Snapshot::save_by_reference(
             renamed_source.to_str().unwrap(),
             &renamed_archive,
             SaveOpts::default(),
@@ -1455,7 +1746,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         );
         assert_eq!(
             Snapshot::group_head("work").await.unwrap().head,
-            original_id
+            Some(original_id.clone())
         );
         assert_eq!(
             Snapshot::open("work:clean").await.unwrap().digest(),
@@ -1476,10 +1767,21 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         let error = Snapshot::load_with_options(&renamed_archive, options)
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            microsandbox::MicrosandboxError::SnapshotAlreadyExists(_)
-        ));
+        let microsandbox::MicrosandboxError::SnapshotImport(report) = error else {
+            panic!("expected structured import failure, got {error}");
+        };
+        assert_eq!(
+            report.outcome,
+            microsandbox::SnapshotImportOutcome::NotCommitted
+        );
+        assert!(
+            matches!(
+                report.source.as_ref(),
+                microsandbox::MicrosandboxError::SnapshotAlreadyExists(_)
+            ),
+            "unexpected import cause: {}",
+            report.source
+        );
 
         let listed = Snapshot::list().await.unwrap();
         assert_eq!(listed.len(), 1);
@@ -1487,7 +1789,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
         assert_eq!(listed[0].name(), Some("clean"));
         assert_eq!(
             Snapshot::group_head("work").await.unwrap().head,
-            original_id
+            Some(original_id.clone())
         );
         assert_eq!(
             std::fs::read(artifact_payload_path(installed.path().unwrap())).unwrap(),
@@ -1524,7 +1826,10 @@ async fn load_many_selects_lineage_tip_independently_of_input_order() {
                 assert_eq!(handle.id(), expected_ids[index]);
                 assert_eq!(handle.group(), Some(group));
             }
-            assert_eq!(Snapshot::group_head(group).await.unwrap().head, third_id);
+            assert_eq!(
+                Snapshot::group_head(group).await.unwrap().head,
+                Some(third_id.clone())
+            );
             assert_eq!(
                 Snapshot::open(format!("{group}:cp01"))
                     .await
@@ -1604,7 +1909,7 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
             .unwrap();
         assert_eq!(
             Snapshot::group_head("existing").await.unwrap().head,
-            base_id
+            Some(base_id.clone())
         );
         let handles = Snapshot::load_many(&siblings, batch_group_options("fresh"))
             .await
@@ -1618,7 +1923,7 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
         );
         assert_eq!(
             Snapshot::group_head("fresh:left").await.unwrap().head,
-            left_id
+            Some(left_id.clone())
         );
         assert_eq!(
             Snapshot::open("fresh").await.unwrap().id().as_str(),
@@ -1661,7 +1966,10 @@ async fn load_many_accepts_complete_payload_with_missing_historical_parent() {
             .await
             .unwrap();
         assert_eq!(handles[0].id(), id);
-        assert_eq!(Snapshot::group_head("work").await.unwrap().head, id);
+        assert_eq!(
+            Snapshot::group_head("work").await.unwrap().head,
+            Some(id.clone())
+        );
         assert_eq!(
             std::fs::read(artifact_payload_path(handles[0].path().unwrap())).unwrap(),
             b"complete payload"
@@ -1797,9 +2105,10 @@ async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
     let archive = tmp.path().join("legacy.tar");
     write_v066_archive(&archive, "sha256-0123456789abcdef", b"legacy disk");
     microsandbox::with_backend(backend, async {
-        let batch = Snapshot::load_many(&[archive.clone()], batch_group_options("batch"))
-            .await
-            .unwrap();
+        let batch =
+            Snapshot::load_many(std::slice::from_ref(&archive), batch_group_options("batch"))
+                .await
+                .unwrap();
         let single = Snapshot::load_with_options(&archive, batch_group_options("single"))
             .await
             .unwrap();
@@ -2428,7 +2737,7 @@ async fn load_selects_child_head_when_parents_are_present() {
     assert_eq!(handle.id(), child_id);
     let imported_group = dest.join(handle.group().expect("load creates a local group"));
     assert_eq!(handle.path().unwrap(), imported_group.join(&child_id));
-    assert_eq!(handle.head_update().unwrap().head, child_id);
+    assert_eq!(handle.head_update().unwrap().head, Some(child_id.clone()));
     assert_eq!(handle.head_update().unwrap().previous, None);
     assert!(
         imported_group
@@ -2892,7 +3201,7 @@ async fn replacing_child_in_place_does_not_inflate_parent_child_count() {
                 std::fs::remove_dir_all(&cdir).unwrap();
             }
             child.remove(false).await.unwrap();
-            Snapshot::remove(pdir.to_string_lossy().as_ref(), false)
+            Snapshot::remove_by_reference(pdir.to_string_lossy().as_ref(), false)
                 .await
                 .expect("parent should be removable once its only child is gone");
         })

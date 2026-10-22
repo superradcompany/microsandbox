@@ -6,7 +6,7 @@ use pyo3::types::PyDict;
 
 use microsandbox::snapshot::{LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts};
 use microsandbox::{
-    Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
+    Checkpoint as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
     SnapshotFormat as RustSnapshotFormat, SnapshotHandle as RustSnapshotHandle,
     SnapshotScope as RustSnapshotScope, UpperVerifyStatus as RustUpperVerifyStatus,
 };
@@ -22,6 +22,12 @@ use crate::helpers::str_enum_member;
 #[pyclass(name = "Snapshot")]
 pub struct PySnapshot {
     inner: RustSnapshot,
+}
+
+/// Facts captured by one exact checkpoint removal, including its head decision.
+#[pyclass(name = "CheckpointRemoveResult")]
+pub struct PyCheckpointRemoveResult {
+    pub(crate) inner: microsandbox::CheckpointRemoveResult,
 }
 
 /// Result of direct sandbox-to-archive capture.
@@ -50,7 +56,42 @@ pub struct PySnapshotHandle {
 //--------------------------------------------------------------------------------------------------
 
 #[pymethods]
+impl PyCheckpointRemoveResult {
+    #[getter]
+    fn id(&self) -> String {
+        self.inner.id.to_string()
+    }
+
+    #[getter]
+    fn head_update(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
+        self.inner
+            .head_update
+            .as_ref()
+            .map(|head| head_update_to_py(py, head))
+            .transpose()
+    }
+
+    #[getter]
+    fn warnings(&self) -> Vec<String> {
+        self.inner.warnings.clone()
+    }
+}
+
+#[pymethods]
 impl PySnapshot {
+    /// Remove this retained checkpoint; force never bypasses an active reader.
+    #[pyo3(signature = (*, force = false))]
+    fn remove<'py>(&self, py: Python<'py>, force: bool) -> PyResult<Bound<'py, PyAny>> {
+        let checkpoint = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = checkpoint
+                .remove_with(|options| if force { options.force() } else { options })
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyCheckpointRemoveResult { inner })
+        })
+    }
+
     /// Observe artifact storage through this snapshot's captured backend.
     fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
@@ -221,13 +262,13 @@ impl PySnapshot {
     /// `force=True`.
     #[staticmethod]
     #[pyo3(signature = (path_or_name, *, force = false))]
-    fn remove<'py>(
+    fn remove_by_reference<'py>(
         py: Python<'py>,
         path_or_name: String,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            RustSnapshot::remove(&path_or_name, force)
+            RustSnapshot::remove_by_reference(&path_or_name, force)
                 .await
                 .map_err(to_py_err)?;
             Ok(())
@@ -253,8 +294,9 @@ impl PySnapshot {
         plain_tar = false,
         since = None,
         last_layers = None,
+        compatibility = "current".to_owned(),
     ))]
-    fn save<'py>(
+    fn save_by_reference<'py>(
         py: Python<'py>,
         name_or_path: String,
         out: PathBuf,
@@ -263,16 +305,18 @@ impl PySnapshot {
         plain_tar: bool,
         since: Option<String>,
         last_layers: Option<usize>,
+        compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let opts = RustSaveOpts {
+                compatibility: compatibility.parse().map_err(to_py_err)?,
                 with_parents,
                 with_image,
                 plain_tar,
                 since,
                 last_layers,
             };
-            RustSnapshot::save(&name_or_path, &out, opts)
+            RustSnapshot::save_by_reference(&name_or_path, &out, opts)
                 .await
                 .map_err(to_py_err)?;
             Ok(())
@@ -292,19 +336,22 @@ impl PySnapshot {
         group: Option<String>,
         set_head: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
+            vec![archive],
+            RustLoadOpts {
+                dest,
+                base,
+                group,
+                set_head,
+            },
+        );
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let h = RustSnapshot::load_with_options(
-                &archive,
-                RustLoadOpts {
-                    dest,
-                    base,
-                    group,
-                    set_head,
-                },
-            )
-            .await
-            .map_err(to_py_err)?;
-            Ok(PySnapshotHandle::from_rust(h))
+            let handle = prepared
+                .map_err(to_py_err)?
+                .checkpoint()
+                .await
+                .map_err(to_py_err)?;
+            Ok(PySnapshotHandle::from_rust(handle))
         })
     }
 
@@ -319,18 +366,21 @@ impl PySnapshot {
         group: Option<String>,
         set_head: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let prepared = microsandbox::snapshot::PreparedSnapshotImport::new(
+            archives,
+            RustLoadOpts {
+                dest,
+                base,
+                group,
+                set_head,
+            },
+        );
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handles = RustSnapshot::load_many(
-                &archives,
-                RustLoadOpts {
-                    dest,
-                    base,
-                    group,
-                    set_head,
-                },
-            )
-            .await
-            .map_err(to_py_err)?;
+            let handles = prepared
+                .map_err(to_py_err)?
+                .checkpoints()
+                .await
+                .map_err(to_py_err)?;
             Ok(handles
                 .into_iter()
                 .map(PySnapshotHandle::from_rust)
@@ -530,7 +580,52 @@ impl PySnapshot {
         })
     }
 
-    /// Bundle this snapshot into a `.tar.zst` archive.
+    /// Spawn this exact member on the backend retained by the handle.
+    #[pyo3(signature = (*, name = None, **kwargs))]
+    fn spawn_sandbox<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<String>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let builder = crate::helpers::restore_builder_from_reference(
+            self.inner.reference(),
+            name.unwrap_or_default(),
+            kwargs,
+        )?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(crate::sandbox::PySandbox::from_rust(
+                inner
+                    .spawn_sandbox_with(|_| builder)
+                    .await
+                    .map_err(to_py_err)?,
+            ))
+        })
+    }
+
+    #[pyo3(signature = (*, name = None, **kwargs))]
+    fn spawn_sandbox_with_progress<'py>(
+        &self,
+        py: Python<'py>,
+        name: Option<String>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let builder = crate::helpers::restore_builder_from_reference(
+            self.inner.reference(),
+            name.unwrap_or_default(),
+            kwargs,
+        )?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (progress, task) = inner
+                .spawn_sandbox_with_progress_with(|_| builder)
+                .await
+                .map_err(to_py_err)?;
+            Ok(crate::sandbox::PyPullSession::new(progress, task))
+        })
+    }
+
     /// Raises `UnsupportedError` when artifact archives are unavailable.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
@@ -541,6 +636,49 @@ impl PySnapshot {
         plain_tar = false,
         since = None,
         last_layers = None,
+        compatibility = "current".to_owned(),
+    ))]
+    fn save<'py>(
+        &self,
+        py: Python<'py>,
+        out: PathBuf,
+        with_parents: bool,
+        with_image: bool,
+        plain_tar: bool,
+        since: Option<String>,
+        last_layers: Option<usize>,
+        compatibility: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            snapshot
+                .save_to(
+                    &out,
+                    RustSaveOpts {
+                        compatibility: compatibility.parse().map_err(to_py_err)?,
+                        with_parents,
+                        with_image,
+                        plain_tar,
+                        since,
+                        last_layers,
+                    },
+                )
+                .await
+                .map_err(to_py_err)
+        })
+    }
+
+    /// Raises `UnsupportedError` when artifact archives are unavailable.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        out,
+        *,
+        with_parents = false,
+        with_image = false,
+        plain_tar = false,
+        since = None,
+        last_layers = None,
+        compatibility = "current".to_owned(),
     ))]
     fn save_to<'py>(
         &self,
@@ -551,6 +689,7 @@ impl PySnapshot {
         plain_tar: bool,
         since: Option<String>,
         last_layers: Option<usize>,
+        compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let snapshot = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -558,6 +697,7 @@ impl PySnapshot {
                 .save_to(
                     &out,
                     RustSaveOpts {
+                        compatibility: compatibility.parse().map_err(to_py_err)?,
                         with_parents,
                         with_image,
                         plain_tar,
@@ -604,6 +744,23 @@ impl PySnapshot {
                 out.set_item("digest", report.digest)?;
                 out.set_item("path", report.path.display().to_string())?;
                 out.set_item("upper", upper)?;
+                let coverage = PyDict::new(py);
+                match report.coverage {
+                    microsandbox::snapshot::SnapshotVerifyCoverage::Complete => {
+                        coverage.set_item("kind", "complete")?;
+                    }
+                    microsandbox::snapshot::SnapshotVerifyCoverage::Incomplete { unrecorded } => {
+                        coverage.set_item("kind", "incomplete")?;
+                        coverage.set_item(
+                            "unrecorded",
+                            unrecorded
+                                .into_iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>(),
+                        )?;
+                    }
+                }
+                out.set_item("coverage", coverage)?;
                 if let Some(checkpoint) = report.checkpoint {
                     let checkpoint_out = PyDict::new(py);
                     checkpoint_out.set_item("kind", "verified")?;
@@ -854,6 +1011,7 @@ impl PySnapshotHandle {
         plain_tar = false,
         since = None,
         last_layers = None,
+        compatibility = "current".to_owned(),
     ))]
     fn save_to<'py>(
         &self,
@@ -864,6 +1022,7 @@ impl PySnapshotHandle {
         plain_tar: bool,
         since: Option<String>,
         last_layers: Option<usize>,
+        compatibility: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -871,6 +1030,7 @@ impl PySnapshotHandle {
                 .save_to(
                     &out,
                     RustSaveOpts {
+                        compatibility: compatibility.parse().map_err(to_py_err)?,
                         with_parents,
                         with_image,
                         plain_tar,
@@ -898,7 +1058,7 @@ impl PySnapshotHandle {
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
 
-fn head_update_to_py(
+pub(crate) fn head_update_to_py(
     py: Python<'_>,
     update: &microsandbox::snapshot::HeadUpdate,
 ) -> PyResult<Py<PyDict>> {

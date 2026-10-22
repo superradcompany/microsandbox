@@ -9,6 +9,8 @@ import pytest
 
 from integration.helpers import IMAGE, remove_sandbox, remove_snapshot
 from microsandbox import (
+    Checkpoint,
+    Image,
     Sandbox,
     Snapshot,
     SnapshotFormat,
@@ -29,17 +31,25 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
 
     await remove_sandbox(fork_name)
     await remove_sandbox(base_name)
-    snapshot_selector = f"{base_name}:{snapshot_name}"
+    snapshot_selector = f"{snapshot_name}:ready"
     await remove_snapshot(snapshot_selector)
 
-    base = await Sandbox.create(base_name, image=IMAGE, cpus=1, memory=512, replace=True)
+    base = await Sandbox.create(
+        base_name, image=Image.oci(IMAGE, root_disk=256), cpus=1, memory=512, replace=True
+    )
     fork = None
-    copied_handle = None
+    copied_group = None
+    group = None
     try:
+        assert (await base.shell("printf restored-user-data > /root/snapshot-marker; sync")).success
         await base.stop()
 
         base_handle = await Sandbox.get(base_name)
-        snapshot = await base_handle.snapshot(snapshot_name)
+        created = await base_handle.snapshot(
+            snapshot_name, initial_checkpoint="ready", record_integrity=True
+        )
+        group = created.snapshot
+        snapshot = created.checkpoint
         assert snapshot.digest
         assert snapshot.reference
         assert snapshot.reference_kind == "path"
@@ -52,30 +62,30 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         verify_result = await snapshot.verify()
         assert isinstance(verify_result, dict)
 
-        handle = await Snapshot.get(snapshot_selector)
+        handle = await Checkpoint.get(snapshot_selector)
         assert handle.digest == snapshot.digest
         assert handle.state_kind is SnapshotStateKind.FILE
         assert handle.format is SnapshotFormat.RAW
         assert handle.scope is SnapshotScope.DISK
-        assert handle.group == base_name
+        assert handle.group == snapshot_name
         assert snapshot.head_update["reason"] == "initialized"
-        head = await Snapshot.group_head(base_name)
-        assert head["head"] == snapshot.id
-        assert head["changed"] is False
-        selected = await Snapshot.group_head(snapshot_selector)
+        head = await group.head()
+        assert head is not None and head.id == snapshot.id
+        selected = await group.set_head("ready")
+        assert selected["changed"] is False
         assert selected["head"] == snapshot.id
         opened = await handle.open()
         assert opened.digest == snapshot.digest
         assert opened.state_kind is SnapshotStateKind.FILE
 
-        snapshots = await Snapshot.list()
+        snapshots = await Checkpoint.list()
         assert any(item.digest == snapshot.digest for item in snapshots)
 
         # All public selector forms must reach the same Rust resolver. In particular, a
         # group:member selector is not a literal directory underneath MSB_HOME/snapshots.
         sources = {
             "member": snapshot_selector,
-            "group": base_name,
+            "group": snapshot_name,
             "id": snapshot.id,
             "directory": snapshot.path,
             "pathlike": Path(snapshot.path),
@@ -84,7 +94,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         }
         if source_kind == "archive":
             archive = tmp_path / "saved.msb"
-            await Snapshot.save(snapshot_selector, str(archive))
+            await snapshot.save(str(archive))
             source = archive
         else:
             source = sources[source_kind]
@@ -93,6 +103,7 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         out = await fork.shell("cat /etc/alpine-release")
         assert out.success is True
         assert out.stdout_text.strip()
+        assert (await fork.shell("cat /root/snapshot-marker")).stdout_text == "restored-user-data"
 
         # Restore by ID while it still identifies one local artifact. Importing the copy
         # below intentionally makes that selector ambiguous.
@@ -103,20 +114,22 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
             .record_integrity(True)
             .save()
         )
-        copied_handle = await Snapshot.load(
-            copied_archive,
-            dest=tmp_path / "copied-artifact",
+        imported = await Snapshot.load(
+            sandbox_name("copied-history"), [copied_archive],
+            dest=tmp_path / "copied-artifact", set_head=True,
         )
-        copied = await copied_handle.open()
+        copied_group = imported.snapshot
+        assert len(imported.checkpoints) == len(imported.added) == 1
+        copied = await imported.checkpoints[0].open()
         assert copied.labels == {"environment": "test"}
         assert (await copied.verify())["upper"]["kind"] == "verified"
     finally:
-        if copied_handle is not None:
-            with suppress(Exception):
-                await Snapshot.remove(copied_handle.reference, force=True)
+        if copied_group is not None:
+            await copied_group.remove()
         if fork is not None:
             with suppress(Exception):
                 await fork.stop()
         await remove_sandbox(fork_name)
         await remove_sandbox(base_name)
-        await remove_snapshot(snapshot_selector)
+        if group is not None:
+            await group.remove()

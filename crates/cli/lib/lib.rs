@@ -16,6 +16,7 @@ pub mod machine_cmd;
 #[cfg(feature = "net")]
 pub mod net_rule;
 pub mod sandbox_config;
+pub mod snapshot_source;
 pub mod styles;
 pub mod tree;
 pub mod ui;

@@ -113,6 +113,45 @@ Use `msb run --help` for the full flag list.
 
 Pass configuration files explicitly. Files merge left to right; explicit CLI arguments override them. See [Configuration](/cli/configuration).
 
+### Start from a snapshot
+
+Use `--from-snapshot` with one installed group or one or more explicit local archive/artifact paths. `--from-snap` is an alias. An explicit snapshot source conflicts with a positional image. This launch path is local-only.
+
+<CodeGroup>
+```bash Shell
+# Persistent child from the group's current head
+msb create --from-snapshot devbox-history --name worker
+
+# Run a new command from a specific disk checkpoint
+msb run --from-snapshot devbox-history --checkpoint ready -- echo hello
+
+# Resolve an incremental archive together with its dependencies
+msb run --from-snapshot ./base.msb ./tip.msb -- cat /root/result
+
+# Cold-boot a full snapshot's disk and start a new command
+msb run --from-snapshot ./full.msb --disk-only -- echo hello
+```
+</CodeGroup>
+
+Prefix local paths with `./`, `../`, or an absolute path so they cannot be mistaken for group names. Archive filenames do not need a particular extension. Paths form one dependency set: their order does not choose the checkpoint. A unique terminal checkpoint is selected automatically; use `--checkpoint SNAPSHOT_ID` to select an exact supplied checkpoint when there is more than one possible tip. A group accepts a checkpoint name or ID and otherwise uses its head. Missing dependencies and conflicting artifacts fail before launch. Launching from paths does not install a group.
+
+`create` boots a persistent, detached sandbox; a full checkpoint resumes its captured processes. `run` starts a new command and therefore requires `--disk-only` for a full checkpoint. Init, hostname, guest THP, and guest security changes require a disk boot. `--cow-mem` selects private copy-on-write memory for full resume and conflicts with `--disk-only`.
+
+For a disk boot, explicit command environment, user, working directory, entrypoint, hostname, and init options apply to the child. An unnamed run is ephemeral; a named run persists. A snapshot-backed run refuses an existing destination unless `--replace` is specified. The deprecated restore interfaces retain their existing options; they do not accept the new path-set grammar.
+
+Supply destination resources explicitly. For snapshot launches, `-v SOURCE:GUEST[:OPTIONS]` maps a destination resource and `-v /guest/path` selects a private copy of a captured additional disk. Explicit mappings at the same guest path replace earlier choices; explicit mount-kind flags are applied after `-v`. A captured-disk selector must identify a disk actually present in the checkpoint. Image-based create/run retains its existing volume grammar.
+
+Use a size-only `--root-disk 20G` to grow a snapshot child's root disk and ext4 filesystem before boot. The captured managed or flat layout is preserved, and source layers remain unchanged. Shrinking, switching layouts or formats, and replacing the captured root with a file or tmpfs are rejected. A full checkpoint requires `--disk-only` for growth. Unsupported ext4 layouts fail during private staging, before `--replace` stops the existing sandbox. The deprecated `--oci-upper-size` spelling has the same size-only behavior.
+
+An ordinary disk snapshot records external mount paths without saving those external disks' bytes; supply their destination backing explicitly. Full checkpoints can carry additional disk payloads for private restoration. Allowing missing resources does not make an absent captured-disk selection valid.
+
+| Flag | Effect on snapshot-backed create/run |
+| --- | --- |
+| `--allow-missing-resources` | Permit unavailable captured external filesystems or additional disks. Full resume reports warnings even with `--quiet`; guest access can fail. Required root and owned snapshot data must remain complete. |
+| `--dangerously-inherit-resources` | Fill unspecified bindings from validated source-local records where available. This is explicit permission to share host resources, not permission to recover credentials or look up a replacement source by name. |
+| `--external-mount-policy strict\|relaxed` | Select object-compatibility validation. Relaxed mode does not authorize inheritance or waive missing backing. |
+| `--forked` | Deprecated alias for `--cow-mem`; emits a warning. |
+
 ### Flat OCI rootfs
 
 <Tooltip tip="Flat OCI roots use host-local image artifacts and are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -294,7 +333,7 @@ msb create --replace-with-timeout 0 python --name worker    # SIGKILL immediatel
 
 ## msb snap restore
 
-Restore into a new sandbox. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports disk restore. Use `msb exec` to run new commands. The existing `msb restore`, `msb sandbox restore`, and `msb sbx restore` forms accept the same flags.
+This deprecated interface restores into a new sandbox using its existing 0.7.x grammar and flags. Use [create/run with `--from-snapshot`](#start-from-a-snapshot) for the canonical local launch workflow. Disk snapshots boot fresh; full snapshots resume execution. Cloud supports the existing disk restore path. Use `msb exec` to run new commands. The existing `msb restore`, `msb sandbox restore`, and `msb sbx restore` forms accept the same legacy flags.
 
 <CodeGroup>
 ```bash Shell

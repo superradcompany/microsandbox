@@ -16,6 +16,7 @@ from microsandbox import (
     Action,
     BackendKind,
     ChangeKind,
+    Checkpoint,
     DeploymentProfile,
     DiskImageFormat,
     ExecEventType,
@@ -45,7 +46,6 @@ from microsandbox import (
     SecretChangeKind,
     SecretEntry,
     SecurityProfile,
-    Snapshot,
     SnapshotCopyBuilder,
     SnapshotHandle,
     Stdin,
@@ -57,8 +57,8 @@ from microsandbox import (
 
 
 def test_snapshot_types_expose_archive_operations() -> None:
-    assert callable(Snapshot.save_to)
-    assert callable(Snapshot.copy_to)
+    assert callable(Checkpoint.save_to)
+    assert callable(Checkpoint.copy_to)
     assert callable(SnapshotCopyBuilder.labels)
     assert callable(SnapshotCopyBuilder.record_integrity)
     assert callable(SnapshotCopyBuilder.save)

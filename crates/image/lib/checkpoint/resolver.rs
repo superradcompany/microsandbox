@@ -14,6 +14,7 @@ use super::{
     ObjectId, fs_state_budget_error,
 };
 use crate::error::{ImageError, ImageResult};
+use crate::snapshot::UpperIntegrity;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -51,9 +52,71 @@ pub struct CheckpointObjectReadTiming {
     pub hash_us: u128,
 }
 
+/// One required payload check. A missing integrity value is incomplete coverage, not success.
+#[derive(Clone, Debug)]
+pub struct CheckpointPayloadCheck {
+    /// Confined physical payload path.
+    pub path: PathBuf,
+    /// Length observed or required while preparing the inventory.
+    pub length: u64,
+    /// Recorded checksum binding, when one exists.
+    pub integrity: Option<CheckpointPayloadIntegrity>,
+    /// Exact bounded bytes used for semantic decoding. Batch verification must compare these
+    /// with the hashed file, so a concurrent replacement cannot change the plan's meaning.
+    /// Large RAM/disk/execution payloads are streamed and never retained here.
+    pub metadata_bytes: Option<Vec<u8>>,
+}
+
+/// A verification-only checksum binding, preserving the format used by its writer.
+///
+/// Checkpoint disk roots use a different BLAKE3 domain and leaf size from snapshot file
+/// roots. This type is never serialized into artifacts and does not extend either codec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckpointPayloadIntegrity {
+    /// A checksum from a snapshot descriptor or a SHA-256 object identity.
+    Snapshot(UpperIntegrity),
+    /// The fixed checkpoint-file/1 format written by `sparse_file_integrity`.
+    CheckpointFileV1(super::SparseFileIntegrity),
+}
+
+/// A structurally checked inventory for explicit batch verification, never restore admission.
+///
+/// The root descriptor is authenticated, but referenced payloads still need every check in
+/// `payloads` to pass. This type deliberately cannot be converted into `CheckpointClosure`.
+#[derive(Clone, Debug)]
+pub struct CheckpointVerificationPlan {
+    root_id: ObjectId,
+    checkpoint: CheckpointManifest,
+    payloads: Vec<CheckpointPayloadCheck>,
+}
+
+/// Restore admission checks immediately; explicit batch verification defers payload hashing
+/// so the caller can group shared physical files before reading them.
+struct PayloadAdmission<'a> {
+    pending: Option<&'a mut Vec<CheckpointPayloadCheck>>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl CheckpointPayloadIntegrity {
+    /// Identify the exact hash format for scheduling and reporting.
+    pub fn algorithm(&self) -> &'static str {
+        match self {
+            Self::Snapshot(integrity) => integrity.algorithm(),
+            Self::CheckpointFileV1(_) => "microsandbox.checkpoint-file/1",
+        }
+    }
+
+    /// Return the recorded qualified digest or root.
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Snapshot(integrity) => integrity.value(),
+            Self::CheckpointFileV1(integrity) => &integrity.root,
+        }
+    }
+}
 
 impl CheckpointClosure {
     /// Inspect the bounded, identity-verified root for construction planning, not payload admission.
@@ -73,7 +136,7 @@ impl CheckpointClosure {
         expected_root: Option<&ObjectId>,
         fs_state_limit: usize,
     ) -> ImageResult<Self> {
-        Self::open_inner(root.into(), expected_root, true, fs_state_limit)
+        Self::open_inner(root.into(), expected_root, true, fs_state_limit, None)
     }
 
     /// Open and validate a checkpoint closure without requiring host architecture compatibility.
@@ -85,7 +148,7 @@ impl CheckpointClosure {
         expected_root: Option<&ObjectId>,
         fs_state_limit: usize,
     ) -> ImageResult<Self> {
-        Self::open_inner(root.into(), expected_root, false, fs_state_limit)
+        Self::open_inner(root.into(), expected_root, false, fs_state_limit, None)
     }
 
     fn open_inner(
@@ -93,7 +156,9 @@ impl CheckpointClosure {
         expected_root: Option<&ObjectId>,
         require_host_architecture: bool,
         fs_state_limit: usize,
+        pending: Option<&mut Vec<CheckpointPayloadCheck>>,
     ) -> ImageResult<Self> {
+        let mut admission = PayloadAdmission { pending };
         let (root_id, checkpoint) = read_checkpoint_root(&root, expected_root)?;
         if require_host_architecture && checkpoint.architecture != std::env::consts::ARCH {
             return checkpoint_error(format!(
@@ -103,20 +168,45 @@ impl CheckpointClosure {
             ));
         }
 
-        let memory_bytes = read_object_verified(&root, &checkpoint.memory, MAX_MANIFEST_BYTES)?;
-        crate::snapshot::verify_owned_directory_payloads(&root, &checkpoint.owned_volumes)?;
-        let memory = MemoryManifest::from_bytes(&memory_bytes)?;
+        let memory = admission.decode_object(
+            &root,
+            &checkpoint.memory,
+            MAX_MANIFEST_BYTES,
+            MemoryManifest::from_bytes,
+        )?;
+        admission.owned_directories(&root, &checkpoint.owned_volumes)?;
         if memory.architecture != checkpoint.architecture
             || memory.pause_generation != checkpoint.pause_generation
         {
             return checkpoint_error("memory state does not belong to the checkpoint epoch");
         }
         validate_memory_objects(&root, &memory)?;
+        if let Some(pending) = &mut admission.pending {
+            let mut seen = BTreeSet::new();
+            for extent in &memory.extents {
+                if let MemoryExtentContent::Object(content) = &extent.content
+                    && seen.insert(&content.object)
+                {
+                    let path = object_path(&root, &content.object);
+                    pending.push(CheckpointPayloadCheck {
+                        length: open_regular(&path)?.metadata()?.len(),
+                        path,
+                        integrity: Some(
+                            UpperIntegrity::Sha256 {
+                                digest: content.object.to_string(),
+                            }
+                            .into(),
+                        ),
+                        metadata_bytes: None,
+                    });
+                }
+            }
+        }
 
         // Execution/device codecs perform their own bounded semantic decoding in the runtime. At
         // this layer we still prove that every named immutable object exists and matches its id,
         // and decode virtio-fs states so a backend state over the budget is refused before restore.
-        read_object_verified(
+        admission.verify_object(
             &root,
             &checkpoint.execution_state,
             MAX_EXECUTION_STATE_BYTES,
@@ -126,13 +216,17 @@ impl CheckpointClosure {
             if device.is_virtio_fs() && object_len(&root, &device.state)? > max_len {
                 return checkpoint_error(fs_state_budget_error(fs_state_limit));
             }
-            let bytes = read_object_verified(&root, &device.state, max_len)?;
             if device.is_virtio_fs() {
-                device
-                    .decode_virtio_state(&bytes, fs_state_limit)
-                    .map_err(|error| {
-                        checkpoint_error_value(format!("device {}: {error}", device.device_id))
-                    })?;
+                admission.decode_object(&root, &device.state, max_len, |bytes| {
+                    device
+                        .decode_virtio_state(bytes, fs_state_limit)
+                        .map(|_| ())
+                        .map_err(|error| {
+                            checkpoint_error_value(format!("device {}: {error}", device.device_id))
+                        })
+                })?;
+            } else {
+                admission.verify_object(&root, &device.state, max_len)?;
             }
         }
 
@@ -140,8 +234,9 @@ impl CheckpointClosure {
         let mut admitted_disks = AdmittedDiskLayers::default();
         let mut volumes = BTreeSet::new();
         for disk_id in &checkpoint.disks {
-            let bytes = read_object_verified(&root, disk_id, MAX_MANIFEST_BYTES)?;
-            let disk = DiskGenerationManifest::from_bytes(&bytes)?;
+            let disk = admission.decode_object(&root, disk_id, MAX_MANIFEST_BYTES, |bytes| {
+                DiskGenerationManifest::from_bytes(bytes).map_err(ImageError::from)
+            })?;
             if disk.pause_generation != checkpoint.pause_generation {
                 return checkpoint_error("disk generation does not belong to the checkpoint epoch");
             }
@@ -153,7 +248,21 @@ impl CheckpointClosure {
                 if open_regular(&path)?.metadata()?.len() != layer.file_size {
                     return checkpoint_error("disk layer length differs from captured file size");
                 }
-                if let Some(expected) = &layer.integrity_root {
+                if let Some(pending) = &mut admission.pending {
+                    pending.push(CheckpointPayloadCheck {
+                        path,
+                        length: layer.file_size,
+                        integrity: layer.integrity_root.as_ref().map(|root| {
+                            CheckpointPayloadIntegrity::CheckpointFileV1(
+                                super::SparseFileIntegrity {
+                                    root: root.clone(),
+                                    logical_size: layer.file_size,
+                                },
+                            )
+                        }),
+                        metadata_bytes: None,
+                    });
+                } else if let Some(expected) = &layer.integrity_root {
                     admitted_disks.admit(&path, expected)?;
                 }
             }
@@ -252,6 +361,133 @@ impl CheckpointClosure {
             }
         }
         Ok(())
+    }
+}
+
+impl CheckpointVerificationPlan {
+    /// Inspect a portable closure for explicit verification. Payload hashes are deferred, and
+    /// no runtime may consume this plan as admitted state. Bounded metadata parsing and all
+    /// namespace, epoch, resource-inventory and slice checks remain identical to admission.
+    pub fn prepare(
+        root: impl Into<PathBuf>,
+        expected_root: &ObjectId,
+        fs_state_limit: usize,
+    ) -> ImageResult<Self> {
+        let mut payloads = Vec::new();
+        let closure = CheckpointClosure::open_inner(
+            root.into(),
+            Some(expected_root),
+            false,
+            fs_state_limit,
+            Some(&mut payloads),
+        )?;
+        Ok(Self {
+            root_id: closure.root_id,
+            checkpoint: closure.checkpoint,
+            payloads,
+        })
+    }
+
+    /// Authenticated root descriptor identity; this alone does not authenticate its payloads.
+    pub fn root_id(&self) -> &ObjectId {
+        &self.root_id
+    }
+
+    /// Root metadata for checking the enclosing snapshot's inventory against this plan.
+    pub fn checkpoint(&self) -> &CheckpointManifest {
+        &self.checkpoint
+    }
+
+    /// Every payload binding needed before this plan can be reported as fully verified.
+    pub fn payloads(&self) -> &[CheckpointPayloadCheck] {
+        &self.payloads
+    }
+}
+
+impl PayloadAdmission<'_> {
+    fn decode_object<T>(
+        &mut self,
+        root: &Path,
+        id: &ObjectId,
+        max_len: u64,
+        decode: impl FnOnce(&[u8]) -> ImageResult<T>,
+    ) -> ImageResult<T> {
+        let Some(pending) = &mut self.pending else {
+            return decode(&read_object_verified(root, id, max_len)?);
+        };
+        let path = object_path(root, id);
+        let bytes = read_regular_bounded(&path, max_len)?;
+        let decoded = decode(&bytes)?;
+        pending.push(CheckpointPayloadCheck {
+            path,
+            length: bytes.len() as u64,
+            integrity: Some(
+                UpperIntegrity::Sha256 {
+                    digest: id.to_string(),
+                }
+                .into(),
+            ),
+            metadata_bytes: Some(bytes),
+        });
+        Ok(decoded)
+    }
+
+    fn verify_object(&mut self, root: &Path, id: &ObjectId, max_len: u64) -> ImageResult<()> {
+        let Some(pending) = &mut self.pending else {
+            read_object_verified(root, id, max_len)?;
+            return Ok(());
+        };
+        let path = object_path(root, id);
+        let length = open_regular(&path)?.metadata()?.len();
+        if length > max_len {
+            return checkpoint_error(format!("checkpoint object exceeds {max_len} bytes"));
+        }
+        pending.push(CheckpointPayloadCheck {
+            path,
+            length,
+            integrity: Some(
+                UpperIntegrity::Sha256 {
+                    digest: id.to_string(),
+                }
+                .into(),
+            ),
+            metadata_bytes: None,
+        });
+        Ok(())
+    }
+
+    fn owned_directories(
+        &mut self,
+        root: &Path,
+        volumes: &[crate::snapshot::OwnedVolumeCapture],
+    ) -> ImageResult<()> {
+        let Some(pending) = &mut self.pending else {
+            return crate::snapshot::verify_owned_directory_payloads(root, volumes);
+        };
+        crate::snapshot::visit_owned_directory_payloads(root, volumes, |path, expected| {
+            pending.push(CheckpointPayloadCheck {
+                path: path.to_path_buf(),
+                length: expected.bytes,
+                integrity: Some(
+                    UpperIntegrity::Sha256 {
+                        digest: format!("sha256:{}", expected.digest),
+                    }
+                    .into(),
+                ),
+                metadata_bytes: None,
+            });
+            Ok(())
+        })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl From<UpperIntegrity> for CheckpointPayloadIntegrity {
+    fn from(integrity: UpperIntegrity) -> Self {
+        Self::Snapshot(integrity)
     }
 }
 
@@ -392,8 +628,13 @@ fn read_regular_bounded(path: &Path, max_len: u64) -> ImageResult<Vec<u8>> {
     if length > max_len {
         return checkpoint_error(format!("checkpoint manifest exceeds {max_len} bytes"));
     }
-    let mut bytes = Vec::with_capacity(length as usize);
-    file.read_to_end(&mut bytes)?;
+    let length = usize::try_from(length)
+        .map_err(|_| checkpoint_error_value("checkpoint manifest exceeds host limits"))?;
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)?;
+    if file.read(&mut [0u8; 1])? != 0 {
+        return checkpoint_error("checkpoint manifest changed length during read");
+    }
     Ok(bytes)
 }
 
@@ -609,6 +850,26 @@ mod tests {
             assert!(
                 CheckpointClosure::open(directory.path(), None, DEFAULT_FS_STATE_LIMIT).is_ok()
             );
+            let root = ObjectId::from_bytes(&checkpoint.to_canonical_bytes().unwrap()).unwrap();
+            let plan = CheckpointVerificationPlan::prepare(
+                directory.path(),
+                &root,
+                DEFAULT_FS_STATE_LIMIT,
+            )
+            .unwrap();
+            let binding = plan
+                .payloads()
+                .iter()
+                .find(|check| check.path == path)
+                .unwrap();
+            match &binding.integrity {
+                Some(CheckpointPayloadIntegrity::CheckpointFileV1(actual)) => {
+                    assert!(record_integrity);
+                    assert_eq!(*actual, sparse_file_integrity(&path).unwrap());
+                }
+                None => assert!(!record_integrity),
+                other => panic!("checkpoint disk must retain its writer's hash format: {other:?}"),
+            }
             // Same-length content changes are intentionally only detectable when opted in.
             std::fs::write(&path, [18; 4096]).unwrap();
             assert_eq!(
@@ -634,6 +895,59 @@ mod tests {
 
         assert_eq!(closure.root_id(), &expected);
         assert_eq!(closure.memory().pause_generation, 7);
+    }
+
+    #[test]
+    fn verification_plan_records_parsed_metadata_and_defers_only_payload_hashes() {
+        let (directory, expected) = fixture();
+        let manifest =
+            CheckpointClosure::inspect_manifest(directory.path(), Some(&expected)).unwrap();
+        let execution_path = object_path(directory.path(), &manifest.execution_state);
+        std::fs::write(&execution_path, b"corrupted").unwrap();
+        // Planning is deliberately weaker than admission and must retain the original binding.
+        let plan = CheckpointVerificationPlan::prepare(
+            directory.path(),
+            &expected,
+            DEFAULT_FS_STATE_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(plan.payloads().len(), 4);
+        let execution = plan
+            .payloads()
+            .iter()
+            .find(|check| check.path == execution_path)
+            .unwrap();
+        assert_eq!(
+            execution.integrity.as_ref().unwrap().value(),
+            manifest.execution_state.as_str()
+        );
+        assert!(execution.metadata_bytes.is_none());
+        let metadata = plan
+            .payloads()
+            .iter()
+            .find(|check| check.path == object_path(directory.path(), &manifest.memory))
+            .unwrap();
+        assert_eq!(
+            metadata.metadata_bytes.as_ref().unwrap(),
+            &std::fs::read(&metadata.path).unwrap()
+        );
+        assert!(
+            CheckpointClosure::open_portable(
+                directory.path(),
+                Some(&expected),
+                DEFAULT_FS_STATE_LIMIT
+            )
+            .is_err()
+        );
+        std::fs::remove_file(execution_path).unwrap();
+        assert!(
+            CheckpointVerificationPlan::prepare(
+                directory.path(),
+                &expected,
+                DEFAULT_FS_STATE_LIMIT
+            )
+            .is_err()
+        );
     }
 
     #[test]

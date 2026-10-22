@@ -7,6 +7,7 @@ mod create;
 pub(crate) mod deletion;
 mod dispatch;
 pub mod downgrade;
+mod file_identity;
 mod group;
 mod lease;
 pub(crate) mod lineage;
@@ -14,8 +15,10 @@ mod metadata;
 pub(super) mod migration;
 pub(crate) mod publication;
 mod restore;
+mod source;
 mod store;
 mod verify;
+mod writer;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -25,6 +28,7 @@ use crate::snapshot::{
     HeadUpdate, Manifest, SnapshotArchive, SnapshotConfig, SnapshotFormat, SnapshotId,
     SnapshotScope, UpperIntegrity,
 };
+pub(crate) use archive::launch::{PreparedLaunchSource, prepare as prepare_snapshot_sources};
 pub(crate) use archive::materialize_archive_for_child_with_overrides as materialize_archive_for_child;
 use artifact::{Snapshot, SnapshotHandle};
 pub(crate) use create::{
@@ -41,3 +45,5 @@ pub(crate) use restore::{
 pub(crate) use archive::save_snapshot_expected;
 pub(super) use store::looks_like_path;
 pub(crate) use store::remove_snapshot_expected;
+
+pub(crate) use dispatch::{anchor_archive_selector, load_group_admitted, load_many_admitted};

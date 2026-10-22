@@ -2,9 +2,14 @@
 
 #[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
+#[cfg(feature = "net")]
+use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 
 use super::config::SnapshotRestoreMode;
-use super::{ExternalMountRestorePolicy, MountBuilder, Sandbox, SandboxBuilder, SecurityProfile};
+use super::{
+    ExternalMountRestorePolicy, InitOptionsBuilder, MountBuilder, PullPolicy, Sandbox,
+    SandboxBuilder, SecurityProfile,
+};
 use crate::size::Mebibytes;
 use crate::snapshot::SnapshotReference;
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
@@ -33,6 +38,10 @@ pub struct RestoreBuilder {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct RestoreBootOverrides {
     pub(crate) security: bool,
+    pub(crate) init: bool,
+    pub(crate) hostname: bool,
+    pub(crate) thp: bool,
+    pub(crate) new_command: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -48,6 +57,18 @@ impl RestoreBootOverrides {
     ) -> MicrosandboxResult<()> {
         if scope != crate::snapshot::SnapshotScope::Full || mode == SnapshotRestoreMode::DiskOnly {
             return Ok(());
+        }
+        for (requested, label) in [
+            (self.new_command, "starting a new command"),
+            (self.init, "init replacement"),
+            (self.hostname, "hostname replacement"),
+            (self.thp, "guest THP policy replacement"),
+        ] {
+            if requested {
+                return Err(MicrosandboxError::InvalidConfig(format!(
+                    "{label} requires a disk snapshot or disk-only mode; full restore resumes captured execution"
+                )));
+            }
         }
         if self.security {
             return Err(MicrosandboxError::unsupported(
@@ -112,6 +133,46 @@ impl RestoreBuilder {
         self
     }
 
+    /// Default guest working directory for new commands, including after full resume.
+    pub fn workdir(mut self, path: impl Into<String>) -> Self {
+        self.inner = self.inner.workdir(path);
+        self
+    }
+
+    /// Default shell for new commands; this does not execute it during restoration.
+    pub fn shell(mut self, shell: impl Into<String>) -> Self {
+        self.inner = self.inner.shell(shell);
+        self
+    }
+
+    /// Set the entrypoint for future default-workload execution; captured processes are unchanged.
+    pub fn entrypoint(mut self, argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.inner = self.inner.entrypoint(argv);
+        self
+    }
+
+    /// Set CMD for future default-workload execution. An empty list explicitly clears CMD.
+    /// This never selects a startup command or executes during restoration.
+    pub fn cmd(mut self, argv: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.inner = self.inner.cmd(argv);
+        self
+    }
+
+    /// Add a destination environment default for new commands, not captured processes.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.inner = self.inner.env(key, value);
+        self
+    }
+
+    /// Add destination environment defaults using the existing SDK append/override semantics.
+    pub fn envs(
+        mut self,
+        env: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.inner = self.inner.envs(env);
+        self
+    }
+
     /// Set guest CPUs for disk boot. Full restore accepts only the captured CPU count.
     pub fn cpus(mut self, count: u8) -> Self {
         self.inner = self.inner.cpus(count);
@@ -124,11 +185,92 @@ impl RestoreBuilder {
         self
     }
 
+    /// Set the CPU ceiling for disk boot. Full resume requires the captured ceiling.
+    pub fn max_cpus(mut self, count: u8) -> Self {
+        self.inner = self.inner.max_cpus(count);
+        self
+    }
+
+    /// Set the memory ceiling for disk boot. Full resume requires the captured ceiling.
+    pub fn max_memory(mut self, size: impl Into<Mebibytes>) -> Self {
+        self.inner = self.inner.max_memory(size);
+        self
+    }
+
+    /// Attach a label to the destination sandbox without changing snapshot labels.
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.inner = self.inner.label(key, value);
+        self
+    }
+
+    /// Attach destination labels, replacing earlier values for the same keys.
+    pub fn labels(
+        mut self,
+        labels: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.inner = self.inner.labels(labels);
+        self
+    }
+
+    /// Select the guest PID 1 for a disk snapshot or disk-only boot.
+    /// Full-memory resume rejects this request, including an explicit `auto`.
+    pub fn init(self, cmd: impl Into<String>) -> Self {
+        self.init_with(cmd, |init| init)
+    }
+
+    /// Select guest PID 1 with explicit arguments and environment for a disk boot.
+    /// This replaces any earlier init choice. It never changes captured processes on full resume.
+    pub fn init_with(
+        mut self,
+        cmd: impl Into<String>,
+        configure: impl FnOnce(InitOptionsBuilder) -> InitOptionsBuilder,
+    ) -> Self {
+        self.inner = self.inner.init_with(cmd, configure);
+        // Preserve intent before deferred metadata resolution, even for default-looking values.
+        self.inner
+            .config
+            .restore_boot_overrides
+            .get_or_insert_with(Default::default)
+            .init = true;
+        self
+    }
+
+    /// Set the guest hostname for disk boot; full-memory resume rejects replacement.
+    /// The name must be nonempty and fit within Linux's 64-byte hostname limit.
+    pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
+        self.inner = self.inner.hostname(hostname);
+        self.inner
+            .config
+            .restore_boot_overrides
+            .get_or_insert_with(Default::default)
+            .hostname = true;
+        self
+    }
+
     /// Set the destination host's network policy before disk boot or captured execution resumes.
     /// This changes traffic admission, not the captured guest interface or TLS trust setup.
     #[cfg(feature = "net")]
     pub fn network_policy(mut self, policy: NetworkPolicy) -> Self {
         self.inner = self.inner.network(|network| network.policy(policy));
+        self
+    }
+
+    /// Control retrieval of the snapshot's digest-pinned base image.
+    /// This never selects a different image or updates the saved snapshot.
+    pub fn pull_policy(mut self, policy: PullPolicy) -> Self {
+        self.inner = self.inner.pull_policy(policy);
+        self
+    }
+
+    /// Select the destination proxy before disk boot or full-memory resume.
+    /// This does not replace the captured guest interface or inject guest trust material.
+    /// Proxy credentials use the existing destination secret-source resolution.
+    #[cfg(feature = "net")]
+    pub fn proxy<P>(mut self, configure: impl FnOnce(OutboundProxyBuilder) -> P) -> Self
+    where
+        P: OutboundProxyConfig,
+    {
+        self.inner = self.inner.proxy(configure);
         self
     }
 
@@ -266,29 +408,7 @@ macro_rules! resource_methods {
                 guest: impl Into<String>,
                 configure: impl FnOnce(MountBuilder) -> MountBuilder,
             ) -> Self {
-                let resources = self
-                    .inner
-                    .config
-                    .restore_resources
-                    .get_or_insert_with(Default::default);
-                let mounts = self.inner.config.spec.mounts.get_or_insert_with(Vec::new);
-                match configure(MountBuilder::new(guest)).build_restore() {
-                    Ok(Ok(mount)) => {
-                        let guest = mount.guest();
-                        resources.captured.remove(guest);
-                        resources.mapped.insert(guest.into());
-                        mounts.retain(|existing| existing.guest() != guest);
-                        mounts.push(mount);
-                    }
-                    Ok(Err(guest)) => {
-                        resources.mapped.remove(&guest);
-                        mounts.retain(|existing| existing.guest() != guest);
-                        resources.captured.insert(guest);
-                    }
-                    Err(error) => {
-                        self.inner.build_error = Some(error);
-                    }
-                }
+                self.inner = self.inner.snapshot_volume(guest, configure);
                 self
             }
 
@@ -388,6 +508,205 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_pull_policy_preserves_source_and_full_resume_admission() {
+        for policy in [PullPolicy::Always, PullPolicy::IfMissing, PullPolicy::Never] {
+            let builder = Sandbox::restore("saved").pull_policy(policy);
+            let config = config(&builder);
+            assert_eq!(config.spec.pull_policy, policy);
+            assert!(builder.inner.build_error.is_none());
+            config
+                .restore_boot_overrides
+                .validate_scope(
+                    crate::snapshot::SnapshotScope::Full,
+                    SnapshotRestoreMode::Full,
+                )
+                .unwrap();
+        }
+    }
+
+    #[cfg(all(feature = "local", feature = "net"))]
+    #[test]
+    fn destination_proxy_preserves_guest_identity_and_policy() {
+        let builder = Sandbox::restore("saved")
+            .network_policy(NetworkPolicy::none())
+            .proxy(|proxy| {
+                proxy.socks5("127.0.0.1:1080").credentials(
+                    "destination",
+                    crate::sandbox::SecretSource::env("DEST_PROXY_PASSWORD"),
+                )
+            });
+        let config = config(&builder);
+        let network = config.local_network_config().unwrap();
+        let proxy = serde_json::to_value(network.outbound_proxy.unwrap()).unwrap();
+        assert!(proxy.to_string().contains("DEST_PROXY_PASSWORD"));
+        assert!(network.interface.mac.is_none());
+        assert_eq!(
+            serde_json::to_value(network.policy).unwrap(),
+            serde_json::to_value(NetworkPolicy::none()).unwrap()
+        );
+        // A destination host proxy does not ask to replay boot configuration or commands.
+        config
+            .restore_boot_overrides
+            .validate_scope(
+                crate::snapshot::SnapshotScope::Full,
+                SnapshotRestoreMode::Full,
+            )
+            .unwrap();
+        assert!(builder.inner.build_error.is_none());
+    }
+
+    #[test]
+    fn destination_labels_do_not_override_guest_boot() {
+        let builder = Sandbox::restore("saved")
+            .label("team", "before")
+            .labels([("team", "after"), ("purpose", "snapshot-child")]);
+        let config = config(&builder);
+        assert_eq!(config.spec.labels["team"], "after");
+        assert_eq!(config.spec.labels["purpose"], "snapshot-child");
+        config
+            .restore_boot_overrides
+            .validate_scope(
+                crate::snapshot::SnapshotScope::Full,
+                SnapshotRestoreMode::Full,
+            )
+            .unwrap();
+        // Labels use the regular sandbox validation, including reserved keys.
+        assert!(
+            Sandbox::restore("saved")
+                .name("child")
+                .label("microsandbox.reserved", "x")
+                .inner
+                .image("alpine")
+                .finish(None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn command_defaults_do_not_request_startup_or_change_captured_execution() {
+        let builder = Sandbox::restore("saved")
+            .workdir("/root")
+            .shell("/bin/ash")
+            .entrypoint(["/bin/sh", "-c"])
+            .cmd(["printf requested"])
+            .env("KEY", "first")
+            .envs([("KEY", "last"), ("EMPTY", "")]);
+        let config = config(&builder);
+        assert_eq!(config.spec.runtime.workdir.as_deref(), Some("/root"));
+        assert_eq!(config.spec.runtime.shell.as_deref(), Some("/bin/ash"));
+        assert_eq!(
+            config.spec.runtime.entrypoint,
+            Some(vec!["/bin/sh".into(), "-c".into()])
+        );
+        assert_eq!(
+            config.spec.runtime.cmd,
+            Some(vec!["printf requested".into()])
+        );
+        assert!(!config.should_launch_background_command());
+        config
+            .restore_boot_overrides
+            .validate_scope(
+                crate::snapshot::SnapshotScope::Full,
+                SnapshotRestoreMode::Full,
+            )
+            .unwrap();
+        assert_eq!(
+            config
+                .spec
+                .env
+                .iter()
+                .map(|value| (value.key.as_str(), value.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("KEY", "first"), ("KEY", "last"), ("EMPTY", "")]
+        );
+        let cleared = builder
+            .entrypoint(Vec::<String>::new())
+            .cmd(Vec::<String>::new());
+        let cleared = self::config(&cleared);
+        assert_eq!(cleared.spec.runtime.entrypoint, Some(vec![]));
+        assert_eq!(cleared.spec.runtime.cmd, Some(vec![]));
+    }
+
+    #[test]
+    fn resource_ceilings_preserve_explicit_intent_and_validate_zero() {
+        let ordinary = Sandbox::restore("saved").name("child");
+        assert!(ordinary.inner.config.spec.resources.max_cpus.is_none());
+        assert!(
+            ordinary
+                .inner
+                .config
+                .spec
+                .resources
+                .max_memory_mib
+                .is_none()
+        );
+        let explicit = ordinary.cpus(1).memory(128).max_cpus(4).max_memory(512);
+        // Inspection keeps caller options sparse until captured-geometry validation.
+        assert_eq!(explicit.inner.config.spec.resources.max_cpus, Some(4));
+        assert_eq!(
+            explicit.inner.config.spec.resources.max_memory_mib,
+            Some(512)
+        );
+        let resolved = explicit
+            .inner
+            // Source preparation normally supplies the captured image before finish.
+            .image("alpine")
+            .finish(None, None)
+            .unwrap();
+        assert_eq!(resolved.spec.resources.max_cpus, 4);
+        assert_eq!(resolved.spec.resources.max_memory_mib, 512);
+        for builder in [
+            Sandbox::restore("saved").name("child").max_cpus(0),
+            Sandbox::restore("saved").name("child").max_memory(0),
+        ] {
+            assert!(
+                builder
+                    .inner
+                    .image("alpine")
+                    .finish(None, None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be greater than 0")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_boot_controls_reject_full_resume_even_when_defaults_are_requested() {
+        use crate::snapshot::SnapshotScope;
+
+        for builder in [
+            Sandbox::restore("saved").init("auto"),
+            Sandbox::restore("saved").init_with("/sbin/init", |init| init.arg("--flag")),
+            Sandbox::restore("saved").hostname("child"),
+        ] {
+            let intent = config(&builder).restore_boot_overrides;
+            assert!(
+                intent
+                    .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::Full)
+                    .is_err()
+            );
+            assert!(
+                intent
+                    .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::DiskOnly)
+                    .is_ok()
+            );
+            assert!(
+                intent
+                    .validate_scope(SnapshotScope::Disk, SnapshotRestoreMode::Full)
+                    .is_ok()
+            );
+        }
+        let ordinary = config(&Sandbox::restore("saved"));
+        assert!(
+            ordinary
+                .restore_boot_overrides
+                .validate_scope(SnapshotScope::Full, SnapshotRestoreMode::Full)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn cow_memory_preserves_the_existing_transient_launch_flag() {
         let ordinary = Sandbox::restore("saved").name("child");
         assert!(!config(&ordinary).forked);
@@ -423,7 +742,10 @@ mod tests {
         use crate::snapshot::SnapshotScope;
 
         for security in [false, true] {
-            let overrides = RestoreBootOverrides { security };
+            let overrides = RestoreBootOverrides {
+                security,
+                ..Default::default()
+            };
             assert!(
                 overrides
                     .validate_scope(SnapshotScope::Disk, SnapshotRestoreMode::Full)

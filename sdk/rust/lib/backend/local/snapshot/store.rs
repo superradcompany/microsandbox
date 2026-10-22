@@ -41,13 +41,22 @@ pub(super) async fn open_snapshot_leased(
     local: &LocalBackend,
     path_or_name: &str,
 ) -> MicrosandboxResult<Snapshot> {
-    open_snapshot_impl(local, path_or_name, true).await
+    open_snapshot_impl(local, path_or_name, true, true).await
+}
+
+/// Verification retains payload leases but must not repair the discovery index as a side effect.
+pub(super) async fn open_for_verification(
+    local: &LocalBackend,
+    path: &Path,
+) -> MicrosandboxResult<Snapshot> {
+    open_snapshot_impl(local, &path.to_string_lossy(), true, false).await
 }
 
 async fn open_snapshot_impl(
     local: &LocalBackend,
     path_or_name: &str,
     reader: bool,
+    index: bool,
 ) -> MicrosandboxResult<Snapshot> {
     if path_or_name.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
@@ -56,6 +65,7 @@ async fn open_snapshot_impl(
     }
 
     let dir = resolve_path(local, path_or_name).await?;
+    super::group::recover_member(&dir).await?;
     let mut lease = if reader {
         Some(
             super::lease::reader_async(canonical_path(&dir))
@@ -80,6 +90,17 @@ async fn open_snapshot_impl(
 
     let manifest_path = dir.join(DESCRIPTOR_FILENAME);
     if !manifest_path.exists() && dir.join(V066_DESCRIPTOR_FILENAME).exists() {
+        if !index {
+            // Verification owns stable writer admission while selecting readers. It must not
+            // start a catalog/descriptor migration inside that read operation.
+            return Err(MicrosandboxError::Unsupported {
+                op: crate::Operation::SnapshotOps,
+                reason: crate::error::UnsupportedReason::NotAvailable(
+                    "legacy manifest.json requires explicit migration before group verification"
+                        .into(),
+                ),
+            });
+        }
         // Migration changes the descriptor inode. Keep the namespace admitted until
         // the reader has transferred protection to the newly published descriptor.
         let _namespace = microsandbox_image::storage_lease::StorageLease::shared(&dir)?;
@@ -183,6 +204,7 @@ async fn open_snapshot_impl(
                 .all(|part| !part.as_os_str().to_string_lossy().starts_with('.'))
         });
     if reader
+        && index
         && managed
         && (super::group::group_path(&dir).is_some()
             || dir.parent() == Some(snapshots_dir.as_path()))
@@ -248,6 +270,84 @@ pub(super) async fn index_write(
     availability: &str,
     name: Option<String>,
 ) -> MicrosandboxResult<()> {
+    write_index_rows(
+        db,
+        vec![index_row(
+            artifact_path,
+            digest,
+            manifest,
+            availability,
+            name,
+        )?],
+        Vec::new(),
+    )
+    .await
+}
+
+/// Publish ready index rows in one SQLite transaction; a batch must never appear a row at a time.
+pub(super) async fn index_write_batch(
+    db: &microsandbox_db::DbWriteConnection,
+    snapshots: &[(PathBuf, String, Manifest)],
+) -> MicrosandboxResult<()> {
+    let rows = snapshots
+        .iter()
+        .map(|(path, digest, manifest)| index_row(path, digest, manifest, "ready", None))
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    write_index_rows(db, rows, Vec::new()).await
+}
+
+/// Resolve all reservations from one recovered batch in the same index commit. Absent
+/// payloads are rolled-back reservations, not members to expose and remove in a second pass.
+pub(super) async fn index_recover_batch(
+    db: &microsandbox_db::DbWriteConnection,
+    snapshots: &[(PathBuf, String, Manifest)],
+    absent: Vec<String>,
+) -> MicrosandboxResult<()> {
+    let rows = snapshots
+        .iter()
+        .map(|(path, digest, manifest)| index_row(path, digest, manifest, "ready", None))
+        .collect::<MicrosandboxResult<Vec<_>>>()?;
+    write_index_rows(db, rows, absent).await
+}
+
+async fn write_index_rows(
+    db: &microsandbox_db::DbWriteConnection,
+    rows: Vec<(snapshot_entity::ActiveModel, sea_orm::Condition)>,
+    absent: Vec<String>,
+) -> MicrosandboxResult<()> {
+    db.transaction::<_, _, _, sea_orm::DbErr>(|transaction| {
+        let rows = rows.clone();
+        let absent = absent.clone();
+        async move {
+            if !absent.is_empty() {
+                snapshot_entity::Entity::delete_many()
+                    .filter(snapshot_entity::Column::ArtifactPath.is_in(absent))
+                    .filter(snapshot_entity::Column::Availability.eq("publishing"))
+                    .exec(&transaction)
+                    .await?;
+            }
+            for (row, supersede) in rows {
+                snapshot_entity::Entity::delete_many()
+                    .filter(supersede)
+                    .exec(&transaction)
+                    .await?;
+                row.insert(&transaction).await?;
+            }
+            recompute_children(&transaction).await?;
+            Ok((transaction, ()))
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+fn index_row(
+    artifact_path: &Path,
+    digest: &str,
+    manifest: &Manifest,
+    availability: &str,
+    name: Option<String>,
+) -> MicrosandboxResult<(snapshot_entity::ActiveModel, sea_orm::Condition)> {
     let created_at = chrono::DateTime::parse_from_rfc3339(&manifest.capture.created_at)
         .map(|d| d.naive_utc())
         .unwrap_or_else(|_| Utc::now().naive_utc());
@@ -345,22 +445,7 @@ pub(super) async fn index_write(
         indexed_at: Set(indexed_at),
         child_count: Set(0),
     };
-    db.transaction::<_, _, _, sea_orm::DbErr>(|transaction| {
-        let row = row.clone();
-        let supersede = supersede.clone();
-        async move {
-            snapshot_entity::Entity::delete_many()
-                .filter(supersede)
-                .exec(&transaction)
-                .await?;
-            row.insert(&transaction).await?;
-            recompute_children(&transaction).await?;
-            Ok((transaction, ()))
-        }
-    })
-    .await?;
-
-    Ok(())
+    Ok((row, supersede))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -443,14 +528,7 @@ pub(super) async fn list_dir(
         if path.join(super::group::GROUP_FILENAME).is_file() {
             // Groups are exactly one level deep. Do not recursively walk arbitrary folders,
             // symlink trees, checkpoint stores, or failed staging directories.
-            let mut members = tokio::fs::read_dir(&path).await?;
-            while let Some(member) = members.next_entry().await? {
-                if member.file_type().await?.is_dir()
-                    && !member.file_name().to_string_lossy().starts_with('.')
-                {
-                    candidates.push(member.path());
-                }
-            }
+            candidates.extend(super::group::member_paths(&path).await?);
         } else {
             candidates.push(path);
         }
@@ -485,10 +563,25 @@ pub(crate) async fn remove_snapshot_expected(
     force: bool,
     expected: Option<&str>,
 ) -> MicrosandboxResult<()> {
+    remove_snapshot_report(local, path_or_name, force, expected)
+        .await
+        .map(|_| ())
+}
+
+pub(super) async fn remove_snapshot_report(
+    local: &LocalBackend,
+    path_or_name: &str,
+    force: bool,
+    expected: Option<&str>,
+) -> MicrosandboxResult<Option<crate::snapshot::CheckpointRemoveResult>> {
     let path = canonical_path(&resolve_path(local, path_or_name).await?);
+    super::group::recover_member(&path).await?;
     // Initialize/reconcile before taking the deletion lock: migration itself pins the
     // namespace, so starting it while holding that namespace exclusively would deadlock.
     let pools = local.db().await?;
+    if let Some(group) = super::group::group_path(&path) {
+        super::publication::complete_batch(pools.write(), &group).await?;
+    }
     if !path.join(DESCRIPTOR_FILENAME).exists() && path.join(V066_DESCRIPTOR_FILENAME).exists() {
         super::migration::reconcile_explicit(pools, &path).await?;
     }
@@ -499,7 +592,7 @@ pub(crate) async fn remove_snapshot_expected(
         && matches!(tokio::fs::symlink_metadata(parent).await, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
     {
         if remove_missing_snapshot(local, &path, force, expected).await? {
-            return Ok(());
+            return Ok(None);
         }
 
         return Err(MicrosandboxError::SnapshotNotFound(
@@ -526,10 +619,10 @@ pub(crate) async fn remove_snapshot_expected(
     if looks_like_path(path_or_name)
         && remove_missing_snapshot(local, &path, force, expected).await?
     {
-        return Ok(());
+        return Ok(None);
     }
 
-    let snapshot = open_snapshot_impl(local, path.to_string_lossy().as_ref(), false).await?;
+    let snapshot = open_snapshot_impl(local, path.to_string_lossy().as_ref(), false, true).await?;
     if expected.is_some_and(|expected| expected != snapshot.digest()) {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "snapshot handle refers to a replaced artifact".into(),
@@ -553,11 +646,16 @@ pub(crate) async fn remove_snapshot_expected(
         )));
     }
 
-    // The group helper validates head removal and removes the member under its publication
-    // lock. Even --force must not leave a group's head dangling while other members remain.
-    if !super::group::remove_member_leased(&artifact_path, _deletion.clone()).await?
-        && artifact_path.exists()
-    {
+    // Group publication pairs member retirement with its recorded-parent head fallback.
+    // The result is captured under ownership; never reread a head another writer can change.
+    let removal = super::group::remove_member_leased(&artifact_path, _deletion.clone()).await?;
+    if let Some(removal) = &removal {
+        tracing::debug!(head_update = ?removal.head_update, "checkpoint removed");
+        for warning in &removal.warnings {
+            tracing::warn!(%warning);
+        }
+    }
+    if removal.is_none() && artifact_path.exists() {
         let path = artifact_path.clone();
         let lease = _deletion.clone();
         tokio::task::spawn_blocking(move || {
@@ -567,15 +665,32 @@ pub(crate) async fn remove_snapshot_expected(
         .await
         .map_err(|error| MicrosandboxError::Custom(format!("snapshot removal task: {error}")))??;
     }
-    snapshot_entity::Entity::delete_by_id(artifact_key)
-        .exec(write_db)
-        .await?;
-    recompute_children(write_db).await?;
-    drop(_deletion);
-    if let Some(parent) = artifact_path.parent() {
-        super::deletion::recover_parent(local, parent).await?;
+    let report = crate::snapshot::CheckpointRemoveResult {
+        id: snapshot.id().clone(),
+        head_update: removal.as_ref().map(|removal| removal.head_update.clone()),
+        warnings: removal.map(|removal| removal.warnings).unwrap_or_default(),
+    };
+    // Publication already committed. A later database/cleanup failure must retain
+    // the removal's identity and head outcome rather than imply nothing happened.
+    let cleanup: MicrosandboxResult<()> = async {
+        snapshot_entity::Entity::delete_by_id(artifact_key)
+            .exec(write_db)
+            .await?;
+        recompute_children(write_db).await?;
+        drop(_deletion);
+        if let Some(parent) = artifact_path.parent() {
+            super::deletion::recover_parent(local, parent).await?;
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    if let Err(source) = cleanup {
+        return Err(MicrosandboxError::SnapshotRemovalRecovery {
+            result: Box::new(report),
+            source: Box::new(source),
+        });
+    }
+    Ok(Some(report))
 }
 
 /// Forget an absent artifact only if no surviving group needs its head/membership checks.
@@ -749,7 +864,12 @@ async fn resolve_path(local: &LocalBackend, selector: &str) -> MicrosandboxResul
 }
 
 pub(super) fn canonical_path(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // Retirement removes the entry before catalog cleanup. Preserve its address by
+    // resolving the surviving parent, even when a caller reached it through a symlink
+    // (including macOS /var -> /private/var). Otherwise recovery misses the original row.
+    std::fs::canonicalize(path)
+        .or_else(|_| microsandbox_image::storage_lease::StorageLease::key(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 async fn indexed_path(
@@ -840,6 +960,30 @@ mod tests {
     };
 
     use super::*;
+
+    /// Parallel subprocess tests can inherit a lookup descriptor until exec. Busy is
+    /// a valid pre-publication result then; never retry a committed or unrelated error.
+    async fn after_reader_release<T, F, Fut>(mut operation: F) -> MicrosandboxResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = MicrosandboxResult<T>>,
+    {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match operation().await {
+                Err(MicrosandboxError::Custom(message))
+                    if message.contains("snapshot is in use by an active operation") =>
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "reader protection never released: {message}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                result => return result,
+            }
+        }
+    }
 
     fn manifest(id: u128, parent: Option<&Manifest>) -> Manifest {
         Manifest {
@@ -993,6 +1137,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whole_group_removal_refuses_external_dependents_and_readers() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let parent = manifest(940, None);
+        let child = manifest(941, Some(&parent));
+        let dependent = manifest(942, Some(&parent));
+        install(&local, "history", "parent", &parent).await;
+        let child_path = install(&local, "history", "child", &child).await;
+        install(&local, "external", "dependent", &dependent).await;
+        // Explicitly index fixtures as real capture/import does before returning.
+        reindex_dir(&local, &local.snapshots_dir()).await.unwrap();
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
+        crate::with_backend(backend, async {
+            let group = crate::Snapshot::get("history").await.unwrap();
+            assert!(
+                group
+                    .remove()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("surviving checkpoint")
+            );
+            let other = crate::Snapshot::get("external").await.unwrap();
+            other.head().await.unwrap().unwrap().remove().await.unwrap();
+            let reader = super::super::lease::reader(&child_path).unwrap();
+            assert!(
+                group
+                    .remove()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("active reader")
+            );
+            drop(reader);
+            let gate = StorageLease::shared(&local.snapshots_dir().join("history")).unwrap();
+            assert!(
+                group
+                    .remove()
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("verification")
+            );
+            drop(gate);
+            let report = group.remove().await.unwrap();
+            assert_eq!(
+                report.removed,
+                vec![parent.snapshot_id.clone(), child.snapshot_id.clone()]
+            );
+            assert_eq!(
+                report.head_update.previous.as_deref(),
+                Some(child.snapshot_id.as_str())
+            );
+            assert!(report.head_update.head.is_none());
+            assert!(!local.snapshots_dir().join("history").exists());
+            assert!(list_indexed(&local).await.unwrap().is_empty());
+            assert!(other.remove().await.unwrap().removed.is_empty());
+        })
+        .await;
+    }
+
+    #[test]
+    fn whole_group_recovery_preserves_a_recreated_group() {
+        // Recovery must reach the injected SQL failure immediately. Unrelated parallel
+        // fork/exec tests can temporarily inherit setup's reader leases and correctly
+        // cause pre-publication refusal instead. Create the fixture after exec in an
+        // isolated process; do not retry removal or weaken its committed-result checks.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::local::snapshot::store::tests::whole_group_recovery_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess helper for the committed group-recovery contract"]
+    async fn whole_group_recovery_worker() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let original = manifest(943, None);
+        install(&local, "history", "original", &original).await;
+        reindex_dir(&local, &local.snapshots_dir()).await.unwrap();
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
+        crate::with_backend(backend, async {
+            let group = crate::Snapshot::get("history").await.unwrap();
+            let db = local.db().await.unwrap();
+            db.write().execute_raw(sea_orm::Statement::from_string(sea_orm::DatabaseBackend::Sqlite,
+                "CREATE TRIGGER reject_group_cleanup BEFORE DELETE ON snapshot_index BEGIN SELECT RAISE(FAIL, 'injected group cleanup failure'); END".to_string())).await.unwrap();
+            let error = group.remove().await.unwrap_err();
+            let MicrosandboxError::SnapshotGroupRemovalRecovery { result, .. } = error else { panic!("lost committed group result: {error}"); };
+            assert_eq!(result.removed, vec![original.snapshot_id]);
+            assert!(!local.snapshots_dir().join("history").exists());
+            db.write().execute_raw(sea_orm::Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "DROP TRIGGER reject_group_cleanup".to_string())).await.unwrap();
+            let replacement = manifest(944, None);
+            let replacement_path = install(&local, "history", "replacement", &replacement).await;
+            open_snapshot(&local, replacement_path.to_str().unwrap()).await.unwrap();
+            let groups = crate::Snapshot::list().await.unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].name(), "history");
+            let rows = list_indexed(&local).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(replacement_path.join(DESCRIPTOR_FILENAME).exists());
+            assert_eq!(crate::Snapshot::get("history").await.unwrap().head().await.unwrap().unwrap().id(), &replacement.snapshot_id);
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_removal_returns_its_own_head_outcome() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let parent = manifest(930, None);
+        let child = manifest(931, Some(&parent));
+        let sibling = manifest(932, Some(&parent));
+        install(&local, "history", "base", &parent).await;
+        install(&local, "history", "child", &child).await;
+        install(&local, "history", "sibling", &sibling).await;
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
+        crate::with_backend(backend, async {
+            let group = crate::Snapshot::get("history").await.unwrap();
+            let base = group.get_checkpoint("base").await.unwrap();
+            let child_value = group.get_checkpoint("child").await.unwrap();
+            let sibling_value = group.get_checkpoint("sibling").await.unwrap();
+            assert!(base.remove().await.is_err()); // Indexed dependents still protect the base.
+            let report = after_reader_release(|| sibling_value.remove())
+                .await
+                .unwrap();
+            assert_eq!(report.id, sibling.snapshot_id);
+            let change = report.head_update.unwrap();
+            assert!(!change.changed);
+            assert_eq!(change.head.as_deref(), Some(child.snapshot_id.as_str()));
+            assert!(sibling_value.remove().await.is_err()); // No fabricated repeated removal.
+            let report = after_reader_release(|| child_value.remove()).await.unwrap();
+            let change = report.head_update.as_ref().unwrap();
+            assert_eq!(change.previous.as_deref(), Some(child.snapshot_id.as_str()));
+            assert_eq!(change.head.as_deref(), Some(parent.snapshot_id.as_str()));
+            assert!(change.changed);
+            group.clear_head().await.unwrap();
+            // A later head mutation cannot change the earlier operation's report.
+            assert_eq!(
+                report.head_update.unwrap().head.as_deref(),
+                Some(parent.snapshot_id.as_str())
+            );
+            let report = after_reader_release(|| base.remove()).await.unwrap();
+            assert_eq!(report.id, parent.snapshot_id);
+            assert!(!report.head_update.unwrap().changed);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn committed_checkpoint_removal_keeps_report_when_catalog_cleanup_fails() {
+        let home = tempfile::tempdir().unwrap();
+        let local = std::sync::Arc::new(
+            crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let checkpoint = manifest(933, None);
+        let path = install(&local, "cleanup", "only", &checkpoint).await;
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
+        crate::with_backend(backend, async {
+            let value = crate::Snapshot::get("cleanup").await.unwrap().get_checkpoint("only").await.unwrap();
+            let pools = local.db().await.unwrap();
+            pools.write().execute_raw(Statement::from_string(DatabaseBackend::Sqlite,
+                "CREATE TRIGGER reject_removal_cleanup BEFORE DELETE ON snapshot_index BEGIN SELECT RAISE(FAIL, 'injected catalog cleanup failure'); END".to_owned())).await.unwrap();
+            let error = after_reader_release(|| value.remove()).await.unwrap_err();
+            let MicrosandboxError::SnapshotRemovalRecovery { result, source } = error else { panic!("unexpected error: {error}") };
+            assert!(!path.exists());
+            assert_eq!(result.id, checkpoint.snapshot_id);
+            let change = result.head_update.unwrap();
+            assert_eq!(change.previous.as_deref(), Some(checkpoint.snapshot_id.as_str()));
+            assert_eq!(change.head, None);
+            assert!(source.to_string().contains("injected catalog cleanup failure"));
+            pools.write().execute_raw(Statement::from_string(DatabaseBackend::Sqlite,
+                "DROP TRIGGER reject_removal_cleanup".to_owned())).await.unwrap();
+            super::super::deletion::recover_parent(&local, path.parent().unwrap()).await.unwrap();
+            assert!(snapshot_entity::Entity::find_by_id(path.display().to_string()).one(pools.read()).await.unwrap().is_none());
+        }).await;
+    }
+
+    #[tokio::test]
     async fn retained_sdk_handles_reject_replacement_before_export_or_removal() {
         let home = tempfile::tempdir().unwrap();
         let local = std::sync::Arc::new(
@@ -1011,10 +1363,10 @@ mod tests {
         .unwrap();
         let backend: std::sync::Arc<dyn crate::backend::Backend> = local.clone();
         crate::with_backend(backend, async {
-            let opened = crate::Snapshot::open(artifact.to_str().unwrap())
+            let opened = crate::Checkpoint::open(artifact.to_str().unwrap())
                 .await
                 .unwrap();
-            let handle = crate::Snapshot::list().await.unwrap().pop().unwrap();
+            let handle = crate::Checkpoint::list().await.unwrap().pop().unwrap();
             remove_snapshot(&local, artifact.to_str().unwrap(), false)
                 .await
                 .unwrap();
@@ -1042,6 +1394,14 @@ mod tests {
                     Err(MicrosandboxError::SnapshotIntegrity(_))
                 ));
             }
+            assert!(matches!(
+                opened.remove().await,
+                Err(MicrosandboxError::SnapshotIntegrity(_))
+            ));
+            assert!(matches!(
+                opened.remove_with(|options| options.force()).await,
+                Err(MicrosandboxError::SnapshotIntegrity(_))
+            ));
             assert!(!out.exists());
             assert_eq!(
                 open_snapshot(&local, artifact.to_str().unwrap())
@@ -1056,6 +1416,26 @@ mod tests {
 
     #[tokio::test]
     async fn pending_publication_recovers_both_sides_of_the_rename() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_PENDING_PUBLICATION_RECOVERY").is_none() {
+            // Dropping the lease simulates publisher exit. A sibling test's fork
+            // could retain that descriptor until exec, so isolate this fixture
+            // rather than weakening its immediate recovery assertions.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::local::snapshot::store::tests::pending_publication_recovers_both_sides_of_the_rename",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_PENDING_PUBLICATION_RECOVERY", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated publication recovery failed: {status}"
+            );
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
@@ -1136,6 +1516,213 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn committed_batch_recovery_finishes_index_with_live_publisher_pins() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("committed"))
+            .await
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let staged = tempfile::tempdir_in(&group).unwrap();
+        let base = manifest(970, None);
+        let child = manifest(971, Some(&base));
+        let db = local.db().await.unwrap();
+        let mut publishers = Vec::new();
+        for data in [&base, &child] {
+            let path = group.join(data.snapshot_id.as_str());
+            publishers.push(StorageLease::shared(&path).unwrap());
+            super::super::publication::prepare(db.write(), &path, &data.digest().unwrap(), data)
+                .await
+                .unwrap();
+            let incoming = staged.path().join(data.snapshot_id.as_str());
+            std::fs::create_dir(&incoming).unwrap();
+            std::fs::write(
+                incoming.join(DESCRIPTOR_FILENAME),
+                data.to_canonical_bytes().unwrap(),
+            )
+            .unwrap();
+        }
+        super::super::group::publish_batch_indexed(
+            &group,
+            staged.path(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&child.snapshot_id),
+            false,
+            super::super::group::IndexedPublication {
+                operation: "00000000000000000000000000000001".into(),
+                outcome: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(group.join(".group-transaction").exists());
+
+        // A post-filesystem failure retains a committed journal and the complete reservation
+        // set. Reading must report failure rather than silently return an older index view.
+        db.write()
+            .execute_unprepared(
+                "CREATE TRIGGER fail_batch_index BEFORE INSERT ON snapshot_index \
+             WHEN NEW.availability = 'ready' AND EXISTS \
+             (SELECT 1 FROM snapshot_index WHERE availability = 'ready') \
+             BEGIN SELECT RAISE(FAIL, 'injected batch-index failure'); END",
+            )
+            .await
+            .unwrap();
+        assert!(
+            list_indexed(&local)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("injected batch-index failure")
+        );
+        for data in [&base, &child] {
+            assert_eq!(
+                indexed_path(&local, &group.join(data.snapshot_id.as_str()))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .availability,
+                "publishing"
+            );
+        }
+        assert!(group.join(".group-transaction").exists());
+        db.write()
+            .execute_unprepared("DROP TRIGGER fail_batch_index")
+            .await
+            .unwrap();
+        let listed = tokio::time::timeout(std::time::Duration::from_secs(5), list_indexed(&local))
+            .await
+            .expect("committed recovery waited on the original publisher's pins")
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|member| member.availability == "ready"));
+        assert!(!group.join(".group-transaction").exists());
+        assert!(
+            !super::super::publication::complete_batch(db.write(), &group)
+                .await
+                .unwrap()
+        );
+        drop(publishers);
+    }
+
+    #[tokio::test]
+    async fn pending_batch_recovery_defers_live_publishers_and_commits_all_rows_together() {
+        const CHILD: &str = "MSB_TEST_BATCH_RECOVERY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Parallel fork-based tests can inherit the publisher's flock until exec.
+            // A busy namespace correctly defers recovery, so isolate the injected SQL
+            // failure test instead of weakening production admission or retrying errors.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::store::tests::pending_batch_recovery_defers_live_publishers_and_commits_all_rows_together")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("batch"))
+            .await
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let db = local.db().await.unwrap();
+        let mut paths = Vec::new();
+        for number in 0..3 {
+            let data = manifest(950 + number, None);
+            let path = group.join(data.snapshot_id.as_str());
+            super::super::publication::prepare(db.write(), &path, &data.digest().unwrap(), &data)
+                .await
+                .unwrap();
+            if number < 2 {
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(
+                    path.join(DESCRIPTOR_FILENAME),
+                    data.to_canonical_bytes().unwrap(),
+                )
+                .unwrap();
+            }
+            paths.push(path);
+        }
+
+        // One still-live publisher must defer its whole group, including earlier entries
+        // that a per-row recovery loop would otherwise expose prematurely.
+        let publisher = StorageLease::shared(&paths[1]).unwrap();
+        super::super::publication::recover(&local).await.unwrap();
+        for path in &paths {
+            assert_eq!(
+                indexed_path(&local, path)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .availability,
+                "publishing"
+            );
+        }
+        drop(publisher);
+
+        // Fail after the first ready insertion inside the transaction. Both that insertion
+        // and deletion of the absent reservation must roll back, preserving all three roots.
+        db.write()
+            .execute_unprepared(
+                "CREATE TRIGGER fail_second_ready BEFORE INSERT ON snapshot_index \
+             WHEN NEW.availability = 'ready' AND EXISTS \
+             (SELECT 1 FROM snapshot_index WHERE availability = 'ready') \
+             BEGIN SELECT RAISE(FAIL, 'injected second-row failure'); END",
+            )
+            .await
+            .unwrap();
+        let error = super::super::publication::recover(&local)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("injected second-row failure"));
+        for path in &paths {
+            assert_eq!(
+                indexed_path(&local, path)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .availability,
+                "publishing"
+            );
+        }
+        db.write()
+            .execute_unprepared("DROP TRIGGER fail_second_ready")
+            .await
+            .unwrap();
+        super::super::publication::recover(&local).await.unwrap();
+        for path in &paths[..2] {
+            assert_eq!(
+                indexed_path(&local, path)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .availability,
+                "ready"
+            );
+        }
+        assert!(indexed_path(&local, &paths[2]).await.unwrap().is_none());
+        super::super::publication::recover(&local).await.unwrap();
+        assert_eq!(list_indexed(&local).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn recovery_finds_quarantine_after_last_index_row_is_gone() {
         let home = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
@@ -1213,6 +1800,26 @@ mod tests {
 
     #[tokio::test]
     async fn stale_metadata_cannot_resurrect_a_removed_snapshot() {
+        #[cfg(unix)]
+        if std::env::var_os("MSB_TEST_STALE_SNAPSHOT_REMOVAL").is_none() {
+            // Metadata opening briefly holds a reader lease. Other test threads
+            // may fork while it is held and retain it until exec, so construct
+            // this immediate-removal fixture only after entering its own process.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::local::snapshot::store::tests::stale_metadata_cannot_resurrect_a_removed_snapshot",
+                    "--nocapture",
+                ])
+                .env("MSB_TEST_STALE_SNAPSHOT_REMOVAL", "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "isolated stale-metadata fixture failed: {status}"
+            );
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
@@ -1260,7 +1867,85 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn read_only_grouped_snapshot_preserves_explicit_path_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let group = super::super::group::ensure(external.path(), Some("readonly"))
+            .await
+            .unwrap();
+        let data = manifest(902, None);
+        let path = group.join(data.snapshot_id.as_str());
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(
+            path.join(DESCRIPTOR_FILENAME),
+            data.to_canonical_bytes().unwrap(),
+        )
+        .unwrap();
+        let lock = group.join(".group.lock");
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&group, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = open_snapshot_leased(&local, path.to_str().unwrap()).await;
+        std::fs::set_permissions(&group, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let reader = result.unwrap();
+        assert_eq!(reader.id(), &data.snapshot_id);
+        assert!(!group.join(".msb-leases").exists());
+    }
+
+    #[tokio::test]
+    async fn group_listing_retains_valid_artifacts_beside_malformed_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let data = manifest(904, None);
+        let path = install(&local, "history", "baseline", &data).await;
+        let group = path.parent().unwrap();
+        let corrupt = group.join("snap_00000000000000000000000000000389");
+        std::fs::create_dir(&corrupt).unwrap();
+        std::fs::write(corrupt.join(DESCRIPTOR_FILENAME), b"malformed descriptor").unwrap();
+        // Explicit-path discovery has always been useful for recovering otherwise healthy
+        // artifacts when local selection metadata is damaged. Preserve that behavior.
+        std::fs::write(
+            group.join(super::super::group::GROUP_FILENAME),
+            b"malformed group",
+        )
+        .unwrap();
+        let found = list_dir(&local, &local.snapshots_dir()).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id(), &data.snapshot_id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn read_only_external_snapshot_needs_no_sidecar_directory() {
+        const CHILD: &str = "MSB_TEST_READONLY_SNAPSHOT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // The final assertion requires all reader descriptors to be closed.
+            // Parallel subprocess tests may inherit the flock until their exec,
+            // so run this ownership check without unrelated fork producers.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("backend::local::snapshot::store::tests::read_only_external_snapshot_needs_no_sidecar_directory")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         let home = tempfile::tempdir().unwrap();
         let external = tempfile::tempdir().unwrap();
@@ -1308,7 +1993,9 @@ mod tests {
         assert!(!second.exists());
         assert!(first.join(DESCRIPTOR_FILENAME).exists());
         drop(reader);
-        remove_snapshot(&local, first.to_str().unwrap(), false)
+        // The live-reader refusal above stays strict; after release allow only the
+        // transient inheritance interval exercised by the parallel crash tests.
+        after_reader_release(|| remove_snapshot(&local, first.to_str().unwrap(), false))
             .await
             .unwrap();
         assert!(!first.exists());
@@ -1415,7 +2102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn distinct_child_counts_and_head_guard_survive_reindex() {
+    async fn distinct_child_counts_and_parent_fallback_survive_reindex() {
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
@@ -1437,16 +2124,40 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.child_count == 1));
         assert!(
-            remove_snapshot(&local, "first:child", true)
+            remove_snapshot(&local, "first:base", false)
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("current head")
+                .contains("indexed child")
         );
+        remove_snapshot(&local, "first:child", false).await.unwrap();
         assert_eq!(
             get_handle(&local, "first").await.unwrap().id(),
+            parent.snapshot_id.as_str()
+        );
+        assert_eq!(
+            get_handle(&local, "second").await.unwrap().id(),
             child.snapshot_id.as_str()
         );
+        // A second installed copy of the same child still protects the parent;
+        // removing one copy must not reset the distinct-child count to zero.
+        assert!(
+            remove_snapshot(&local, "first:base", false)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("indexed child")
+        );
+        remove_snapshot(&local, "second:child", false)
+            .await
+            .unwrap();
+        let rows = snapshot_entity::Entity::find()
+            .filter(snapshot_entity::Column::SnapshotId.eq(parent.snapshot_id.as_str()))
+            .all(local.db().await.unwrap().read())
+            .await
+            .unwrap();
+        assert!(rows.iter().all(|row| row.child_count == 0));
+        remove_snapshot(&local, "first:base", false).await.unwrap();
     }
 
     #[tokio::test]

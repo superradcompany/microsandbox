@@ -32,6 +32,10 @@ pub struct PublishedSnapshotArtifact {
     pub snapshot_id: String,
     /// Digest of the canonical snapshot descriptor.
     pub digest: String,
+    /// Head outcome recorded by this publication, never a later read of the mutable group head.
+    /// Absent for archive-only capture or producers that did not report an outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_update: Option<crate::snapshot::HeadUpdate>,
 }
 
 /// Capture completed, but restoring the source's prior execution state failed.
@@ -56,6 +60,36 @@ pub struct SnapshotSourceRecoveryError {
     pub detail: String,
     /// Additional failure while materializing or publishing the requested artifact.
     pub publication_error: Option<String>,
+}
+
+/// What is known about an archive batch when its import call fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotImportOutcome {
+    /// This operation did not publish group members or change the head.
+    NotCommitted,
+    /// The entire batch committed; a later indexing, cleanup or result step failed.
+    Committed,
+    /// Publication may have committed; recovery must establish the durable outcome.
+    Unknown,
+}
+
+/// An import failure with its publication outcome and original cause retained.
+#[derive(Debug, Serialize)]
+pub struct SnapshotImportError {
+    /// Identity of this attempt, also recorded in its local publication journal.
+    pub operation_id: String,
+    /// Requested archive paths, resolved at the local backend boundary.
+    pub archives: Vec<PathBuf>,
+    /// Destination group directory, when namespace preparation completed.
+    pub group_path: Option<PathBuf>,
+    /// Whether this operation published its batch.
+    pub outcome: SnapshotImportOutcome,
+    /// Original diagnostic, also available through the Rust error source chain.
+    pub detail: String,
+    /// Original typed cause; language bindings preserve the serialized context above.
+    #[serde(skip)]
+    pub source: Box<MicrosandboxError>,
 }
 
 /// Errors that can occur in microsandbox operations.
@@ -324,6 +358,34 @@ pub enum MicrosandboxError {
     /// A checkpoint was captured, but restoring the source's execution state failed.
     #[error("{0}")]
     SnapshotSourceRecovery(Box<SnapshotSourceRecoveryError>),
+
+    /// An archive import failed without discarding its publication outcome.
+    #[error("{0}")]
+    SnapshotImport(#[source] Box<SnapshotImportError>),
+
+    /// Filesystem removal committed, but subsequent catalog or recovery work failed.
+    #[error("checkpoint removal committed for {}; recovery remains: {source}", .result.id)]
+    SnapshotRemovalRecovery {
+        /// The exact removal and head outcome, even though cleanup did not finish.
+        result: Box<crate::snapshot::CheckpointRemoveResult>,
+        /// Original cleanup/catalog failure.
+        #[source]
+        source: Box<MicrosandboxError>,
+    },
+
+    /// Whole-group publication committed, but catalog or payload cleanup needs recovery.
+    #[error("snapshot group removal committed for {group}: {source}", group = .result.group)]
+    SnapshotGroupRemovalRecovery {
+        /// Confirmed publication outcome, retained even though cleanup failed.
+        result: Box<crate::snapshot::SnapshotRemoveResult>,
+        /// Catalog or cleanup failure after whole-group retirement.
+        #[source]
+        source: Box<MicrosandboxError>,
+    },
+
+    /// Group verification failed. The report retains every member outcome, including partial evidence.
+    #[error("snapshot group verification failed for '{}'", .0.group)]
+    SnapshotVerification(Box<crate::snapshot::SnapshotGroupVerifyReport>),
 
     /// An adjacent-release snapshot artifact migration is blocked.
     #[error("snapshot artifact migration failed for {artifact} during {phase}: {code}: {detail}")]
@@ -709,6 +771,38 @@ impl RestoreKind {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl std::fmt::Display for SnapshotImportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "snapshot import {}", self.operation_id)?;
+        if let Some(group) = &self.group_path {
+            write!(f, " into {}", group.display())?;
+        }
+        match self.outcome {
+            SnapshotImportOutcome::NotCommitted => write!(
+                f,
+                " failed; this batch published no changes: {}",
+                self.detail
+            ),
+            SnapshotImportOutcome::Committed => write!(
+                f,
+                " committed, but a later step failed: {}; inspect the destination before retrying",
+                self.detail
+            ),
+            SnapshotImportOutcome::Unknown => write!(
+                f,
+                " has an unknown publication outcome: {}; recover the destination before retrying",
+                self.detail
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
 impl std::fmt::Display for SnapshotSourceRecoveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(artifact) = &self.artifact {
@@ -813,6 +907,7 @@ mod tests {
                 path: "/snapshots/saved.tar".into(),
                 snapshot_id: "snap_test".into(),
                 digest: "sha256:descriptor".into(),
+                head_update: None,
             }),
             detail: "thaw timed out; re-pause failed".into(),
             publication_error: None,

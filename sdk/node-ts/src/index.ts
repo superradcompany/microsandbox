@@ -113,12 +113,17 @@ export {
 } from "./volume-fs.js";
 
 // Snapshots
-export { Snapshot, SnapshotArchive } from "./snapshot.js";
+export type { SnapshotGroupInfo, SnapshotSourceBinding, SnapshotSourceStatus } from "./snapshot-inspection.js";
+export type { CheckpointRemoveResult, SnapshotRemoveResult } from "./snapshot-removal.js";
+export { Snapshot as Checkpoint, CheckpointRemoveOptions, SnapshotSaveOptions, SnapshotArchive } from "./snapshot.js";
+export { Snapshot, SnapshotCaptureOptions, SnapshotLoadOptions } from "./snapshot-group.js";
+export type { SnapshotCreateResult, CheckpointCaptureResult, SnapshotImportResult } from "./snapshot-group.js";
+export type { SnapshotGroupVerifyReport, CheckpointVerification, SnapshotVerificationFinding, SnapshotVerificationFindingKind, SnapshotVerificationState } from "./snapshot-verification.js";
 export type { DiskCompactionOptions, DiskCompactionDiskResult, DiskCompactionResult } from "./compact.js";
 import { Snapshot as _Snapshot, type SnapshotBuilder as _SnapBT } from "./snapshot.js";
 /**
  * Native fluent builder for a snapshot. `new SnapshotBuilder(name)`
- * is equivalent to `Snapshot.builder(name)`.
+ * is equivalent to `Checkpoint.builder(name)`.
  */
 export const SnapshotBuilder = function SnapshotBuilder(
   this: unknown,
@@ -137,6 +142,7 @@ export type {
   GuestFlush,
   SnapshotState,
   SnapshotVerifyReport,
+  SnapshotVerifyCoverage,
 } from "./snapshot.js";
 
 // Local storage observations and runtime cache cleanup
@@ -408,12 +414,14 @@ export const RootDiskBuilder = napi.RootDiskBuilder;
 export type RootDiskBuilder = NapiRootDiskBuilder;
 export const ExecOptionsBuilder = napi.ExecOptionsBuilder;
 export const InitOptionsBuilder = napi.InitOptionsBuilder;
+export type InitOptionsBuilder = NapiInitOptionsBuilder;
 export const AttachOptionsBuilder = napi.AttachOptionsBuilder;
 import type {
   NapiNetworkPolicyBuilder,
   NapiHttpConnectProxyBuilder,
   NapiOutboundProxyBuilder,
   NapiRootDiskBuilder,
+  NapiInitOptionsBuilder,
   NapiRuleBuilder,
   NapiRuleDestinationBuilder,
   NapiSocks4ProxyBuilder,
@@ -493,6 +501,10 @@ export {
   SandboxReplacedError,
   SandboxStillRunningError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
+  SnapshotVerificationError,
+  SnapshotRemovalRecoveryError,
+  SnapshotGroupRemovalRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
@@ -503,6 +515,8 @@ export type {
   MicrosandboxErrorCode,
   PublishedSnapshotArtifact,
   SnapshotSourceRecoveryDetails,
+  SnapshotImportDetails,
+  SnapshotImportOutcome,
 } from "./errors.js";
 
 // Sizes

@@ -23,12 +23,12 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 	baseName := uniqueIntegrationName(t, "go-sdk-snapshot-base")
 	forkName := uniqueIntegrationName(t, "go-sdk-snapshot-fork")
 	snapshotName := uniqueIntegrationName(t, "go-sdk-snapshot")
-	snapshotSelector := baseName + ":" + snapshotName
+	snapshotSelector := snapshotName + ":ready"
 
 	t.Cleanup(func() {
 		removeSandboxBestEffort(forkName)
 		removeSandboxBestEffort(baseName)
-		removeSnapshotBestEffort(snapshotSelector)
+		removeGroupBestEffort(snapshotName)
 	})
 
 	phaseStart := time.Now()
@@ -40,6 +40,9 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("CreateSandbox base: %v", err)
 	}
 	logSnapshotPhase(t, "create base sandbox", phaseStart)
+	if _, err := base.Exec(ctx, "sh", []string{"-c", "printf restored-user-data > /root/snapshot-marker; sync"}); err != nil {
+		t.Fatal(err)
+	}
 
 	phaseStart = time.Now()
 	if err := base.Stop(ctx); err != nil {
@@ -55,11 +58,12 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("GetSandbox base: %v", err)
 	}
 	phaseStart = time.Now()
-	artifact, err := baseHandle.Snapshot(ctx, snapshotName)
+	created, err := baseHandle.Snapshot(ctx, snapshotName, microsandbox.WithSnapshotCaptureConfig(microsandbox.SnapshotCaptureConfig{Name: "ready", RecordIntegrity: true}))
 	if err != nil {
 		t.Fatalf("SandboxHandle.Snapshot: %v", err)
 	}
 	logSnapshotPhase(t, "create snapshot", phaseStart)
+	artifact := created.Checkpoint
 	if artifact.Digest() == "" {
 		t.Fatal("Snapshot artifact has empty digest")
 	}
@@ -80,15 +84,15 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("Verify returned incomplete report: %+v", report)
 	}
 
-	handle, err := microsandbox.Snapshot.Get(ctx, snapshotSelector)
+	handle, err := microsandbox.Checkpoint.Get(ctx, snapshotSelector)
 	if err != nil {
 		t.Fatalf("Snapshot.Get: %v", err)
 	}
 	if handle.Digest() != artifact.Digest() {
 		t.Fatalf("Snapshot.Get digest = %q, want %q", handle.Digest(), artifact.Digest())
 	}
-	if gotName := handle.Name(); gotName == nil || *gotName != snapshotName {
-		t.Fatalf("Snapshot.Get name = %v, want %q", gotName, snapshotName)
+	if gotName := handle.Name(); gotName == nil || *gotName != "ready" {
+		t.Fatalf("Snapshot.Get name = %v, want %q", gotName, "ready")
 	}
 
 	opened, err := handle.Open(ctx)
@@ -100,7 +104,7 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 	}
 
 	found := false
-	handles, err := microsandbox.Snapshot.List(ctx)
+	handles, err := microsandbox.Checkpoint.List(ctx)
 	if err != nil {
 		t.Fatalf("Snapshot.List: %v", err)
 	}
@@ -115,7 +119,7 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 	}
 
 	phaseStart = time.Now()
-	fork, err := microsandbox.RestoreSandbox(ctx, artifact, forkName)
+	fork, err := artifact.SpawnSandbox(ctx, forkName)
 	if err != nil {
 		t.Fatalf("RestoreSandbox: %v", err)
 	}
@@ -139,9 +143,10 @@ func TestSandboxHandleSnapshotAndRestore(t *testing.T) {
 		t.Fatalf("/etc/alpine-release empty in fork")
 	}
 
-	// TODO: when stop-flush ensures guest writes are persisted into the
-	// upper layer before the VM halts, restore a marker write+read here
-	// to prove the snapshot captured user data, not just the image.
+	marker, err := fork.FS().ReadString(ctx, "/root/snapshot-marker")
+	if err != nil || marker != "restored-user-data" {
+		t.Fatalf("restored marker = %q, err = %v", marker, err)
+	}
 }
 
 func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
@@ -151,7 +156,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 
 	t.Cleanup(func() {
 		removeSandboxBestEffort(baseName)
-		removeSnapshotBestEffort(snapshotName)
+		removeGroupBestEffort(baseName)
 	})
 
 	phaseStart := time.Now()
@@ -174,7 +179,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	}
 
 	phaseStart = time.Now()
-	artifact, err := microsandbox.Snapshot.Create(ctx, microsandbox.SnapshotCreateOptions{
+	artifact, err := microsandbox.Checkpoint.Create(ctx, microsandbox.SnapshotCreateOptions{
 		Name:        snapshotName,
 		FromSandbox: baseName,
 	})
@@ -187,16 +192,16 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Create path = %q, want stable ID basename %q", snapshotDir, artifact.ID())
 	}
 	update := artifact.HeadUpdate()
-	if update == nil || update.Group != baseName || update.Head != artifact.ID() {
+	if update == nil || update.Group != baseName || (update.Head == nil || *update.Head != artifact.ID()) {
 		t.Fatalf("Snapshot.Create missing group head outcome: %#v", update)
 	}
-	head, err := microsandbox.Snapshot.GroupHead(ctx, baseName)
-	if err != nil || head.Head != artifact.ID() {
+	head, err := microsandbox.Checkpoint.GroupHead(ctx, baseName)
+	if err != nil || (head == nil || head.Head == nil || *head.Head != artifact.ID()) {
 		t.Fatalf("Snapshot.GroupHead = %#v, err = %v", head, err)
 	}
 	t.Cleanup(func() { removeSnapshotBestEffort(snapshotDir) })
 
-	opened, err := microsandbox.Snapshot.Open(ctx, snapshotDir)
+	opened, err := microsandbox.Checkpoint.Open(ctx, snapshotDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Open: %v", err)
 	}
@@ -204,7 +209,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.Open digest = %q, want %q", opened.Digest(), artifact.Digest())
 	}
 
-	dirEntries, err := microsandbox.Snapshot.ListDir(ctx, filepath.Dir(snapshotDir))
+	dirEntries, err := microsandbox.Checkpoint.ListDir(ctx, filepath.Dir(snapshotDir))
 	if err != nil {
 		t.Fatalf("Snapshot.ListDir: %v", err)
 	}
@@ -219,7 +224,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 		t.Fatalf("Snapshot.ListDir did not include digest %q", artifact.Digest())
 	}
 
-	indexed, err := microsandbox.Snapshot.Reindex(ctx, filepath.Dir(snapshotDir))
+	indexed, err := microsandbox.Checkpoint.Reindex(ctx, filepath.Dir(snapshotDir))
 	if err != nil {
 		t.Fatalf("Snapshot.Reindex: %v", err)
 	}
@@ -247,14 +252,18 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	}
 	logSnapshotPhase(t, "copy snapshot archive", phaseStart)
 
-	copiedHandle, err := microsandbox.Snapshot.Load(
-		copyCtx,
-		copiedArchivePath,
-		filepath.Join(t.TempDir(), "copied"),
+	copiedResult, err := microsandbox.Snapshot.Load(
+		copyCtx, uniqueIntegrationName(t, "copied"), []string{copiedArchivePath},
+		microsandbox.SnapshotImportOptions{Dest: filepath.Join(t.TempDir(), "copied"), SetHead: true},
 	)
 	if err != nil {
 		t.Fatalf("Snapshot.Load copied archive: %v", err)
 	}
+	if len(copiedResult.Checkpoints) != 1 || len(copiedResult.Added) != 1 || copiedResult.HeadUpdate == nil || copiedResult.HeadUpdate.Head == nil {
+		t.Fatalf("canonical import outcome: %+v", copiedResult)
+	}
+	copiedHandle := copiedResult.Checkpoints[0]
+	t.Cleanup(func() { _, _ = copiedResult.Snapshot.Remove(context.Background()) })
 	t.Cleanup(func() {
 		removeSnapshotBestEffort(copiedHandle.Reference())
 	})
@@ -276,7 +285,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	t.Cleanup(cancelLoad)
 	importDir := filepath.Join(t.TempDir(), "imported")
 	phaseStart = time.Now()
-	imported, err := microsandbox.Snapshot.Load(loadCtx, archivePath, importDir)
+	imported, err := microsandbox.Checkpoint.Load(loadCtx, archivePath, importDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Load: %v", err)
 	}
@@ -290,7 +299,7 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 
 	// Independent imports share an identity and digest. Handle operations must stay
 	// bound to one installed copy instead of re-resolving an ambiguous digest.
-	duplicate, err := microsandbox.Snapshot.Load(loadCtx, archivePath, importDir)
+	duplicate, err := microsandbox.Checkpoint.Load(loadCtx, archivePath, importDir)
 	if err != nil {
 		t.Fatalf("Snapshot.Load duplicate: %v", err)
 	}
@@ -307,13 +316,13 @@ func TestSnapshotCreateAndSnapshotDirectoryOps(t *testing.T) {
 	if _, err := duplicate.Open(loadCtx); err != nil {
 		t.Fatalf("removing first import affected second copy: %v", err)
 	}
-	if _, err := microsandbox.Snapshot.Open(loadCtx, snapshotDir); err != nil {
+	if _, err := microsandbox.Checkpoint.Open(loadCtx, snapshotDir); err != nil {
 		t.Fatalf("removing an import affected the original snapshot: %v", err)
 	}
 
 	// A repeated archive still yields one result per input, but one batch group
 	// installs the identical snapshot only once.
-	batch, err := microsandbox.Snapshot.LoadMany(loadCtx,
+	batch, err := microsandbox.Checkpoint.LoadMany(loadCtx,
 		[]string{archivePath, archivePath}, microsandbox.SnapshotLoadOptions{Dest: importDir})
 	if err != nil {
 		t.Fatalf("Snapshot.LoadMany: %v", err)
@@ -349,5 +358,11 @@ func removeSandboxBestEffort(name string) {
 }
 
 func removeSnapshotBestEffort(pathOrName string) {
-	_ = microsandbox.Snapshot.Remove(context.Background(), pathOrName, true)
+	_ = microsandbox.Checkpoint.Remove(context.Background(), pathOrName, true)
+}
+
+func removeGroupBestEffort(name string) {
+	if group, err := microsandbox.Snapshot.Get(context.Background(), name); err == nil {
+		_, _ = group.Remove(context.Background())
+	}
 }

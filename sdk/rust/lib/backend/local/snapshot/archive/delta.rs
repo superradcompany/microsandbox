@@ -82,6 +82,10 @@ pub(super) struct Sources {
     disks: BTreeMap<String, PathBuf>,
     memory: BTreeMap<ObjectId, PathBuf>,
     owned: BTreeMap<String, PathBuf>,
+    // Canonical launch sets reject ambiguous shared identities. Legacy import
+    // callers keep their existing admission path through `add`.
+    strict_disk_identities: BTreeMap<String, LayerIdentity>,
+    strict_disk_hashes: BTreeMap<String, UpperIntegrity>,
 }
 
 type SourceIndex = (
@@ -116,6 +120,71 @@ impl Sources {
         for (identity, path) in disks {
             self.disks.entry(identity).or_insert(path);
         }
+        for (identity, path) in memory {
+            self.memory.entry(identity).or_insert(path);
+        }
+        for (identity, path) in owned {
+            self.owned.entry(identity).or_insert(path);
+        }
+        Ok(())
+    }
+
+    /// Admit a canonical launch input without choosing between conflicting providers.
+    pub(super) async fn add_strict(
+        &mut self,
+        manifest: &Manifest,
+        directory: &Path,
+        archive_stage: Option<&Path>,
+    ) -> MicrosandboxResult<()> {
+        let manifest = manifest.clone();
+        let directory = directory.to_path_buf();
+        let archive_stage = archive_stage.map(Path::to_path_buf);
+        let (disks, memory, owned) = tokio::task::spawn_blocking(move || {
+            inspect_sources(&manifest, &directory, archive_stage.as_deref())
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("snapshot source inspection: {error}"))
+        })??;
+        for (key, path) in disks {
+            let identity: LayerIdentity = serde_json::from_str(&key)?;
+            let (id, has_backing) = match &identity {
+                LayerIdentity::File(layer) => {
+                    (format!("file:{}", layer.layer_id), layer.backing.is_some())
+                }
+                LayerIdentity::Checkpoint(layer) => (
+                    format!("checkpoint:{}", layer.layer_id),
+                    layer.predecessor.is_some(),
+                ),
+            };
+            if let Some(previous) = self.strict_disk_identities.get(&id)
+                && previous != &identity
+            {
+                return Err(source_error(format!(
+                    "conflicting disk layer metadata for {id}"
+                )));
+            }
+            self.strict_disk_identities.insert(id.clone(), identity);
+            if let Some(previous) = self.disks.get(&key) {
+                let previous_hash = match self.strict_disk_hashes.get(&key) {
+                    Some(hash) => hash.clone(),
+                    None => {
+                        let hash = launch_disk_hash(previous, has_backing).await?;
+                        self.strict_disk_hashes.insert(key.clone(), hash.clone());
+                        hash
+                    }
+                };
+                if previous_hash != launch_disk_hash(&path, has_backing).await? {
+                    return Err(source_error(format!(
+                        "conflicting disk layer payloads for {id}"
+                    )));
+                }
+            } else {
+                self.disks.insert(key, path);
+            }
+        }
+        // RAM and borrowed owned payload identities include content hashes and
+        // are verified when reconstructed; disk IDs alone may have no checksum.
         for (identity, path) in memory {
             self.memory.entry(identity).or_insert(path);
         }
@@ -168,6 +237,17 @@ impl Sources {
 
 /// Inspect only descriptors and small identity-verified manifests. Missing payloads in dependent
 /// archives are expected; admission still happens after filling their complete target closure.
+async fn launch_disk_hash(path: &Path, has_backing: bool) -> MicrosandboxResult<UpperIntegrity> {
+    // The on-disk backing name is transport location, not immutable payload data.
+    // Use one comparison-only header without changing either source file.
+    let prefix = if has_backing {
+        microsandbox_image::checkpoint::relocated_qcow2_header(path, Path::new("parent"))?
+    } else {
+        Vec::new()
+    };
+    super::super::verify::compute_merkle_integrity_with_prefix(path, prefix).await
+}
+
 fn inspect_sources(
     manifest: &Manifest,
     directory: &Path,
@@ -655,8 +735,12 @@ pub(super) fn apply(
 }
 
 pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Option<Dependencies>> {
-    let extension = inventory.extensions.get(REQUIREMENT);
-    let required = inventory.requires.iter().any(|value| value == REQUIREMENT);
+    let capability = extensions::Extension::Dependencies;
+    let extension = capability.resolve(&inventory.extensions, &inventory.requires)?;
+    let required = inventory
+        .requires
+        .iter()
+        .any(|value| capability.recognizes(value));
     if inventory.completeness == "boot-complete" && !required && extension.is_none() {
         if inventory.entries.iter().any(|entry| !entry.included) {
             return Err(MicrosandboxError::SnapshotIntegrity(

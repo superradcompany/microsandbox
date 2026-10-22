@@ -1,3 +1,4 @@
+import { parseCheckpointRemoval, parseGroupRemoval } from "../snapshot-removal.js";
 import {
   CustomError,
   CloudHttpError,
@@ -30,12 +31,17 @@ import {
   SandboxReplacedError,
   SandboxStillRunningError,
   SnapshotSourceRecoveryError,
+  SnapshotImportError,
+  SnapshotVerificationError,
+  SnapshotRemovalRecoveryError,
+  SnapshotGroupRemovalRecoveryError,
   TerminalError,
   UnsupportedOperationError,
   UnsupportedError,
   VolumeAlreadyExistsError,
   VolumeNotFoundError,
 } from "../errors.js";
+import { parseGroupVerification } from "../snapshot-verification.js";
 
 // The recovery variant carries a JSON envelope after the usual tag; all others carry text.
 const PATTERN = /^\[(\w+)\] ([\s\S]*)$/;
@@ -95,6 +101,28 @@ export function mapNapiError(err: unknown): unknown {
   if (!(err instanceof Error)) return err;
   const m = PATTERN.exec(err.message);
   if (!m) return err;
+  if (m[1] === "SnapshotImport") return mapImportError(m[2]!, err);
+  if (m[1] === "SnapshotRemovalRecovery") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string" || typeof envelope.detail !== "string") return err;
+      return new SnapshotRemovalRecoveryError(envelope.message, parseCheckpointRemoval(envelope.result), envelope.detail, { cause: err });
+    } catch { return err; }
+  }
+  if (m[1] === "SnapshotGroupRemovalRecovery") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string" || typeof envelope.detail !== "string") return err;
+      return new SnapshotGroupRemovalRecoveryError(envelope.message, parseGroupRemoval(envelope.result), envelope.detail, { cause: err });
+    } catch { return err; }
+  }
+  if (m[1] === "SnapshotVerification") {
+    try {
+      const envelope = JSON.parse(m[2]!);
+      if (typeof envelope.message !== "string") return err;
+      return new SnapshotVerificationError(envelope.message, parseGroupVerification(envelope.report), { cause: err });
+    } catch { return err; }
+  }
   if (m[1] === "SnapshotSourceRecovery") {
     return mapRecoveryError(m[2]!, err);
   }
@@ -114,6 +142,11 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
     const a = r.artifact;
     if (a !== null && (!a || !(a.kind === "installed" || a.kind === "archive") ||
         !["path", "snapshot_id", "digest"].every((key) => typeof a[key] === "string"))) return raw;
+    const head = a?.head_update;
+    if (head != null && (typeof head !== "object" || typeof head.group !== "string" ||
+        typeof head.reason !== "string" || typeof head.changed !== "boolean" ||
+        !(head.previous === null || typeof head.previous === "string") ||
+        !(head.head === null || typeof head.head === "string"))) return raw;
     return new SnapshotSourceRecoveryError(envelope.message, {
       sourceSandbox: r.source_sandbox,
       checkpointId: r.checkpoint_id,
@@ -123,6 +156,7 @@ function mapRecoveryError(payload: string, raw: Error): unknown {
       publicationError: r.publication_error,
       artifact: a === null ? null : {
         kind: a.kind, path: a.path, snapshotId: a.snapshot_id, digest: a.digest,
+        ...(a.head_update === undefined ? {} : { headUpdate: head }),
       },
     }, { cause: raw });
   } catch {
@@ -136,5 +170,24 @@ export async function withMappedErrors<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (e) {
     throw mapNapiError(e);
+  }
+}
+
+function mapImportError(payload: string, raw: Error): unknown {
+  try {
+    const envelope = JSON.parse(payload);
+    const details = envelope.import;
+    if (typeof envelope.message !== "string" || !details ||
+        typeof details.operation_id !== "string" || typeof details.detail !== "string" ||
+        !(details.group_path === null || typeof details.group_path === "string") ||
+        !["not_committed", "committed", "unknown"].includes(details.outcome) ||
+        !Array.isArray(details.archives) || !details.archives.every((path: unknown) => typeof path === "string")) return raw;
+    return new SnapshotImportError(envelope.message, {
+      operationId: details.operation_id, archives: details.archives,
+      groupPath: details.group_path, outcome: details.outcome, detail: details.detail,
+    }, { cause: raw });
+  } catch {
+    // A mismatched native payload is still a failure, never an inferred successful import.
+    return raw;
   }
 }

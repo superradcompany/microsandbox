@@ -127,7 +127,7 @@ for (const entry of result.entries) {
 
 Pruning removes only unused published runtime RAM. Live mappings, retained baselines, and pending handoffs remain protected. Saved snapshots, images, sandbox disks, volumes, and stable lock files are retained. `olderThanSeconds` must be a whole non-negative safe integer; the default is zero. `dryRun` defaults to false. The SDK does not prompt for confirmation, and each apply call rechecks ownership. Individual failures remain in `entries` alongside completed removals; `physicalBytesReclaimed` is unknown (`null`). Cloud backends reject these local-only operations. Each call captures its backend before returning the promise; changing the default while it runs cannot redirect it. An older native addon without these methods raises `UnsupportedOperationError` when they are called.
 
-`SandboxHandle.storageUsage()`, `Snapshot.storageUsage()`, and `SnapshotHandle.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. Snapshot records returned by `Snapshot.list()` contain metadata only; fetch a native handle with `Snapshot.get()` before inspecting its storage.
+`SandboxHandle.storageUsage()`, `Checkpoint.storageUsage()`, and `SnapshotHandle.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. `Snapshot.get()` and `Snapshot.list()` select histories. Inspect member storage through an exact `Checkpoint` or a `SnapshotHandle` from that history.
 
 ## Common Examples
 

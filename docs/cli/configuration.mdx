@@ -80,7 +80,7 @@ Scoped files contain one group of settings without its wrapper key. Unrelated fi
 | Flag | Accepted fields |
 | --- | --- |
 | `--conf PATH` | Any sandbox configuration field |
-| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `max_inbound_tcp_connections`, `tcp_accept_queue_size` |
+| `--net-conf PATH` | `policy`, `allow`, `deny`, `ports`, `dns`, `tls`, `strict`, `proxy`, `trust_host_cas`, `max_tcp_connections`, `max_udp_connections`, `max_inbound_tcp_connections`, `tcp_accept_queue_size` |
 | `--resource-conf PATH` | `cpus`, `memory`, `max_duration`, `idle_timeout`, `rlimits` |
 | `--runtime-conf PATH` | `workdir`, `shell`, `user`, `hostname`, `security`, `entrypoint`, `cmd`, `env`, `labels`, `init` |
 | `--fs-conf PATH` | `mounts`, `patch_files`, `patches` |
@@ -302,6 +302,22 @@ network:
 </CodeGroup>
 
 A non-empty `allow` list implies deny-by-default egress. `strict` defaults to `true` and requires hostname-based allow rules to use an inspectable request authority. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule. Set `strict: false` to opt out. Top-level `ports` is shorthand for `network.ports`; when both are present, the lists are combined and duplicate host ports are rejected.
+
+Set `proxy` to an `http://IP:PORT`, `socks4://IP:PORT`, or `socks5://IP:PORT` URL. Authenticated proxies use an object:
+
+<CodeGroup>
+```yaml YAML
+network:
+  proxy:
+    url: socks5://127.0.0.1:1080
+    username: sandbox
+    password_env: SANDBOX_PROXY_PASSWORD
+```
+</CodeGroup>
+
+SOCKS4 accepts `user_id` instead of SOCKS5's `username` and `password_env`. SOCKS5 requires both authentication fields together. Literal password fields are rejected; `password_env` remains a destination environment reference until the existing credential resolver reads it. The same protocol and authentication checks apply to CLI flags and config files.
+
+A higher-priority file replaces the complete `proxy` value, including authentication; it cannot change the endpoint while inheriting credentials for the previous endpoint. The object therefore always requires `url`. A plain URL selects an unauthenticated proxy. An omitted or null `proxy` leaves lower-priority settings in place. Explicit `--proxy` and its authentication flags replace the file's complete proxy setting. These settings work for image-backed and snapshot-backed create/run. Older CLIs without this additive file field reject the configuration; existing files that omit it retain their behavior.
 
 Both `ports` lists accept inclusive, equal-length host and guest ranges, including bind addresses and `/tcp` or `/udp`:
 

@@ -235,6 +235,40 @@ impl PySandboxTouchResult {
 
 #[pymethods]
 impl PySandbox {
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, *, initial_checkpoint = None, dest_dir = None, labels = None, full = false, record_integrity = false, guest_flush = None))]
+    fn snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        initial_checkpoint: Option<String>,
+        dest_dir: Option<std::path::PathBuf>,
+        labels: Option<std::collections::HashMap<String, String>>,
+        full: bool,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        let options = crate::snapshot_group::capture_options(
+            initial_checkpoint,
+            dest_dir,
+            self.local_backend,
+            labels,
+            full,
+            record_integrity,
+            guest_flush,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = Self::clone_sandbox(&handle).await?;
+            let result = handle
+                .snapshot_with(&name, |_| options)
+                .await
+                .map_err(to_py_err)?;
+            Ok(crate::snapshot_group::PySnapshotCreateResult::from_rust(
+                result,
+            ))
+        })
+    }
     fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

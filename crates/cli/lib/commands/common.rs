@@ -322,6 +322,7 @@ pub struct SandboxOpts {
 
     /// Root disk for OCI images (e.g. 8G, tmpfs:2G, flat:8G,
     /// ./scratch.img, ./scratch.qcow2:format=qcow2,fstype=ext4).
+    /// Snapshot launches accept a size only, growing the child disk and filesystem.
     #[arg(long = "root-disk", value_name = "SPEC")]
     pub root_disk: Option<String>,
 
@@ -735,9 +736,9 @@ enum CopyKind {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxOpts {
-    /// Builds the protocol-specific proxy selected by the CLI flags.
+    /// Builds the protocol-specific proxy selected by flags or an atomic file input.
     #[cfg(feature = "net")]
-    fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
+    pub(crate) fn build_outbound_proxy(&self) -> anyhow::Result<Option<OutboundProxy>> {
         let Some(raw) = self.proxy.as_deref() else {
             if self.socks4_user_id.is_some()
                 || self.socks5_username.is_some()
@@ -1882,6 +1883,10 @@ fn validate_guest_path(context: &str, path: &str) -> anyhow::Result<()> {
 ///
 /// Accepts: `SRC:DST[:ro|rw][,noexec][,nosuid][,nodev][,follow-root-symlinks][,stat-virt=...][,host-perms=...][,uid=...,gid=...]`.
 pub fn apply_volume(builder: SandboxBuilder, spec: &str) -> anyhow::Result<SandboxBuilder> {
+    if builder.is_snapshot_launch() {
+        let (guest, mount) = parse_restore_volume(spec)?;
+        return Ok(builder.snapshot_volume(guest, |_| mount));
+    }
     let parsed = parse_volume_mount_spec(spec)?;
     let is_path = microsandbox_utils::looks_like_local_path_text(parsed.source);
     let source = parsed.source.to_string();
