@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use super::LocalBackend;
 use crate::MicrosandboxResult;
 use crate::agent::AgentClient;
-use crate::backend::{Backend, SnapshotBackend};
+use crate::backend::Backend;
 use crate::config::RegistryOptions;
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
@@ -204,20 +204,14 @@ impl LocalBackend {
             );
         }
         builder = builder.deployment_profile(profile);
-        let mut config = builder.finish(
-            Some(&self.config),
+        let mut config = builder.finish_local(
+            &self.config,
             resolved_image
                 .as_ref()
                 .map(|image| crate::SandboxConfigPatch::from_image(&image.pull_result.config)),
         )?;
         config.apply_rootfs_defaults(&self.config().sandbox_defaults.oci)?;
         super::super::host_paths::resolve_host_paths(&mut config)?;
-        // Compatibility callers can supply a snapshot reference alongside an image.
-        // Resolve it with this backend before replacement or child reservation can mutate state.
-        if let Some(reference) = config.snapshot_reference.take() {
-            SnapshotBackend::prepare_restore(self, backend.clone(), &mut config, reference).await?;
-            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-        }
 
         let timing_name = config.spec.name.clone();
         tracing::debug!(
@@ -250,113 +244,25 @@ impl LocalBackend {
         launch_contract::validate_runtime_config(&config, self.config()).await?;
         let sandbox_dir = self.sandboxes_dir().join(&config.spec.name);
         // Preserve only the installed-snapshot source that existed on entry. Direct archive
-        // materialization below installs its checkpoint closure directly into child staging, so
+        // preparation already placed its checkpoint closure in private child staging, so
         // feeding that result through the installed-snapshot copier would copy the closure onto
         // itself and destroy the eager restore source.
-        let installed_checkpoint_restore = config.checkpoint_restore.take();
+        let installed_checkpoint_restore = if config.restore_resources.archive.is_none() {
+            config.checkpoint_restore.take()
+        } else {
+            None
+        };
         let installed_file_sources = std::mem::take(&mut config.snapshot_root_layer_sources);
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
-        // Decode once into a unique sibling before touching the replacement target.
-        // Archive metadata supplies effective runtime requirements; validating the
-        // builder alone misses those. Publication below is a rename, not another copy.
-        let mut archive_stage = None;
-        if let Some(archive) = config.snapshot_archive_source.clone() {
-            tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
-            let stage = tempfile::Builder::new()
-                .prefix(".archive-restore-")
-                .tempdir_in(self.sandboxes_dir())?;
-            let stage_path = stage.path();
-            let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
-            // Archive decoding has a large async state machine. Keep it off the containing
-            // create future so native SDK debug builds fit ordinary Tokio worker stacks.
-            let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
-                self,
-                &archive,
-                stage_path,
-                disk_only,
-                config.snapshot_base.as_deref(),
-                &config.restore_resources,
-                config.restore_boot_overrides,
-            ))
-            .await?;
-            config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
-            if config.spec.runtime.user.is_none() {
-                config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
-            }
-            crate::sandbox::apply_snapshot_guest_clock(&mut config, &materialized.manifest)?;
-            crate::sandbox::require_recorded_mounts(&config, &materialized.manifest)?;
-            crate::sandbox::require_guest_mounts(&config, materialized.required_bind_paths)?;
-            config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
-            crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
-            config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
-            crate::sandbox::apply_snapshot_root_layout(
-                &mut config,
-                &materialized.manifest.root_disk,
-            )?;
-            image_operations.push(materialized.cache_operation);
-            if let Some(restore) = materialized.checkpoint_restore {
-                let state = match &materialized.manifest.state {
-                    crate::snapshot::SnapshotState::Checkpoint(state) => state,
-                    crate::snapshot::SnapshotState::File(_) => {
-                        return Err(crate::MicrosandboxError::SnapshotIntegrity(
-                            "archive produced checkpoint construction state for file snapshot"
-                                .into(),
-                        ));
-                    }
-                };
-                let expected =
-                    microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
-                        .map_err(|error| {
-                            crate::MicrosandboxError::SnapshotIntegrity(error.to_string())
-                        })?;
-                let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
-                    &restore.closure,
-                    Some(&expected),
-                    self.config().fs_state_limit(),
-                )
-                .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-                let overrides = config.restore_overrides;
-                crate::sandbox::apply_checkpoint_restore_constraints(
-                    &mut config,
-                    state,
-                    closure.checkpoint(),
-                    overrides,
-                )?;
-                config.checkpoint_restore = Some(restore);
-                config.snapshot_upper_layers = materialized.upper_layers;
-                config.suppress_launch_for_full_restore();
-            } else if !materialized.upper_layers.is_empty() {
-                config.snapshot_upper_layers = materialized.upper_layers;
-            } else if matches!(
-                materialized.manifest.state,
-                crate::snapshot::SnapshotState::File(_)
-            ) {
-                config.snapshot_upper_source =
-                    Some(stage_path.join(match &materialized.manifest.root_disk {
-                        SnapshotRootDisk::Managed => "upper.ext4",
-                        SnapshotRootDisk::Flat => crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME,
-                        SnapshotRootDisk::Tmpfs { .. } => {
-                            unreachable!("file snapshots reject tmpfs roots")
-                        }
-                    }));
-            }
-            // Archive descriptors are resolved here, after the builder's initial validation.
-            // Do not let a disk archive turn an explicit CoW restore into a fresh boot, and
-            // reject it before replacement can remove the existing sandbox.
-            if config.forked && config.checkpoint_restore.is_none() {
-                return Err(crate::MicrosandboxError::InvalidConfig(
-                    "copy-on-write memory requires a full snapshot restore".into(),
-                ));
-            }
-
-            // Archive metadata is now available. Check policy against captured state
-            // before admitting it or touching the replacement target. The archive path
-            // stays set so this check sees a disk-only restore's snapshot source.
-            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-            // Keep launch-time restore intent in this check, not just cold-start state.
-            launch_contract::validate_runtime_config(&config, self.config()).await?;
-            archive_stage = Some(stage);
-        }
+        let archive_stage = if let Some(archive) = config.restore_resources.archive.take() {
+            image_operations.push(archive.cache_operation.clone());
+            let source = archive.stage.path().to_path_buf();
+            let stage = archive.into_stage(&self.sandboxes_dir()).await?;
+            relocate_archive_config(&mut config, &source, stage.path());
+            Some(stage)
+        } else {
+            None
+        };
 
         // Transition ownership is deliberately separate from the runtime lifecycle lock: this
         // guard serializes database/storage mutation and launcher-to-runtime handoff, while the

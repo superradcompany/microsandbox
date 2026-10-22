@@ -29,12 +29,13 @@ use microsandbox_protocol::core::{
     WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
-    WorkloadFrozen, WorkloadThaw, WorkloadThawed, WorkloadTransportCredit,
+    WorkloadFrozen, WorkloadThaw, WorkloadThawMode, WorkloadThawed, WorkloadTransportCredit,
     WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
-    ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
-    ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
+    ExecExited, ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecResize, ExecSignal,
+    ExecStarted, ExecStderr, ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
+    MAX_EXEC_CONTROL_BYTES,
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
@@ -552,6 +553,7 @@ pub async fn run(
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+            exec_limits: config.exec_limits,
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -662,6 +664,11 @@ pub async fn run(
                 if !state.output_parked && !workload.is_frozen() => {
                 if !inherited && let Err(error) = result {
                     encode_stdin_error(id, &AgentdError::Io(error), &mut serial_out_buf)?;
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
+
+                if !inherited && let Some(session) = state.sessions.get_mut(&id) {
+                    encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
             }
@@ -1002,6 +1009,20 @@ pub async fn run(
                                     };
                                     Some(state.input_window.admit(lane, wire_bytes)?)
                                 };
+                                if msg.t.is_exec_control() && wire_bytes > MAX_EXEC_CONTROL_BYTES {
+                                    let out_before = serial_out_buf.len();
+                                    encode_core_error_if_supported(
+                                        &msg,
+                                        msg.id,
+                                        CoreErrorKind::InvalidPayload,
+                                        "execution control message exceeds 4 KiB".into(),
+                                        Some(msg.t.as_str().to_string()),
+                                        &mut serial_out_buf,
+                                    )?;
+                                    record_encoded_guest_messages(&serial_out_buf, out_before, &mut activity);
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    continue;
+                                }
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -1051,6 +1072,10 @@ pub async fn run(
                                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
                             }
 
+                            // Coalesce input acknowledgements across this decoded batch.
+                            for (&id, session) in &mut state.sessions {
+                                encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
+                            }
                             // Flush any outgoing messages.
                             if !serial_out_buf.is_empty() {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
@@ -1116,6 +1141,8 @@ pub async fn run(
                         activity.add_exec_output_bytes(len);
                     }
                     SessionOutput::Exited(code) => {
+                        let code = state.sessions.get_mut(&id).and_then(|session| session.finish(code));
+                        let Some(code) = code else { continue; };
                         let msg = Message::with_payload(MessageType::ExecExited, id, &ExecExited { code })
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
@@ -2727,7 +2754,7 @@ async fn handle_message_with_charge(
                 || (!workload.is_frozen()
                     && state.aborted_transport_attempt.as_deref() == Some(&request.attempt_id))
             {
-                if request.mode != microsandbox_protocol::core::WorkloadThawMode::Continue {
+                if request.mode != WorkloadThawMode::Continue {
                     encode_workload_error(
                         &msg,
                         &request.attempt_id,
@@ -2762,7 +2789,7 @@ async fn handle_message_with_charge(
                 codec::encode_to_buf(&reply, out_buf)?;
                 return Ok(());
             }
-            if request.mode == microsandbox_protocol::core::WorkloadThawMode::Restore
+            if request.mode == WorkloadThawMode::Restore
                 && state.restored_attempt.as_deref() != Some(&request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
@@ -2805,6 +2832,26 @@ async fn handle_message_with_charge(
             let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
                 return Ok(());
             };
+            // Released peers do not acknowledge execution output. Preserve their legacy path.
+            let policy = (msg.v >= 10).then_some(config.exec_limits).flatten();
+            if let Some(policy) = policy {
+                if state.sessions.len() + state.detached_sessions.len()
+                    >= policy.max_executions as usize
+                {
+                    encode_exec_failed(
+                        msg.id,
+                        ExecFailed {
+                            kind: ExecFailureKind::ResourceLimit,
+                            errno: None,
+                            errno_name: None,
+                            message: "active execution limit reached".into(),
+                            stage: Some("execution_admission".into()),
+                        },
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+            }
             if req.cwd.is_none() {
                 req.cwd = config.default_cwd().map(str::to_string);
             }
@@ -2847,6 +2894,7 @@ async fn handle_message_with_charge(
                 config.user.as_deref(),
                 config.security_profile,
                 workload_placement,
+                policy,
             ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -2890,10 +2938,34 @@ async fn handle_message_with_charge(
             let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
                 return Ok(());
             };
-            if let Some(session) = state.sessions.get_mut(&msg.id)
-                && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
+            if let Some(session) = state.sessions.get_mut(&msg.id) {
+                if let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take()) {
+                    encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
+                }
+            }
+        }
+
+        MessageType::ExecOutputAck => {
+            let Some(ack) = decode_payload_or_core_error::<ExecOutputAck>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            if let Some(session) = state.sessions.get(&msg.id)
+                && let Err(error) = session.acknowledge_output(ack.consumed)
             {
-                encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
+                eprintln!(
+                    "rejected exec output acknowledgement for {}: {error}",
+                    msg.id
+                );
+            }
+            if let Some(code) = state
+                .sessions
+                .get_mut(&msg.id)
+                .and_then(ExecSession::take_completed_exit)
+            {
+                let reply =
+                    Message::with_payload(MessageType::ExecExited, msg.id, &ExecExited { code })?;
+                codec::encode_to_buf(&reply, out_buf)?;
+                state.sessions.remove(&msg.id);
             }
         }
 
@@ -3416,6 +3488,19 @@ fn poll_pending_stdin(
         }
     }
     Poll::Pending
+}
+
+fn encode_exec_stdin_ack(
+    id: u32,
+    session: &mut ExecSession,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    if let Some(consumed) = session.take_stdin_ack() {
+        let message =
+            Message::with_payload(MessageType::ExecStdinAck, id, &ExecStdinAck { consumed })?;
+        codec::encode_to_buf(&message, out_buf)?;
+    }
+    Ok(())
 }
 
 fn encode_stdin_error(id: u32, error: &AgentdError, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
@@ -4269,11 +4354,12 @@ mod tests {
 
     #[tokio::test]
     async fn transport_cut_waits_for_decoded_prefix_and_abort_is_owned_and_repeatable() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4399,6 +4485,7 @@ mod tests {
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4636,6 +4723,7 @@ mod tests {
             };
             let mut activity = ActivityTracker::new();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -5659,13 +5747,12 @@ mod tests {
     }
     #[tokio::test]
     async fn restore_thaw_checks_ownership_is_idempotent_and_leaves_source_clients_alone() {
-        use microsandbox_protocol::core::WorkloadThawMode;
-
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let heartbeat = heartbeat::HeartbeatControl::default();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -5788,7 +5875,7 @@ mod tests {
 
     #[tokio::test]
     async fn saturated_stdin_allows_thaw_and_preserves_input_and_eof() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
 
         // SIGSTOP provides a deterministic blocked pipe/PTY without a privileged cgroup mount.
         // Thaw must complete before external consumer progress, then accepted data drains exactly
@@ -5816,6 +5903,7 @@ mod tests {
             let mut activity = ActivityTracker::new();
             let heartbeat = heartbeat::HeartbeatControl::default();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -5848,6 +5936,7 @@ mod tests {
                 sender.clone(),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -6047,6 +6136,7 @@ mod tests {
                 None,
                 crate::config::SecurityProfile::Default,
                 None,
+                None,
             )
             .unwrap();
             let pid = session.pid();
@@ -6081,6 +6171,7 @@ mod tests {
                 sender.with_incarnation(Some(new_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();

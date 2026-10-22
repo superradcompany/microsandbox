@@ -730,7 +730,9 @@ pub fn load_persisted_config_or_default() -> MicrosandboxResult<GlobalConfig> {
     Ok(GlobalConfigPatch::load()?.into_config())
 }
 
-/// Persist the provided local config to disk as pretty JSON.
+/// Persist every resolved local setting, including defaults, as pretty JSON.
+/// Use [`GlobalConfigPatch::load`] and [`GlobalConfigPatch::save`] to edit settings while
+/// preserving omitted fields.
 pub fn save_persisted_config(config: &GlobalConfig) -> MicrosandboxResult<()> {
     let patch: GlobalConfigPatch = serde_json::from_value(serde_json::to_value(config)?)?;
     patch.save()

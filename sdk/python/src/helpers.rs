@@ -419,6 +419,7 @@ pub fn sandbox_builder_from_args(
         ));
     }
     let mut builder = microsandbox::Sandbox::builder(name);
+
     {
         let image_obj = kwargs.get_item("image")?.unwrap();
         // Accept an open image reference/path or the concrete ImageSource

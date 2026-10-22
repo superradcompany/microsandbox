@@ -39,9 +39,11 @@ use microsandbox_protocol::codec::{self, MAX_FRAME_SIZE, MAX_WIRE_FRAME};
 use microsandbox_protocol::core::WORKLOAD_TRANSPORT_BARRIER_VERSION;
 use microsandbox_protocol::core::{
     CoreError, CoreErrorKind, InitAck, InitResolved, Ready, RelayClientDisconnected, WorkloadThaw,
-    WorkloadThawed,
+    WorkloadThawMode, WorkloadThawed,
 };
-use microsandbox_protocol::exec::{ExecRequest, ExecSignal, ExecStderr, ExecStdout};
+use microsandbox_protocol::exec::{
+    ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecSignal, ExecStderr, ExecStdout,
+};
 use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
@@ -60,6 +62,8 @@ use microsandbox_protocol::transport::{
     try_decode_relay_client_disconnected_ack_from_bytes,
 };
 use microsandbox_protocol::transport::{RelayClientConnected, RelayClientDisconnectedAck};
+#[cfg(test)]
+use microsandbox_types::ExecLimits;
 #[cfg(unix)]
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -78,19 +82,16 @@ use crate::checkpoint::RestoredAgentState;
 use crate::clock::{RestoreActivationMode, spawn_clock_sync_task};
 use crate::console::ConsoleSharedState;
 use crate::exec_log::{LogSource, LogWriter};
+use crate::relay::exec_admission::ExecutionTracker;
 use crate::{RuntimeError, RuntimeResult};
 
 #[path = "relay/envelope.rs"]
 mod envelope;
 #[path = "relay/input_stall.rs"]
 mod input_stall;
-#[cfg(test)]
-#[path = "relay/input_stall_tests.rs"]
-mod input_stall_tests;
 
-#[cfg(test)]
-#[path = "relay/namespace_tests.rs"]
-mod namespace_tests;
+#[path = "relay/exec_admission.rs"]
+mod exec_admission;
 
 //--------------------------------------------------------------------------------------------------
 // Types: capture
@@ -158,7 +159,8 @@ const CLIENT_WRITE_BATCH_FRAMES: usize = 64;
 /// Separate admission reserves share one FIFO. Permits survive dequeue and physical writes, so
 /// credit-starved payload cannot consume the space needed by another client's metadata.
 const AGENT_WRITE_CLASS_FRAMES: usize = 8;
-const AGENT_WRITE_CHANNEL_CAPACITY: usize = 2 * AGENT_WRITE_CLASS_FRAMES;
+const AGENT_WRITE_CONTROL_FRAMES: usize = 16;
+const AGENT_WRITE_CHANNEL_CAPACITY: usize = AGENT_WRITE_CLASS_FRAMES + AGENT_WRITE_CONTROL_FRAMES;
 const AGENT_WRITE_DATA_BYTES: usize = 32 * 1024 * 1024;
 const AGENT_WRITE_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 
@@ -191,6 +193,8 @@ const RELAY_FAILURE_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::
 struct ClientState {
     /// Revoked when the primary connection leaves the routing map.
     exec_control: Option<ExecControlConnection>,
+    /// Sandbox-wide execution admission, accounting, and pending stdin routing.
+    execution_tracker: Arc<ExecutionTracker>,
     /// Transport identity for this leased ownership of the slot, independent of lane topology.
     incarnation: Option<ClientIncarnation>,
 
@@ -239,6 +243,7 @@ enum ControlOrder {
     TcpInputData(u32),
     TcpInputFinish(u32),
     TcpOutputCredit(u32),
+    ExecOutputAck(u32),
     ClientFence { start: u32, end: u32 },
     GlobalFence,
 }
@@ -253,6 +258,8 @@ struct ControlAdmission {
 #[derive(Clone)]
 pub(crate) struct ControlWriter {
     pub(crate) exec_controls: Arc<ExecControlRegistry>,
+    /// Sandbox-wide execution admission, accounting, and pending stdin routing.
+    execution_tracker: Arc<ExecutionTracker>,
     tx: mpsc::Sender<ControlWrite>,
     data_bytes: Arc<Semaphore>,
     data_frames: Arc<Semaphore>,
@@ -318,7 +325,7 @@ struct ClientWrite {
     /// Runtime-generated terminal rejections have no guest-lane allocation and therefore carry
     /// no permit here.
     _lane_permit: Option<tokio::sync::OwnedSemaphorePermit>,
-    /// Per-client admission, retained for the same lifetime as the aggregate permit.
+    /// Client output capacity, retained until socket delivery.
     _client_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -593,7 +600,7 @@ impl ControlWrite {
         }
     }
 
-    /// Signals interrupt exec input; TCP return credit advances the independent output flow.
+    /// Signals and PTY resizes interrupt exec input; TCP credit advances the output flow.
     /// Other operations retain their correlation order. Raw metadata was validated by the reader.
     fn classify_message_order(
         &mut self,
@@ -628,6 +635,10 @@ impl ControlWrite {
             }
             MessageType::ExecSignal if message.payload::<ExecSignal>().is_ok() => {
                 self.order = ControlOrder::ExecSignal(id)
+            }
+            MessageType::ExecResize => self.order = ControlOrder::ExecSignal(id),
+            MessageType::ExecOutputAck if message.payload::<ExecOutputAck>().is_ok() => {
+                self.order = ControlOrder::ExecOutputAck(id);
             }
             MessageType::BulkFinish
                 if message.payload::<BulkFinish>().is_ok_and(|finish| {
@@ -673,6 +684,7 @@ impl ControlOrder {
             // their end marker. Reordering only the credit breaks a full-duplex credit cycle;
             // input data and input finish still conflict with each other in their original FIFO.
             (Self::TcpInputData(_) | Self::TcpInputFinish(_), Self::TcpOutputCredit(_)) => false,
+            (Self::ExecInput(_), Self::ExecOutputAck(_)) => false,
             (a, b) => a.id() == b.id(),
         }
     }
@@ -684,7 +696,8 @@ impl ControlOrder {
             | Self::ExecSignal(id)
             | Self::TcpInputData(id)
             | Self::TcpInputFinish(id)
-            | Self::TcpOutputCredit(id) => id,
+            | Self::TcpOutputCredit(id)
+            | Self::ExecOutputAck(id) => id,
             Self::ClientFence { .. }
             | Self::GlobalFence
             | Self::ShutdownFence
@@ -705,10 +718,11 @@ impl ControlWriter {
         Self {
             tx,
             exec_controls: Arc::new(ExecControlRegistry::default()),
+            execution_tracker: Arc::new(ExecutionTracker::default()),
             data_bytes: Arc::new(Semaphore::new(AGENT_WRITE_DATA_BYTES)),
             data_frames: Arc::new(Semaphore::new(AGENT_WRITE_CLASS_FRAMES)),
             control_bytes: Arc::new(Semaphore::new(AGENT_WRITE_CONTROL_BYTES)),
-            control_frames: Arc::new(Semaphore::new(AGENT_WRITE_CLASS_FRAMES)),
+            control_frames: Arc::new(Semaphore::new(AGENT_WRITE_CONTROL_FRAMES)),
         }
     }
 
@@ -1743,7 +1757,7 @@ impl AgentRelay {
             RESTORE_CONTROL_ID,
             &WorkloadThaw {
                 attempt_id: restored.attempt_id.clone(),
-                mode: microsandbox_protocol::core::WorkloadThawMode::Restore,
+                mode: WorkloadThawMode::Restore,
             },
         )
         .map_err(|error| RuntimeError::Custom(format!("encode restored workload thaw: {error}")))?;
@@ -1925,6 +1939,10 @@ impl AgentRelay {
         // Backpressure prevents unbounded memory growth from client floods.
         let (agent_tx, agent_rx) = ControlWriter::new();
         agent_tx
+            .execution_tracker
+            .install(ready_payload.exec_limits)
+            .map_err(RuntimeError::Custom)?;
+        agent_tx
             .exec_controls
             .enabled
             .store(exec_control_supported, Ordering::Release);
@@ -1943,7 +1961,11 @@ impl AgentRelay {
 
         // Spawn the ring writer task (client frames → rx_ring → guest).
         let shared_for_writer = Arc::clone(&self.shared);
-        let mut ring_writer_handle = tokio::spawn(ring_writer_task(shared_for_writer, agent_rx));
+        let mut ring_writer_handle = tokio::spawn(ring_writer_task(
+            shared_for_writer,
+            agent_rx,
+            Arc::clone(&agent_tx.execution_tracker),
+        ));
         let clock_sync_handle = spawn_clock_sync_task(
             agent_tx.clone(),
             self.guest_clock,
@@ -2195,6 +2217,7 @@ impl AgentRelay {
                                 let mut map = clients.lock().await;
                                 map.insert(slot, ClientState {
                                     exec_control,
+                                    execution_tracker: Arc::clone(&agent_tx.execution_tracker),
                                     incarnation,
                                     active_sessions: HashSet::new(),
                                     active_bulk: Arc::clone(&active_bulk),
@@ -2974,6 +2997,8 @@ async fn wait_for_input_stall(shared: &ConsoleSharedState, bulk: Option<&Console
 async fn ring_writer_task(
     shared: Arc<ConsoleSharedState>,
     mut rx: mpsc::Receiver<ControlWrite>,
+    // Sandbox-wide execution admission, accounting, and pending stdin routing.
+    execution_tracker: Arc<ExecutionTracker>,
 ) -> RuntimeResult<()> {
     let _lifetime = WorkloadWriterGuard(Arc::clone(&shared.workload_control));
     #[cfg(unix)]
@@ -3011,7 +3036,7 @@ async fn ring_writer_task(
             }
         }
         let mut wait_clock_capacity = false;
-        let write = if let Ok(write) = private.try_recv() {
+        let mut write = if let Ok(write) = private.try_recv() {
             Some(ControlWrite::from(write.0))
         } else {
             let (write, wait_capacity) =
@@ -3020,6 +3045,23 @@ async fn ring_writer_task(
             wait_clock_capacity = wait_capacity;
             write
         };
+
+        // Snapshot gates stop both queues through workload.admit; disconnect clears this
+        // client's pending stdin before its fence, and shutdown may interrupt stdin.
+        if write.is_none() {
+            write = execution_tracker
+                .take_input(|write| {
+                    admit_control_write(
+                        write,
+                        workload,
+                        Some(&shared),
+                        &mut wait_clock_capacity,
+                        crate::clock::current_clock_sync_frame,
+                    )
+                })
+                .map_err(RuntimeError::Custom)?;
+        }
+
         if !wait_clock_capacity && write.is_none() && !workload.gated() {
             input_stall = None;
         } else if wait_clock_capacity && input_stall.is_none() {
@@ -3057,7 +3099,7 @@ async fn ring_writer_task(
             drop(admission);
             continue;
         }
-        if ordinary_closed && pending.is_empty() {
+        if ordinary_closed && pending.is_empty() && !execution_tracker.has_pending_input() {
             break;
         }
         tokio::select! {
@@ -3077,6 +3119,7 @@ async fn ring_writer_task(
                 }
             }
             _ = &mut changed => {}
+            _ = execution_tracker.input_changed() => {}
             _ = async {
                 if let Some(stall) = &input_stall {
                     stall.watch().await;
@@ -3898,6 +3941,49 @@ async fn route_guest_lane_frame(
     };
     let is_terminal = (frame.flags & FLAG_TERMINAL) != 0;
 
+    // Only execution sessions need payload accounting. Decode outside the shared client map
+    // so filesystem/network traffic stays on the raw forwarding path.
+    let execution = if frame.flags != FLAG_BULK {
+        let map = clients.lock().await;
+        map.get(&client_slot)
+            .filter(|client| !dual_port || client.incarnation == incarnation)
+            .filter(|client| {
+                client.execution_tracker.contains(frame.id)
+                    || client
+                        .exec_control
+                        .as_ref()
+                        .is_some_and(|connection| connection.pending(frame.id))
+            })
+            .map(|client| {
+                (
+                    Arc::clone(&client.execution_tracker),
+                    client.disconnect_tx.clone(),
+                )
+            })
+    } else {
+        None
+    };
+
+    let execution_message = if let Some((flows, disconnect)) = execution {
+        match decode_frame(frame.data.as_ref()) {
+            Ok(message) => {
+                if let Err(error) = flows.guest_message(&message, frame.data.len()) {
+                    tracing::error!(%error, id = frame.id, "invalid guest execution frame");
+                    let _ = disconnect.send(true);
+                    return Ok(());
+                }
+                Some(message)
+            }
+            Err(error) => {
+                tracing::error!(%error, id = frame.id, "malformed guest execution frame");
+                let _ = disconnect.send(true);
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     // Clone only nonblocking routing handles while holding the shared owner map.
     let writer_result = {
         let mut map = clients.lock().await;
@@ -3909,8 +3995,9 @@ async fn route_guest_lane_frame(
                     connection.mark_finished(frame.id);
                 } else if frame.flags != FLAG_BULK
                     && connection.pending(frame.id)
-                    && decode_frame(frame.data.as_ref())
-                        .is_ok_and(|message| message.t == MessageType::ExecStarted)
+                    && execution_message
+                        .as_ref()
+                        .is_some_and(|message| message.t == MessageType::ExecStarted)
                 {
                     // Observe before publishing Started to the caller, so immediate signals work.
                     connection.started(frame.id);
@@ -4684,6 +4771,50 @@ async fn client_reader_task(
             }
             continue;
         }
+
+        let mut input_len = None;
+        if let Some(message) = decoded_message.as_ref() {
+            if message.t == MessageType::ExecRequest {
+                match agent_tx.execution_tracker.admit(message) {
+                    Ok(exec_admission::Admission::Full) => {
+                        let failure = ExecFailed {
+                            kind: ExecFailureKind::ResourceLimit,
+                            errno: None,
+                            errno_name: None,
+                            message: "active execution limit reached".into(),
+                            stage: Some("execution_admission".into()),
+                        };
+                        let Ok(mut response) =
+                            Message::with_payload(MessageType::ExecFailed, message.id, &failure)
+                        else {
+                            break;
+                        };
+                        response.v = message.v;
+                        if queue_client_rejection(&write_tx, &write_budget, &response).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "invalid execution request");
+                        break;
+                    }
+                }
+            }
+
+            match agent_tx
+                .execution_tracker
+                .client_message(message, frame.data.len())
+            {
+                Ok(length) => input_len = length,
+                Err(error) => {
+                    tracing::warn!(%error, "invalid execution client frame");
+                    break;
+                }
+            }
+        }
+
         let opened_bulk_kind = decoded_message
             .as_ref()
             .and_then(|message| match message.t {
@@ -5004,12 +5135,32 @@ async fn client_reader_task(
                     || message_type.is_some_and(MessageType::uses_workload_data_credit),
             );
             write.classify_message_order(frame.id, bulk_metadata, decoded_message.as_ref());
+            if let Some(message) = decoded_message.as_ref()
+                && message.t == MessageType::ExecStdin
+                && agent_tx.execution_tracker.routes_input(message)
+            {
+                // None means the execution has already ended; discard late input rather
+                // than falling back to the legacy shared queue without an execution slot.
+                if let Some(length) = input_len
+                    && let Err(error) = agent_tx
+                        .execution_tracker
+                        .enqueue_input(write, message, length)
+                {
+                    tracing::warn!(%error, "invalid execution input");
+                    break;
+                }
+                continue;
+            }
             if agent_tx.send(write).await.is_err() {
                 tracing::error!("agent relay: control ring writer channel closed");
                 break;
             }
         }
     }
+
+    agent_tx
+        .execution_tracker
+        .cancel_input(id_start, id_end_exclusive);
 
     // Client disconnected — send SIGKILL for each active session.
     let active_sessions = {
@@ -5133,6 +5284,13 @@ async fn client_reader_task(
         );
         return;
     }
+
+    // Leased connections retain execution reservations until guest cleanup is confirmed.
+    // Buffered output can outlive the client. Failed relay actors terminate the data plane
+    // through wait_relay_exit; releasing early would undercount retained executions.
+    agent_tx
+        .execution_tracker
+        .disconnect(id_start, id_end_exclusive);
 
     // Combined mode releases after enqueue as before. Dual mode reaches this point only after the
     // reverse control stream has drained through agentd's matching acknowledgement.
@@ -5465,6 +5623,10 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use microsandbox_protocol::wire::Envelope;
+    use tokio::io::DuplexStream;
+
+    use super::exec_admission::ExecutionTracker;
     use super::*;
 
     /// Reports the relay reader's consumed byte count every time its read goes pending, so a test
@@ -5555,7 +5717,7 @@ mod tests {
                 owner.started(101);
             }
             if full {
-                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                for _ in 0..AGENT_WRITE_CONTROL_FRAMES {
                     tx.send(ControlWrite::ordinary(
                         Bytes::from_static(b"control"),
                         102,
@@ -5586,7 +5748,7 @@ mod tests {
                 assert!(message.contains("was not queued"), "{message}");
             }
             if full {
-                for _ in 0..AGENT_WRITE_CLASS_FRAMES {
+                for _ in 0..AGENT_WRITE_CONTROL_FRAMES {
                     assert!(rx.try_recv().is_ok());
                 }
             }
@@ -5923,6 +6085,7 @@ mod tests {
             0,
             ClientState {
                 exec_control: None,
+                execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -5979,6 +6142,7 @@ mod tests {
             0,
             ClientState {
                 exec_control: None,
+                execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -6115,6 +6279,7 @@ mod tests {
             0,
             ClientState {
                 exec_control: None,
+                execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                 incarnation: Some(TEST_INCARNATION),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6148,8 +6313,13 @@ mod tests {
                 .push(Bytes::from_static(b"occupied"))
                 .unwrap();
         }
-        let ring_writer =
-            (!dual_port).then(|| tokio::spawn(ring_writer_task(Arc::clone(&shared), agent_rx)));
+        let ring_writer = (!dual_port).then(|| {
+            tokio::spawn(ring_writer_task(
+                Arc::clone(&shared),
+                agent_rx,
+                Arc::default(),
+            ))
+        });
         let used_slots = Arc::new(Mutex::new(HashSet::from([0])));
         let (drain_tx, _drain_rx) = mpsc::channel(1);
         let (bulk_tx, mut bulk_rx) = mpsc::channel(1);
@@ -6327,7 +6497,7 @@ mod tests {
             );
             assert_eq!(
                 queue_budget.control_frames.available_permits(),
-                AGENT_WRITE_CLASS_FRAMES
+                AGENT_WRITE_CONTROL_FRAMES
             );
             let gate = shared.workload_control.gate();
             assert_eq!(next_host_fragment(&shared).await.as_ref(), b"occupied");
@@ -6535,7 +6705,7 @@ mod tests {
     async fn control_writer_acknowledges_only_after_ring_admission() {
         let shared = Arc::new(ConsoleSharedState::with_capacity(64 * 1024));
         let (tx, rx) = mpsc::channel(1);
-        let task = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let task = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         let (completion, completed) = oneshot::channel();
         tx.send(ControlWrite {
             completion: Some(completion),
@@ -6613,6 +6783,7 @@ mod tests {
                 slot,
                 ClientState {
                     exec_control: None,
+                    execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                     incarnation: Some(TEST_INCARNATION),
                     active_sessions: HashSet::from([id_start, id_start + 1]),
                     active_bulk: Arc::clone(&active_bulk),
@@ -6724,6 +6895,186 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_input_saturation_preserves_ack_progress_and_order() {
+        use microsandbox_protocol::{
+            core::{WorkloadTransportCredit, WorkloadTransportPosition},
+            exec::{ExecLimits, ExecStarted, ExecStdin, ExecStdout},
+        };
+
+        let policy = ExecLimits::default();
+        let (agent_tx, agent_rx) = ControlWriter::new();
+        agent_tx.execution_tracker.install(Some(policy)).unwrap();
+        for id in 1..=4 {
+            let request = Message::with_payload(MessageType::ExecRequest, id, &()).unwrap();
+            assert!(matches!(
+                agent_tx.execution_tracker.admit(&request).unwrap(),
+                exec_admission::Admission::Accepted
+            ));
+            let started =
+                Message::with_payload(MessageType::ExecStarted, id, &ExecStarted { pid: id })
+                    .unwrap();
+            agent_tx
+                .execution_tracker
+                .guest_message(&started, 0)
+                .unwrap();
+        }
+        let output = Message::with_payload(
+            MessageType::ExecStdout,
+            1,
+            &ExecStdout {
+                data: vec![1; 1024],
+            },
+        )
+        .unwrap();
+        agent_tx
+            .execution_tracker
+            .guest_message(&output, 0)
+            .unwrap();
+        let shared = workload_test_shared(128 * 1024, false);
+        shared
+            .workload_control
+            .register_ordinary_writer(agent_tx.clone());
+        let mut credit = WorkloadTransportCredit {
+            control_bytes: 4096,
+            control_frames: 16,
+            ..Default::default()
+        };
+        shared
+            .workload_control
+            .restore(WorkloadTransportPosition::default(), credit, 0)
+            .unwrap();
+
+        let (reader, mut peer) = tokio::io::duplex(1024);
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        #[cfg(unix)]
+        let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, disconnect_rx) = watch::channel(false);
+        let write_budget = Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY));
+        let active_bulk = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let clients = Arc::new(Mutex::new(HashMap::from([(
+            0,
+            ClientState {
+                exec_control: None,
+                execution_tracker: Arc::clone(&agent_tx.execution_tracker),
+                incarnation: None,
+                active_sessions: HashSet::from([1, 2, 3, 4]),
+                active_bulk: Arc::clone(&active_bulk),
+                completed_bulk_ids: None,
+                write_tx: write_tx.clone(),
+                write_budget: Arc::clone(&write_budget),
+                disconnect_tx,
+                #[cfg(unix)]
+                local_outbound: None,
+            },
+        )])));
+        let (drain_tx, _drain_rx) = mpsc::channel(1);
+        let (merge_tx, _merge_rx) = mpsc::channel(1);
+        let execution_tracker = Arc::clone(&agent_tx.execution_tracker);
+        let reader = tokio::spawn(client_reader_task(
+            0,
+            reader,
+            agent_tx,
+            clients,
+            Arc::new(Mutex::new(HashSet::from([0]))),
+            drain_tx,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(1)),
+            None,
+            None,
+            merge_tx,
+            Arc::new(Mutex::new(HashMap::new())),
+            1,
+            AGENT_RELAY_ID_RANGE_STEP,
+            None,
+            active_bulk,
+            write_tx,
+            write_budget,
+            disconnect_rx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(unix)]
+            local_write_tx,
+        ));
+        let writer = tokio::spawn(ring_writer_task(
+            Arc::clone(&shared),
+            agent_rx,
+            execution_tracker,
+        ));
+        let mut expected: HashMap<u32, Vec<u8>> = HashMap::new();
+        // Twelve full chunks exceed the old eight-frame shared admission while each execution
+        // stays within its own allowance. Guest transport data credit remains exhausted.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for chunk in 0..4 {
+                for id in 1..=3 {
+                    let data = vec![(id * 10 + chunk) as u8; policy.stdin_chunk_size as usize];
+                    expected.entry(id).or_default().extend_from_slice(&data);
+                    peer.write_all(&encoded_message_id(
+                        MessageType::ExecStdin,
+                        id,
+                        &ExecStdin { data },
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+            // Tiny writes exercise coalescing while all forwarding is still blocked.
+            for byte in 0..128u8 {
+                expected.entry(4).or_default().push(byte);
+                peer.write_all(&encoded_message_id(
+                    MessageType::ExecStdin,
+                    4,
+                    &ExecStdin { data: vec![byte] },
+                ))
+                .await
+                .unwrap();
+            }
+            for id in 1..=4 {
+                peer.write_all(&encoded_message_id(
+                    MessageType::ExecStdin,
+                    id,
+                    &ExecStdin { data: Vec::new() },
+                ))
+                .await
+                .unwrap();
+            }
+            peer.write_all(&encoded_message_id(
+                MessageType::ExecOutputAck,
+                1,
+                &ExecOutputAck { consumed: 1280 },
+            ))
+            .await
+            .unwrap();
+        })
+        .await
+        .expect("stdin must not stop the shared reader before the output acknowledgement");
+        let ack = decode_frame(&next_host_fragment(&shared).await).unwrap();
+        assert_eq!(ack.t, MessageType::ExecOutputAck);
+        assert_eq!(ack.id, 1);
+        assert!(shared.rx_ring.pop().is_none());
+
+        credit.bulk_bytes = 1024 * 1024;
+        credit.bulk_frames = 32;
+        shared.workload_control.update_credit(credit).unwrap();
+        let mut received: HashMap<u32, Vec<u8>> = HashMap::new();
+        let mut ended = HashSet::new();
+        while ended.len() < 4 {
+            let message = decode_frame(&next_host_fragment(&shared).await).unwrap();
+            assert_eq!(message.t, MessageType::ExecStdin);
+            assert!(!ended.contains(&message.id), "data cannot follow EOF");
+            let input = message.payload::<ExecStdin>().unwrap();
+            if input.data.is_empty() {
+                assert_eq!(received.get(&message.id), expected.get(&message.id));
+                ended.insert(message.id);
+            } else {
+                received.entry(message.id).or_default().extend(input.data);
+            }
+        }
+        assert_eq!(ended.len(), 4);
+        assert_eq!(received, expected);
+        reader.abort();
+        writer.abort();
+    }
+
+    #[tokio::test]
     async fn paused_client_rejects_work_without_registering_or_forwarding_sessions() {
         let slot = 0;
         let incarnation = [0x82; CLIENT_INCARNATION_SIZE];
@@ -6744,6 +7095,7 @@ mod tests {
             slot,
             ClientState {
                 exec_control: Some(owner),
+                execution_tracker: Arc::clone(&agent_tx.execution_tracker),
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6885,6 +7237,7 @@ mod tests {
             slot,
             ClientState {
                 exec_control: None,
+                execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                 incarnation: Some(incarnation),
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::clone(&active_bulk),
@@ -6996,6 +7349,7 @@ mod tests {
                 slot,
                 ClientState {
                     exec_control: None,
+                    execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                     incarnation: None,
                     active_sessions: HashSet::new(),
                     active_bulk: Arc::clone(&active_bulk),
@@ -7765,6 +8119,7 @@ mod tests {
                 0,
                 ClientState {
                     exec_control: None,
+                    execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                     incarnation: Some(TEST_INCARNATION),
                     active_sessions: HashSet::from([id]),
                     active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -8208,6 +8563,7 @@ mod tests {
             0,
             ClientState {
                 exec_control: None,
+                execution_tracker: Arc::new(exec_admission::ExecutionTracker::default()),
                 incarnation: None,
                 active_sessions: HashSet::new(),
                 active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -8241,6 +8597,21 @@ mod tests {
             panic!("combined control output unexpectedly used the local bulk path");
         };
         assert_eq!(output.as_ref(), frame);
+
+        // Non-execution payloads remain opaque to routing, including a payload only the
+        // destination understands. They must not kill the sandbox-wide reader.
+        let mut opaque = frame.to_vec();
+        opaque[LEN_PREFIX_SIZE + FRAME_HEADER_SIZE] = 0xff;
+        shared.tx_ring.push(opaque.clone()).unwrap();
+        shared.tx_wake.wake();
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), write_rx.recv())
+            .await
+            .unwrap()
+            .expect("opaque traffic terminated the shared reader");
+        let ClientWriteData::Inline(forwarded) = forwarded.data else {
+            panic!("expected inline forwarding");
+        };
+        assert_eq!(forwarded.as_ref(), opaque);
         reader.abort();
     }
 
@@ -8630,75 +9001,90 @@ mod tests {
 
     #[tokio::test]
     async fn restored_workload_thaw_uses_private_attempt_scoped_exchange() {
-        // Console capacity is now a byte budget, not a count of queued frames.
-        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
-        let sock_path = test_agent_endpoint("restore-thaw");
-        let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
-            .await
-            .unwrap();
-        let restored = restored_agent("checkpoint-attempt");
-        relay.install_restored_ready(&restored).unwrap();
+        for policy in [
+            None,
+            Some(ExecLimits {
+                max_executions: 7,
+                input_limit: 32768,
+                ..Default::default()
+            }),
+        ] {
+            // Console capacity is now a byte budget, not a count of queued frames.
+            let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+            let sock_path = test_agent_endpoint("restore-thaw");
+            let mut relay = AgentRelay::new(&sock_path, Arc::clone(&shared))
+                .await
+                .unwrap();
+            let mut restored = restored_agent("checkpoint-attempt");
+            restored.ready.exec_limits = policy;
+            relay.install_restored_ready(&restored).unwrap();
 
-        let guest_shared = Arc::clone(&shared);
-        let guest = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            let request = loop {
-                if let Some(frame) = guest_shared.rx_ring.pop() {
-                    break codec::decode_message_frame(&frame).unwrap();
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "host did not send the private thaw request"
+            let guest_shared = Arc::clone(&shared);
+            let guest = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let request = loop {
+                    if let Some(frame) = guest_shared.rx_ring.pop() {
+                        break codec::decode_message_frame(&frame).unwrap();
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "host did not send the private thaw request"
+                    );
+                    let _ = guest_shared
+                        .rx_wake
+                        .wait_timeout(std::time::Duration::from_millis(10));
+                };
+
+                assert_eq!(request.id, RESTORE_CONTROL_ID);
+                assert_eq!(request.t, MessageType::WorkloadThaw);
+                assert_eq!(
+                    request.payload::<WorkloadThaw>().unwrap().mode,
+                    WorkloadThawMode::Restore
                 );
-                let _ = guest_shared
-                    .rx_wake
-                    .wait_timeout(std::time::Duration::from_millis(10));
-            };
+                assert_eq!(
+                    request.payload::<WorkloadThaw>().unwrap().attempt_id,
+                    "checkpoint-attempt"
+                );
 
-            assert_eq!(request.id, RESTORE_CONTROL_ID);
-            assert_eq!(request.t, MessageType::WorkloadThaw);
-            assert_eq!(
-                request.payload::<WorkloadThaw>().unwrap().mode,
-                microsandbox_protocol::core::WorkloadThawMode::Restore
-            );
-            assert_eq!(
-                request.payload::<WorkloadThaw>().unwrap().attempt_id,
-                "checkpoint-attempt"
-            );
-
-            let mut response = Message::with_payload(
-                MessageType::WorkloadThawed,
-                RESTORE_CONTROL_ID,
-                &WorkloadThawed {
-                    attempt_id: "checkpoint-attempt".into(),
-                },
-            )
-            .unwrap();
-            response.v = request.v;
-            let mut frame = Vec::new();
-            codec::encode_to_buf(
-                &Message::with_payload(
-                    MessageType::WorkloadTransportCredit,
+                let mut response = Message::with_payload(
+                    MessageType::WorkloadThawed,
                     RESTORE_CONTROL_ID,
-                    &microsandbox_protocol::core::WorkloadTransportCredit {
-                        control_bytes: 100,
-                        control_frames: 1,
-                        ..Default::default()
+                    &WorkloadThawed {
+                        attempt_id: "checkpoint-attempt".into(),
                     },
                 )
-                .unwrap(),
-                &mut frame,
-            )
-            .unwrap();
-            codec::encode_to_buf(&response, &mut frame).unwrap();
-            guest_shared.tx_ring.push(frame).unwrap();
-            guest_shared.tx_wake.wake();
-        });
+                .unwrap();
+                response.v = request.v;
+                let mut frame = Vec::new();
+                codec::encode_to_buf(
+                    &Message::with_payload(
+                        MessageType::WorkloadTransportCredit,
+                        RESTORE_CONTROL_ID,
+                        &microsandbox_protocol::core::WorkloadTransportCredit {
+                            control_bytes: 100,
+                            control_frames: 1,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                    &mut frame,
+                )
+                .unwrap();
+                codec::encode_to_buf(&response, &mut frame).unwrap();
+                guest_shared.tx_ring.push(frame).unwrap();
+                guest_shared.tx_wake.wake();
+            });
 
-        relay.thaw_restored_workload(&restored).unwrap();
-        guest.join().unwrap();
-        assert!(shared.workload_control.admit(false, 100).unwrap());
-        assert!(!shared.workload_control.admit(false, 1).unwrap());
+            relay.thaw_restored_workload(&restored).unwrap();
+            let advertised = codec::decode_message_frame(relay.ready_frame.as_ref().unwrap())
+                .unwrap()
+                .payload::<Ready>()
+                .unwrap();
+            assert_eq!(advertised.exec_limits, policy);
+            guest.join().unwrap();
+            assert!(shared.workload_control.admit(false, 100).unwrap());
+            assert!(!shared.workload_control.admit(false, 1).unwrap());
+        }
     }
 
     #[tokio::test]
@@ -9041,7 +9427,7 @@ mod tests {
         tx.send(ControlWrite::ordinary(exec.clone(), 100, false))
             .await
             .unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         assert_eq!(
             next_host_fragment(&shared).await.as_ref(),
             encode_relay_client_connected(RelayClientConnected {
@@ -9186,7 +9572,7 @@ mod tests {
             .await
             .unwrap();
         tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
 
         let first_clock = decode_frame(&next_host_fragment(&shared).await).unwrap();
         assert_eq!(first_clock.t, MessageType::ClockSync);
@@ -9244,7 +9630,7 @@ mod tests {
             .unwrap();
         tx.send(shutdown.clone().into()).await.unwrap();
         tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(shared.rx_ring.pop().is_none());
         let gate = control.gate();
@@ -9277,7 +9663,7 @@ mod tests {
         shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
         let (tx, rx) = ControlWriter::new();
         tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tokio::time::sleep(Duration::from_millis(20)).await;
         let gate = shared.workload_control.gate();
         assert_eq!(
@@ -9414,6 +9800,58 @@ mod tests {
                 credit_limit: microsandbox_protocol::bulk::DEFAULT_BULK_WINDOW,
             },
         )
+    }
+
+    #[test]
+    fn exec_output_credit_passes_stalled_stdin_but_respects_creation_and_freeze() {
+        use microsandbox_protocol::core::{WorkloadTransportCredit, WorkloadTransportPosition};
+        use microsandbox_protocol::exec::{ExecOutputAck, ExecStdin};
+
+        let shared = workload_test_shared(4096, false);
+        let control = &shared.workload_control;
+        control
+            .restore(
+                WorkloadTransportPosition::default(),
+                WorkloadTransportCredit {
+                    control_bytes: 4096,
+                    control_frames: 16,
+                    ..Default::default()
+                },
+                0,
+            )
+            .unwrap();
+        let message =
+            Message::with_payload(MessageType::ExecStdin, 17, &ExecStdin { data: vec![1; 16] })
+                .unwrap();
+        let mut encoded = Vec::new();
+        codec::encode_to_buf(&message, &mut encoded).unwrap();
+        let mut input = ControlWrite::ordinary(Bytes::from(encoded), 17, true);
+        input.classify_message_order(17, None, Some(&message));
+        let credit = || {
+            ordered_tcp_metadata(
+                MessageType::ExecOutputAck,
+                &ExecOutputAck { consumed: 4096 },
+            )
+        };
+        let mut pending = VecDeque::from([
+            input,
+            ordered_tcp_metadata(MessageType::ExecRequest, &()),
+            credit(),
+        ]);
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        pending.remove(1);
+        let gate = control.gate();
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        gate.release();
+        assert!(matches!(
+            next_control_write(&mut pending, control)
+                .unwrap()
+                .unwrap()
+                .order,
+            ControlOrder::ExecOutputAck(17)
+        ));
+        assert!(next_control_write(&mut pending, control).unwrap().is_none());
+        assert_eq!(pending.len(), 1);
     }
 
     #[test]
@@ -9582,7 +10020,7 @@ mod tests {
         let data = Bytes::from(vec![0; AGENT_WRITE_DATA_BYTES / AGENT_WRITE_CLASS_FRAMES]);
         let metadata = Bytes::from(vec![
             0;
-            AGENT_WRITE_CONTROL_BYTES / AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_BYTES / AGENT_WRITE_CONTROL_FRAMES
         ]);
         let mut pending = Vec::new();
         for id in 1..=AGENT_WRITE_CLASS_FRAMES as u32 {
@@ -9596,7 +10034,7 @@ mod tests {
             tx.try_send(ControlWrite::ordinary(Bytes::new(), 99, true)),
             Err(mpsc::error::TrySendError::Full(_))
         ));
-        for id in 100..100 + AGENT_WRITE_CLASS_FRAMES as u32 {
+        for id in 100..100 + AGENT_WRITE_CONTROL_FRAMES as u32 {
             tx.try_send(ControlWrite::ordinary(metadata.clone(), id, false))
                 .unwrap();
             pending.push(rx.recv().await.unwrap());
@@ -9617,7 +10055,7 @@ mod tests {
         assert_eq!(tx.data_frames.available_permits(), AGENT_WRITE_CLASS_FRAMES);
         assert_eq!(
             tx.control_frames.available_permits(),
-            AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_FRAMES
         );
     }
 
@@ -9676,7 +10114,12 @@ mod tests {
         let (tx, rx) = ControlWriter::new();
         let mut expected = Vec::new();
         for uses_data_credit in [true, false] {
-            for id in 1..=AGENT_WRITE_CLASS_FRAMES as u32 {
+            let frames = if uses_data_credit {
+                AGENT_WRITE_CLASS_FRAMES
+            } else {
+                AGENT_WRITE_CONTROL_FRAMES
+            };
+            for id in 1..=frames as u32 {
                 let kind = if uses_data_credit {
                     MessageType::ExecStdin
                 } else {
@@ -9691,7 +10134,7 @@ mod tests {
         }
         assert_eq!(tx.data_frames.available_permits(), 0);
         assert_eq!(tx.control_frames.available_permits(), 0);
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         let position = tokio::time::timeout(Duration::from_secs(1), control.parked_position())
             .await
             .unwrap()
@@ -9739,7 +10182,7 @@ mod tests {
         control
             .update_credit(WorkloadTransportCredit {
                 control_bytes: 4096,
-                control_frames: AGENT_WRITE_CLASS_FRAMES as u64,
+                control_frames: AGENT_WRITE_CONTROL_FRAMES as u64,
                 bulk_bytes: 4096,
                 bulk_frames: AGENT_WRITE_CLASS_FRAMES as u64,
             })
@@ -9751,7 +10194,7 @@ mod tests {
         assert_eq!(tx.data_frames.available_permits(), AGENT_WRITE_CLASS_FRAMES);
         assert_eq!(
             tx.control_frames.available_permits(),
-            AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_FRAMES
         );
         drop(tx);
         writer.await.unwrap().unwrap();
@@ -9773,7 +10216,7 @@ mod tests {
             )
             .unwrap();
         let (tx, rx) = mpsc::channel(2);
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         let first = Bytes::from(encoded_message_id(
             MessageType::Ping,
             1,
@@ -9841,7 +10284,7 @@ mod tests {
             0,
             &WorkloadThaw {
                 attempt_id: "fifo".into(),
-                mode: microsandbox_protocol::core::WorkloadThawMode::Continue,
+                mode: WorkloadThawMode::Continue,
             },
         )
         .unwrap();
@@ -9919,7 +10362,7 @@ mod tests {
                         0,
                         &WorkloadThaw {
                             attempt_id: "cancel".into(),
-                            mode: microsandbox_protocol::core::WorkloadThawMode::Continue,
+                            mode: WorkloadThawMode::Continue,
                         },
                     )
                     .unwrap(),
@@ -10081,7 +10524,7 @@ mod tests {
             &microsandbox_protocol::core::Ping {},
         ));
         tx.send(first.clone().into()).await.unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         assert_eq!(next_host_fragment(&shared).await, first);
         let shutdown = encoded_message_id(MessageType::Shutdown, 0, &());
         let shutdown_len = shutdown.len();
@@ -10115,7 +10558,7 @@ mod tests {
         let control = Arc::clone(&shared.workload_control);
         let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx);
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         let gate = control.gate();
         tokio::time::timeout(std::time::Duration::from_secs(1), control.parked_position())
             .await
@@ -10144,7 +10587,7 @@ mod tests {
         let control = Arc::clone(&shared.workload_control);
         let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx.clone());
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tokio::task::yield_now().await; // Let the real writer register as active.
         let first = Bytes::from(encoded_message_id(MessageType::Ping, 1, &()));
         tx.send(first.clone().into()).await.unwrap();
@@ -10187,7 +10630,7 @@ mod tests {
         let control = Arc::clone(&shared.workload_control);
         let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx);
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         let gate = control.gate();
         control.parked_position().await.unwrap();
         let result = push_guest_frame_until_async(
@@ -10216,7 +10659,7 @@ mod tests {
         let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx);
         shared.rx_ring.push(Bytes::from(vec![7; 128])).unwrap();
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tokio::task::yield_now().await;
         let sender = Arc::clone(&shared);
         let delivery = tokio::spawn(async move {
@@ -10259,7 +10702,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("timed out"));
         assert_eq!(
             tx.control_frames.available_permits(),
-            AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_FRAMES
         );
         assert_eq!(tx.control_bytes.available_permits(), 1);
         assert!(rx.try_recv().is_err());
@@ -10295,7 +10738,7 @@ mod tests {
         drop(accepted);
         assert_eq!(
             tx.control_frames.available_permits(),
-            AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_FRAMES
         );
         assert_eq!(
             tx.control_bytes.available_permits(),
@@ -10350,7 +10793,7 @@ mod tests {
             .unwrap();
         let (tx, rx) = ControlWriter::new();
         control.register_ordinary_writer(tx.clone());
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tokio::task::yield_now().await;
         let sender = Arc::clone(&shared);
         let delivery = tokio::spawn(async move {
@@ -10362,7 +10805,7 @@ mod tests {
             .await
         });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while tx.control_frames.available_permits() == AGENT_WRITE_CLASS_FRAMES {
+            while tx.control_frames.available_permits() == AGENT_WRITE_CONTROL_FRAMES {
                 tokio::task::yield_now().await;
             }
         })
@@ -10389,7 +10832,7 @@ mod tests {
         assert!(shared.rx_ring.pop().is_none());
         assert_eq!(
             tx.control_frames.available_permits(),
-            AGENT_WRITE_CLASS_FRAMES
+            AGENT_WRITE_CONTROL_FRAMES
         );
         writer.abort();
         let _ = writer.await;
@@ -10457,7 +10900,7 @@ mod tests {
         use microsandbox_protocol::core::WorkloadFreeze;
         let shared = workload_test_shared(4096, false);
         let (tx, rx) = mpsc::channel(1);
-        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx));
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
         tx.send(
             Bytes::from(encoded_message_id(
                 MessageType::Ping,
@@ -10498,5 +10941,708 @@ mod tests {
                 .unwrap_err()
                 .contains("closed")
         );
+    }
+
+    async fn assert_pending_once<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+
+    fn blocked_write(shared: Arc<ConsoleSharedState>) -> tokio::task::JoinHandle<bool> {
+        tokio::spawn(async move {
+            #[cfg(unix)]
+            let capacity = AsyncFd::new(shared.rx_capacity_wake.as_raw_fd()).unwrap();
+
+            push_bulk_fragment_with_timeout(
+                &shared,
+                Bytes::from_static(b"next"),
+                #[cfg(unix)]
+                &capacity,
+                Duration::from_millis(20),
+            )
+            .await
+        })
+    }
+
+    #[tokio::test]
+    async fn input_stall_retains_frame_and_recovers_on_capacity_notification() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let shared = Arc::new(ConsoleSharedState::with_capacity(4));
+            shared.rx_ring.push(Bytes::from_static(b"full")).unwrap();
+            let mut health = shared.input_stalled.subscribe();
+            let started = tokio::time::Instant::now();
+            let writer = blocked_write(Arc::clone(&shared));
+
+            health.wait_for(|stalled| *stalled).await.unwrap();
+            assert!(started.elapsed() >= Duration::from_millis(20));
+            assert!(!writer.is_finished());
+            assert!(input_is_stalled(&shared, None));
+
+            // Dropping the popped fragment releases its byte charge; wake the
+            // writer exactly as the console consumer does when capacity returns.
+            assert_eq!(shared.rx_ring.pop().unwrap().as_ref(), b"full");
+            shared.rx_capacity_wake.wake();
+
+            assert!(writer.await.unwrap());
+            assert_eq!(shared.rx_ring.pop().unwrap().as_ref(), b"next");
+            assert!(!input_is_stalled(&shared, None));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_stall_shutdown_and_cancellation_release_the_health_gate() {
+        for cancel in [false, true] {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let shared = Arc::new(ConsoleSharedState::with_capacity(4));
+                shared.rx_ring.push(Bytes::from_static(b"full")).unwrap();
+                let mut health = shared.input_stalled.subscribe();
+                let writer = blocked_write(Arc::clone(&shared));
+
+                health.wait_for(|stalled| *stalled).await.unwrap();
+
+                if cancel {
+                    writer.abort();
+                    assert!(writer.await.unwrap_err().is_cancelled());
+                    // Wake the Windows blocking capacity waiter before its runtime exits.
+                    shared.close();
+                } else {
+                    shared.close();
+                    assert!(!writer.await.unwrap());
+                }
+
+                assert!(!*health.borrow());
+                assert_eq!(shared.rx_ring.pop().unwrap().as_ref(), b"full");
+                assert!(shared.rx_ring.pop().is_none());
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn input_stall_on_bulk_lane_also_closes_client_admission() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let control = Arc::new(ConsoleSharedState::with_capacity(4));
+            let bulk = Arc::new(ConsoleSharedState::with_capacity(4));
+            bulk.rx_ring.push(Bytes::from_static(b"full")).unwrap();
+            let writer = blocked_write(Arc::clone(&bulk));
+
+            wait_for_input_stall(&control, Some(&bulk)).await;
+            assert!(!input_is_stalled(&control, None));
+            assert!(input_is_stalled(&control, Some(&bulk)));
+
+            drop(bulk.rx_ring.pop());
+            bulk.rx_capacity_wake.wake();
+
+            assert!(writer.await.unwrap());
+            assert!(!input_is_stalled(&control, Some(&bulk)));
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_stall_temporary_backpressure_keeps_admission_open() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let shared = Arc::new(ConsoleSharedState::with_capacity(4));
+            shared.rx_ring.push(Bytes::from_static(b"full")).unwrap();
+            let writer_shared = Arc::clone(&shared);
+            let writer = tokio::spawn(async move {
+                #[cfg(unix)]
+                let capacity = AsyncFd::new(writer_shared.rx_capacity_wake.as_raw_fd()).unwrap();
+
+                push_bulk_fragment_with_timeout(
+                    &writer_shared,
+                    Bytes::from_static(b"next"),
+                    #[cfg(unix)]
+                    &capacity,
+                    Duration::from_secs(60),
+                )
+                .await
+            });
+
+            tokio::task::yield_now().await;
+            assert!(!input_is_stalled(&shared, None));
+            drop(shared.rx_ring.pop());
+            shared.rx_capacity_wake.wake();
+
+            assert!(writer.await.unwrap());
+            assert!(!input_is_stalled(&shared, None));
+            assert_eq!(shared.rx_ring.pop().unwrap().as_ref(), b"next");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_stall_admission_gate_preserves_existing_client_output() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let directory = tempfile::tempdir_in("/tmp").unwrap();
+            let endpoint = directory.path().join("agent.sock");
+            let shared = Arc::new(ConsoleSharedState::with_capacity(16 * 1024));
+            let mut relay = AgentRelay::new(&endpoint, Arc::clone(&shared))
+                .await
+                .unwrap();
+            relay.ready_frame = Some(encoded_message(MessageType::Ready, &Ready::default()));
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let (drain_tx, mut drain_rx) = mpsc::channel(1);
+
+            let mut client = tokio::net::UnixStream::connect(&endpoint).await.unwrap();
+            let run = tokio::spawn(relay.run(shutdown_rx, drain_tx));
+            let mut range = [0; 8];
+            client.read_exact(&mut range).await.unwrap();
+            let id = u32::from_be_bytes(range[..4].try_into().unwrap());
+            read_raw_frame(&mut client).await.unwrap();
+
+            // Detection is exercised with real capacity waits in the tests above.
+            // Set the lane health explicitly here to isolate the admission contract.
+            shared.input_stalled.send_replace(true);
+            let mut rejected = tokio::net::UnixStream::connect(&endpoint).await.unwrap();
+            assert!(rejected.read_exact(&mut range).await.is_err());
+            assert!(!run.is_finished());
+            assert!(drain_rx.try_recv().is_err());
+
+            shared
+                .tx_ring
+                .push(encoded_message_id(MessageType::Pong, id, &()))
+                .unwrap();
+            shared.tx_wake.wake();
+            let response = read_raw_frame(&mut client).await.unwrap();
+            assert_eq!(
+                decode_frame(response.data.as_ref()).unwrap().t,
+                MessageType::Pong
+            );
+
+            shared.input_stalled.send_replace(false);
+            let mut recovered = tokio::net::UnixStream::connect(&endpoint).await.unwrap();
+            recovered.read_exact(&mut range).await.unwrap();
+            read_raw_frame(&mut recovered).await.unwrap();
+
+            drop(shutdown_tx);
+            assert!(run.await.unwrap().is_ok());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn input_stall_private_write_preserves_clock_stall_until_delivery() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+
+        let mut health = shared.input_stalled.subscribe();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
+        health.wait_for(|stalled| *stalled).await.unwrap();
+        health.borrow_and_update();
+
+        let control = Arc::clone(&shared.workload_control);
+        let request = tokio::spawn(async move {
+            control
+                .request(
+                    Message::with_payload(
+                        MessageType::WorkloadFreeze,
+                        0,
+                        &microsandbox_protocol::core::WorkloadFreeze {
+                            external_mount_tags: Vec::new(),
+                            attempt_id: "stall".into(),
+                            host_input: Default::default(),
+                        },
+                    )
+                    .unwrap(),
+                    "stall",
+                )
+                .await
+        });
+
+        // The clock checks capacity before pushing. A failed push proves the private
+        // write has taken over the blocked delivery, rather than merely been queued.
+        for _ in 0..100 {
+            if shared.rx_ring.snapshot().full_events > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert!(shared.rx_ring.snapshot().full_events > 0);
+        assert!(
+            *health.borrow(),
+            "private traffic must not reopen admission"
+        );
+        assert!(
+            !health.has_changed().unwrap(),
+            "no false recovery notification"
+        );
+
+        drop(shared.rx_ring.pop());
+        shared.rx_capacity_wake.wake();
+        health.wait_for(|stalled| !*stalled).await.unwrap();
+
+        let delivered = shared.rx_ring.pop().unwrap();
+        assert_eq!(
+            decode_frame(&delivered).unwrap().t,
+            MessageType::WorkloadFreeze
+        );
+        drop(delivered);
+
+        shared.close();
+        writer.await.unwrap().unwrap();
+        assert!(request.await.unwrap().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn input_stall_freeze_preserves_admission_gate_until_delivery() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+
+        let mut health = shared.input_stalled.subscribe();
+        let writer = tokio::spawn(ring_writer_task(Arc::clone(&shared), rx, Arc::default()));
+        health.wait_for(|stalled| *stalled).await.unwrap();
+        health.borrow_and_update();
+
+        for _ in 0..3 {
+            let gate = shared.workload_control.gate();
+            shared.workload_control.parked_position().await.unwrap();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+
+            assert!(*health.borrow(), "freezing must not reopen admission");
+            assert!(
+                !health.has_changed().unwrap(),
+                "no recovery without delivery"
+            );
+
+            gate.release();
+            tokio::task::yield_now().await;
+            assert!(*health.borrow(), "thaw must not restart the stall deadline");
+        }
+
+        drop(shared.rx_ring.pop());
+        shared.rx_capacity_wake.wake();
+        health.wait_for(|stalled| !*stalled).await.unwrap();
+
+        let delivered = shared.rx_ring.pop().unwrap();
+        assert_eq!(decode_frame(&delivered).unwrap().t, MessageType::ClockSync);
+        drop(delivered);
+
+        shared.close();
+        writer.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_stall_completion_paths_preserve_errors_during_shutdown() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for lane in ["reader", "writer", "bulk"] {
+                for outcome in ["clean", "error", "panic"] {
+                    // Bulk reports RuntimeResult through a channel, not a JoinHandle.
+                    if lane == "bulk" && outcome == "panic" {
+                        continue;
+                    }
+
+                    for shutdown_mode in ["active", "signalled", "dropped"] {
+                        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+                        let (bulk_tx, mut bulk_rx) = mpsc::channel(1);
+                        let result = move || match outcome {
+                            "clean" => Ok(()),
+                            "error" => Err(RuntimeError::Custom("injected lane failure".into())),
+                            _ => panic!("injected lane panic"),
+                        };
+
+                        let mut reader = tokio::spawn(std::future::pending::<RuntimeResult<()>>());
+                        let mut writer = tokio::spawn(std::future::pending::<RuntimeResult<()>>());
+
+                        if lane == "bulk" {
+                            bulk_tx.send(result()).await.unwrap();
+                        } else {
+                            let handle = if lane == "reader" {
+                                &mut reader
+                            } else {
+                                &mut writer
+                            };
+                            handle.abort();
+                            let _ = (&mut *handle).await;
+                            *handle = tokio::spawn(async move { result() });
+
+                            // Observe actual task completion before making shutdown ready.
+                            // The other handles remain pending, so this exact arm must win.
+                            while !handle.is_finished() {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+
+                        match shutdown_mode {
+                            "signalled" => {
+                                shutdown_tx.send_replace(true);
+                            }
+                            "dropped" => drop(shutdown_tx),
+                            _ => {}
+                        }
+
+                        let exit = wait_relay_exit(
+                            &mut reader,
+                            &mut writer,
+                            &mut bulk_rx,
+                            &mut shutdown_rx,
+                        )
+                        .await;
+                        let context = format!("{lane}, {outcome}, {shutdown_mode}");
+
+                        assert_eq!(exit.control_writer_usable, lane != "writer", "{context}");
+                        assert_eq!(
+                            exit.can_observe_failure_terminals,
+                            lane == "bulk",
+                            "{context}"
+                        );
+
+                        if outcome == "clean" && shutdown_mode != "active" {
+                            assert!(exit.failure.is_none(), "{context}: {:?}", exit.failure);
+                        } else {
+                            let error = exit
+                                .failure
+                                .unwrap_or_else(|| panic!("lost failure: {context}"));
+                            let expected = match outcome {
+                                "clean" => "stopped unexpectedly",
+                                "error" => "injected lane failure",
+                                _ => "task failed",
+                            };
+                            assert!(error.to_string().contains(expected), "{context}: {error}");
+                        }
+
+                        reader.abort();
+                        writer.abort();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn input_stall_countdown_excludes_paused_time_without_resetting() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        let writer = ring_writer_task(Arc::clone(&shared), rx, Arc::default());
+        tokio::pin!(writer);
+
+        // Poll the real scheduler directly so each time advance starts only after
+        // it has observed the gate transition and armed or suspended its timer.
+        assert_pending_once(writer.as_mut()).await;
+
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(20)).await;
+            let gate = shared.workload_control.gate();
+
+            assert_pending_once(writer.as_mut()).await;
+            shared.workload_control.parked_position().await.unwrap();
+
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            assert_pending_once(writer.as_mut()).await;
+            assert!(
+                !input_is_stalled(&shared, None),
+                "intentional pause is not a stall"
+            );
+
+            gate.release();
+            assert_pending_once(writer.as_mut()).await;
+        }
+
+        // Forty seconds of actual blockage have elapsed. Only twenty remain,
+        // regardless of the two hours spent parked or the number of gate changes.
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(!input_is_stalled(&shared, None));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(
+            input_is_stalled(&shared, None),
+            "resume must not restart the countdown"
+        );
+
+        shared.close();
+        writer.await.unwrap();
+        assert!(!input_is_stalled(&shared, None));
+    }
+
+    #[tokio::test]
+    async fn input_stall_shutdown_without_task_completion_ignores_false_updates() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for drop_sender in [false, true] {
+                let mut reader = tokio::spawn(std::future::pending::<RuntimeResult<()>>());
+                let mut writer = tokio::spawn(std::future::pending::<RuntimeResult<()>>());
+                let reader_abort = reader.abort_handle();
+                let writer_abort = writer.abort_handle();
+                let (_bulk_tx, mut bulk_rx) = mpsc::channel(1);
+                let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+                let exit =
+                    wait_relay_exit(&mut reader, &mut writer, &mut bulk_rx, &mut shutdown_rx);
+                tokio::pin!(exit);
+
+                assert_pending_once(exit.as_mut()).await;
+
+                shutdown_tx.send_replace(false);
+                std::future::poll_fn(|cx| {
+                    assert!(
+                        std::future::Future::poll(exit.as_mut(), cx).is_pending(),
+                        "a false update must leave the relay running"
+                    );
+                    std::task::Poll::Ready(())
+                })
+                .await;
+
+                if drop_sender {
+                    drop(shutdown_tx);
+                } else {
+                    shutdown_tx.send_replace(true);
+                }
+
+                let result = exit.await;
+                assert!(result.failure.is_none());
+                assert!(!result.control_writer_usable);
+                assert!(!result.can_observe_failure_terminals);
+
+                reader_abort.abort();
+                writer_abort.abort();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn input_stall_private_delivery_resumes_a_suspended_countdown() {
+        let shared = Arc::new(ConsoleSharedState::with_capacity(4096));
+        shared.rx_ring.push(Bytes::from(vec![0; 4096])).unwrap();
+        let (tx, rx) = ControlWriter::new();
+        tx.send(ControlWrite::clock_sync().unwrap()).await.unwrap();
+        let writer = ring_writer_task(Arc::clone(&shared), rx, Arc::default());
+        tokio::pin!(writer);
+        assert_pending_once(writer.as_mut()).await;
+
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let _gate = shared.workload_control.gate();
+        assert_pending_once(writer.as_mut()).await;
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(!input_is_stalled(&shared, None));
+
+        let message = Message::with_payload(
+            MessageType::WorkloadFreeze,
+            0,
+            &microsandbox_protocol::core::WorkloadFreeze {
+                external_mount_tags: Vec::new(),
+                attempt_id: "paused".into(),
+                host_input: Default::default(),
+            },
+        )
+        .unwrap();
+        let request = shared.workload_control.request(message, "paused");
+        tokio::pin!(request);
+        assert_pending_once(request.as_mut()).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(shared.rx_ring.snapshot().full_events > 0);
+
+        // Private lifecycle delivery is allowed through the gate, so its blocked
+        // push resumes the remaining forty seconds instead of staying suspended.
+        tokio::time::advance(Duration::from_secs(39)).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(!input_is_stalled(&shared, None));
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_pending_once(writer.as_mut()).await;
+        assert!(input_is_stalled(&shared, None));
+
+        shared.close();
+        assert!(writer.await.is_err());
+        assert!(request.await.is_err());
+        assert!(!input_is_stalled(&shared, None));
+    }
+
+    fn packet(name: &str, id: u32, flags: u8) -> Vec<u8> {
+        let envelope = Envelope::new(1, name, &serde_json::json!({"value": "test-only"})).unwrap();
+        let mut bytes = Vec::new();
+        codec::encode_raw_to_buf(&envelope.frame(id, flags).unwrap(), &mut bytes).unwrap();
+        bytes
+    }
+
+    async fn write_fragmented(client: &mut DuplexStream, bytes: &[u8]) {
+        for chunk in bytes.chunks(3) {
+            client.write_all(chunk).await.unwrap();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn namespace_client_reader_task(
+        slot: u32,
+        reader: DuplexStream,
+        agent_tx: ControlWriter,
+        clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+        used_slots: Arc<Mutex<HashSet<u32>>>,
+        drain_tx: mpsc::Sender<()>,
+        session_registry: Arc<SessionRegistry>,
+        next_session_id: Arc<AtomicU64>,
+        start: u32,
+        end: u32,
+    ) {
+        let (merge_tx, _merge_rx) = mpsc::channel(1);
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (_disconnect_tx, disconnect_rx) = watch::channel(false);
+        #[cfg(unix)]
+        let (local_write_tx, _local_write_rx) = mpsc::unbounded_channel();
+        super::client_reader_task(
+            slot,
+            reader,
+            agent_tx,
+            clients,
+            used_slots,
+            drain_tx,
+            session_registry,
+            next_session_id,
+            None,
+            None,
+            merge_tx,
+            Arc::new(Mutex::new(HashMap::new())),
+            start,
+            end,
+            None,
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
+            write_tx,
+            Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+            disconnect_rx,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(unix)]
+            local_write_tx,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn control_names_never_trigger_shutdown_or_new_sessions() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for name in [
+                "control.capabilities",
+                "control.memory.state",
+                "control.memory.target",
+                "control.cpu.state",
+                "control.cpu.target",
+                "control.secrets.update",
+                "control.future",
+            ] {
+                for flags in [0, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL] {
+                    let (mut client, reader) = tokio::io::duplex(8192);
+                    let (agent_tx, mut agent_rx) = ControlWriter::new();
+                    let (drain_tx, mut drain_rx) = mpsc::channel(1);
+                    let (write_tx, _write_rx) = mpsc::unbounded_channel();
+                    let clients = Arc::new(Mutex::new(HashMap::from([(
+                        0,
+                        ClientState {
+                            exec_control: None,
+                            execution_tracker: Arc::new(ExecutionTracker::default()),
+                            incarnation: None,
+                            active_sessions: HashSet::from([11]),
+                            active_bulk: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                            completed_bulk_ids: None,
+                            write_tx,
+                            write_budget: Arc::new(Semaphore::new(
+                                CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY,
+                            )),
+                            disconnect_tx: watch::channel(false).0,
+                            #[cfg(unix)]
+                            local_outbound: None,
+                        },
+                    )])));
+                    let slots = Arc::new(Mutex::new(HashSet::from([0, 1])));
+                    let registry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+                    let sequence = Arc::new(AtomicU64::new(7));
+                    let task = tokio::spawn(namespace_client_reader_task(
+                        0,
+                        reader,
+                        agent_tx,
+                        clients.clone(),
+                        slots.clone(),
+                        drain_tx,
+                        registry.clone(),
+                        sequence.clone(),
+                        10,
+                        20,
+                    ));
+                    let id = if flags == FLAG_SHUTDOWN { 0 } else { 10 };
+                    write_fragmented(&mut client, &packet(name, id, flags)).await;
+                    task.await.unwrap();
+                    assert!(
+                        drain_rx.try_recv().is_err(),
+                        "{name} triggered host shutdown"
+                    );
+                    assert!(registry.lock().unwrap().is_empty());
+                    assert_eq!(sequence.load(Ordering::SeqCst), 7);
+                    assert!(clients.lock().await.is_empty());
+                    assert_eq!(*slots.lock().await, HashSet::from([1]));
+                    // Existing sessions still receive the established disconnect
+                    // cleanup. No caller-supplied control bytes enter this queue.
+                    let kill = decode_frame(&agent_rx.recv().await.unwrap().data).unwrap();
+                    assert_eq!(kill.t, MessageType::ExecSignal);
+                    assert_eq!(kill.id, 11);
+                    let disconnected = decode_frame(&agent_rx.recv().await.unwrap().data).unwrap();
+                    assert_eq!(disconnected.t, MessageType::RelayClientDisconnected);
+                    assert!(agent_rx.recv().await.is_none());
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn forwards_future_agent_bytes_and_reserved_shutdown_unchanged() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (mut client, reader) = tokio::io::duplex(8192);
+            let (agent_tx, mut agent_rx) = ControlWriter::new();
+            let (drain_tx, mut drain_rx) = mpsc::channel(1);
+            let task = tokio::spawn(namespace_client_reader_task(
+                0,
+                reader,
+                agent_tx,
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(HashSet::from([0]))),
+                drain_tx,
+                Arc::new(std::sync::Mutex::new(HashMap::new())),
+                Arc::new(AtomicU64::new(0)),
+                10,
+                20,
+            ));
+            let mut future = packet("core.future", 10, 0);
+            // Keep a future field in the exact frame to catch decode/re-encode.
+            future[9] += 1;
+            future.extend_from_slice(b"\x61x\x01");
+            let len = (future.len() - 4) as u32;
+            future[..4].copy_from_slice(&len.to_be_bytes());
+            write_fragmented(&mut client, &future).await;
+            assert_eq!(agent_rx.recv().await.unwrap().data.as_ref(), future);
+            let shutdown = Message::with_payload(MessageType::Shutdown, 0, &()).unwrap();
+            let mut bytes = Vec::new();
+            codec::encode_to_buf(&shutdown, &mut bytes).unwrap();
+            write_fragmented(&mut client, &bytes).await;
+            assert_eq!(agent_rx.recv().await.unwrap().data.as_ref(), bytes);
+            assert_eq!(drain_rx.recv().await, Some(()));
+            drop(client);
+            task.await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 }

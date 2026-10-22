@@ -15,6 +15,31 @@ use super::resolve_host_paths;
 // Functions: Fixtures
 //--------------------------------------------------------------------------------------------------
 
+async fn write_restore_archive(path: &Path) {
+    let wire = microsandbox_types::snapshot::cloud_manifest::Manifest::from_bytes(
+        br#"{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"docker.io/library/python:3.12","manifest_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"source_sandbox":"source","state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"upper.ext4","size_bytes":512,"integrity":null}},"labels":{},"extensions":{},"requires":[]}"#,
+    ).unwrap();
+    let manifest = microsandbox_types::snapshot::legacy::project_cloud_descriptor(
+        &wire,
+        &wire.digest().unwrap(),
+    )
+    .unwrap();
+    let source = path.with_extension("raw");
+    std::fs::write(&source, [42; 512]).unwrap();
+    crate::backend::local::snapshot::archive::save_direct_file_snapshot(
+        &manifest,
+        &Default::default(),
+        "saved",
+        &[source],
+        None,
+        path,
+        true,
+        true,
+    )
+    .await
+    .unwrap();
+}
+
 fn bind(host: PathBuf, guest: &str) -> VolumeMount {
     VolumeMount::Bind {
         host,
@@ -258,6 +283,8 @@ fn persisted_sources_survive_a_different_restart_directory() {
         .unwrap()
         .block_on(async {
             use crate::{backend::SnapshotBackend, snapshot::SnapshotReference};
+            write_restore_archive(&first.join("saved.tar")).await;
+            write_restore_archive(&first.join("base.tar")).await;
             let backend = std::sync::Arc::new(
                 crate::backend::LocalBackend::builder()
                     .home(base.join("restore-home"))
@@ -302,7 +329,7 @@ fn persisted_sources_survive_a_different_restart_directory() {
 
             // Reusing a built config must not skip admission for replacement inputs.
             // Exercise the real builder preparation, including bare-archive selection.
-            std::fs::write(second.join("replacement.tar"), b"replacement archive").unwrap();
+            write_restore_archive(&second.join("replacement.tar")).await;
             let selected_backend: std::sync::Arc<dyn crate::backend::Backend> = backend.clone();
             crate::backend::with_backend(selected_backend, async {
                 std::env::set_current_dir(&first).unwrap();

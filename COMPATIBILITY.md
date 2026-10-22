@@ -87,6 +87,10 @@ Sources and checks:
 
 Required review should include golden encoded payload bytes when serialization changes. Schema snapshots protect the protocol inventory, but they do not freeze every payload's encoded representation.
 
+### Execution output backpressure
+
+Execution limits are fixed at sandbox creation and advertised in `Ready.exec_limits`: 128 executions, 64 KiB stdin allowance, 1 MiB combined stdout/stderr allowance, and 16 KiB stdin and output chunks. The values are built-in defaults, not user configuration; clients obey the advertised values, so the defaults can change between releases without a lockstep upgrade. The SDK has no stdin staging queue. Generation-10 cumulative `.stdin.ack` and `.output.ack` messages replenish consumed allowance. Released older SDKs retain legacy behavior outside the buffering guarantee; new SDKs fall back to historical buffering when Ready lacks limits. Existing sandboxes require no restart. Intermediate unreleased generation-10 builds are not compatibility targets. No new snapshot-manifest extension is required. Disk-only restores use the current built-in defaults, while memory restores preserve the guest limits from captured Ready; restoring a memory snapshot that captured limits requires the launch capability `exec_limits`. Disk and catalog formats are unchanged. Older relay and cross-version launch coverage must be validated separately from same-version tests.
+
 ## 2. Bootstrap, Init, and Guest Runtime Contract
 
 The first current-protocol host frame is `core.bootstrap` with message ID zero and no flags. The guest then reports resolved init state, the relay installs identity mappings, the host acknowledges init, and only then may the guest become ready.

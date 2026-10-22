@@ -10,6 +10,7 @@ use super::{
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
 use crate::backend::{BackendKind, BackendSelectionSource};
+use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfigPatch};
@@ -247,6 +248,15 @@ impl BackendConfig {
             SandboxConfigPatch::from_defaults(&self.defaults),
             SandboxConfigPatch::from_managed(&self.managed),
         )
+    }
+
+    /// Managed overrides must be enforceable on the captured guest; the managed
+    /// patch is private to this type, so the check lives behind this accessor.
+    pub(crate) fn validate_managed_against_snapshot(
+        &self,
+        restore: &RestoreResources,
+    ) -> MicrosandboxResult<()> {
+        restore.validate_settings(&SandboxConfigPatch::from_managed(&self.managed))
     }
 
     /// Supply registry settings and auth policy for the requested host.

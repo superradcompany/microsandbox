@@ -31,17 +31,21 @@ use std::sync::{Arc, atomic::AtomicU32};
 #[cfg(feature = "stream")]
 use std::time::Duration;
 
+#[cfg(feature = "stream")]
+use microsandbox_protocol::codec::MAX_FRAME_SIZE;
 use microsandbox_protocol::message::FLAG_BULK;
 #[cfg(feature = "stream")]
 use microsandbox_protocol::message::FLAG_TERMINAL;
 use microsandbox_protocol::{
-    bulk::{BULK_PROTOCOL_VERSION, BulkCancel, BulkRecord, MAX_BULK_RECORD_PAYLOAD},
+    bulk::{
+        BULK_PROTOCOL_VERSION, BulkCancel, BulkCredit, BulkFlow, BulkKind, BulkRecord,
+        MAX_BULK_RECORD_PAYLOAD,
+    },
     codec::{self, RawFrame},
     core::Ready,
-    message::{Message, MessageType, PROTOCOL_VERSION},
+    exec::MAX_EXEC_CONTROL_BYTES,
+    message::{FRAME_HEADER_SIZE, Message, MessageType, PROTOCOL_VERSION},
 };
-#[cfg(feature = "stream")]
-use microsandbox_protocol::{codec::MAX_FRAME_SIZE, message::FRAME_HEADER_SIZE};
 use serde::Serialize;
 #[cfg(feature = "stream")]
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -124,6 +128,8 @@ pub struct AgentClient {
     exec_controller: Option<crate::ExecController>,
     /// Channel to the transport writer task.
     writer: mpsc::Sender<WriterCommand>,
+    /// Channel to the control writer task.
+    controls: mpsc::Sender<WriterCommand>,
     /// Next correlation ID to allocate (starts at `id_min`).
     next_id: AtomicU32,
     /// Lower bound (inclusive) of the assigned ID range.
@@ -423,6 +429,13 @@ impl AgentClient {
         finish_connection(reader, writer, handshake, local).await
     }
 
+    /// Abort a corrupt connection and wake all pending operations, including shared owners.
+    pub async fn abort(&self) {
+        self.reader_handle.abort();
+        self.writer_handle.abort();
+        self.pending.lock().await.clear();
+    }
+
     /// Close the connection. Drops the writer and aborts the reader task;
     /// any in-flight requests resolve with [`AgentClientError::Closed`].
     pub async fn close(self) {
@@ -646,6 +659,24 @@ impl AgentClient {
         self.write_frame_owned(id, flags, body).await
     }
 
+    /// Send a typed message, committing caller state when the writer accepts it.
+    ///
+    /// `commit` runs synchronously immediately before enqueueing the frame. If this
+    /// future is cancelled beforehand, the callback is dropped without being called.
+    /// After committing, cancellation does not retract the queued frame.
+    pub async fn send_and_commit<T: Serialize>(
+        &self,
+        id: u32,
+        t: MessageType,
+        payload: &T,
+        commit: impl FnOnce(),
+    ) -> AgentClientResult<()> {
+        self.ensure_version_compat(t)?;
+        let body = encode_message_body(self.protocol.version(), t, payload)?;
+        self.write_frame_and_commit(id, t.flags(), body, commit)
+            .await
+    }
+
     /// Sends one generation-8 raw bulk record on an existing correlation.
     pub async fn send_bulk(&self, record: BulkRecord) -> AgentClientResult<()> {
         self.ensure_bulk_supported()?;
@@ -741,14 +772,42 @@ impl AgentClient {
 
     /// Write a single framed message to the socket, taking ownership of the body.
     async fn write_frame_owned(&self, id: u32, flags: u8, body: Vec<u8>) -> AgentClientResult<()> {
+        self.write_frame_and_commit(id, flags, body, || {}).await
+    }
+
+    async fn write_frame_and_commit(
+        &self,
+        id: u32,
+        flags: u8,
+        body: Vec<u8>,
+        commit: impl FnOnce(),
+    ) -> AgentClientResult<()> {
+        let raw = RawFrame { id, flags, body };
+        if (4 + FRAME_HEADER_SIZE + raw.body.len()) > MAX_EXEC_CONTROL_BYTES
+            && codec::peek_message_type(&raw.body).is_some_and(MessageType::is_exec_control)
+        {
+            return Err(AgentClientError::InvalidPacket(
+                "execution control message exceeds 4 KiB".into(),
+            ));
+        }
+
+        let progress = is_progress_control(&raw);
         let (ack, written) = oneshot::channel();
-        self.writer
-            .send(WriterCommand {
-                frame: WriterFrame::Control(RawFrame { id, flags, body }),
-                ack,
-            })
+        let sender = if progress {
+            &self.controls
+        } else {
+            &self.writer
+        };
+        let slot = sender
+            .reserve()
             .await
             .map_err(|_| AgentClientError::Closed)?;
+        commit();
+
+        slot.send(WriterCommand {
+            frame: WriterFrame::Control(raw),
+            ack,
+        });
         written.await.map_err(|_| AgentClientError::Closed)?
     }
 }
@@ -834,6 +893,7 @@ where
 
     let pending: Arc<Mutex<HashMap<u32, CorrelationRoute>>> = Arc::new(Mutex::new(HashMap::new()));
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+    let (control_tx, control_rx) = mpsc::channel(16);
 
     #[cfg(all(feature = "uds", unix))]
     let (local_release_tx, local_release_rx) = mpsc::unbounded_channel();
@@ -860,17 +920,19 @@ where
     let writer_handle = tokio::spawn(stream_writer_loop(
         writer,
         writer_rx,
+        control_rx,
         local_release_rx,
         local_outbound.clone(),
         connection_shutdown_tx,
         connection_shutdown_rx,
     ));
     #[cfg(not(all(feature = "uds", unix)))]
-    let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx));
+    let writer_handle = tokio::spawn(stream_writer_loop(writer, writer_rx, control_rx));
 
     Ok(AgentClient {
         exec_controller: None,
         writer: writer_tx,
+        controls: control_tx,
         next_id: AtomicU32::new(first_request_id(handshake.id_min)),
         id_min: handshake.id_min,
         id_max: handshake.id_max,
@@ -1078,6 +1140,7 @@ where
 async fn stream_writer_loop<W>(
     mut writer: W,
     mut rx: mpsc::Receiver<WriterCommand>,
+    mut control_rx: mpsc::Receiver<WriterCommand>,
     mut local_release_rx: mpsc::UnboundedReceiver<LocalBulkRelease>,
     local_outbound: Option<SharedArenaProducer>,
     connection_shutdown_tx: watch::Sender<bool>,
@@ -1109,7 +1172,7 @@ async fn stream_writer_loop<W>(
                     break;
                 }
             }
-            command = rx.recv() => {
+            command = next_writer_command(&mut rx, &mut control_rx) => {
                 let Some(mut command) = command else { break; };
                 let result = write_writer_command(&mut writer, &mut command).await;
                 if let Err(error) = result {
@@ -1129,11 +1192,14 @@ async fn stream_writer_loop<W>(
 }
 
 #[cfg(all(feature = "stream", not(all(feature = "uds", unix))))]
-async fn stream_writer_loop<W>(mut writer: W, mut rx: mpsc::Receiver<WriterCommand>)
-where
+async fn stream_writer_loop<W>(
+    mut writer: W,
+    mut rx: mpsc::Receiver<WriterCommand>,
+    mut control_rx: mpsc::Receiver<WriterCommand>,
+) where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    while let Some(mut command) = rx.recv().await {
+    while let Some(mut command) = next_writer_command(&mut rx, &mut control_rx).await {
         let result = write_writer_command(&mut writer, &mut command).await;
         if let Err(error) = result {
             tracing::debug!("agent client: stream writer error: {error}");
@@ -1141,6 +1207,19 @@ where
             break;
         }
         let _ = command.ack.send(Ok(()));
+    }
+}
+
+// Randomized selection gives both lanes opportunities between writes. Data producers reserve
+// downstream capacity before entering this queue, so a blocked input window cannot hold it up.
+#[cfg(feature = "stream")]
+async fn next_writer_command(
+    data: &mut mpsc::Receiver<WriterCommand>,
+    controls: &mut mpsc::Receiver<WriterCommand>,
+) -> Option<WriterCommand> {
+    tokio::select! {
+        command = data.recv() => match command { Some(command) => Some(command), None => controls.recv().await },
+        command = controls.recv() => match command { Some(command) => Some(command), None => data.recv().await },
     }
 }
 
@@ -1384,6 +1463,33 @@ fn encode_message_body<T: Serialize>(
     let mut body = Vec::new();
     ciborium::into_writer(&msg, &mut body).map_err(microsandbox_protocol::ProtocolError::from)?;
     Ok(body)
+}
+
+fn is_progress_control(frame: &RawFrame) -> bool {
+    if frame.flags != 0 {
+        return false;
+    }
+    // Local arena upgrade/release records are already bounded by arena ownership. References
+    // remain ordinary traffic, ordered with inline bulk records.
+    if frame.id == 0 && frame.body.starts_with(b"MSBS") {
+        return matches!(frame.body.get(5), Some(1 | 3));
+    }
+    if 4 + FRAME_HEADER_SIZE + frame.body.len() > MAX_EXEC_CONTROL_BYTES {
+        return false;
+    }
+    let Ok(message) = ciborium::from_reader::<Message, _>(&frame.body[..]) else {
+        return false;
+    };
+
+    match message.t {
+        MessageType::ExecOutputAck | MessageType::ExecSignal | MessageType::ExecResize => true,
+        // Only TCP return credit may overtake same-correlation input. Filesystem credit
+        // must stay ordered with cancellation and other filesystem traffic.
+        MessageType::BulkCredit => message.payload::<BulkCredit>().is_ok_and(|credit| {
+            credit.kind == BulkKind::Tcp && credit.flow == BulkFlow::GuestToHost
+        }),
+        _ => false,
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
