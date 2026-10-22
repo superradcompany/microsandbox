@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::snapshot::{Manifest, Snapshot, SnapshotId, SnapshotState};
+use crate::snapshot::{Checkpoint as Snapshot, Manifest, SnapshotId, SnapshotState};
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 
 //--------------------------------------------------------------------------------------------------
@@ -65,7 +65,7 @@ pub(super) async fn copy_snapshot_archive(
 #[cfg(test)]
 mod tests {
     use crate::backend::{LocalBackend, with_backend};
-    use crate::{SaveOpts, Snapshot};
+    use crate::{Checkpoint as Snapshot, SaveOpts};
 
     #[tokio::test]
     async fn previous_descriptor_exports_and_copies_without_changing_the_source() {

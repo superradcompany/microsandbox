@@ -539,6 +539,134 @@ async fn as_owned_file_snapshot(local: &LocalBackend, snapshot: Snapshot) -> Sna
 }
 
 #[tokio::test]
+async fn full_verification_reports_hashless_disk_without_claiming_complete_coverage() {
+    use crate::snapshot::SnapshotVerifyCoverage;
+
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let snapshot = fixture(&local, &temp.path().join("full"), 1, None, true).await;
+    let report = super::super::super::verify::verify_snapshot(&snapshot, DEFAULT_FS_STATE_LIMIT)
+        .await
+        .unwrap();
+    assert_eq!(report.coverage, SnapshotVerifyCoverage::Complete);
+    assert!(report.checkpoint.is_some());
+
+    let root = snapshot.path().join(CHECKPOINT_DIRECTORY);
+    let closure = CheckpointClosure::open_portable(&root, None, DEFAULT_FS_STATE_LIMIT).unwrap();
+    let objects = LocalObjectStore::open(&root).unwrap();
+    let mut disk = closure.disks()[0].clone();
+    disk.layers[0].integrity_root = None;
+    let expected_path = closure.disk_layer_path(&disk.layers[0]);
+    let mut checkpoint = closure.checkpoint().clone();
+    checkpoint.disks = vec![
+        objects
+            .put_bytes(&disk.to_canonical_bytes().unwrap())
+            .unwrap(),
+    ];
+    let bytes = checkpoint.to_canonical_bytes().unwrap();
+    let mut manifest = snapshot.manifest().clone();
+    let SnapshotState::Checkpoint(state) = &mut manifest.state else {
+        unreachable!()
+    };
+    state.checkpoint_root = ObjectId::from_bytes(&bytes).unwrap().to_string();
+    std::fs::write(root.join("checkpoint.json"), bytes).unwrap();
+    std::fs::write(
+        snapshot.path().join(DESCRIPTOR_FILENAME),
+        manifest.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    let snapshot = store::open_snapshot(&local, snapshot.path().to_str().unwrap())
+        .await
+        .unwrap();
+
+    let report = super::super::super::verify::verify_snapshot(&snapshot, DEFAULT_FS_STATE_LIMIT)
+        .await
+        .unwrap();
+    assert!(report.checkpoint.is_some());
+    assert_eq!(
+        report.coverage,
+        SnapshotVerifyCoverage::Incomplete {
+            unrecorded: vec![expected_path]
+        }
+    );
+    let MemoryExtentContent::Object(content) = &closure.memory().extents[0].content else {
+        unreachable!()
+    };
+    std::fs::write(objects.object_path(&content.object), vec![0; 8192]).unwrap();
+    assert!(
+        super::super::super::verify::verify_snapshot(&snapshot, DEFAULT_FS_STATE_LIMIT)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn disk_verification_reports_hashless_owned_disks_even_with_verified_root() {
+    use crate::snapshot::{SnapshotVerifyCoverage, UpperVerifyStatus};
+    use microsandbox_image::snapshot::{OwnedVolumeData, UpperIntegrity};
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let snapshot = fixture(&local, &temp.path().join("owned"), 2, None, false).await;
+    let snapshot = with_owned_volumes(&local, snapshot, 2).await;
+    let snapshot = as_owned_file_snapshot(&local, snapshot).await;
+    let mut manifest = snapshot.manifest().clone();
+    let SnapshotState::File(state) = &mut manifest.state else {
+        unreachable!()
+    };
+    let root_path = snapshot.path().join(state.layer_path(&state.layers[0]));
+    state.layers[0].payload.integrity = Some(UpperIntegrity::Sha256 {
+        digest: format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(std::fs::read(root_path).unwrap()))
+        ),
+    });
+    let mut volumes = manifest.owned_volumes().unwrap();
+    let mut unrecorded = Vec::new();
+    for volume in &mut volumes {
+        if let OwnedVolumeData::Disk { generation } = &mut volume.data {
+            for layer in &mut generation.layers {
+                layer.integrity_root = None;
+                unrecorded.push(
+                    snapshot
+                        .path()
+                        .join("layers")
+                        .join(format!("{}.{}", layer.layer_id, layer.format)),
+                );
+            }
+        }
+    }
+    assert!(!unrecorded.is_empty());
+    unrecorded.sort();
+    manifest.set_owned_volumes(volumes).unwrap();
+    std::fs::write(
+        snapshot.path().join(DESCRIPTOR_FILENAME),
+        manifest.to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    let snapshot = store::open_snapshot(&local, snapshot.path().to_str().unwrap())
+        .await
+        .unwrap();
+    let report = super::super::super::verify::verify_snapshot(&snapshot, DEFAULT_FS_STATE_LIMIT)
+        .await
+        .unwrap();
+    assert!(matches!(report.upper, UpperVerifyStatus::Verified { .. }));
+    assert_eq!(
+        report.coverage,
+        SnapshotVerifyCoverage::Incomplete { unrecorded }
+    );
+}
+
+#[tokio::test]
 async fn owned_qcow2_file_delta_and_direct_archive_preserve_physical_identity() {
     let temp = tempfile::tempdir().unwrap();
     let local = LocalBackend::builder()
@@ -1586,7 +1714,10 @@ async fn unordered_batch_resolves_disk_and_ram_from_all_supplied_archives() {
         for (offset, snapshot) in loaded.iter().enumerate() {
             assert_ram(snapshot.path(), 6 - offset as u64);
         }
-        assert_eq!(loaded[0].head_update().unwrap().head, loaded[0].snapshot_id);
+        assert_eq!(
+            loaded[0].head_update().unwrap().head.as_deref(),
+            Some(loaded[0].snapshot_id.as_str())
+        );
         // Neither source files, archive bytes, nor other installed generations are needed by
         // the final snapshot after the batch has reconstructed destination-owned closures.
         for generation in 1..=6 {
@@ -1734,7 +1865,7 @@ async fn missing_or_corrupt_borrowed_ram_never_publishes_target() {
     let head = super::super::super::group::select(&local.snapshots_dir(), "received")
         .await
         .unwrap();
-    assert_eq!(head.head, base.id().as_str());
+    assert_eq!(head.head.as_deref(), Some(base.id().as_str()));
 }
 
 #[tokio::test]
@@ -1825,6 +1956,8 @@ async fn memory_dependency_validation_rejects_incomplete_and_misbound_inventorie
         target.path().to_str().unwrap(),
         &archive,
         SaveOpts {
+            // These fixtures intentionally begin in the released dialect before alias mutation.
+            compatibility: crate::ArchiveCompatibility::V0_7_8,
             since: Some(base.path().to_string_lossy().into_owned()),
             plain_tar: true,
             ..Default::default()
@@ -1839,6 +1972,49 @@ async fn memory_dependency_validation_rejects_incomplete_and_misbound_inventorie
         serde_json::from_value::<ArchiveInventory>(serde_json::to_value(&inventory).unwrap())
             .unwrap()
     };
+    // Both wire dialects carry the same dependency contract. Neither alias may bypass
+    // completeness checks or claim a requirement without the exact matching payload key.
+    let capability = extensions::Extension::Dependencies;
+    let mut canonical = clone();
+    let payload = canonical.extensions.remove(REQUIREMENT).unwrap();
+    canonical
+        .extensions
+        .insert(capability.canonical().into(), payload.clone());
+    canonical.requires.retain(|key| key != REQUIREMENT);
+    canonical.requires.push(capability.canonical().into());
+    canonical.requires.sort();
+    assert!(validate(&canonical).unwrap().is_some());
+    let mut equal_aliases = canonical.clone();
+    equal_aliases
+        .extensions
+        .insert(REQUIREMENT.into(), payload.clone());
+    equal_aliases.requires.push(REQUIREMENT.into());
+    equal_aliases.requires.sort();
+    assert!(validate(&equal_aliases).unwrap().is_some());
+    let mut conflicting_aliases = equal_aliases.clone();
+    conflicting_aliases
+        .extensions
+        .insert(REQUIREMENT.into(), serde_json::json!({}));
+    assert!(
+        validate(&conflicting_aliases)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting")
+    );
+    let mut misbound = canonical.clone();
+    misbound
+        .requires
+        .retain(|key| key != capability.canonical());
+    misbound.requires.push(REQUIREMENT.into());
+    assert!(
+        validate(&misbound)
+            .unwrap_err()
+            .to_string()
+            .contains("no matching payload")
+    );
+    let mut incomplete = canonical;
+    incomplete.completeness = "boot-complete".into();
+    assert!(validate(&incomplete).is_err());
     let mut missing_requirement = clone();
     missing_requirement
         .requires
@@ -1993,4 +2169,136 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
         .checkpoint_restore
         .is_some()
     );
+}
+
+#[tokio::test]
+async fn archive_extension_aliases_import_payloads_without_rewriting_descriptors() {
+    use std::io::Read;
+
+    let temp = tempfile::tempdir().unwrap();
+    let local = LocalBackend::builder()
+        .home(temp.path().join("home"))
+        .build()
+        .await
+        .unwrap();
+    let base = fixture(&local, &temp.path().join("base"), 1, None, false).await;
+    let target = fixture(&local, &temp.path().join("target"), 4, Some(&base), false).await;
+    let descriptor = std::fs::read(target.path().join(DESCRIPTOR_FILENAME)).unwrap();
+    let archive = temp.path().join("original.tar");
+    save_snapshot(
+        &local,
+        target.path().to_str().unwrap(),
+        &archive,
+        SaveOpts {
+            // These fixtures intentionally begin in the released dialect before alias mutation.
+            compatibility: crate::ArchiveCompatibility::V0_7_8,
+            since: Some(base.path().to_string_lossy().into_owned()),
+            plain_tar: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Change only archive metadata, keeping payload and transport-integrity bytes intact.
+    // Exercising the real tar reader catches admission checks that a resolver unit test misses.
+    for dialect in ["historical", "canonical", "both", "conflicting", "misbound"] {
+        let rewritten = temp.path().join(format!("{dialect}.tar"));
+        let mut input = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+        let mut output = tar::Builder::new(std::fs::File::create(&rewritten).unwrap());
+        for entry in input.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            let mut header = entry.header().clone();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if path == Path::new("archive.json") {
+                let mut inventory: ArchiveInventory = serde_json::from_slice(&bytes).unwrap();
+                let dependency = extensions::Extension::Dependencies;
+                let payload = inventory
+                    .extensions
+                    .remove(dependency.historical())
+                    .unwrap();
+                inventory.requires.retain(|key| !dependency.recognizes(key));
+                let key = if dialect == "historical" {
+                    dependency.historical()
+                } else {
+                    dependency.canonical()
+                };
+                inventory.extensions.insert(key.into(), payload.clone());
+                inventory.requires.push(key.into());
+                if matches!(dialect, "both" | "conflicting") {
+                    inventory.extensions.insert(
+                        dependency.historical().into(),
+                        if dialect == "both" {
+                            payload
+                        } else {
+                            serde_json::json!({})
+                        },
+                    );
+                    inventory.requires.push(dependency.historical().into());
+                }
+                if dialect == "misbound" {
+                    inventory.requires.retain(|key| !dependency.recognizes(key));
+                    inventory.requires.push(dependency.historical().into());
+                }
+                let names = extensions::Extension::MemberNames;
+                let name_key = if dialect == "historical" {
+                    names.historical()
+                } else {
+                    names.canonical()
+                };
+                inventory.extensions.insert(
+                    name_key.into(),
+                    serde_json::json!({target.id().to_string(): "imported-checkpoint"}),
+                );
+                inventory.requires.push(name_key.into());
+                inventory.requires.sort();
+                bytes = serde_json::to_vec(&inventory).unwrap();
+                header.set_size(bytes.len() as u64);
+                header.set_cksum();
+            }
+            output
+                .append_data(&mut header, &path, bytes.as_slice())
+                .unwrap();
+        }
+        output.finish().unwrap();
+        drop(output);
+        let result = load_snapshot_with_options(
+            &local,
+            &rewritten,
+            LoadOpts {
+                base: Some(base.path().to_string_lossy().into_owned()),
+                group: Some(dialect.into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        if matches!(dialect, "conflicting" | "misbound") {
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("malformed aliases must refuse import"),
+            };
+            let expected = if dialect == "conflicting" {
+                "conflicting"
+            } else {
+                "no matching payload"
+            };
+            assert!(error.to_string().contains(expected), "{error}");
+            assert!(!local.snapshots_dir().join(dialect).exists());
+        } else {
+            let loaded = result.unwrap();
+            assert_ram(loaded.path(), 4);
+            assert_eq!(
+                std::fs::read(loaded.path().join(DESCRIPTOR_FILENAME)).unwrap(),
+                descriptor
+            );
+            assert_eq!(
+                super::super::super::group::member_name(loaded.path())
+                    .unwrap()
+                    .as_deref(),
+                Some("imported-checkpoint")
+            );
+        }
+    }
 }

@@ -309,3 +309,31 @@ func TestForkVolumesPreserveSymlinkParentPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreGuestClockPresenceAndValidation(t *testing.T) {
+	for _, policy := range []GuestClockPolicy{"", GuestClockSync, GuestClockOff} {
+		var config RestoreConfig
+		WithRestoreGuestClock(policy)(&config)
+		if err := validateRestoreConfig(config); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["guest_clock"]
+		if policy == "" && present {
+			t.Fatal("omission became an override")
+		}
+		if policy != "" && (!present || value != string(policy)) {
+			t.Fatalf("lost policy: %s", raw)
+		}
+	}
+	if err := validateRestoreConfig(RestoreConfig{GuestClock: "invalid"}); err == nil {
+		t.Fatal("accepted invalid policy")
+	}
+}

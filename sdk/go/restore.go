@@ -9,6 +9,14 @@ import (
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
 
+// GuestClockPolicy controls wall-clock synchronization after boot or full resume.
+type GuestClockPolicy string
+
+const (
+	GuestClockSync GuestClockPolicy = "sync"
+	GuestClockOff  GuestClockPolicy = "off"
+)
+
 // RestoreOption configures restoration, not image or startup-command selection.
 type RestoreOption func(*RestoreConfig)
 
@@ -32,7 +40,9 @@ type RestoreConfig struct {
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
 	MaxDuration *time.Duration
 	IdleTimeout *time.Duration
-	CowMemory   bool
+	// Empty preserves the recorded/default policy; explicit selection requires native support.
+	GuestClock GuestClockPolicy
+	CowMemory  bool
 	// Forked enables copy-on-write restore memory.
 	//
 	// Deprecated: use CowMemory instead.
@@ -142,7 +152,15 @@ func WithRestoreIdleTimeout(duration time.Duration) RestoreOption {
 	return func(o *RestoreConfig) { o.IdleTimeout = &duration }
 }
 
+// WithRestoreGuestClock selects an explicit wall-clock policy, including overriding a saved off.
+func WithRestoreGuestClock(policy GuestClockPolicy) RestoreOption {
+	return func(o *RestoreConfig) { o.GuestClock = policy }
+}
+
 func validateRestoreConfig(config RestoreConfig) error {
+	if config.GuestClock != "" && config.GuestClock != GuestClockSync && config.GuestClock != GuestClockOff {
+		return fmt.Errorf("microsandbox: guest clock must be sync or off")
+	}
 	if config.MaxConnections != nil && config.MaxTCPConnections != nil {
 		return fmt.Errorf("microsandbox: restore MaxConnections and MaxTCPConnections cannot both be specified")
 	}
@@ -213,6 +231,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxConnections: config.MaxConnections, MaxTCPConnections: config.MaxTCPConnections,
 		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
 		SecurityProfile: string(config.SecurityProfile),
+		GuestClock:      string(config.GuestClock),
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
 		// Keep the native wire spelling stable across SDK/runtime versions.
 		Forked: config.CowMemory || config.Forked, DiskOnly: config.SnapshotDiskOnly,

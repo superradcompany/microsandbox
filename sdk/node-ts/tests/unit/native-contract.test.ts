@@ -152,3 +152,8 @@ describe("native storage contract", () => {
     expect(typeof napi.storagePrune).toBe("function");
   });
 });
+
+it("refuses a conflicting legacy group before reading archives", async () => {
+  await expect(napi.SnapshotGroup.load("selected", ["missing.msb"], { group: "other" }))
+    .rejects.toThrow("different destination group");
+});

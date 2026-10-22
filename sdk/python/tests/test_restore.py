@@ -173,3 +173,9 @@ def test_fork_public_surface_and_outcome_alias():
     for cls in (Sandbox, SandboxHandle):
         for method in ("fork", "fork_many", "branch", "branch_many"):
             assert callable(getattr(cls, method))
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+def test_restore_rejects_unknown_guest_clock(method):
+    with pytest.raises(ValueError, match="guest_clock must be sync or off"):
+        getattr(Sandbox, method)("missing", name="clock-invalid", guest_clock="unknown")

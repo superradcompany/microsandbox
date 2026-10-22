@@ -5,7 +5,7 @@ import type {
   NapiSnapshotHandle,
   NapiSnapshotInfo,
 } from "./internal/napi.js";
-import { Snapshot, type HeadUpdate, type SaveOpts, type SnapshotScope } from "./snapshot.js";
+import { Snapshot, requireArchiveCompatibility, type HeadUpdate, type SaveOpts, type SnapshotScope } from "./snapshot.js";
 
 const READ_ONLY_MSG =
   "SnapshotHandle is read-only — fetch a live handle via Snapshot.get(name) for lifecycle methods.";
@@ -141,6 +141,7 @@ export class SnapshotHandle {
    * Throws `UnsupportedError` when the backend does not expose artifact archives.
    */
   async saveTo(out: string, opts?: SaveOpts): Promise<void> {
+    requireArchiveCompatibility(opts);
     if (typeof (this.inner as NapiSnapshotHandle).saveTo !== "function") {
       throw new Error(READ_ONLY_MSG);
     }

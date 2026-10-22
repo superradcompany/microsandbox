@@ -148,9 +148,9 @@ func TestSmokeAllSandboxMetricsEmpty(t *testing.T) {
 func TestSmokeSnapshotListDirEmpty(t *testing.T) {
 	ctx := smokeSetup(t)
 	dir := t.TempDir()
-	snaps, err := Snapshot.ListDir(ctx, dir)
+	snaps, err := Checkpoint.ListDir(ctx, dir)
 	if err != nil {
-		t.Fatalf("Snapshot.ListDir: %v", err)
+		t.Fatalf("Checkpoint.ListDir: %v", err)
 	}
 	if len(snaps) != 0 {
 		t.Fatalf("empty dir should yield zero artifacts, got %d", len(snaps))
@@ -160,9 +160,9 @@ func TestSmokeSnapshotListDirEmpty(t *testing.T) {
 func TestSmokeSnapshotReindexEmpty(t *testing.T) {
 	ctx := smokeSetup(t)
 	dir := t.TempDir()
-	n, err := Snapshot.Reindex(ctx, dir)
+	n, err := Checkpoint.Reindex(ctx, dir)
 	if err != nil {
-		t.Fatalf("Snapshot.Reindex: %v", err)
+		t.Fatalf("Checkpoint.Reindex: %v", err)
 	}
 	if n != 0 {
 		t.Fatalf("empty dir should index zero artifacts, got %d", n)
@@ -178,7 +178,7 @@ func TestSmokeSnapshotLoadBogusErrors(t *testing.T) {
 	}
 	dest := filepath.Join(tmp, "imported")
 
-	_, err := Snapshot.Load(ctx, archive, dest)
+	_, err := Snapshot.Load(ctx, "invalid-import", []string{archive}, SnapshotImportOptions{Dest: dest})
 	if err == nil {
 		t.Fatal("expected load of bogus archive to fail")
 	}

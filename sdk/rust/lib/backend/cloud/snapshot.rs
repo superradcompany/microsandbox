@@ -18,8 +18,8 @@ use super::http::{cloud_io_error, decode_json, ensure_success, urlencoding};
 use crate::backend::{Backend, SnapshotBackend};
 use crate::sandbox::{FsEntryKind, SandboxConfig};
 use crate::snapshot::{
-    DESCRIPTOR_FILENAME, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle,
-    SnapshotReference, SnapshotState, SnapshotVerifyReport,
+    Checkpoint as Snapshot, DESCRIPTOR_FILENAME, Manifest, SaveOpts, SnapshotConfig,
+    SnapshotHandle, SnapshotReference, SnapshotState, SnapshotVerifyReport,
 };
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
 

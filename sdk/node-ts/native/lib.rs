@@ -40,6 +40,7 @@ mod shared_handle;
 mod snapshot;
 mod snapshot_builder;
 mod snapshot_copy_builder;
+mod snapshot_group;
 mod ssh;
 mod storage;
 mod tls_builder;

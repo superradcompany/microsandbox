@@ -13,7 +13,7 @@ use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage};
 use crate::snapshot::{
-    Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotHandle, SnapshotReference,
+    Checkpoint as Snapshot, Manifest, SaveOpts, SnapshotConfig, SnapshotHandle, SnapshotReference,
     SnapshotVerifyReport,
 };
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink, VolumeHandle};

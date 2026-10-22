@@ -1,5 +1,11 @@
 package ffi
 
+import (
+	"context"
+	"encoding/json"
+	"errors"
+)
+
 // RestoreOptions is deliberately separate from CreateOptions: no image or
 // startup command can cross the restore entry point. Optional pointers retain
 // explicit zero values so the native restore path can validate the user's intent.
@@ -13,6 +19,7 @@ type RestoreOptions struct {
 	MaxTCPConnections           *uint                `json:"max_tcp_connections,omitempty"`
 	MaxUDPConnections           *uint                `json:"max_udp_connections,omitempty"`
 	DisableNetwork              bool                 `json:"disable_network,omitempty"`
+	GuestClock                  string               `json:"guest_clock,omitempty"`
 	SecurityProfile             string               `json:"security_profile,omitempty"`
 	MaxDurationSecs             *uint64              `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs             *uint64              `json:"idle_timeout_secs,omitempty"`
@@ -31,4 +38,35 @@ type RestoreOptions struct {
 	TCPAcceptQueueSize          *uint32              `json:"tcp_accept_queue_size,omitempty"`
 	MaxInboundTCPConnections    *uint                `json:"max_inbound_tcp_connections,omitempty"`
 	Vsock                       []VsockRouteOptions  `json:"vsock,omitempty"`
+}
+
+// CheckRestoreGuestClock requires acknowledgement only for explicit selection. Older native
+// libraries must not silently ignore an option, including an explicit sync over a saved off.
+func CheckRestoreGuestClock(ctx context.Context, policy string) error {
+	if policy == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	raw, err := SnapshotObjectCall(ctx, 0, map[string]any{"op": "restore_guest_clock"})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var native *Error
+		if !errors.As(err, &native) || (native.Kind != KindUnsupportedOperation && native.Kind != KindInvalidArgument) {
+			return err
+		}
+		return &Error{Kind: KindUnsupportedOperation, Message: "guest clock selection requires an updated native SDK: " + err.Error()}
+	}
+	var policies []string
+	if err := json.Unmarshal(raw, &policies); err == nil {
+		for _, supported := range policies {
+			if supported == policy {
+				return nil
+			}
+		}
+	}
+	return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support requested guest clock policy " + policy}
 }

@@ -18,7 +18,7 @@ use super::{
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RestoreOptions {
+pub(super) struct RestoreOptions {
     snapshot: String,
     snapshot_reference_kind: Option<String>,
     cpus: Option<u8>,
@@ -31,9 +31,10 @@ struct RestoreOptions {
     #[serde(default)]
     disable_network: bool,
     security_profile: Option<String>,
+    guest_clock: Option<microsandbox::sandbox::GuestClockPolicy>,
     max_duration_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
-    creation_progress: Option<u64>,
+    pub(super) creation_progress: Option<u64>,
     #[serde(default)]
     forked: bool,
     #[serde(default)]
@@ -90,7 +91,7 @@ where
         .transpose()
 }
 
-fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiError> {
+pub(super) fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiError> {
     let reference = super::parse_snapshot_reference(
         opts.snapshot.clone(),
         opts.snapshot_reference_kind.as_deref().unwrap_or(""),
@@ -116,6 +117,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     if let Some(profile) = &opts.security_profile {
         builder = builder.security(parse_security_profile(profile)?);
+    }
+    if let Some(policy) = opts.guest_clock {
+        builder = builder.guest_clock(policy);
     }
     if let Some(seconds) = opts.max_duration_secs {
         builder = builder.max_duration(seconds);
@@ -223,6 +227,34 @@ pub unsafe extern "C" fn msb_sandbox_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restore_guest_clock_preserves_explicit_policy_and_omission() {
+        for (value, expected) in [
+            (serde_json::Value::Null, None),
+            (
+                serde_json::json!("sync"),
+                Some(microsandbox::sandbox::GuestClockPolicy::Sync),
+            ),
+            (
+                serde_json::json!("off"),
+                Some(microsandbox::sandbox::GuestClockPolicy::Off),
+            ),
+        ] {
+            let options: RestoreOptions = serde_json::from_value(
+                serde_json::json!({"snapshot":"saved", "guest_clock":value}),
+            )
+            .unwrap();
+            assert_eq!(options.guest_clock, expected);
+            assert!(builder("destination".into(), &options).is_ok());
+        }
+        assert!(
+            serde_json::from_value::<RestoreOptions>(
+                serde_json::json!({"snapshot":"saved", "guest_clock":"invalid"})
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn restore_rejects_fresh_boot_options() {
         for field in [

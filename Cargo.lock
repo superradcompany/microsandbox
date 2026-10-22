@@ -4011,6 +4011,7 @@ dependencies = [
  "microsandbox-network",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",

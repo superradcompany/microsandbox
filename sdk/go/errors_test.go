@@ -141,6 +141,29 @@ func TestSnapshotSourceRecoveryError(t *testing.T) {
 	}
 }
 
+// Missing fields from older native producers remain unknown, not a guessed head.
+func TestSnapshotRecoveryPublicationHead(t *testing.T) {
+	for _, head := range []string{`null`, `{"group":"history","previous":null,"head":"snap_1","reason":"initialized","changed":true}`} {
+		payload := `{"kind":"snapshot_source_recovery","message":"source recovery failed","recovery":{"artifact":{"kind":"installed","path":"/saved","snapshot_id":"snap_1","digest":"digest","head_update":` + head + `}}}`
+		var native ffi.Error
+		if err := json.Unmarshal([]byte(payload), &native); err != nil {
+			t.Fatal(err)
+		}
+		var recovery *SnapshotSourceRecoveryError
+		if !errors.As(wrapFFI(&native), &recovery) {
+			t.Fatal("lost typed error")
+		}
+		update := recovery.Recovery.Artifact.HeadUpdate
+		if head == "null" {
+			if update != nil {
+				t.Fatal("invented head outcome")
+			}
+		} else if update == nil || update.Group != "history" || update.Head == nil || *update.Head != "snap_1" || update.Reason != "initialized" || !update.Changed {
+			t.Fatalf("lost publication outcome: %+v", update)
+		}
+	}
+}
+
 func TestWrapFFIFfiError(t *testing.T) {
 	fe := &ffi.Error{Kind: ffi.KindSandboxNotFound, Message: "missing"}
 	err := wrapFFI(fe)
@@ -201,5 +224,67 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		if got != c.want {
 			t.Errorf("kindFromFFI(%q) = %v, want %v", c.tag, got, c.want)
 		}
+	}
+}
+
+func TestSnapshotImportPublicationOutcome(t *testing.T) {
+	for _, outcome := range []string{"not_committed", "committed", "unknown"} {
+		t.Run(outcome, func(t *testing.T) {
+			payload := fmt.Sprintf(`{"kind":"snapshot_import","message":"batch failure","import":{"operation_id":"attempt-1","archives":["/base.msb","/child.msb"],"group_path":null,"outcome":%q,"detail":"index failure"}}`, outcome)
+			var native ffi.Error
+			if err := json.Unmarshal([]byte(payload), &native); err != nil {
+				t.Fatal(err)
+			}
+			err := wrapFFI(&native)
+			var imported *SnapshotImportError
+			if !errors.As(err, &imported) || !IsKind(err, ErrSnapshotImport) {
+				t.Fatalf("lost import details: %v", err)
+			}
+			if string(imported.Details.Outcome) != outcome || imported.Details.OperationID != "attempt-1" || imported.Details.GroupPath != nil || len(imported.Details.Archives) != 2 {
+				t.Fatalf("wrong details: %+v", imported.Details)
+			}
+			native.Import.Archives[0] = "changed"
+			if imported.Details.Archives[0] != "/base.msb" {
+				t.Fatal("native payload remained aliased")
+			}
+			if imported.Error() != native.Message || imported.Details.Detail != "index failure" {
+				t.Fatal("original diagnostic lost")
+			}
+		})
+	}
+}
+
+func TestCommittedCheckpointRemovalPreservesOutcome(t *testing.T) {
+	native := &ffi.Error{
+		Kind:    ffi.KindSnapshotRemovalRecovery,
+		Message: "removal committed; cleanup failed",
+		Detail:  "catalog unavailable",
+		Removal: json.RawMessage(`{"id":"removed","head_update":{"group":"history","previous":"removed","head":"parent","reason":"parent_fallback","changed":true},"warnings":[]}`),
+	}
+	err := wrapFFI(native)
+	var recovery *SnapshotRemovalRecoveryError
+	if !errors.As(err, &recovery) {
+		t.Fatalf("lost typed recovery: %T %v", err, err)
+	}
+	if recovery.Result.ID != "removed" || recovery.Result.HeadUpdate == nil || recovery.Result.HeadUpdate.Head == nil || *recovery.Result.HeadUpdate.Head != "parent" {
+		t.Fatalf("lost committed outcome: %+v", recovery.Result)
+	}
+	if recovery.Detail != "catalog unavailable" || !IsKind(err, ErrSnapshotRemovalRecovery) || !errors.Is(err, native) {
+		t.Fatalf("lost error identity: %+v", recovery)
+	}
+}
+
+func TestCommittedGroupRemovalPreservesOutcome(t *testing.T) {
+	native := &ffi.Error{Kind: ffi.KindSnapshotGroupRemovalRecovery, Message: "group removed; cleanup failed", Detail: "catalog unavailable", Removal: json.RawMessage(`{"group":"history","removed":["parent","child"],"head_update":{"group":"history","previous":"child","head":null,"reason":"cleared","changed":true},"warnings":[]}`)}
+	err := wrapFFI(native)
+	var recovery *SnapshotGroupRemovalRecoveryError
+	if !errors.As(err, &recovery) {
+		t.Fatalf("lost typed recovery: %T %v", err, err)
+	}
+	if recovery.Result.Group != "history" || len(recovery.Result.Removed) != 2 || recovery.Result.HeadUpdate == nil || recovery.Result.HeadUpdate.Head != nil {
+		t.Fatalf("lost committed outcome: %+v", recovery.Result)
+	}
+	if recovery.Detail != "catalog unavailable" || !IsKind(err, ErrSnapshotGroupRemovalRecovery) || !errors.Is(err, native) {
+		t.Fatalf("lost error identity: %+v", recovery)
 	}
 }

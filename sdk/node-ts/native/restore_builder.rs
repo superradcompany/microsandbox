@@ -150,6 +150,18 @@ impl JsRestoreBuilder {
         Ok(self)
     }
 
+    /// Explicit wall-clock policy; omission preserves the snapshot/default policy.
+    #[napi(js_name = "guestClock")]
+    pub fn guest_clock(&mut self, policy: String) -> Result<&Self> {
+        let policy = match policy.as_str() {
+            "sync" => microsandbox::sandbox::GuestClockPolicy::Sync,
+            "off" => microsandbox::sandbox::GuestClockPolicy::Off,
+            _ => return Err(napi::Error::from_reason("guest clock must be sync or off")),
+        };
+        self.inner = Some(self.take_inner()?.guest_clock(policy));
+        Ok(self)
+    }
+
     /// Apply the destination host's maximum runtime in seconds; zero expires immediately.
     #[napi(js_name = "maxDuration")]
     pub fn max_duration(&mut self, secs: f64) -> Result<&Self> {
@@ -409,7 +421,7 @@ impl JsRestoreBuilder {
 }
 
 impl JsRestoreBuilder {
-    fn take_inner(&mut self) -> Result<RestoreBuilder> {
+    pub(crate) fn take_inner(&mut self) -> Result<RestoreBuilder> {
         self.inner
             .take()
             .ok_or_else(|| napi::Error::from_reason("RestoreBuilder already consumed"))

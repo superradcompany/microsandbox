@@ -4,52 +4,438 @@ title: Snapshots
 description: Capture and manage snapshots with the Ruby SDK.
 ---
 
-See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore or full-capture options. See [forking availability](#forking).
+See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby exposes disk/full group capture, management, and sandbox creation from a group or exact checkpoint.
 
-## SandboxHandle
+Export methods `save` and `save_to` accept the keyword `compatibility` (`"current"` by default, or `"0.7.8"`). The historical target writes archive extension names understood by 0.7.8 and refuses required behavior it cannot preserve. It does not convert checkpoint identity or VM state. See [archive targets](/cli/snapshot-commands#msb-snap-export).
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+<span id="group-lifecycle-and-08-migration" />
+
+## Sandbox capture
+
+<span id="sandbox-group-capture" />
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">snapshot()</span>
 
 ```ruby
-handle.snapshot(name) # => Hash
+sandbox.snapshot(group, initial_checkpoint: nil, dest_dir: nil, labels: nil,
+                 full: false, record_integrity: false, guest_flush: "auto") # => SnapshotCreateResult
 ```
+
+Available on `Microsandbox::Sandbox` and `SandboxHandle`. `group` selects a new history; `initial_checkpoint` names the first member. `dest_dir` selects its parent storage directory. An existing group is refused. Omitted member names are generated; capture is disk-only by default. Set `full: true` to include memory and device state, or `record_integrity: true` to record payload checksums. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`. Unknown keywords are rejected.
 
 <Accordion title="Example">
 
 ```ruby
-handle = Microsandbox::Sandbox.get("worker")
-checkpoint = handle.snapshot("after-build")
-puts checkpoint["reference"]
+source = Microsandbox::Sandbox.get("worker")
+created = source.snapshot("history", initial_checkpoint: "ready", record_integrity: true)
+group = created.snapshot
+next_capture = group.checkpoint(name: "after-build")
+exact = group.get_checkpoint("ready")
+group.set_head("ready")
+group.clear_head
+# Clearing selection keeps the artifacts available for exact export.
+exact.save_to("ready.msb")
+reopened = Microsandbox::Snapshot.get("history")
 ```
 
 </Accordion>
 
-Capture a named snapshot using the selected backend's default capture behavior. Local group members are immutable; choose a new name for each checkpoint.
+Artifact helpers formerly owned by `Snapshot` are now accessed through `Checkpoint`. Existing `SnapshotHandle`, builder, archive, ID, and verification type names remain; this public object rename does not rewrite persisted artifact IDs. Retained artifact helpers below also cover supported cloud workflows, where local group operations return unsupported.
 
-<p className="msb-label">Parameters</p>
+## Snapshot group methods
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot name.</div>
-  </div>
-</div>
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
-    <div className="msb-param-desc">String keys: digest, reference, reference_kind, and size_bytes.</div>
-  </div>
-</div>
-
-## Snapshot
-
-#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">open()</span>
+#### <span className="msb-recv">Snapshot.</span><span className="msb-hn">open()</span>
 
 ```ruby
-Microsandbox::Snapshot.open(reference) # => Snapshot
+Snapshot.open(path) -> Snapshot
+```
+
+Open an existing local history directory, including groups captured or imported outside the default snapshot store. Relative paths are anchored when the call is made, before deferred work; symlinks retain their filesystem meaning. The returned group retains its backend and path for later operations. Missing directories fail without creating a group or falling back to a same-name default-store group. Cloud backends do not support this local-directory operation. Use `get` (`Get` in Go) to select a bare group name from the default store.
+
+
+<span id="group-get" />
+
+#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">get()</span>
+
+```ruby
+Microsandbox::Snapshot.get(name) # => Microsandbox::Snapshot
+```
+
+Open a named local history, including a headless group. Group operations on cloud return unsupported.
+
+<span id="group-list" />
+
+#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">list</span>
+
+```ruby
+Microsandbox::Snapshot.list # => Array<Microsandbox::Snapshot>
+```
+
+List installed groups. Standalone artifacts are not treated as groups.
+
+<span id="group-name" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">name</span>
+
+```ruby
+group.name # => String
+```
+
+Read the retained group name without changing selection.
+
+<span id="group-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">head</span>
+
+```ruby
+group.head # => Microsandbox::Checkpoint or nil
+```
+
+Read the selected checkpoint once. The returned checkpoint retains that identity if head changes later. Returns `nil` after explicit clearing.
+
+<span id="group-checkpoints" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">checkpoints</span>
+
+```ruby
+group.checkpoints # => Array<Microsandbox::SnapshotHandle>
+```
+
+List member handles in stable ID order, including when no head is selected.
+
+<span id="group-get-checkpoint" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">get_checkpoint()</span>
+
+```ruby
+group.get_checkpoint(member) # => Microsandbox::Checkpoint
+```
+
+Open one member by group-local name or stable checkpoint ID without changing head.
+
+<span id="group-set-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">set_head()</span>
+
+```ruby
+group.set_head(member) # => Hash
+```
+
+Select an existing member by group-local name or stable ID. Selecting the current head reports a no-op. See [head outcomes](#group-head-outcome) for the string-keyed result.
+
+<span id="group-clear-head" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">clear_head</span>
+
+```ruby
+group.clear_head # => Hash
+```
+
+Clear selection while preserving every member. Clearing an already headless group reports a no-op.
+
+<span id="group-checkpoint" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">checkpoint()</span>
+
+```ruby
+group.checkpoint(name: nil, labels: nil, full: false,
+                 record_integrity: false, guest_flush: "auto") # => CheckpointCaptureResult
+```
+
+Capture the bound sandbox and return the exact checkpoint and this operation’s head outcome. Imported or orphaned groups refuse capture; a same-name replacement sandbox never becomes the source. Omitted `name` is generated. `guest_flush` accepts `"auto"`, `"required"` or `"skip"`. An append accepts neither a source override nor `dest_dir`.
+
+## Spawn a sandbox
+
+<span id="group-spawn" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawn_sandbox()</span>
+
+```ruby
+group.spawn_sandbox(**options) # => Microsandbox::Sandbox
+```
+
+The same method is available on an exact checkpoint. Destination keywords are listed below.
+
+<span id="group-spawn-progress" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">spawn_sandbox_with_progress()</span>
+
+```ruby
+group.spawn_sandbox_with_progress(**options) # => Microsandbox::PullSession
+```
+
+Returns a local creation session with progress, cancellation and an authoritative result.
+
+<Accordion title="Example">
+
+```ruby
+child = group.spawn_sandbox(name: "worker", cpus: 2, memory: 512)
+exact_child = checkpoint.spawn_sandbox(name: "exact-worker")
+
+session = checkpoint.spawn_sandbox_with_progress(name: "observed-worker")
+session.progress.each { |event| puts event.inspect }
+child = session.result
+```
+
+</Accordion>
+
+The group selects its head once; an exact checkpoint stays fixed even if the group head changes. A headless group refuses spawning, while its exact members remain usable. Imported or orphaned groups can spawn; they cannot capture a new checkpoint. The receiver retains its owning backend even when the default backend changes.
+
+Both methods accept the same destination keywords. Progress returns a `PullSession`; its `progress` enumerator (or `next_event`) produces best-effort event hashes with `kind` (`pull` or `startup`) and `progress`. End of the stream is not success. `result` returns the persistent sandbox or raises the authoritative failure and can be consumed once. Progress may be ignored without blocking creation. `cancel` requests cancellation; consume `result` to learn whether cancellation or completion won. Cancellation after success does not stop the returned sandbox. Sessions cannot be used from a forked child process. Native waits release the Ruby interpreter lock. They do not have a built-in timeout; request cancellation from another Ruby thread when needed, then consume the result. Ruby’s `Timeout.timeout` does not reliably interrupt a native wait.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key">Identity and capacity</div>
+    <div className="msb-param-desc"><code>name</code>, <code>cpus</code>, <code>memory</code> (MiB)</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Lifetime</div>
+    <div className="msb-param-desc"><code>max_duration</code>, <code>idle_timeout</code> (whole seconds)</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Restore policy</div>
+    <div className="msb-param-desc"><code>disk_only</code>, <code>cow_memory</code>, <code>snapshot_base</code>, <code>guest_clock</code> (<code>sync</code> or <code>off</code>)</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Guest execution</div>
+    <div className="msb-param-desc"><code>user</code>, <code>security</code> (<code>default</code> or <code>restricted</code>), <code>log_level</code></div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Egress</div>
+    <div className="msb-param-desc"><code>disable_network</code>, <code>network</code> (<code>:none</code> or the existing <code>allowed_hosts</code>/<code>allowed_ports</code> policy hash), <code>max_tcp_connections</code>, <code>max_udp_connections</code></div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Ingress</div>
+    <div className="msb-param-desc"><code>ports</code>, <code>max_inbound_tcp_connections</code>, <code>tcp_accept_queue_size</code></div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key">Resources</div>
+    <div className="msb-param-desc"><code>volumes</code>, <code>captured_volumes</code>, <code>vsock</code>, <code>external_mount_policy</code> (<code>strict</code> or <code>relaxed</code>), <code>allow_missing_resources</code>, <code>dangerously_inherit_resources</code></div>
+  </div>
+</div>
+
+`ports` is an array of `{ host: 8080, guest: 80, bind: "127.0.0.1", protocol: :tcp }` hashes; bind is optional and protocol defaults to TCP. `vsock` is an array of `{ path: "/run/service.sock", port: 5000, datagram: false }`. `volumes` maps guest paths to hashes containing exactly one of `bind`, `named`, or `disk`, with optional `readonly: true`. For example: `volumes: { "/data" => { bind: "./data", readonly: true } }`. `captured_volumes` lists guest paths whose private captured disks should be selected. Explicit local host paths are captured when the method is called; remote backend paths are not resolved against the client directory.
+
+Unknown keywords are rejected. These methods accept destination restore controls, not source/image replacement or new init/entrypoint instructions. Full-memory restore preserves captured execution; changing its boot security profile is refused by the core before child execution. The separate snapshot-backed create/run work expands disk-start controls.
+
+A capture can publish successfully and then raise `SnapshotSourceRecoveryError` because the source failed to recover. Its `artifact` hash retains the published kind, path, snapshot identity, digest and `head_update` for an installed capture. This head outcome belongs to the capture even if another operation later changes the head. Archive-only capture and older producers omit it. Recovery locators do not prove that the source is running or safe to resume.
+
+## Save an exact checkpoint
+
+<Accordion title="Example">
+
+```ruby
+checkpoint.save("ready.msb")
+checkpoint.save("portable.msb", with_parents: true, with_image: true)
+```
+
+</Accordion>
+
+The receiver selects one immutable checkpoint. Use the group’s optional head or exact-member lookup first; saving a group’s whole history is not implied. The no-options call writes a compressed `.msb` archive. `save_to` retains its explicit options form for compatibility. See the archive compatibility option below before sending output to an older reader.
+
+## Group archive import
+
+<span id="group-load" />
+
+#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">load()</span>
+
+```ruby
+Microsandbox::Snapshot.load(group, files, dest: nil, base: nil, set_head: false) # => SnapshotImportResult
+```
+
+Import a batch atomically. `dest` selects the parent storage directory; omission uses default storage. `base` supplies an external dependency snapshot or archive. `set_head: true` selects the unique imported tip even when it is not a fast-forward; ambiguous tips are refused.
+
+<Accordion title="Example">
+
+```ruby
+Microsandbox::Snapshot.load(group, files, dest: "store", base: "base.msb", set_head: true)
+```
+
+</Accordion>
+
+`files` is an array of host paths. The keywords are optional. Returns `SnapshotImportResult` with `snapshot`, `checkpoints`, `added`, `reused`, `head_update`, `operation_id`, and `warnings` readers.
+
+The result contains every unique supplied checkpoint, including bundled dependencies, in stable ID order. `added` and `reused` identify what was new versus already installed at publication; archive argument order does not select the head. The head outcome belongs to this operation and does not change when another operation edits the group. Multiple incomparable tips can commit a headless group; explicit head selection refuses ambiguous tips.
+
+A successful return confirms publication and catalog completion. Warnings describe deferred cleanup after commit. A structured import error distinguishes no publication, confirmed publication with a later failure, and an unknown outcome needing recovery. Import never binds a group to a source sandbox. See [atomic import requirements](/cli/snapshot-commands#msb-snap-import) for filesystem capabilities and maintenance requirements.
+
+## Group inspection
+
+<span id="group-inspect" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">info</span>
+
+```ruby
+group.info # => Hash
+```
+
+Returns `name`, `path`, optional `head`, `checkpoint_count` and optional `source` as string-keyed hash fields. Head and count come from one protected read. Source fields are `database_uuid`, `sandbox_id`, `recorded_name`, `current_name` and `status`. An unbound group has no source; other statuses are `available`, `missing_sandbox` or `different_catalog`. Availability is observed separately and does not guarantee future capture readiness. A replacement sandbox with the old name never replaces the recorded identity.
+
+`info` preserves Ruby's standard `Object#inspect` diagnostic. Invalid metadata or database failures raise errors; inspection does not change head or manufacture a missing catalog identity. Use `group.get_checkpoint(member)` for immutable checkpoint metadata.
+
+## Group verification
+
+<span id="group-verification" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">verify</span>
+
+```ruby
+group.verify # => Hash
+```
+
+Checks every selected member, including headless histories. The report has string keys `group`, `state`, `checkpoints` and `payload_hashes`. States are `complete`, `incomplete`, `invalid` or `empty`; empty means zero members checked. Missing checksums remain incomplete. Corruption or operational failures raise `SnapshotVerificationError` with the full report in `error.report`. Failures before meaningful selection retain their ordinary exception. Selected members remain protected through hashing, including cancellation. Same-group captures, imports and head changes wait until verification finishes. Concurrent older removers must be stopped or upgraded; reads and sandbox execution can continue.
+
+## Whole-group removal
+
+<span id="group-remove" />
+
+#### <span className="msb-recv">group.</span><span className="msb-hn">remove</span>
+
+```ruby
+group.remove # => Microsandbox::SnapshotRemoveResult
+```
+
+Removes the selected history and returns `SnapshotRemoveResult` with `group`, `removed`, `head_update`, and `warnings`. The member IDs and cleared-head outcome belong to this operation. Empty groups can be removed. Active readers and surviving external dependents refuse removal; there is no force bypass for an entire group.
+
+If publication commits but catalog cleanup fails, the call raises `SnapshotGroupRemovalRecoveryError` with `result` and `detail`. The attached result means removal already happened. Cleanup warnings after successful catalog reconciliation are returned in the result. An uncertain durability outcome is an error requiring recovery rather than a claimed successful removal. Later listing recovers pending cleanup without deleting a replacement group.
+
+## Exact checkpoint removal
+
+<Accordion title="Example">
+
+```ruby
+removed = checkpoint.remove
+# To allow indexed dependents, use checkpoint.remove(force: true) instead.
+```
+
+</Accordion>
+
+Returns `CheckpointRemoveResult` with `id`, optional `head_update`, and `warnings`. It identifies this exact retained checkpoint and this operation's head decision. Removing head selects its surviving same-group parent or clears selection; other removals leave head unchanged. Later head edits do not change the result, and force never bypasses active readers.
+
+If removal commits but catalog cleanup fails, `SnapshotRemovalRecoveryError` retains the committed `result` and cleanup `detail`. Do not interpret this as an unchanged artifact or blindly repeat deletion. A repeated removal reports a missing checkpoint, and a replacement at the original address is refused. Unsupported backends refuse exact-removal reporting instead of deleting by name.
+
+## Group options and results
+
+<span id="group-create-result" />
+
+### SnapshotCreateResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">Microsandbox::Snapshot</span></div>
+    <div className="msb-param-desc">The newly created group.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoint</code><span className="msb-type">Microsandbox::Checkpoint</span></div>
+    <div className="msb-param-desc">The exact first checkpoint created by this call.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>head_update</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+</div>
+
+<span id="group-capture-result" />
+
+### CheckpointCaptureResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoint</code><span className="msb-type">Microsandbox::Checkpoint</span></div>
+    <div className="msb-param-desc">The exact checkpoint created by this append.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>head_update</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+</div>
+
+<span id="group-import-result" />
+
+### SnapshotImportResult
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>operation_id</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Identifier of this import attempt.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>snapshot</code><span className="msb-type">Microsandbox::Snapshot</span></div>
+    <div className="msb-param-desc">The destination group.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>checkpoints</code><span className="msb-type">Array&lt;Microsandbox::SnapshotHandle&gt;</span></div>
+    <div className="msb-param-desc">All unique supplied members, including bundled dependencies, in stable ID order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>added</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Stable IDs newly installed by this operation.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reused</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Stable IDs already installed at publication.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>head_update</code><span className="msb-type">Hash</span></div>
+    <div className="msb-param-desc">Head outcome from this operation; later selection changes do not alter it. See <a href="#group-head-outcome">head outcomes</a>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>warnings</code><span className="msb-type">Array&lt;String&gt;</span></div>
+    <div className="msb-param-desc">Cleanup warnings after confirmed publication and catalog completion; empty when none.</div>
+  </div>
+</div>
+
+<span id="group-head-outcome" />
+
+### Head outcome
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>group</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Group name.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>previous</code><span className="msb-type">String or nil</span></div>
+    <div className="msb-param-desc">Previous selected member ID; absent when headless.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>head</code><span className="msb-type">String or nil</span></div>
+    <div className="msb-param-desc">Resulting selected member ID; absent after clearing or a headless import.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>reason</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Selection reason: initialized, fast_forwarded, selected, unchanged, diverged, unknown_ancestry, ambiguous_candidates, cleared or parent_selected.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>changed</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Whether this operation changed the selected head.</div>
+  </div>
+</div>
+
+Head outcomes use string keys. Capture and import results expose readers; read the returned checkpoint directly instead of looking up the mutable group head.
+
+## SandboxHandle
+
+<span id="handle-snapshot" />
+
+```ruby
+handle.snapshot(group, initial_checkpoint: nil, dest_dir: nil, labels: nil,
+                full: false, record_integrity: false, guest_flush: "auto") # => SnapshotCreateResult
+```
+
+The first positional name selects the new group. Use the initial-checkpoint option to name its first member, then call the returned group’s checkpoint method for subsequent captures. Both a connected sandbox and its metadata handle support this group-creation flow. See [group lifecycle and migration](#group-lifecycle-and-08-migration) for a complete example.
+
+<span id="snapshot" />
+
+## Checkpoint
+
+<span id="snapshot-open" />
+<span id="snapshotopen" />
+
+#### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">open()</span>
+
+```ruby
+Microsandbox::Checkpoint.open(reference) # => Checkpoint
 ```
 
 Open a snapshot using the selected backend.
@@ -59,7 +445,7 @@ Open a snapshot using the selected backend.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>reference</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot reference or name.</div>
+    <div className="msb-param-desc">Checkpoint reference or name.</div>
   </div>
 </div>
 
@@ -67,15 +453,18 @@ Open a snapshot using the selected backend.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Snapshot</span></div>
+    <div className="msb-param-key"><span className="msb-type">Checkpoint</span></div>
     <div className="msb-param-desc">The opened snapshot.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">get()</span>
+<span id="snapshot-get" />
+<span id="snapshotget" />
+
+#### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">get()</span>
 
 ```ruby
-Microsandbox::Snapshot.get(name) # => SnapshotHandle
+Microsandbox::Checkpoint.get(name) # => SnapshotHandle
 ```
 
 Look up snapshot metadata using the selected backend.
@@ -85,7 +474,7 @@ Look up snapshot metadata using the selected backend.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot reference or name.</div>
+    <div className="msb-param-desc">Checkpoint reference or name.</div>
   </div>
 </div>
 
@@ -94,14 +483,17 @@ Look up snapshot metadata using the selected backend.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">SnapshotHandle</span></div>
-    <div className="msb-param-desc">Snapshot metadata and lifecycle handle.</div>
+    <div className="msb-param-desc">Checkpoint metadata and lifecycle handle.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">list()</span>
+<span id="snapshot-list" />
+<span id="snapshotlist" />
+
+#### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">list()</span>
 
 ```ruby
-Microsandbox::Snapshot.list # => Array<SnapshotHandle>
+Microsandbox::Checkpoint.list # => Array<SnapshotHandle>
 ```
 
 <p className="msb-label">Returns</p>
@@ -113,10 +505,13 @@ Microsandbox::Snapshot.list # => Array<SnapshotHandle>
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">remove()</span>
+<span id="snapshot-remove" />
+<span id="snapshotremove" />
+
+#### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">remove()</span>
 
 ```ruby
-Microsandbox::Snapshot.remove(name, force = false) # => nil
+Microsandbox::Checkpoint.remove(name, force = false) # => nil
 ```
 
 Remove a snapshot using the selected backend.
@@ -126,7 +521,7 @@ Remove a snapshot using the selected backend.
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot reference or name.</div>
+    <div className="msb-param-desc">Checkpoint reference or name.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
@@ -143,10 +538,13 @@ Remove a snapshot using the selected backend.
   </div>
 </div>
 
-#### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">save()</span>
+<span id="snapshot-save" />
+<span id="snapshotsave" />
+
+#### <span className="msb-recv">Microsandbox::Checkpoint.</span><span className="msb-hn">save()</span>
 
 ```ruby
-Microsandbox::Snapshot.save(reference, output_path, **options) # => nil
+Microsandbox::Checkpoint.save(reference, output_path, **options) # => nil
 ```
 
 Export a local snapshot archive. See [snapshot exports](/sandboxes/snapshots#move-snapshots) for parent chains and incremental exports.
@@ -156,7 +554,7 @@ Export a local snapshot archive. See [snapshot exports](/sandboxes/snapshots#mov
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>reference</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot reference.</div>
+    <div className="msb-param-desc">Checkpoint reference.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>output_path</code><span className="msb-type">String</span></div>
@@ -202,7 +600,7 @@ snapshot.save_to(output_path, **options) # => nil
 <Accordion title="Example">
 
 ```ruby
-snapshot = Microsandbox::Snapshot.open("after-build")
+snapshot = Microsandbox::Checkpoint.open("after-build")
 snapshot.save_to("./after-build.tar.zst", with_image: true)
 ```
 
@@ -251,7 +649,7 @@ snapshot.digest # => String
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot digest.</div>
+    <div className="msb-param-desc">Checkpoint digest.</div>
   </div>
 </div>
 
@@ -266,7 +664,7 @@ snapshot.size_bytes # => Integer | nil
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Snapshot size.</div>
+    <div className="msb-param-desc">Checkpoint size.</div>
   </div>
 </div>
 
@@ -313,7 +711,7 @@ handle.digest # => String
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot digest.</div>
+    <div className="msb-param-desc">Checkpoint digest.</div>
   </div>
 </div>
 
@@ -328,7 +726,7 @@ handle.size_bytes # => Integer | nil
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Snapshot size.</div>
+    <div className="msb-param-desc">Checkpoint size.</div>
   </div>
 </div>
 
@@ -373,7 +771,7 @@ handle.name # => String | nil
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">String | nil</span></div>
-    <div className="msb-param-desc">Snapshot name.</div>
+    <div className="msb-param-desc">Checkpoint name.</div>
   </div>
 </div>
 
@@ -410,14 +808,14 @@ handle.state_kind # => String
 #### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
 
 ```ruby
-handle.open # => Snapshot
+handle.open # => Checkpoint
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Snapshot</span></div>
+    <div className="msb-param-key"><span className="msb-type">Checkpoint</span></div>
     <div className="msb-param-desc">Open the snapshot through the retained backend.</div>
   </div>
 </div>
@@ -485,6 +883,22 @@ Export through the backend retained by this handle. Archive export is local-only
     <div className="msb-param-desc">No return value.</div>
   </div>
 </div>
+
+## Checkpoint verification
+
+<Accordion title="Example">
+
+```ruby
+checkpoint = Microsandbox::Snapshot.get("templates").get_checkpoint("ready")
+report = checkpoint.verify
+puts report["coverage"]["kind"]
+```
+
+</Accordion>
+
+`verify` returns a hash with `digest`, `path`, `upper`, `checkpoint`, and `coverage`. Coverage is `complete` or `incomplete`; incomplete coverage includes an `unrecorded` array of required payload paths without checksums, including ancestor layers and owned disks. The upper/head checksum or checkpoint-root result alone does not establish complete coverage. Corruption raises an error.
+
+`Microsandbox::Snapshot.get("worker").verify` checks the whole group's pinned membership, including headless groups. Its hash contains `group`, `state`, `checkpoints`, and `payload_hashes`. States are `complete`, `incomplete`, `invalid`, and `empty` (zero checked). Each member retains its `id`, `path`, `state`, optional existing verification `report`, and specific `findings`. Shared physical payloads are hashed once per algorithm; independent copies are checked separately. Missing checksums remain incomplete. Other verification failures raise `SnapshotVerificationError` with the entire hash in `error.report`; failures before meaningful selection retain their ordinary exception.
 
 ## Forking
 

@@ -71,17 +71,17 @@ Saved-state operations are grouped under `msb snap`. The equivalent long form, `
 
 <CodeGroup>
 ```bash Shell
-msb snap create ready --sandbox devbox --full
-msb snap restore devbox:ready --name worker
-msb snap ls --group devbox
-msb snap export devbox:ready --output ready.msb
-msb snap import ready.msb --group received
+msb snap create devbox-history --sandbox devbox --name ready --full
+msb snap restore devbox-history:ready --name worker
+msb snap ls devbox-history
+msb snap export devbox-history --checkpoint ready --output ready.msb
+msb snap import received --file ready.msb
 ```
 </CodeGroup>
 
 <Accordion title="Snapshot behavior, aliases, and backend support">
 
-Omit `--full` to save disk state for a fresh boot. The group defaults to the source sandbox's name, so the first command creates `devbox:ready`. Full captures, live forks, groups, and archive operations are local-only. Use `msb fork devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
+Omit `--full` to save disk state for a fresh boot. The first command creates group `devbox-history` and its checkpoint `ready`. Full captures, live forks, groups, and archive operations are local-only. Use `msb fork devbox --names worker-a worker-b` to create children directly from the same live moment. See [Snapshots](/sandboxes/snapshots) for backend limits and resource bindings. Existing top-level `restore` and snapshot `save`/`load` commands remain supported.
 
 </Accordion>
 

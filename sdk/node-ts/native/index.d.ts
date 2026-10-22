@@ -354,29 +354,50 @@ export declare class InterfaceOverridesBuilder {
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
 
+/** Sandbox-scoped job handle; dropping it does not terminate the guest process. */
 export declare class Job {
+  /** Return the opaque job identity, scoped to its sandbox. */
   get id(): string
+  /** Return current lifecycle metadata as JSON, including capture or runtime errors. */
   inspect(): Promise<string>
+  /** Wait for a terminal state and return its exit result as JSON. */
   wait(): Promise<string>
+  /** Request delivery of a signal to this job; use `wait` to confirm its exit. */
   signal(signal: number): Promise<void>
+  /** Request SIGKILL without waiting for confirmed process termination. */
   kill(): Promise<void>
+  /** Permanently close pipe stdin after previously admitted input; PTY jobs reject EOF. */
   eof(): Promise<void>
+  /** Return retained log entries as JSON using JSON-encoded log options. */
   logs(options: string): Promise<string>
+  /** Replay retained logs and optionally follow output using JSON-encoded log options. */
   logStream(options: string): Promise<JobLogStream>
+  /**
+   * Attach with optional recent-byte or cursor replay; the replay selectors are exclusive.
+   * A writable attachment acquires the job's stdin lease; read-only observers do not.
+   */
   attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
 }
 export type JsJob = Job
 
+/** Renewable output attachment with optional exclusive stdin ownership. */
 export declare class JobAttachment {
+  /** Receive the next JSON-encoded event, or `None` when the attachment ends. */
   recv(): Promise<string | null>
+  /** Admit bytes to guest stdin through this attachment's writable lease. */
   writeStdin(data: Buffer): Promise<void>
+  /** Resize a PTY job's terminal through this attachment's writable lease. */
   resize(rows: number, cols: number): Promise<void>
+  /** Release the attachment without closing guest stdin or terminating the job. */
   detach(): Promise<void>
 }
 export type JsJobAttachment = JobAttachment
 
+/** Cancellable iterator over retained output and optional live updates. */
 export declare class JobLogStream {
+  /** Read the next JSON-encoded log entry, or `None` after completion or closure. */
   next(): Promise<string | null>
+  /** Idempotently close this iterator and wake a pending read without stopping the job. */
   close(): Promise<void>
 }
 export type JsJobLogStream = JobLogStream
@@ -565,13 +586,13 @@ export declare class NetworkBuilder {
   maxTcpConnections(max: number): this
   /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
   maxUdpConnections(max: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /**
    * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
    * 1024; the host kernel clamps it to its own somaxconn.
    */
   tcpAcceptQueueSize(size: number): this
-  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
-  maxInboundTcpConnections(value: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -814,6 +835,8 @@ export declare class RestoreBuilder {
   disableNetwork(): this
   /** Set guest security for disk boot; explicit changes are rejected by full restore. */
   security(profile: 'default' | 'restricted'): this
+  /** Explicit wall-clock policy; omission preserves the snapshot/default policy. */
+  guestClock(policy: string): this
   /** Apply the destination host's maximum runtime in seconds; zero expires immediately. */
   maxDuration(secs: number): this
   /** Apply the destination host's idle timeout in seconds; zero expires immediately. */
@@ -852,10 +875,10 @@ export declare class RestoreBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
-  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
-  tcpAcceptQueueSize(size: number): this
   /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
   maxInboundTcpConnections(value: number): this
+  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -1049,6 +1072,8 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
+  /** Create a new history from this exact sandbox incarnation. */
+  snapshot(name: string, options?: SnapshotCaptureOptions): Promise<SnapshotCreateResult>
   /** Retrieve a retained managed job in this sandbox. */
   getJob(id: string): Promise<Job>
   /** List bounded managed-job metadata without creating processes. */
@@ -1635,13 +1660,8 @@ export declare class SandboxHandle {
    * `exec.log`.
    */
   logStream(opts?: LogStreamOptions | undefined | null): Promise<LogStream>
-  /**
-   * Snapshot this sandbox's disk under a bare name, preserving its running/paused state.
-   *
-   * Resolves under `~/.microsandbox/snapshots/<name>/`. Move
-   * artifacts with `Snapshot.save`/`Snapshot.load`.
-   */
-  snapshot(name: string): Promise<JsSnapshot>
+  /** Create a new history with the exact initial checkpoint and capture head outcome. */
+  snapshot(name: string, options?: SnapshotCaptureOptions): Promise<SnapshotCreateResult>
 }
 export type JsSandboxHandle = SandboxHandle
 
@@ -1723,6 +1743,20 @@ export type JsSftpClient = SftpClient
 
 /** A backend-neutral snapshot artifact. */
 export declare class Snapshot {
+  /**
+   * Consume destination options; the receiver always selects the source and backend.
+   *
+   * # Safety
+   * The destination builder is consumed before suspension and must not be reused.
+   */
+  spawnSandboxWithBuilder(builder: RestoreBuilder): Promise<Sandbox>
+  /**
+   * Consume destination options and return progress for the receiver-selected source.
+   *
+   * # Safety
+   * The destination builder is consumed before suspension and must not be reused.
+   */
+  spawnSandboxWithProgressBuilder(builder: RestoreBuilder): Promise<PullProgressCreate>
   static open(pathOrName: string): Promise<Snapshot>
   static get(nameOrDigest: string): Promise<SnapshotHandle>
   static list(): Promise<Array<SnapshotInfo>>
@@ -1773,6 +1807,8 @@ export declare class Snapshot {
    * Returns an unsupported-operation error when artifact archives are unavailable.
    */
   copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
+  /** Remove this exact retained checkpoint and serialize its operation-owned result. */
+  removeCheckpoint(force: boolean): Promise<string>
   /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
   /** Observe this artifact's storage through its captured backend. */
@@ -1843,6 +1879,44 @@ export declare class SnapshotCopyBuilder {
   save(): Promise<void>
 }
 export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
+
+/** A named snapshot history, separate from an immutable checkpoint. */
+export declare class SnapshotGroup {
+  /** Observe metadata and source association without selecting a checkpoint for execution. */
+  inspectJson(): Promise<string>
+  /** Return the committed member set and head outcome without a later catalog read. */
+  removeGroup(): Promise<string>
+  /** Internal JSON transport preserves nested per-member results without flattening errors. */
+  verifyJson(): Promise<string>
+  static load(group: string, archives: string[], opts?: LoadOpts): Promise<SnapshotImportResult>
+  /**
+   * Consume destination options; the receiver always selects the source and backend.
+   *
+   * # Safety
+   * The destination builder is consumed before suspension and must not be reused.
+   */
+  spawnSandboxWithBuilder(builder: RestoreBuilder): Promise<Sandbox>
+  /**
+   * Consume destination options and return progress for the receiver-selected source.
+   *
+   * # Safety
+   * The destination builder is consumed before suspension and must not be reused.
+   */
+  spawnSandboxWithProgressBuilder(builder: RestoreBuilder): Promise<PullProgressCreate>
+  /** Open a local directory, anchoring it before scheduling native work. */
+  static open(path: string): Promise<SnapshotGroup>
+  static get(name: string): Promise<SnapshotGroup>
+  static list(): Promise<Array<SnapshotGroup>>
+  get name(): string
+  head(): Promise<Snapshot | null>
+  checkpoints(): Promise<Array<SnapshotHandle>>
+  getCheckpoint(member: string): Promise<Snapshot>
+  setHead(member: string): Promise<HeadUpdate>
+  clearHead(): Promise<HeadUpdate>
+  checkpoint(options?: SnapshotCaptureOptions | undefined | null): Promise<CheckpointCaptureResult>
+  spawnSandbox(): Promise<Sandbox>
+}
+export type JsSnapshotGroup = SnapshotGroup
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
@@ -2049,6 +2123,12 @@ export interface AttachOptions {
   rlimits: Array<Rlimit>
 }
 
+/** The exact member and head outcome of one capture. */
+export interface CheckpointCaptureResult {
+  checkpoint: Snapshot
+  headUpdate: HeadUpdate
+}
+
 /** Return secret-safe information about the active default backend. */
 export declare function defaultBackendInfo(): JsBackendInfo
 
@@ -2132,7 +2212,7 @@ export interface FsMetadata {
 export interface HeadUpdate {
   group: string
   previous?: string
-  head: string
+  head?: string
   reason: string
   changed: boolean
 }
@@ -2633,6 +2713,8 @@ export interface SandboxTouchResult {
 
 /** Options for `Snapshot.save()` and instance `saveTo()` methods. */
 export interface SaveOpts {
+  /** Explicit archive reader target: current or 0.7.8. */
+  compatibility?: string
   /** Walk the parent chain and include each ancestor in the archive. */
   withParents?: boolean
   /** Bundle the OCI image cache for offline transport. */
@@ -2739,6 +2821,19 @@ export declare function setRuntimeLibkrunfwPath(path: string): void
  */
 export declare function setRuntimeMsbPath(path: string): void
 
+/** Explicit export options must not be silently ignored by an older native library. */
+export declare function snapshotArchiveCompatibilityTargets(): Array<string>
+
+/** Initial or subsequent capture controls. Source selection belongs to the receiver. */
+export interface SnapshotCaptureOptions {
+  name?: string
+  destDir?: string
+  full?: boolean
+  recordIntegrity?: boolean
+  guestFlush?: string
+  labels?: Record<string, string>
+}
+
 /** Built snapshot configuration produced by `SnapshotBuilder.build()`. */
 export interface SnapshotConfig {
   guestFlush: string
@@ -2750,6 +2845,24 @@ export interface SnapshotConfig {
   force: boolean
   recordIntegrity: boolean
   full: boolean
+}
+
+/** A newly created group and its exact initial checkpoint. */
+export interface SnapshotCreateResult {
+  snapshot: SnapshotGroup
+  checkpoint: Snapshot
+  headUpdate: HeadUpdate
+}
+
+/** A committed archive batch, including reused members and deferred cleanup. */
+export interface SnapshotImportResult {
+  operationId: string
+  snapshot: SnapshotGroup
+  checkpoints: Array<SnapshotHandle>
+  added: Array<string>
+  reused: Array<string>
+  headUpdate: HeadUpdate
+  warnings: Array<string>
 }
 
 /** Snapshot index info from the local DB cache. */
@@ -2804,6 +2917,9 @@ export interface SnapshotVerifyReport {
   upperDigest?: string
   /** Verified composite-checkpoint root, when the artifact is full. */
   checkpointRoot?: string
+  /** Coverage of every required payload, independent of the head-only upper projection. */
+  coverageKind: string
+  unrecorded: Array<string>
 }
 
 /** Options accepted by `SshClient.attach()`. */

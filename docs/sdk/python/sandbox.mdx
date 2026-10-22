@@ -1633,17 +1633,17 @@ Stream captured log entries (works without starting)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>Group creation is local-only. For supported cloud disk capture, use the artifact capture helpers under `Checkpoint`.</Note>
 
 ```python
-snapshot(name)
+snapshot(group)
 ```
 
-Create a named [snapshot](/sdk/python/snapshots) of the sandbox
+Create a new [snapshot group](/sdk/python/snapshots) and its first checkpoint. An existing group name is refused; append through the returned group instead.
 
 <p className="msb-label">Returns</p>
 
-`Awaitable[Snapshot]`
+`Awaitable[SnapshotCreateResult]`
 
 ## MetricsStream
 

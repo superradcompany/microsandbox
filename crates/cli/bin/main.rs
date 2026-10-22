@@ -820,6 +820,7 @@ mod command_tests {
                     path: "/saved/snapshot.tar".into(),
                     snapshot_id: "snap_test".into(),
                     digest: "digest".into(),
+                    head_update: None,
                 }),
                 detail: "thaw acknowledgement timed out".into(),
                 publication_error: None,
@@ -1009,8 +1010,7 @@ mod command_tests {
             vec!["snaps"],
         ] {
             let cli =
-                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["--group", "app"]))
-                    .unwrap();
+                Cli::try_parse_from(["msb"].into_iter().chain(prefix).chain(["app"])).unwrap();
             let args = match cli.command {
                 Commands::Snapshots(args) => args,
                 Commands::Snapshot(snapshot::SnapshotArgs {

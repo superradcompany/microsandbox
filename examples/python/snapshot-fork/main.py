@@ -2,7 +2,7 @@
 
 import asyncio
 
-from microsandbox import Sandbox, Snapshot
+from microsandbox import Sandbox
 
 
 async def main():
@@ -19,21 +19,23 @@ async def main():
     await baseline.stop()
 
     h = await Sandbox.get("snapshot-baseline")
-    snap = await h.snapshot("snapshot-baseline-state")
+    created = await h.snapshot("snapshot-baseline-state")
+    snap = created.checkpoint
     print(f"created snapshot: {snap.digest}")
     print(f"                  {snap.path}")
 
     # Restore uses the snapshot image and captured state; the child starts with the
     # captured upper layer in place.
-    fork = await Sandbox.restore(snap.path, name="snapshot-fork")
+    fork = await snap.spawn_sandbox(name="snapshot-fork")
     output = await fork.shell("cat /root/marker.txt")
+    assert output.stdout_text.strip() == "shipped via snapshot"
     print(f"fork sees: {output.stdout_text.strip()}")
 
     await fork.stop()
 
     await Sandbox.remove("snapshot-baseline")
     await Sandbox.remove("snapshot-fork")
-    await Snapshot.remove("snapshot-baseline:snapshot-baseline-state")
+    await created.snapshot.remove()
 
 
 asyncio.run(main())

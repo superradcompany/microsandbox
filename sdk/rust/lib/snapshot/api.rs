@@ -20,11 +20,11 @@ use crate::backend::Backend;
 
 /// A backend-neutral disk or full execution snapshot.
 ///
-/// Returned by [`Snapshot::create`] and [`Snapshot::open`]. The snapshot keeps
+/// Returned by [`Checkpoint::create`] and [`Checkpoint::open`]. The snapshot keeps
 /// its originating backend internally, so follow-up operations do not require
 /// backend-specific user code.
 #[derive(Clone)]
-pub struct Snapshot {
+pub struct Checkpoint {
     pub(crate) backend: Arc<dyn Backend>,
     pub(crate) reference: SnapshotReference,
     pub(crate) digest: String,
@@ -49,7 +49,7 @@ pub enum SnapshotReference {
 
 /// Builder for [`SnapshotConfig`].
 ///
-/// Constructed via [`Snapshot::builder`]. The snapshot name is fixed at
+/// Constructed via [`Checkpoint::builder`]. The snapshot name is fixed at
 /// construction; the source sandbox is set with
 /// [`from_sandbox`](Self::from_sandbox) and is required.
 pub struct SnapshotBuilder {
@@ -66,8 +66,8 @@ pub struct SnapshotBuilder {
 
 /// Lightweight handle backed by a backend snapshot listing.
 ///
-/// Returned by [`Snapshot::list`]. Use [`open`](SnapshotHandle::open)
-/// to read the artifact metadata, and [`Snapshot::verify`] for explicit
+/// Returned by [`Checkpoint::list`]. Use [`open`](SnapshotHandle::open)
+/// to read the artifact metadata, and [`Checkpoint::verify`] for explicit
 /// local content verification.
 #[derive(Clone)]
 pub struct SnapshotHandle {
@@ -109,11 +109,26 @@ pub struct SnapshotArchive {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl Snapshot {
+impl Checkpoint {
+    /// Export this exact checkpoint with default archive controls.
+    pub async fn save(&self, out: impl AsRef<Path>) -> MicrosandboxResult<()> {
+        self.save_to(out.as_ref(), SaveOpts::default()).await
+    }
+
+    /// Export this exact checkpoint with portable or incremental archive controls.
+    pub async fn save_with(
+        &self,
+        out: impl AsRef<Path>,
+        configure: impl FnOnce(SaveOpts) -> SaveOpts,
+    ) -> MicrosandboxResult<()> {
+        self.save_to(out.as_ref(), configure(SaveOpts::default()))
+            .await
+    }
+
     /// Start configuring a snapshot named `name` using the active backend.
     ///
     /// The source sandbox is required:
-    /// `Snapshot::builder("clean").from_sandbox("box").create()`.
+    /// `Checkpoint::builder("clean").from_sandbox("box").create()`.
     ///
     /// Without a destination, local snapshots use the default snapshot store
     /// and cloud snapshots use managed storage. A destination selects a local
@@ -241,7 +256,7 @@ impl Snapshot {
     }
 
     /// Remove a snapshot by a backend-relative string reference.
-    pub async fn remove(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
+    pub async fn remove_by_reference(path_or_name: &str, force: bool) -> MicrosandboxResult<()> {
         let reference = SnapshotReference::Auto(path_or_name.to_string());
         Self::remove_ref(reference, force).await
     }
@@ -260,8 +275,28 @@ impl Snapshot {
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
+    /// Remove this exact checkpoint, retaining its operation-owned head decision.
+    pub async fn remove(&self) -> MicrosandboxResult<super::CheckpointRemoveResult> {
+        self.remove_with(|options| options).await
+    }
+
+    /// Configure removal. Force never bypasses reader leases or identity validation.
+    /// Already missing/replaced checkpoints fail rather than claim a new removal.
+    pub async fn remove_with(
+        &self,
+        configure: impl FnOnce(super::CheckpointRemoveOptions) -> super::CheckpointRemoveOptions,
+    ) -> MicrosandboxResult<super::CheckpointRemoveResult> {
+        self.backend
+            .snapshots()
+            .remove_checkpoint(self, configure(Default::default()))
+            .await
+    }
+
     /// Verify this snapshot's recorded integrity.
+    ///
+    /// Corruption is an error. A successful report may still have incomplete `coverage` when
+    /// required payload checksums were not recorded; `upper` describes only the head layer.
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
@@ -307,7 +342,7 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Snapshot>> {
+    pub async fn list_dir(dir: impl AsRef<Path>) -> MicrosandboxResult<Vec<Checkpoint>> {
         let backend = crate::backend::default_backend();
         backend
             .snapshots()
@@ -342,7 +377,12 @@ impl Snapshot {
     ///
     /// This artifact-file operation is currently local-only. Other backends
     /// return [`crate::MicrosandboxError::Unsupported`].
-    pub async fn save(name_or_path: &str, out: &Path, opts: SaveOpts) -> MicrosandboxResult<()> {
+    #[doc(hidden)]
+    pub async fn save_by_reference(
+        name_or_path: &str,
+        out: &Path,
+        opts: SaveOpts,
+    ) -> MicrosandboxResult<()> {
         let backend = crate::backend::default_backend();
         let reference = SnapshotReference::Auto(name_or_path.to_string());
         backend.snapshots().save(reference, out, opts).await
@@ -431,7 +471,7 @@ impl SnapshotHandle {
         self.parent_digest.as_deref()
     }
 
-    /// Snapshot payload scope.
+    /// Checkpoint payload scope.
     pub fn scope(&self) -> SnapshotScope {
         self.scope
     }
@@ -486,7 +526,7 @@ impl SnapshotHandle {
         self.migration_error_code.as_deref()
     }
 
-    /// Snapshot creation time (from manifest).
+    /// Checkpoint creation time (from manifest).
     pub fn created_at(&self) -> chrono::NaiveDateTime {
         self.created_at
     }
@@ -508,14 +548,14 @@ impl SnapshotHandle {
     }
 
     /// Open the underlying artifact metadata.
-    pub async fn open(&self) -> MicrosandboxResult<Snapshot> {
+    pub async fn open(&self) -> MicrosandboxResult<Checkpoint> {
         self.backend
             .snapshots()
             .open(self.backend.clone(), self.reference())
             .await
     }
 
-    /// Remove this snapshot. See [`Snapshot::remove`].
+    /// Legacy unit-returning removal. See [`Checkpoint::remove_by_reference`].
     pub async fn remove(&self, force: bool) -> MicrosandboxResult<()> {
         #[cfg(feature = "local")]
         if let Some(local) = self.backend.as_local() {
@@ -632,12 +672,12 @@ impl SnapshotBuilder {
     }
 
     /// Build and execute the snapshot in one step.
-    pub async fn create(self) -> MicrosandboxResult<Snapshot> {
-        Snapshot::create(self.build()?).await
+    pub async fn create(self) -> MicrosandboxResult<Checkpoint> {
+        Checkpoint::create(self.build()?).await
     }
 }
 
-impl Snapshot {
+impl Checkpoint {
     /// Stable portable identity, independent of the descriptor digest.
     ///
     /// Cloud legacy descriptors use the released legacy-import identity mapping;
@@ -760,7 +800,7 @@ impl SnapshotBuilder {
         out: impl AsRef<Path>,
         plain_tar: bool,
     ) -> MicrosandboxResult<SnapshotArchive> {
-        Snapshot::create_archive(self.build()?, out, plain_tar).await
+        Checkpoint::create_archive(self.build()?, out, plain_tar).await
     }
 }
 
@@ -812,10 +852,10 @@ impl SnapshotArchive {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
-impl fmt::Debug for Snapshot {
+impl fmt::Debug for Checkpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("Snapshot")
+            .debug_struct("Checkpoint")
             .field("reference", &self.reference)
             .field("digest", &self.digest)
             .field("manifest", &self.manifest)
@@ -834,8 +874,8 @@ impl fmt::Debug for SnapshotHandle {
     }
 }
 
-impl From<&Snapshot> for SnapshotReference {
-    fn from(snapshot: &Snapshot) -> Self {
+impl From<&Checkpoint> for SnapshotReference {
+    fn from(snapshot: &Checkpoint) -> Self {
         snapshot.reference()
     }
 }

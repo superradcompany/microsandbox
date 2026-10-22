@@ -270,7 +270,43 @@ describe("Snapshot native projections", () => {
       path: "/snapshots/example",
       upper: { kind: "notRecorded" },
       checkpoint: { kind: "verified", root },
+      coverage: { kind: "unknown" },
     });
+  });
+  it("keeps incomplete ancestor coverage separate from a verified head", async () => {
+    const snapshot = projectedSnapshot({
+      verify: async () => ({
+        digest: "sha256:descriptor", path: "/snapshots/example",
+        upperKind: "verified", upperAlgorithm: "sha256", upperDigest: "sha256:head",
+        coverageKind: "incomplete", unrecorded: ["/snapshots/example/layers/base.raw"],
+      }),
+    });
+    await expect(snapshot.verify()).resolves.toMatchObject({
+      upper: { kind: "verified" },
+      coverage: { kind: "incomplete", unrecorded: ["/snapshots/example/layers/base.raw"] },
+    });
+  });
+  it("reports complete coverage only when the native library attests to it", async () => {
+    const snapshot = projectedSnapshot({
+      verify: async () => ({
+        digest: "sha256:descriptor", path: "/snapshots/example",
+        upperKind: "verified", upperAlgorithm: "sha256", upperDigest: "sha256:head",
+        coverageKind: "complete", unrecorded: [],
+      }),
+    });
+    expect((await snapshot.verify()).coverage).toEqual({ kind: "complete" });
+    expect((await projectedSnapshot().verify()).coverage).toEqual({ kind: "unknown" });
+  });
+  it("rejects malformed coverage instead of claiming successful verification", async () => {
+    for (const coverage of [{ coverageKind: "new_kind" }, { coverageKind: "incomplete", unrecorded: [] }]) {
+      const snapshot = projectedSnapshot({
+        verify: async () => ({
+          digest: "sha256:descriptor", path: "/snapshots/example",
+          upperKind: "notRecorded", ...coverage,
+        }),
+      });
+      await expect(snapshot.verify()).rejects.toThrow("invalid verification coverage");
+    }
   });
   it("delegates saveTo to live snapshots and handles", async () => {
     const saveSnapshot = vi.fn().mockResolvedValue(undefined);

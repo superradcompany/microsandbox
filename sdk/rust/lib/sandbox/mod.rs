@@ -42,6 +42,7 @@ pub(crate) mod pause;
 mod reap;
 mod restore_builder;
 pub(crate) mod restore_resources;
+mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;
 // Windows-only in shipping builds, but kept compiled under `test` so the

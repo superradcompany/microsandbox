@@ -40,6 +40,7 @@ mod exec_adapter;
 mod jobs;
 mod restore;
 mod setup;
+mod snapshot_objects;
 mod storage;
 mod volume_fs;
 
@@ -59,8 +60,8 @@ use std::{
 
 use base64::Engine;
 use microsandbox::{
-    AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
-    UpperVerifyStatus, default_backend,
+    AgentBridge, Checkpoint as Snapshot, LogLevel, MicrosandboxError, RegistryAuth, Sandbox,
+    SnapshotReference, UpperVerifyStatus, default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
@@ -481,6 +482,10 @@ mod error_kind {
     pub const SNAPSHOT_INTEGRITY: &str = "snapshot_integrity";
     pub const SNAPSHOT_MIGRATION: &str = "snapshot_migration";
     pub const SNAPSHOT_SOURCE_RECOVERY: &str = "snapshot_source_recovery";
+    pub const SNAPSHOT_IMPORT: &str = "snapshot_import";
+    pub const SNAPSHOT_GROUP_REMOVAL_RECOVERY: &str = "snapshot_group_removal_recovery";
+    pub const SNAPSHOT_REMOVAL_RECOVERY: &str = "snapshot_removal_recovery";
+    pub const SNAPSHOT_VERIFICATION: &str = "snapshot_verification";
     pub const PATCH_FAILED: &str = "patch_failed";
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
@@ -492,6 +497,10 @@ struct FfiError {
     kind: &'static str,
     message: String,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    import: Option<Box<microsandbox::SnapshotImportError>>,
+    verification: Option<Box<microsandbox::snapshot::SnapshotGroupVerifyReport>>,
+    removal: Option<(Box<microsandbox::CheckpointRemoveResult>, String)>,
+    group_removal: Option<Box<(microsandbox::SnapshotRemoveResult, String)>>,
     os_error: Option<i32>,
 }
 
@@ -511,6 +520,10 @@ impl FfiError {
             kind,
             message: message.into(),
             recovery: None,
+            import: None,
+            verification: None,
+            removal: None,
+            group_removal: None,
             os_error: None,
         }
     }
@@ -538,6 +551,23 @@ impl FfiError {
             return format!(
                 r#"{{"kind":"{}","message":{},"os_error":{}}}"#,
                 self.kind, msg, os_error
+            );
+        }
+        if let Some((result, detail)) = self.group_removal.as_deref() {
+            return serde_json::json!({ "kind": self.kind, "message": self.message, "removal": result, "detail": detail }).to_string();
+        }
+        if let Some((result, detail)) = &self.removal {
+            return serde_json::json!({ "kind": self.kind, "message": self.message, "removal": result, "detail": detail }).to_string();
+        }
+        if let Some(report) = &self.verification {
+            return serde_json::json!({ "kind": self.kind, "message": self.message, "report": report }).to_string();
+        }
+        if let Some(details) = &self.import
+            && let Ok(details) = serde_json::to_string(details)
+        {
+            return format!(
+                r#"{{"kind":"{}","message":{},"import":{}}}"#,
+                self.kind, msg, details
             );
         }
         if let Some(recovery) = &self.recovery
@@ -578,6 +608,14 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SnapshotIntegrity(_) => error_kind::SNAPSHOT_INTEGRITY,
             MicrosandboxError::SnapshotMigration { .. } => error_kind::SNAPSHOT_MIGRATION,
             MicrosandboxError::SnapshotSourceRecovery(_) => error_kind::SNAPSHOT_SOURCE_RECOVERY,
+            MicrosandboxError::SnapshotImport(_) => error_kind::SNAPSHOT_IMPORT,
+            MicrosandboxError::SnapshotVerification(_) => error_kind::SNAPSHOT_VERIFICATION,
+            MicrosandboxError::SnapshotGroupRemovalRecovery { .. } => {
+                error_kind::SNAPSHOT_GROUP_REMOVAL_RECOVERY
+            }
+            MicrosandboxError::SnapshotRemovalRecovery { .. } => {
+                error_kind::SNAPSHOT_REMOVAL_RECOVERY
+            }
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
@@ -587,14 +625,32 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::Io(_) => error_kind::IO,
             _ => error_kind::INTERNAL,
         };
+        let message = e.to_string();
+        if let MicrosandboxError::SnapshotGroupRemovalRecovery { result, source } = e {
+            let mut error = Self::new(kind, message);
+            error.group_removal = Some(Box::new((*result, source.to_string())));
+            return error;
+        }
+        let (recovery, import, verification, removal) = match e {
+            MicrosandboxError::SnapshotSourceRecovery(recovery) => {
+                (Some(recovery), None, None, None)
+            }
+            MicrosandboxError::SnapshotImport(details) => (None, Some(details), None, None),
+            MicrosandboxError::SnapshotVerification(report) => (None, None, Some(report), None),
+            MicrosandboxError::SnapshotRemovalRecovery { result, source } => {
+                (None, None, None, Some((result, source.to_string())))
+            }
+            _ => (None, None, None, None),
+        };
         Self {
             kind,
-            message: e.to_string(),
+            message,
             os_error: None,
-            recovery: match e {
-                MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
-                _ => None,
-            },
+            recovery,
+            import,
+            verification,
+            removal,
+            group_removal: None,
         }
     }
 }
@@ -1245,6 +1301,8 @@ struct SnapshotCreateOpts {
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotSaveOptsJson {
+    #[serde(default)]
+    compatibility: microsandbox::ArchiveCompatibility,
     since: Option<String>,
     last_layers: Option<usize>,
     #[serde(default)]
@@ -6591,6 +6649,7 @@ fn verify_report_json(report: microsandbox::snapshot::SnapshotVerifyReport) -> s
         "path": report.path.display().to_string(),
         "upper": upper,
         "checkpoint": checkpoint,
+        "coverage": report.coverage,
     })
 }
 
@@ -6648,8 +6707,17 @@ pub unsafe extern "C" fn msb_sandbox_handle_snapshot(
         let sandbox_name = unsafe { cstr(sandbox_name) }?;
         let snapshot_name = unsafe { cstr(snapshot_name) }?;
         Ok(Box::pin(async move {
-            let h = Sandbox::get(&sandbox_name).await.map_err(FfiError::from)?;
-            let snap = h.snapshot(&snapshot_name).await.map_err(FfiError::from)?;
+            // This released symbol still serves older Go SDKs: its argument is
+            // a member name, not the new group name accepted by capture_source.
+            let backend = default_backend();
+            backend
+                .sandboxes()
+                .get(backend.clone(), &sandbox_name)
+                .await?;
+            let config = Snapshot::builder(snapshot_name)
+                .from_sandbox(sandbox_name)
+                .build()?;
+            let snap = backend.snapshots().create(backend.clone(), config).await?;
             Ok(snapshot_json(&snap).to_string())
         }))
     })
@@ -6872,6 +6940,7 @@ pub unsafe extern "C" fn msb_snapshot_export(
                     reference,
                     &PathBuf::from(out),
                     SaveOpts {
+                        compatibility: opts.compatibility,
                         with_parents: opts.with_parents,
                         with_image: opts.with_image,
                         plain_tar: opts.plain_tar,
@@ -7971,6 +8040,7 @@ mod tests {
                     path: "/saved.msb".into(),
                     snapshot_id: "snap_1".into(),
                     digest: "sha256:descriptor".into(),
+                    head_update: None,
                 }),
                 detail: "thaw acknowledgement lost".into(),
                 publication_error: None,

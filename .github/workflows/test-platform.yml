@@ -92,4 +92,14 @@ jobs:
         uses: rui314/setup-mold@da13e0b42e392e3a45d1215033a2270b849d7d36 # 2.41.0
 
       - name: Test workspace
-        run: cargo +stable test --workspace --exclude microsandbox-agentd
+        env:
+          TEST_PLATFORM_OS: ${{ inputs.os }}
+        run: |
+          # Concurrent fresh shell fixtures can exceed the runtime's two-second
+          # probe deadline on macOS. Bound harness workers, not production timeouts;
+          # tests still exercise their own explicit concurrency unchanged.
+          if [[ "$TEST_PLATFORM_OS" == "darwin" ]]; then
+            workers="$(sysctl -n hw.logicalcpu)"
+            export RUST_TEST_THREADS="$(( workers < 4 ? workers : 4 ))"
+          fi
+          cargo +stable test --workspace --exclude microsandbox-agentd

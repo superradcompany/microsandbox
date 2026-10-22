@@ -920,18 +920,20 @@ async fn endpoint_answers(path: &Path) -> std::io::Result<bool> {
         return Ok(false);
     }
 
-    if let Err(error) = tokio::fs::symlink_metadata(path).await {
-        // No endpoint can be reached through a malformed directory entry.
-        // Cleanup can remove the entry without following it.
-        if error.kind() == ErrorKind::NotFound
-            || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
-        {
-            return Ok(false);
-        }
-
-        return Err(endpoint_error("inspect", path, error));
+    // These are filesystem endpoints, never Linux abstract socket names. The
+    // previous filesystem lookup also rejected NUL before attempting a connect.
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(endpoint_error(
+            "connect to",
+            path,
+            std::io::Error::new(ErrorKind::InvalidInput, "socket path contains NUL"),
+        ));
     }
 
+    // Connect already distinguishes absent/stale paths from live listeners and
+    // propagates uncertain errors. A preceding tokio::fs lookup adds no ownership
+    // evidence, but blocking-pool queueing can consume the entire probe deadline
+    // and falsely prevent creation even when every endpoint is absent.
     loop {
         match tokio::net::UnixStream::connect(path).await {
             Ok(_) => return Ok(true),
@@ -1035,7 +1037,8 @@ mod tests {
             std::fs::write(&path, b"stale artifact").unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
-            // Final symlinks pass symlink_metadata; connect must reject their targets.
+            // Connecting must reject malformed symlink targets without following
+            // them during cleanup or mistaking them for live endpoints.
             std::os::unix::fs::symlink(&path, &path).unwrap();
             assert!(!probe_without_advancing_clock(&probe_paths).await.unwrap());
             std::fs::remove_file(&path).unwrap();
@@ -1077,18 +1080,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn endpoint_probe_timeout_retains_an_uncertain_owner() {
-        // The overall deadline is a caller-facing latency contract, so state it
-        // independently of the production constant. Widening the budget must
-        // fail here rather than silently lengthening this test's wait.
-        const EXPECTED_BUDGET: Duration = Duration::from_millis(50);
-
+    fn endpoint_probe_checks_missing_paths_with_a_busy_blocking_pool() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
-            .start_paused(true)
             .build()
             .unwrap();
         let (release, wait) = std::sync::mpsc::channel();
@@ -1098,31 +1095,109 @@ mod tests {
             let _ = wait.recv();
         });
         started.recv().unwrap();
-        // A busy filesystem pool delays metadata past the probe's deadline.
-        // The caller must return conservatively without waiting for that work.
-        let result = runtime.block_on(async {
-            let probe = paths.may_be_live();
-            tokio::pin!(probe);
-            tokio::select! {
-                biased;
-                result = &mut probe => panic!("probe completed before deadline: {result:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-            tokio::time::advance(EXPECTED_BUDGET).await;
-            // The budget has elapsed, so the next poll must already be ready.
-            // Never await the probe here: a paused clock auto-advances while
-            // idle and would hide a deadline longer than the contract.
-            tokio::select! {
-                biased;
-                result = &mut probe => result,
-                () = tokio::task::yield_now() => {
-                    panic!("probe still pending after {EXPECTED_BUDGET:?}")
-                }
-            }
-        });
+
+        // A direct nonblocking connect can prove every endpoint absent even
+        // while unrelated filesystem work occupies the blocking pool.
+        let result = runtime.block_on(paths.may_be_live());
+        std::fs::create_dir_all(paths.fallback_agent.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&paths.fallback_agent).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let live_result = runtime.block_on(paths.may_be_live());
+        let accepted = listener.accept();
         release.send(()).unwrap();
         runtime.block_on(blocker).unwrap();
+        assert!(
+            !result.unwrap(),
+            "absent endpoints are not uncertain owners"
+        );
+        assert!(live_result.unwrap());
+        accepted.expect("a live historical endpoint must actually be contacted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_probe_timeout_retains_an_uncertain_owner() {
+        // Keep the latency contract independent of the production constant.
+        const EXPECTED_BUDGET: Duration = Duration::from_millis(50);
+
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
+        let path = &paths.runtime.legacy_agent;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let _queued = tokio::net::UnixStream::connect(path).await.unwrap();
+        assert_eq!(
+            tokio::net::UnixStream::connect(path)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock,
+        );
+
+        // This is real uncertainty: a live owner has no listener queue space.
+        // It must stay protected, without lengthening the probe's deadline.
+        let probe = paths.may_be_live();
+        tokio::pin!(probe);
+        tokio::select! {
+            biased;
+            result = &mut probe => panic!("probe completed before deadline: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        tokio::time::advance(EXPECTED_BUDGET).await;
+        let result = tokio::select! {
+            biased;
+            result = &mut probe => result,
+            () = tokio::task::yield_now() => {
+                panic!("probe still pending after {EXPECTED_BUDGET:?}")
+            }
+        };
         assert!(result.unwrap());
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endpoint_probe_rejects_nul_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        for bytes in [b"\0abstract".as_slice(), b"path\0suffix".as_slice()] {
+            let path = PathBuf::from(OsString::from_vec(bytes.to_vec()));
+            let error = endpoint_answers(&path).await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endpoint_probe_propagates_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses filesystem mode checks, so cannot exercise this denial.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let paths = SandboxSocketPaths::new(home.path(), home.path(), "worker");
+        std::fs::create_dir_all(&paths.runtime.canonical_dir).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&paths.runtime.agent).unwrap();
+        std::fs::set_permissions(
+            &paths.runtime.canonical_dir,
+            std::fs::Permissions::from_mode(0),
+        )
+        .unwrap();
+        let result = paths.may_be_live().await;
+        std::fs::set_permissions(
+            &paths.runtime.canonical_dir,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(paths.runtime.agent.exists());
     }
 
     #[cfg(target_os = "linux")]

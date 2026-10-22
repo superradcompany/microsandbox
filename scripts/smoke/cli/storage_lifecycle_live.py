@@ -15,7 +15,7 @@ def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     # Keep runtime sockets under sockaddr_un's limit, independent of the report path.
-    root = Path(tempfile.mkdtemp(prefix="msb-sl-", dir="/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="msb-sl-", dir="/tmp")).resolve()
     config = root / "config.json"
     config.write_text("{}")
     env = dict(os.environ, MSB_CONFIG_PATH=str(config), MSB_BACKEND="local", NO_COLOR="1",
@@ -28,7 +28,8 @@ def run(args):
     def command(label, *words, home=homes[0], success=True):
         started = time.monotonic()
         result = subprocess.run([str(args.binary), *words], env=dict(env, MSB_HOME=str(home)),
-                                cwd=root, text=True, capture_output=True, timeout=180, check=False)
+                                cwd=root, stdin=subprocess.DEVNULL, text=True,
+                                capture_output=True, timeout=180, check=False)
         (output / f"{label}.log").write_text(result.stdout + result.stderr)
         records.append({"case": label, "code": result.returncode,
                         "seconds": round(time.monotonic() - started, 3)})
@@ -48,7 +49,7 @@ def run(args):
                 "printf disk-state > /root/storage-marker; printf ram-state > /ram/storage-marker")
         assert report("prune-running-image", "image", "prune", "--yes")["image_refs_removed"] == 0
         command("force-untag-running-image", "image", "rm", args.image, "--force")
-        command("capture-full", "snapshot", "create", "base", "--group", "saved",
+        command("capture-full", "snapshot", "create", "saved", "--name", "base",
                 "--sandbox", "source", "--full")
         snapshots = report("snapshot-list", "snapshot", "list")
         assert len(snapshots) == 1, snapshots
@@ -57,10 +58,12 @@ def run(args):
         descriptor, = (homes[0] / "snapshots/saved").glob("*/snapshot.json")
         with descriptor.open("rb") as reader:
             fcntl.flock(reader, fcntl.LOCK_SH)
-            busy = command("snapshot-reader-refuses-force", "snapshot", "rm", "saved:base", "--force", success=False)
+            busy = command("snapshot-reader-refuses-force", "snapshot", "rm", "saved",
+                           "--checkpoint", "base", "--force", success=False)
             assert "active operation" in busy.stderr, busy.stderr
         archive = root / "saved.msb"
-        command("portable-export", "snapshot", "export", "saved:base", "--with-image", "-o", str(archive))
+        command("portable-export", "snapshot", "save", "saved", str(archive),
+                "--checkpoint", "base", "--with-image")
         command("branch", "branch", "source", "--name", "branch", "--dangerously-inherit-resources")
         usage = report("usage-live", "df")
         assert usage["branch_memory"]["in_use"] > 0, usage
@@ -76,18 +79,20 @@ def run(args):
         assert report("snapshot-roots-image", "image", "prune", "--yes")["image_refs_removed"] == 0
         report("reclaim-idle-ram", "prune", "--yes")
         assert report("usage-after-prune", "df")["branch_memory"]["count"] == 0
-        command("restore-local", "restore", "saved:base", "--name", "restored", "--forked", "--no-net")
+        command("restore-local", "snapshot", "restore", "saved:base",
+                "--name", "restored", "--cow-mem", "--no-net")
         command("restore-retains-state", "exec", "restored", "--", "sh", "-ec",
                 'test "$(cat /root/storage-marker)" = disk-state; test "$(cat /ram/storage-marker)" = ram-state')
-        command("import-fresh-home", "snapshot", "import", str(archive), "--group", "imported", home=homes[1])
+        command("import-fresh-home", "snapshot", "load", "imported", "--file", str(archive), home=homes[1])
         assert report("imported-snapshot-roots-image", "image", "prune", "--yes", home=homes[1])["image_refs_removed"] == 0
-        command("restore-imported", "restore", "imported:base", "--name", "received", "--forked", "--no-net", home=homes[1])
+        command("restore-imported", "snapshot", "restore", "imported:base",
+                "--name", "received", "--cow-mem", "--no-net", home=homes[1])
         command("import-retains-state", "exec", "received", "--", "sh", "-ec",
                 'test "$(cat /root/storage-marker)" = disk-state; test "$(cat /ram/storage-marker)" = ram-state', home=homes[1])
-        for home, name, selector in [(homes[0], "restored", "saved:base"), (homes[1], "received", "imported:base")]:
+        for home, name, group in [(homes[0], "restored", "saved"), (homes[1], "received", "imported")]:
             # Completed restores own their payloads. Deleting the source must succeed,
             # while the running child's catalog ownership still excludes its image from GC.
-            command(f"remove-snapshot-{name}", "snapshot", "rm", selector, home=home)
+            command(f"remove-snapshot-{name}", "snapshot", "rm", group, "--checkpoint", "base", home=home)
             assert report(f"restored-vm-roots-image-{name}", "image", "prune", "--yes", home=home)["image_refs_removed"] == 0
             report(f"prune-while-restored-{name}", "prune", "--yes", home=home)
             command(f"independent-restored-state-{name}", "exec", name, "--", "sh", "-ec",
@@ -110,6 +115,7 @@ def run(args):
                 for item in report(f"cleanup-list-{index}", "list", home=home):
                     if item["status"] not in ("Stopped", "Crashed"):
                         command(f"cleanup-stop-{index}-{item['name']}", "stop", item["name"], "--force", home=home)
+                    command(f"cleanup-remove-{index}-{item['name']}", "remove", item["name"], home=home)
             except Exception as error:  # noqa: BLE001 - clean every home, then report all failures.
                 failures.append(str(error))
         if failures:

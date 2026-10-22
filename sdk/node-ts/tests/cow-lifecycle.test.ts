@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { Sandbox, Snapshot } from "../dist/index.js";
+import { Sandbox, Checkpoint } from "../dist/index.js";
 
 // Opt-in because this starts real VMs with a matching development runtime/kernel bundle.
 it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and restores private memory", async () => {
@@ -15,7 +15,7 @@ it.skipIf(process.env.MSB_COW_LIVE !== "1")("captures a resident pause and resto
     const branched = await paused.fork(`${name}-paused-branch`);
     branches.push(branched);
     expect((await branched.exec("cat", ["/dev/shm/sdk-marker"])).stdout().trim()).toBe("source");
-    const snapshot = await Snapshot.builder(`${name}-full`).fromSandbox(name).full().create();
+    const snapshot = await Checkpoint.builder(`${name}-full`).fromSandbox(name).full().create();
     await paused.resume();
     child = await Sandbox.restore(snapshot.path).name(`${name}-child`).cowMemory().restore();
     expect((await child.exec("cat", ["/dev/shm/sdk-marker"])).stdout().trim()).toBe("source");

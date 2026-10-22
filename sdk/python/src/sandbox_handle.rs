@@ -690,15 +690,38 @@ impl PySandboxHandle {
         })
     }
 
-    /// Snapshot this sandbox's disk under a bare name, preserving its running/paused state. Resolves
-    /// under `~/.microsandbox/snapshots/<name>/`. Move artifacts with
-    /// `Snapshot.save`/`Snapshot.load`.
-    fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+    /// Create a new source-bound history and return its exact initial checkpoint.
+    #[pyo3(signature = (name, *, initial_checkpoint=None, dest_dir=None, labels=None, full=false, record_integrity=false, guest_flush=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        initial_checkpoint: Option<String>,
+        dest_dir: Option<std::path::PathBuf>,
+        labels: Option<std::collections::HashMap<String, String>>,
+        full: bool,
+        record_integrity: bool,
+        guest_flush: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        let options = crate::snapshot_group::capture_options(
+            initial_checkpoint,
+            dest_dir,
+            self.inner.backend_kind().as_str() == "local",
+            labels,
+            full,
+            record_integrity,
+            guest_flush,
+        )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.clone();
-            let snap = guard.snapshot(&name).await.map_err(to_py_err)?;
-            Ok(crate::snapshot::PySnapshot::from_rust(snap))
+            let result = handle
+                .snapshot_with(&name, |_| options)
+                .await
+                .map_err(to_py_err)?;
+            Ok(crate::snapshot_group::PySnapshotCreateResult::from_rust(
+                result,
+            ))
         })
     }
 }

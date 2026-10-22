@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from microsandbox import Snapshot, SnapshotHandle
+from microsandbox import Checkpoint, SnapshotHandle
 
 
 @pytest.mark.asyncio
@@ -33,8 +33,14 @@ async def test_local_snapshot_path(tmp_path: Path) -> None:
     }
     (tmp_path / "snapshot.json").write_text(json.dumps(manifest))
     (tmp_path / "upper.ext4").write_bytes(b"hello")
-    snapshot = await Snapshot.open(str(tmp_path))
+    snapshot = await Checkpoint.open(str(tmp_path))
     assert snapshot.path == str(tmp_path.resolve())
     assert snapshot.reference == snapshot.path
     assert snapshot.reference_kind == "path"
     assert hasattr(SnapshotHandle, "path")
+    report = await snapshot.verify()
+    assert report["upper"]["kind"] == "not_recorded"
+    assert report["coverage"] == {
+        "kind": "incomplete",
+        "unrecorded": [str(tmp_path.resolve() / "upper.ext4")],
+    }

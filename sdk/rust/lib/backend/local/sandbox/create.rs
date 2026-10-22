@@ -797,9 +797,12 @@ impl LocalBackend {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
-        let created = self
-            .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
-            .await;
+        // Keep the large launch future out of this outer future's inline storage.
+        // Nested group restores can otherwise exhaust a default-sized thread stack
+        // in debug builds. Poll it here so ownership and cancellation stay unchanged.
+        let created =
+            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard)))
+                .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {

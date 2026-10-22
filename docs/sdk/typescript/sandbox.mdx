@@ -2696,17 +2696,17 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Note>Group creation is local-only. For supported cloud disk capture, use the artifact capture helpers under `Checkpoint`.</Note>
 
 ```typescript
-snapshot(name)
+snapshot(group)
 ```
 
-Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/typescript/snapshots).
+Create a new named group and its first checkpoint. An existing group name is refused; append through the returned group instead. See [Snapshots](/sdk/typescript/snapshots).
 
 <p className="msb-label">Returns</p>
 
-`Promise<Snapshot>`
+`Promise<SnapshotCreateResult>`
 
 ## RegistryConfigBuilder
 

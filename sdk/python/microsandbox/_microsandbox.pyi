@@ -42,6 +42,7 @@ from microsandbox.types import (
     SecretModifySpec,
     SecurityProfile,
     SnapshotFormat,
+    SnapshotGroupInfo,
     SnapshotScope,
     SnapshotStateKind,
     StatVirtualization,
@@ -97,6 +98,17 @@ class SandboxPage:
     def next_cursor(self) -> str | None: ...
 
 class Sandbox:
+    async def snapshot(
+        self,
+        name: str,
+        *,
+        initial_checkpoint: str | None = None,
+        dest_dir: str | os.PathLike[str] | None = None,
+        labels: dict[str, str] | None = None,
+        full: bool = False,
+        record_integrity: bool = False,
+        guest_flush: str | None = None,
+    ) -> SnapshotCreateResult: ...
     """Sandbox lifecycle API.
 
     Sandbox names are limited to 128 UTF-8 bytes.
@@ -123,6 +135,7 @@ class Sandbox:
         security: SecurityProfile | None = None,
         max_duration: float | None = None,
         idle_timeout: float | None = None,
+        guest_clock: Literal["sync", "off"] | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -154,6 +167,7 @@ class Sandbox:
         security: SecurityProfile | None = None,
         max_duration: float | None = None,
         idle_timeout: float | None = None,
+        guest_clock: Literal["sync", "off"] | None = None,
         cow_memory: bool = False,
         forked: bool = False,  # Deprecated: use cow_memory.
         disk_only: bool = False,
@@ -653,7 +667,17 @@ class SandboxHandle:
     async def destroy(self, *, force: bool = False, timeout: float | None = None) -> None: ...
     async def wait_until_stopped(self) -> SandboxStopResult: ...
     async def remove(self) -> None: ...
-    async def snapshot(self, name: str) -> Snapshot: ...
+    async def snapshot(
+        self,
+        name: str,
+        *,
+        initial_checkpoint: str | None = None,
+        dest_dir: str | os.PathLike[str] | None = None,
+        labels: dict[str, str] | None = None,
+        full: bool = False,
+        record_integrity: bool = False,
+        guest_flush: str | None = None,
+    ) -> SnapshotCreateResult: ...
 
 class ExecOutput:
     @property
@@ -1165,6 +1189,21 @@ class ExternalMountWarning:
     def stale_inodes(self) -> list[int]: ...
 
 class Snapshot:
+    async def spawn_sandbox(self, *, name: str | None = None, **kwargs: Any) -> Sandbox: ...
+    async def spawn_sandbox_with_progress(
+        self, *, name: str | None = None, **kwargs: Any
+    ) -> PullSession: ...
+    async def save(
+        self,
+        out: str | os.PathLike[str],
+        *,
+        with_parents: bool = False,
+        with_image: bool = False,
+        plain_tar: bool = False,
+        since: str | None = None,
+        last_layers: int | None = None,
+        compatibility: Literal["current", "0.7.8"] = "current",
+    ) -> None: ...
     async def storage_usage(self) -> StorageItemUsage: ...
     @staticmethod
     async def create(
@@ -1200,11 +1239,12 @@ class Snapshot:
     @staticmethod
     async def list() -> list[SnapshotHandle]: ...
     @staticmethod
-    async def remove(path_or_name: str, *, force: bool = False) -> None: ...
+    async def remove_by_reference(path_or_name: str, *, force: bool = False) -> None: ...
+    async def remove(self, *, force: bool = False) -> CheckpointRemoveResult: ...
     @staticmethod
     async def reindex(dir: str | os.PathLike[str] | None = None) -> int: ...
     @staticmethod
-    async def save(
+    async def save_by_reference(
         name_or_path: str,
         out: str | os.PathLike[str],
         *,
@@ -1213,6 +1253,7 @@ class Snapshot:
         plain_tar: bool = False,
         since: str | None = None,
         last_layers: int | None = None,
+        compatibility: Literal["current", "0.7.8"] = "current",
     ) -> None: ...
     @staticmethod
     async def load(
@@ -1285,6 +1326,7 @@ class Snapshot:
         plain_tar: bool = False,
         since: str | None = None,
         last_layers: int | None = None,
+        compatibility: Literal["current", "0.7.8"] = "current",
     ) -> None: ...
     def copy_to(self, output_archive_path: str | os.PathLike[str]) -> SnapshotCopyBuilder: ...
     async def verify(self) -> dict[str, Any]: ...
@@ -1359,6 +1401,7 @@ class SnapshotHandle:
         plain_tar: bool = False,
         since: str | None = None,
         last_layers: int | None = None,
+        compatibility: Literal["current", "0.7.8"] = "current",
     ) -> None: ...
 
 class PullSession:
@@ -1472,3 +1515,95 @@ class JobLogStream:
     async def close(self) -> None: ...
     def __aiter__(self) -> JobLogStream: ...
     async def __anext__(self) -> JobLogEntry: ...
+
+
+class SnapshotGroup:
+    async def inspect(self) -> SnapshotGroupInfo: ...
+    async def remove(self) -> SnapshotRemoveResult: ...
+    async def verify(self) -> dict[str, Any]: ...
+    @staticmethod
+    async def load(
+        group: str,
+        files: list[str | os.PathLike[str]],
+        *,
+        dest: str | os.PathLike[str] | None = None,
+        base: str | None = None,
+        set_head: bool = False,
+    ) -> SnapshotImportResult: ...
+    async def spawn_sandbox(self, *, name: str | None = None, **kwargs: Any) -> Sandbox: ...
+    async def spawn_sandbox_with_progress(
+        self, *, name: str | None = None, **kwargs: Any
+    ) -> PullSession: ...
+    """Named checkpoint history; a cleared head does not remove its members."""
+    @staticmethod
+    async def get(name: str) -> SnapshotGroup: ...
+    @staticmethod
+    async def open(path: str | os.PathLike[str]) -> SnapshotGroup: ...
+    @staticmethod
+    async def list() -> list[SnapshotGroup]: ...
+    @property
+    def name(self) -> str: ...
+    async def head(self) -> Snapshot | None: ...
+    async def checkpoints(self) -> list[SnapshotHandle]: ...
+    async def get_checkpoint(self, member: str) -> Snapshot: ...
+    async def set_head(self, member: str) -> dict[str, Any]: ...
+    async def clear_head(self) -> dict[str, Any]: ...
+    async def checkpoint(
+        self,
+        *,
+        name: str | None = None,
+        labels: dict[str, str] | None = None,
+        full: bool = False,
+        record_integrity: bool = False,
+        guest_flush: str | None = None,
+    ) -> CheckpointCaptureResult: ...
+
+class SnapshotCreateResult:
+    @property
+    def snapshot(self) -> SnapshotGroup: ...
+    @property
+    def checkpoint(self) -> Snapshot: ...
+    @property
+    def head_update(self) -> dict[str, Any]: ...
+
+class CheckpointCaptureResult:
+    @property
+    def checkpoint(self) -> Snapshot: ...
+    @property
+    def head_update(self) -> dict[str, Any]: ...
+
+class SnapshotImportResult:
+    @property
+    def operation_id(self) -> str: ...
+    @property
+    def snapshot(self) -> SnapshotGroup: ...
+    @property
+    def checkpoints(self) -> list[SnapshotHandle]: ...
+    @property
+    def added(self) -> list[str]: ...
+    @property
+    def reused(self) -> list[str]: ...
+    @property
+    def head_update(self) -> dict[str, Any]: ...
+    @property
+    def warnings(self) -> list[str]: ...
+
+class CheckpointRemoveResult:
+    """One removal's committed identity and head outcome; never a later head read."""
+    @property
+    def id(self) -> str: ...
+    @property
+    def head_update(self) -> dict[str, Any] | None: ...
+    @property
+    def warnings(self) -> list[str]: ...
+
+class SnapshotRemoveResult:
+    """Whole-history removal and its operation-owned head outcome."""
+    @property
+    def group(self) -> str: ...
+    @property
+    def removed(self) -> list[str]: ...
+    @property
+    def head_update(self) -> dict[str, Any]: ...
+    @property
+    def warnings(self) -> list[str]: ...

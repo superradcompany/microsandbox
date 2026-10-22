@@ -6,7 +6,7 @@ icon: "code-branch"
 
 <Tooltip tip="Cloud supports disk snapshots from stopped persistent sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
+Save a prepared sandbox and reuse it as a starting point. Each spawn or restore creates a new sandbox and leaves the source unchanged. `Snapshot` names a mutable history and `Checkpoint` names an immutable member. SDK group/checkpoint spawn methods are canonical. The legacy CLI restore grammar and SDK restore helpers remain available with their existing capabilities; this guide does not extend deprecated CLI restore.
 
 ## Snapshot types
 
@@ -94,7 +94,8 @@ import { Sandbox } from "microsandbox";
 
 const baseline = await Sandbox.get("baseline");
 
-const snapshot = await baseline.snapshot("ready");
+const created = await baseline.snapshotWith("baseline", capture => capture.initialCheckpoint("ready"));
+const snapshot = created.checkpoint;
 ```
 
 ```rust Rust
@@ -102,7 +103,8 @@ use microsandbox::Sandbox;
 
 let baseline = Sandbox::get("baseline").await?;
 
-let snapshot = baseline.snapshot("ready").await?;
+let created = baseline.snapshot_with("baseline", |capture| capture.initial_checkpoint("ready")).await?;
+let snapshot = created.checkpoint;
 ```
 
 ```python Python
@@ -110,7 +112,8 @@ from microsandbox import Sandbox
 
 baseline = await Sandbox.get("baseline")
 
-snapshot = await baseline.snapshot("ready")
+created = await baseline.snapshot("baseline", initial_checkpoint="ready")
+snapshot = created.checkpoint
 ```
 
 ```go Go
@@ -119,19 +122,23 @@ if err != nil {
     return err
 }
 
-snapshot, err := baseline.Snapshot(ctx, "ready")
+created, err := baseline.Snapshot(ctx, "baseline", m.WithSnapshotCaptureConfig(
+    m.SnapshotCaptureConfig{Name: "ready"},
+))
 if err != nil {
     return err
 }
+snapshot := created.Checkpoint
 ```
 
 ```ruby Ruby
 baseline = Microsandbox::Sandbox.get("baseline")
-snapshot = baseline.snapshot("ready")
+created = baseline.snapshot("baseline", initial_checkpoint: "ready")
+snapshot = created.checkpoint
 ```
 
 ```bash CLI
-msb snap create ready --sandbox baseline
+msb snap create baseline --sandbox baseline --name ready
 ```
 </CodeGroup>
 
@@ -142,24 +149,19 @@ Restore into `worker`. Its disk writes are independent of the source.
 
 <CodeGroup>
 ```typescript TypeScript
-const worker = await Sandbox.restore(snapshot)
-    .name("worker")
-    .restore();
+const worker = await snapshot.spawnSandboxWith(destination => destination.name("worker"));
 ```
 
 ```rust Rust
-let worker = Sandbox::restore_ref(snapshot.reference())
-    .name("worker")
-    .restore()
-    .await?;
+let worker = snapshot.spawn_sandbox_with(|destination| destination.name("worker")).await?;
 ```
 
 ```python Python
-worker = await Sandbox.restore(snapshot, name="worker")
+worker = await snapshot.spawn_sandbox(name="worker")
 ```
 
 ```go Go
-worker, err := m.RestoreSandbox(ctx, snapshot, "worker")
+worker, err := snapshot.SpawnSandbox(ctx, "worker")
 if err != nil {
     return err
 }
@@ -194,18 +196,18 @@ Start with a running or paused sandbox named `worker`:
 
 <CodeGroup>
 ```typescript TypeScript
-import { Snapshot } from "microsandbox";
+import { Checkpoint } from "microsandbox";
 
-const snapshot = await Snapshot.builder("snap")
+const snapshot = await Checkpoint.builder("snap")
     .fromSandbox("worker")
     .full()
     .create();
 ```
 
 ```rust Rust
-use microsandbox::Snapshot;
+use microsandbox::Checkpoint;
 
-let snapshot = Snapshot::builder("snap")
+let snapshot = Checkpoint::builder("snap")
     .from_sandbox("worker")
     .full()
     .create()
@@ -213,9 +215,9 @@ let snapshot = Snapshot::builder("snap")
 ```
 
 ```python Python
-from microsandbox import Snapshot
+from microsandbox import Checkpoint
 
-snapshot = await Snapshot.create(
+snapshot = await Checkpoint.create(
     "snap",
     from_sandbox="worker",
     full=True,
@@ -223,7 +225,7 @@ snapshot = await Snapshot.create(
 ```
 
 ```go Go
-snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+snapshot, err := m.Checkpoint.Create(ctx, m.SnapshotCreateOptions{
     Name:        "snap",
     FromSandbox: "worker",
     Full:        true,
@@ -231,7 +233,7 @@ snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
 ```
 
 ```bash CLI
-msb snap create snap --sandbox worker --full
+msb snap create worker --sandbox worker --name snap --full
 ```
 </CodeGroup>
 
@@ -467,9 +469,9 @@ The default `auto` policy flushes running disk snapshots. Full snapshots and for
 
 <CodeGroup>
 ```typescript TypeScript
-import { Snapshot } from "microsandbox";
+import { Checkpoint } from "microsandbox";
 
-const snapshot = await Snapshot.builder("ready")
+const snapshot = await Checkpoint.builder("ready")
     .fromSandbox("worker")
     .full()
     .guestFlush("required")
@@ -477,9 +479,9 @@ const snapshot = await Snapshot.builder("ready")
 ```
 
 ```rust Rust
-use microsandbox::{snapshot::GuestFlush, Snapshot};
+use microsandbox::{snapshot::GuestFlush, Checkpoint};
 
-let snapshot = Snapshot::builder("ready")
+let snapshot = Checkpoint::builder("ready")
     .from_sandbox("worker")
     .full()
     .guest_flush(GuestFlush::Required)
@@ -488,9 +490,9 @@ let snapshot = Snapshot::builder("ready")
 ```
 
 ```python Python
-from microsandbox import GuestFlush, Snapshot
+from microsandbox import GuestFlush, Checkpoint
 
-snapshot = await Snapshot.create(
+snapshot = await Checkpoint.create(
     "ready",
     from_sandbox="worker",
     full=True,
@@ -501,7 +503,7 @@ snapshot = await Snapshot.create(
 ```go Go
 import m "github.com/superradcompany/microsandbox/sdk/go"
 
-snapshot, err := m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+snapshot, err := m.Checkpoint.Create(ctx, m.SnapshotCreateOptions{
     Name:        "ready",
     FromSandbox: "worker",
     Full:        true,
@@ -511,7 +513,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snap create ready --sandbox worker --full --guest-flush required
+msb snap create worker --sandbox worker --name ready --full --guest-flush required
 ```
 </CodeGroup>
 
@@ -957,58 +959,58 @@ List snapshots, inspect one, or remove it:
 
 <CodeGroup>
 ```typescript TypeScript
-const snapshots = await Snapshot.list();
+const snapshots = await Checkpoint.list();
 
-const saved = await Snapshot.open("baseline:ready");
+const saved = await Checkpoint.open("baseline:ready");
 console.log(saved.digest);
 
-await Snapshot.remove("baseline:ready");
+await Checkpoint.remove("baseline:ready");
 ```
 
 ```rust Rust
-let snapshots = Snapshot::list().await?;
+let snapshots = Checkpoint::list().await?;
 
-let saved = Snapshot::open("baseline:ready").await?;
+let saved = Checkpoint::open("baseline:ready").await?;
 println!("{}", saved.digest());
 
-Snapshot::remove("baseline:ready", false).await?;
+Checkpoint::remove_by_reference("baseline:ready", false).await?;
 ```
 
 ```python Python
-snapshots = await Snapshot.list()
+snapshots = await Checkpoint.list()
 
-saved = await Snapshot.open("baseline:ready")
+saved = await Checkpoint.open("baseline:ready")
 print(saved.digest)
 
-await Snapshot.remove("baseline:ready")
+await Checkpoint.remove("baseline:ready")
 ```
 
 ```go Go
-snapshots, err := m.Snapshot.List(ctx)
+snapshots, err := m.Checkpoint.List(ctx)
 if err != nil { return err }
 
-saved, err := m.Snapshot.Open(ctx, "baseline:ready")
+saved, err := m.Checkpoint.Open(ctx, "baseline:ready")
 if err != nil { return err }
 
 fmt.Println(saved.Digest())
-err = m.Snapshot.Remove(ctx, "baseline:ready", false)
+err = m.Checkpoint.Remove(ctx, "baseline:ready", false)
 if err != nil { return err }
 ```
 
 ```ruby Ruby
-snapshots = Microsandbox::Snapshot.list
+snapshots = Microsandbox::Checkpoint.list
 
-saved = Microsandbox::Snapshot.open("baseline:ready")
+saved = Microsandbox::Checkpoint.open("baseline:ready")
 puts saved.digest
 
-Microsandbox::Snapshot.remove("baseline:ready")
+Microsandbox::Checkpoint.remove("baseline:ready")
 ```
 
 ```bash CLI
 msb snap ls
-msb snap ls --group baseline
-msb snap inspect baseline:ready
-msb snap rm baseline:ready
+msb snap ls baseline
+msb snap inspect baseline --checkpoint ready
+msb snap rm baseline --checkpoint ready
 ```
 </CodeGroup>
 
@@ -1016,187 +1018,133 @@ msb snap rm baseline:ready
 
 ### Snapshot groups
 
-A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots. Choose the original group when capturing to keep the new snapshots in that group; otherwise, the group defaults to the restored sandbox’s name.
+A group is the checkpoint history of one sandbox instance. Its saved source association uses stable identity, so deleting and recreating a sandbox with the same name does not rebind the group. A sandbox may have several groups. Restoring a member into a new sandbox does not give that child permission to append to the original group; create a new group for the child.
 
-Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
-
-See the [v0.6 snapshot upgrade example](/migrations/v0.7#update-snapshot-code).
-
-Locally, `group` selects its head; `group:member` selects an exact snapshot:
+Create a group and its first checkpoint, then append through the group. Creating an existing group fails. Capturing an imported, unbound, or orphaned group also fails before guest work. Checkpoints are immutable; choose a unique or generated name for each capture. Explicit removal still checks readers and dependencies.
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.builder("cp01")
-    .fromSandbox("baseline")
-    .group("work")
-    .create();
-
-await Snapshot.builder("cp02")
-    .fromSandbox("baseline")
-    .group("work")
-    .create();
-
-const latest = await Sandbox.restore("work")
-    .name("latest")
-    .restore();
-
-const earlier = await Sandbox.restore("work:cp01")
-    .name("earlier")
-    .restore();
-
-await Snapshot.groupHead("work");
-
-await Snapshot.groupHead("work:cp01");
+const source = await Sandbox.get("baseline");
+const created = await source.snapshotWith("work", capture => capture.initialCheckpoint("cp01"));
+const group = created.snapshot;
+await group.checkpointWith(capture => capture.name("cp02"));
+const latest = await group.spawnSandboxWith(destination => destination.name("latest"));
+const first = await group.getCheckpoint("cp01");
+const earlier = await first.spawnSandboxWith(destination => destination.name("earlier"));
+await group.setHead("cp01");
+await group.clearHead(); // Members remain; future head-based spawn needs a selection.
 ```
 
 ```rust Rust
-Snapshot::builder("cp01")
-    .from_sandbox("baseline")
-    .group("work")
-    .create()
-    .await?;
-
-Snapshot::builder("cp02")
-    .from_sandbox("baseline")
-    .group("work")
-    .create()
-    .await?;
-
-let latest = Sandbox::restore("work")
-    .name("latest")
-    .restore()
-    .await?;
-
-let earlier = Sandbox::restore("work:cp01")
-    .name("earlier")
-    .restore()
-    .await?;
-
-Snapshot::group_head("work").await?;
-
-Snapshot::group_head("work:cp01").await?;
+let source = Sandbox::get("baseline").await?;
+let created = source.snapshot_with("work", |capture| capture.initial_checkpoint("cp01")).await?;
+let group = created.snapshot;
+group.checkpoint_with(|capture| capture.name("cp02")).await?;
+let latest = group.spawn_sandbox_with(|destination| destination.name("latest")).await?;
+let first = group.get_checkpoint("cp01").await?;
+let earlier = first.spawn_sandbox_with(|destination| destination.name("earlier")).await?;
+group.set_head("cp01").await?;
+group.clear_head().await?; // Members remain; future head-based spawn needs a selection.
 ```
 
 ```python Python
-await Snapshot.create("cp01", from_sandbox="baseline", group="work")
-
-await Snapshot.create("cp02", from_sandbox="baseline", group="work")
-
-latest = await Sandbox.restore("work", name="latest")
-
-earlier = await Sandbox.restore("work:cp01", name="earlier")
-
-await Snapshot.group_head("work")
-
-await Snapshot.group_head("work:cp01")
+source = await Sandbox.get("baseline")
+created = await source.snapshot("work", initial_checkpoint="cp01")
+group = created.snapshot
+await group.checkpoint(name="cp02")
+latest = await group.spawn_sandbox(name="latest")
+first = await group.get_checkpoint("cp01")
+earlier = await first.spawn_sandbox(name="earlier")
+await group.set_head("cp01")
+await group.clear_head()  # Members remain; future head-based spawn needs a selection.
 ```
 
 ```go Go
-var err error
-
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name: "cp01",
-    FromSandbox: "baseline",
-    Group: "work",
-})
+source, err := m.GetSandbox(ctx, "baseline")
 if err != nil { return err }
-
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
-    Name: "cp02",
-    FromSandbox: "baseline",
-    Group: "work",
-})
+created, err := source.Snapshot(ctx, "work", m.WithSnapshotCaptureConfig(m.SnapshotCaptureConfig{Name: "cp01"}))
 if err != nil { return err }
-
-latest, err := m.RestoreSandbox(ctx, "work", "latest")
+group := created.Snapshot
+if _, err = group.Checkpoint(ctx, m.WithSnapshotCaptureConfig(m.SnapshotCaptureConfig{Name: "cp02"})); err != nil { return err }
+latest, err := group.SpawnSandbox(ctx, "latest")
 if err != nil { return err }
-
-earlier, err := m.RestoreSandbox(ctx, "work:cp01", "earlier")
+first, err := group.GetCheckpoint(ctx, "cp01")
 if err != nil { return err }
-
-_, err = m.Snapshot.GroupHead(ctx, "work")
+earlier, err := first.SpawnSandbox(ctx, "earlier")
 if err != nil { return err }
+if _, err = group.SetHead(ctx, "cp01"); err != nil { return err }
+if _, err = group.ClearHead(ctx); err != nil { return err }
+```
 
-_, err = m.Snapshot.GroupHead(ctx, "work:cp01")
-if err != nil { return err }
+```ruby Ruby
+source = Microsandbox::Sandbox.get("baseline")
+created = source.snapshot("work", initial_checkpoint: "cp01")
+group = created.snapshot
+group.checkpoint(name: "cp02")
+first = group.get_checkpoint("cp01")
+group.set_head("cp01")
+group.clear_head
+first.save_to("cp01.msb")
 ```
 
 ```bash CLI
-msb snap create cp01 --sandbox baseline --group work
-msb snap create cp02 --sandbox baseline --group work
+msb snap create work --sandbox baseline --name cp01
+msb snap checkpoint work --name cp02
 msb snap restore work --name latest
 msb snap restore work:cp01 --name earlier
-msb snap head work           # Show the selected snapshot ID
-msb snap head work:cp01      # Explicitly select an earlier checkpoint
+msb snap head work
+msb snap modify work --set-head cp01
+msb snap modify work --clear-head
 ```
 </CodeGroup>
 
-The first capture sets the head. Later captures or imports advance it only with proven ancestry; older or divergent snapshots leave it unchanged. Select another head before removing the current one if other members remain.
+The first capture sets head. Later captures or imports advance it only with proven ancestry; older or divergent checkpoints leave it unchanged. Removing head atomically selects its surviving recorded parent in the same group, or clears selection when none survives. It never selects an unrelated member or a parent from another group. Group spawn selects one head at admission and keeps that exact member protected during preparation.
 
-<Accordion title="Import into a group">
+`msb snap checkpoint --sandbox baseline` is a convenience selector when exactly one group is associated with the source. Multiple associated groups require explicit selection. Combining a group and `--sandbox` validates their association; it cannot override the group’s source.
 
-Imports without a group create a new one. Select an imported head explicitly when needed:
+<Accordion title="Import a checkpoint history">
+
+Choose a destination group explicitly. Importing several archives is one atomic operation; file order does not choose head. Dependency resolution uses the whole supplied set, and a failed preflight publishes none of its new members.
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.loadWithOptions("snap.msb", { group: "work" });
-
-await Snapshot.loadWithOptions("experiment.msb", {
-    group: "work",
-    setHead: true,
-});
+import { Snapshot } from "microsandbox";
+const imported = await Snapshot.load("work", ["base.msb", "changes.msb"]);
+await imported.snapshot.setHead("cp01");
 ```
 
 ```rust Rust
-use std::path::Path;
-
-use microsandbox::{snapshot::LoadOpts, Snapshot};
-
-Snapshot::load_with_options(
-    Path::new("snap.msb"),
-    LoadOpts {
-        group: Some("work".into()),
-        ..Default::default()
-    },
-).await?;
-
-Snapshot::load_with_options(
-    Path::new("experiment.msb"),
-    LoadOpts {
-        group: Some("work".into()),
-        set_head: true,
-        ..Default::default()
-    },
-).await?;
+use microsandbox::Snapshot;
+let imported = Snapshot::load("work", &["base.msb".into(), "changes.msb".into()]).await?;
+imported.snapshot.set_head("cp01").await?;
 ```
 
 ```python Python
-await Snapshot.load("snap.msb", group="work")
-
-await Snapshot.load("experiment.msb", group="work", set_head=True)
+from microsandbox import Snapshot
+imported = await Snapshot.load("work", ["base.msb", "changes.msb"])
+await imported.snapshot.set_head("cp01")
 ```
 
 ```go Go
-var err error
-
-_, err = m.Snapshot.LoadWithOptions(ctx, "snap.msb",
-    m.SnapshotLoadOptions{Group: "work"},
-)
+imported, err := m.Snapshot.Load(ctx, "work", []string{"base.msb", "changes.msb"})
 if err != nil { return err }
+if _, err = imported.Snapshot.SetHead(ctx, "cp01"); err != nil { return err }
+```
 
-_, err = m.Snapshot.LoadWithOptions(ctx, "experiment.msb",
-    m.SnapshotLoadOptions{Group: "work", SetHead: true},
-)
-if err != nil { return err }
+```ruby Ruby
+imported = Microsandbox::Snapshot.load("work", ["base.msb", "changes.msb"])
+imported.snapshot.set_head("cp01")
 ```
 
 ```bash CLI
-msb snap import snap.msb --group work
-msb snap import experiment.msb --group work --set-head
+msb snap import work --file base.msb --file changes.msb
+msb snap modify work --set-head cp01
 ```
 </CodeGroup>
 
-Identical members can be reused; conflicting IDs or names fail. Publication never overwrites an existing member. Inspect the group before retrying an interrupted import.
+Identical members are reused; conflicting IDs or names fail. An existing head stays selected when new tips are incomparable, while a new group can be committed headless. Explicit `--set-head` requires an unambiguous candidate. The result reports added/reused members, the operation’s head decision and cleanup warnings. Errors distinguish no publication, committed publication with a later failure, and an unknown outcome requiring recovery. Follow the diagnostic before retrying. Imported groups remain unbound and cannot capture new checkpoints.
+
+See [atomic import requirements](/cli/snapshot-commands#msb-snap-import) for qualified filesystems and concurrent older-writer restrictions. No best-effort publication fallback is used.
 
 </Accordion>
 
@@ -1210,15 +1158,15 @@ Copy either snapshot type to another machine as a `.msb` archive. Include the im
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
+await Checkpoint.save("baseline:ready", "ready.msb", { withImage: true });
 ```
 
 ```rust Rust
 use std::path::Path;
 
-use microsandbox::{snapshot::SaveOpts, Snapshot};
+use microsandbox::{snapshot::SaveOpts, Checkpoint};
 
-Snapshot::save("baseline:ready",
+Checkpoint::save_by_reference("baseline:ready",
     Path::new("ready.msb"),
     SaveOpts {
         with_image: true,
@@ -1228,24 +1176,24 @@ Snapshot::save("baseline:ready",
 ```
 
 ```python Python
-await Snapshot.save("baseline:ready", "ready.msb", with_image=True)
+await Checkpoint.save_by_reference("baseline:ready", "ready.msb", with_image=True)
 ```
 
 ```go Go
 var err error
 
-err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
+err = m.Checkpoint.Save(ctx, "baseline:ready", "ready.msb",
     m.SnapshotSaveOptions{WithImage: true},
 )
 if err != nil { return err }
 ```
 
 ```ruby Ruby
-Microsandbox::Snapshot.save("baseline:ready", "ready.msb", with_image: true)
+Microsandbox::Checkpoint.save("baseline:ready", "ready.msb", with_image: true)
 ```
 
 ```bash CLI
-msb snap export baseline:ready --output ready.msb --with-image
+msb snap export baseline --checkpoint ready --output ready.msb --with-image
 ```
 </CodeGroup>
 
@@ -1287,18 +1235,18 @@ Load a base and dependent archives together; order does not matter:
 
 <CodeGroup>
 ```typescript TypeScript
-const handles = await Snapshot.loadMany(
+const handles = await Checkpoint.loadMany(
     ["changes.msb", "base.msb"],
     { group: "received", dest: "/mnt/snapshots" },
 );
 ```
 
 ```rust Rust
-use microsandbox::{snapshot::LoadOpts, Snapshot};
+use microsandbox::{snapshot::LoadOpts, Checkpoint};
 
 let archives = vec!["changes.msb".into(), "base.msb".into()];
 
-let handles = Snapshot::load_many(
+let handles = Checkpoint::load_many(
     &archives,
     LoadOpts {
         group: Some("received".into()),
@@ -1309,7 +1257,7 @@ let handles = Snapshot::load_many(
 ```
 
 ```python Python
-handles = await Snapshot.load_many(
+handles = await Checkpoint.load_many(
     ["changes.msb", "base.msb"],
     group="received",
     dest="/mnt/snapshots",
@@ -1317,7 +1265,7 @@ handles = await Snapshot.load_many(
 ```
 
 ```go Go
-handles, err := m.Snapshot.LoadMany(ctx,
+handles, err := m.Checkpoint.LoadMany(ctx,
     []string{"changes.msb", "base.msb"},
     m.SnapshotLoadOptions{Group: "received", Dest: "/mnt/snapshots"},
 )
@@ -1325,7 +1273,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snap import changes.msb base.msb --group received --dest /mnt/snapshots
+msb snap import received --file changes.msb --file base.msb --dest /mnt/snapshots
 ```
 </CodeGroup>
 
@@ -1339,12 +1287,12 @@ Export only disk layers and full-snapshot RAM objects not supplied by an exact b
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.builder("v2")
+await Checkpoint.builder("v2")
     .fromSandbox("worker")
     .full()
     .create();
 
-await Snapshot.save("worker:v2", "changes.msb", {
+await Checkpoint.save("worker:v2", "changes.msb", {
     since: "worker:v1",
 });
 ```
@@ -1352,15 +1300,15 @@ await Snapshot.save("worker:v2", "changes.msb", {
 ```rust Rust
 use std::path::Path;
 
-use microsandbox::{snapshot::SaveOpts, Snapshot};
+use microsandbox::{snapshot::SaveOpts, Checkpoint};
 
-Snapshot::builder("v2")
+Checkpoint::builder("v2")
     .from_sandbox("worker")
     .full()
     .create()
     .await?;
 
-Snapshot::save("worker:v2",
+Checkpoint::save_by_reference("worker:v2",
     Path::new("changes.msb"),
     SaveOpts {
         since: Some("worker:v1".into()),
@@ -1370,9 +1318,9 @@ Snapshot::save("worker:v2",
 ```
 
 ```python Python
-await Snapshot.create("v2", from_sandbox="worker", full=True)
+await Checkpoint.create("v2", from_sandbox="worker", full=True)
 
-await Snapshot.save(
+await Checkpoint.save_by_reference(
     "worker:v2",
     "changes.msb",
     since="worker:v1",
@@ -1382,14 +1330,14 @@ await Snapshot.save(
 ```go Go
 var err error
 
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+_, err = m.Checkpoint.Create(ctx, m.SnapshotCreateOptions{
     Name: "v2",
     FromSandbox: "worker",
     Full: true,
 })
 if err != nil { return err }
 
-err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
+err = m.Checkpoint.Save(ctx, "worker:v2", "changes.msb",
     m.SnapshotSaveOptions{Since: "worker:v1"},
 )
 if err != nil { return err }
@@ -1397,7 +1345,7 @@ if err != nil { return err }
 
 ```ruby Ruby
 # Export an existing snapshot against its saved base.
-Microsandbox::Snapshot.save(
+Microsandbox::Checkpoint.save(
   "worker:v2",
   "changes.msb",
   since: "worker:v1"
@@ -1405,8 +1353,8 @@ Microsandbox::Snapshot.save(
 ```
 
 ```bash CLI
-msb snap create v2 --sandbox worker --full
-msb snap export worker:v2 --output changes.msb --since worker:v1
+msb snap checkpoint worker --name v2 --full
+msb snap export worker --checkpoint v2 --output changes.msb --since worker:v1
 ```
 </CodeGroup>
 
@@ -1416,7 +1364,7 @@ Import or restore with that base:
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.loadWithOptions("changes.msb", {
+await Checkpoint.loadWithOptions("changes.msb", {
     group: "imported",
     base: "worker:v1",
 });
@@ -1430,9 +1378,9 @@ const child = await Sandbox.restore("changes.msb")
 ```rust Rust
 use std::path::Path;
 
-use microsandbox::{snapshot::LoadOpts, Sandbox, Snapshot};
+use microsandbox::{snapshot::LoadOpts, Sandbox, Checkpoint};
 
-Snapshot::load_with_options(
+Checkpoint::load_with_options(
     Path::new("changes.msb"),
     LoadOpts {
         group: Some("imported".into()),
@@ -1449,7 +1397,7 @@ let child = Sandbox::restore("changes.msb")
 ```
 
 ```python Python
-await Snapshot.load(
+await Checkpoint.load(
     "changes.msb",
     group="imported",
     base="worker:v1",
@@ -1465,7 +1413,7 @@ child = await Sandbox.restore(
 ```go Go
 var err error
 
-_, err = m.Snapshot.LoadWithOptions(ctx, "changes.msb",
+_, err = m.Checkpoint.LoadWithOptions(ctx, "changes.msb",
     m.SnapshotLoadOptions{Group: "imported", Base: "worker:v1"},
 )
 if err != nil { return err }
@@ -1477,7 +1425,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snap import changes.msb --base worker:v1 --group imported
+msb snap import imported --file changes.msb --base worker:v1
 msb snap restore changes.msb --name child --snapshot-base worker:v1
 ```
 </CodeGroup>
@@ -1498,26 +1446,26 @@ Capture directly to an archive without installing a snapshot locally. Disk is th
 
 <CodeGroup>
 ```typescript TypeScript
-import { Snapshot } from "microsandbox";
+import { Checkpoint } from "microsandbox";
 
-const archive = await Snapshot.builder("deps")
+const archive = await Checkpoint.builder("deps")
     .fromSandbox("baseline")
     .createArchive("/tmp/deps.msb");
 ```
 
 ```rust Rust
-use microsandbox::Snapshot;
+use microsandbox::Checkpoint;
 
-let archive = Snapshot::builder("deps")
+let archive = Checkpoint::builder("deps")
     .from_sandbox("baseline")
     .create_archive("/tmp/deps.msb", false)
     .await?;
 ```
 
 ```python Python
-from microsandbox import Snapshot
+from microsandbox import Checkpoint
 
-archive = await Snapshot.create_archive(
+archive = await Checkpoint.create_archive(
     "deps",
     "/tmp/deps.msb",
     from_sandbox="baseline",
@@ -1525,7 +1473,7 @@ archive = await Snapshot.create_archive(
 ```
 
 ```go Go
-archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
+archive, err := m.Checkpoint.CreateArchive(ctx, m.SnapshotArchiveOptions{
     SnapshotCreateOptions: m.SnapshotCreateOptions{
         Name:        "deps",
         FromSandbox: "baseline",
@@ -1535,7 +1483,7 @@ archive, err := m.Snapshot.CreateArchive(ctx, m.SnapshotArchiveOptions{
 ```
 
 ```bash CLI
-msb snap create deps \
+msb snap create --name deps \
     --sandbox baseline \
     -o /tmp/deps.msb
 ```
@@ -1607,9 +1555,9 @@ Disk content hashing is opt-in. Record hashes during capture, then verify when r
 
 <CodeGroup>
 ```typescript TypeScript
-import { Snapshot } from "microsandbox";
+import { Checkpoint } from "microsandbox";
 
-const snap = await Snapshot.builder("deps")
+const snap = await Checkpoint.builder("deps")
     .fromSandbox("baseline")
     .recordIntegrity()
     .create();
@@ -1618,9 +1566,9 @@ const report = await snap.verify();
 ```
 
 ```rust Rust
-use microsandbox::Snapshot;
+use microsandbox::Checkpoint;
 
-let snap = Snapshot::builder("deps")
+let snap = Checkpoint::builder("deps")
     .from_sandbox("baseline")
     .record_integrity()
     .create()
@@ -1630,9 +1578,9 @@ let report = snap.verify().await?;
 ```
 
 ```python Python
-from microsandbox import Snapshot
+from microsandbox import Checkpoint
 
-snap = await Snapshot.create(
+snap = await Checkpoint.create(
     "deps",
     from_sandbox="baseline",
     record_integrity=True,
@@ -1642,7 +1590,7 @@ report = await snap.verify()
 ```
 
 ```go Go
-snap, err := m.Snapshot.Create(ctx,
+snap, err := m.Checkpoint.Create(ctx,
     m.SnapshotCreateOptions{
         Name:            "deps",
         FromSandbox:     "baseline",
@@ -1654,9 +1602,9 @@ report, err := snap.Verify(ctx)
 ```
 
 ```bash CLI
-msb snap create deps --sandbox baseline --integrity
-msb snap verify baseline:deps
-msb snap inspect baseline:deps --verify
+msb snap create baseline --sandbox baseline --name deps --integrity
+msb snap verify baseline --checkpoint deps
+msb snap inspect baseline --checkpoint deps --verify
 ```
 </CodeGroup>
 
@@ -1666,7 +1614,7 @@ Without hashes, size and structure checks cannot detect same-length disk corrupt
 
 <CodeGroup>
 ```typescript TypeScript
-await Snapshot.builder("saved")
+await Checkpoint.builder("saved")
     .fromSandbox("worker")
     .full()
     .recordIntegrity()
@@ -1677,7 +1625,7 @@ const child = await source.fork("child", { recordIntegrity: true });
 ```
 
 ```rust Rust
-Snapshot::builder("saved")
+Checkpoint::builder("saved")
     .from_sandbox("worker")
     .full()
     .record_integrity()
@@ -1689,7 +1637,7 @@ let child = source.fork("child").record_integrity().fork().await?;
 ```
 
 ```python Python
-await Snapshot.create(
+await Checkpoint.create(
     "saved",
     from_sandbox="worker",
     full=True,
@@ -1703,7 +1651,7 @@ child = await source.fork("child", record_integrity=True)
 ```go Go
 var err error
 
-_, err = m.Snapshot.Create(ctx, m.SnapshotCreateOptions{
+_, err = m.Checkpoint.Create(ctx, m.SnapshotCreateOptions{
     Name: "saved",
     FromSandbox: "worker",
     Full: true,
@@ -1719,7 +1667,7 @@ if err != nil { return err }
 ```
 
 ```bash CLI
-msb snap create saved --sandbox worker --full --integrity
+msb snap create worker --sandbox worker --name saved --full --integrity
 msb fork worker --name child --integrity
 ```
 </CodeGroup>

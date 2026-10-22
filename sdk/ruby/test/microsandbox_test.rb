@@ -17,7 +17,8 @@ class MicrosandboxTest < Test::Unit::TestCase
     FilesystemError PathNotFoundError
     VolumeNotFoundError VolumeAlreadyExistsError ImageNotFoundError ImageInUseError ImagePullFailedError
     SnapshotNotFoundError SnapshotAlreadyExistsError SnapshotSandboxRunningError
-    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotMigrationError
+    SnapshotImageMissingError SnapshotIntegrityError SnapshotSourceRecoveryError SnapshotImportError SnapshotMigrationError
+    SnapshotVerificationError SnapshotRemovalRecoveryError SnapshotGroupRemovalRecoveryError
     NetworkPolicyError SecretViolationError TlsError
     IoError
     MetricsDisabledError MetricsUnavailableError
@@ -178,6 +179,15 @@ class MicrosandboxTest < Test::Unit::TestCase
       assert_nil error.public_send(name), name
     end
     assert_equal "snapshot-source-recovery", error.code
+  end
+
+  def test_snapshot_import_error_attributes_default_to_nil
+    error = Microsandbox::SnapshotImportError.new("boom")
+
+    %i[operation_id archives group_path outcome detail].each do |name|
+      assert_nil error.public_send(name), name
+    end
+    assert_equal "snapshot-import", error.code
   end
 
   def test_missing_sandbox_raises_sandbox_not_found_error

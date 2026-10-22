@@ -655,8 +655,12 @@ pub(super) fn apply(
 }
 
 pub(super) fn validate(inventory: &ArchiveInventory) -> MicrosandboxResult<Option<Dependencies>> {
-    let extension = inventory.extensions.get(REQUIREMENT);
-    let required = inventory.requires.iter().any(|value| value == REQUIREMENT);
+    let capability = extensions::Extension::Dependencies;
+    let extension = capability.resolve(&inventory.extensions, &inventory.requires)?;
+    let required = inventory
+        .requires
+        .iter()
+        .any(|value| capability.recognizes(value));
     if inventory.completeness == "boot-complete" && !required && extension.is_none() {
         if inventory.entries.iter().any(|entry| !entry.included) {
             return Err(MicrosandboxError::SnapshotIntegrity(

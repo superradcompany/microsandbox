@@ -1238,7 +1238,7 @@ impl SandboxBuilder {
 
     /// Defer snapshot resolution to the selected backend.
     ///
-    /// References returned by [`crate::snapshot::Snapshot::reference`] and
+    /// References returned by [`crate::snapshot::Checkpoint::reference`] and
     /// [`SnapshotHandle::reference`](crate::snapshot::SnapshotHandle::reference)
     /// preserve whether the selected backend resolves the value as an
     /// identifier or a path.
@@ -2071,7 +2071,7 @@ impl SandboxBuilder {
 #[cfg(feature = "local")]
 pub(crate) fn prepare_local_snapshot_restore(
     config: &mut SandboxConfig,
-    snap: &crate::snapshot::Snapshot,
+    snap: &crate::snapshot::Checkpoint,
 ) -> MicrosandboxResult<()> {
     // A security profile is a boot-time guest policy, not a host-side restore override.
     // Validate the caller's explicit intent before preparing any snapshot resources.

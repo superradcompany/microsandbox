@@ -112,6 +112,35 @@ impl Sandbox {
 
 #[napi]
 impl Sandbox {
+    /// Create a new history from this exact sandbox incarnation.
+    #[napi(
+        ts_args_type = "name: string, options?: SnapshotCaptureOptions",
+        ts_return_type = "Promise<SnapshotCreateResult>"
+    )]
+    pub fn snapshot<'env>(
+        &self,
+        env: &'env Env,
+        name: String,
+        options: Option<crate::snapshot_group::JsSnapshotCaptureOptions>,
+    ) -> Result<PromiseRaw<'env, crate::snapshot_group::JsSnapshotCreateResult>> {
+        let options = crate::snapshot_group::capture_options_for_backend(
+            options.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
+        let inner = self.inner.clone();
+        // Keep errors as promise rejections while taking caller-relative inputs synchronously.
+        env.spawn_future(async move {
+            let options = options?;
+            let sandbox = inner.get().await.ok_or_else(consumed_error)?;
+            Ok(crate::snapshot_group::JsSnapshotCreateResult::from_rust(
+                sandbox
+                    .snapshot_with(&name, |_| options)
+                    .await
+                    .map_err(to_napi_error)?,
+            ))
+        })
+    }
+
     /// Retrieve a retained managed job in this sandbox.
     #[napi]
     pub async fn get_job(&self, id: String) -> Result<JsJob> {

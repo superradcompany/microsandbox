@@ -36,7 +36,6 @@ local = [
     "dep:microsandbox-migration",
     "dep:microsandbox-runtime",
     "dep:nix",
-    "dep:rand",
     "dep:rayon",
     "dep:reqwest",
     "dep:sea-orm",
@@ -93,7 +92,7 @@ nix = { workspace = true, features = ["process", "signal", "term"], optional = t
 notify.workspace = true
 object.workspace = true
 semver.workspace = true
-rand = { workspace = true, optional = true }
+rand.workspace = true
 rayon = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["query"], optional = true }
 rustls = { workspace = true, optional = true }

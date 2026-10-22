@@ -1,3 +1,5 @@
+import { UnsupportedError } from "./errors.js";
+import { snapshotCreateResult, type SnapshotCreateResult, SnapshotCaptureOptions } from "./snapshot-group.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -215,7 +217,7 @@ export class PullProgressCreate {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
     // Full restores can auto-detach even without an explicit detached builder option.
     // Only the completed native handle knows whether disposal owns this lifecycle.
-    return new Sandbox(inner, this.name);
+    return new Sandbox(inner, await inner.name);
   }
 }
 
@@ -237,6 +239,15 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
+  async snapshot(group: string): Promise<SnapshotCreateResult> {
+    return this.snapshotWith(group, options => options);
+  }
+
+  async snapshotWith(group: string, configure: (options: SnapshotCaptureOptions) => SnapshotCaptureOptions): Promise<SnapshotCreateResult> {
+    const options = configure(new SnapshotCaptureOptions()).toNative();
+    return snapshotCreateResult(await withMappedErrors(() => this.inner.snapshot(group, options)));
+  }
+
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
@@ -257,6 +268,11 @@ export class Sandbox implements AsyncDisposable {
     const builder = typeof snapshot === "string"
       ? new napi.RestoreBuilder(snapshot)
       : new napi.RestoreBuilder(snapshot.reference, snapshot.referenceKind);
+    // A new JS package can load an older native addon. Reject explicit unsupported policy
+    // instead of dropping it; ordinary restores still use the old supported entry points.
+    if (typeof builder.guestClock !== "function") {
+      builder.guestClock = () => { throw new UnsupportedError("guest clock selection requires an updated native SDK"); };
+    }
     const restore = builder.restore.bind(builder);
     const progress = builder.restoreWithProgress.bind(builder);
     let name = "";

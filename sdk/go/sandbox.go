@@ -852,6 +852,7 @@ func RemoveSandbox(ctx context.Context, name string) error {
 // It carries metadata (name, status, timestamps) and provides methods to
 // connect, start, stop, or remove the sandbox. Obtain via GetSandbox.
 type SandboxHandle struct {
+	object        *ffi.SnapshotObject
 	id            string
 	name          string
 	status        SandboxStatus
@@ -867,6 +868,7 @@ func newSandboxHandle(info *ffi.SandboxHandleInfo) *SandboxHandle {
 		backendKind = BackendUnknown
 	}
 	return &SandboxHandle{
+		object:        ffi.NewSnapshotObject(info.ObjectHandle),
 		id:            info.ID,
 		name:          info.Name,
 		status:        SandboxStatus(info.Status),
@@ -909,7 +911,9 @@ func (h *SandboxHandle) Refresh(ctx context.Context) (*SandboxHandle, error) {
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return newSandboxHandle(info), nil
+	refreshed := newSandboxHandle(info)
+	refreshed.object = h.object
+	return refreshed, nil
 }
 
 // CreatedAt returns the sandbox creation time, or the zero value if unknown.
@@ -1178,14 +1182,27 @@ func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) erro
 	}))
 }
 
-// Snapshot captures this sandbox's disk under a bare name in the default
-// snapshots directory.
-func (h *SandboxHandle) Snapshot(ctx context.Context, name string) (*SnapshotArtifact, error) {
-	info, err := ffi.SandboxHandleSnapshot(ctx, h.name, name)
-	if err != nil {
-		return nil, wrapFFI(err)
+// Snapshot creates a new source-bound group and its initial immutable checkpoint.
+func (h *SandboxHandle) Snapshot(ctx context.Context, name string, opts ...SnapshotCaptureOption) (*SnapshotCreateResult, error) {
+	if h.object == nil {
+		return nil, &Error{Kind: ErrUnsupportedOperation, Message: "native SDK does not retain this sandbox for group capture; update the native SDK and obtain it with GetSandbox"}
 	}
-	return snapshotFromInfo(info), nil
+	options := SnapshotCaptureConfig{}
+	for _, configure := range opts {
+		configure(&options)
+	}
+	var result snapshotCaptureWire
+	if err := snapshotObjectRequest(ctx, h.object, map[string]any{"op": "capture_source", "name": name, "options": options}, &result); err != nil {
+		return nil, err
+	}
+	group, err := snapshotGroupFromWire(result.Snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if result.Checkpoint == nil {
+		return nil, fmt.Errorf("native SDK returned no initial checkpoint")
+	}
+	return &SnapshotCreateResult{Snapshot: group, Checkpoint: snapshotFromInfo(result.Checkpoint), HeadUpdate: snapshotHeadUpdateFromInfo(result.HeadUpdate)}, nil
 }
 
 // ---------------------------------------------------------------------------
