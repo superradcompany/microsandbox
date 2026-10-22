@@ -354,6 +354,11 @@ jobs:
           python3 scripts/smoke/cli/runtime-discovery.py \
             --msb build/msb --libkrunfw build/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
 
+      - name: Smoke test cloud backend in msb
+        run: |
+          MSB_BACKEND=cloud MSB_API_KEY=msb_test_ci build/msb context --format json |
+            python3 -c 'import json, sys; assert json.load(sys.stdin)["kind"] == "cloud"'
+
       # Upload immediately. All KVM lanes can begin while independent quality
       # and cross-platform checks continue in parallel.
       - name: Upload runtime artifacts
