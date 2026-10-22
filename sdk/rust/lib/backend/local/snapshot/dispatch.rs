@@ -125,17 +125,7 @@ impl LocalBackend {
             return Ok(true);
         }
 
-        let old_stage = prepared.stage.path().to_path_buf();
-        config.spec.mounts.retain(|mount| {
-            !matches!(mount,
-            microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(&old_stage))
-        });
-
-        config.restore_resources.clear_captured();
-        config.checkpoint_restore = None;
-        config.resumed_from_full_snapshot = false;
-        config.snapshot_upper_source = None;
-        config.snapshot_upper_layers.clear();
+        config.clear_prepared_restore();
         Ok(false)
     }
 

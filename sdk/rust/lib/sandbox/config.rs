@@ -519,6 +519,26 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
+    /// Discard materialized restore paths before releasing their archive staging owner.
+    pub(crate) fn clear_prepared_restore(&mut self) {
+        #[cfg(feature = "local")]
+        if let Some(prepared) = &self.restore_resources.archive {
+            let old_stage = prepared.stage.path();
+            self.spec.mounts.retain(|mount| {
+                !matches!(mount,
+                    microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(old_stage))
+            });
+        }
+        #[cfg(feature = "local")]
+        {
+            self.checkpoint_restore = None;
+            self.snapshot_upper_layers.clear();
+        }
+        self.resumed_from_full_snapshot = false;
+        self.snapshot_upper_source = None;
+        self.restore_resources.clear_captured();
+    }
+
     /// Apply the composed patches, then resolve sandbox defaults that depend on the final values.
     pub(super) fn apply_layers(
         &mut self,

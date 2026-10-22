@@ -624,3 +624,54 @@ async fn archive_settings_are_resolved_after_inspection_and_staging_survives_reu
         assert_eq!(unique.path(), unique_path);
     }
 }
+
+#[tokio::test]
+async fn replacing_prepared_full_archive_discards_its_checkpoint() {
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let full = checkpoint_archive(root.path()).await;
+    let disk = archive(root.path(), false, true).await;
+    let local = backend(root.path(), 18).await;
+    let mut builder = SandboxBuilder::new("restore")
+        .with_snapshot_reference(SnapshotReference::path(full.to_string_lossy()));
+    builder.prepare(local.clone()).await.unwrap();
+    let config = builder.finish_local(local.config_sources(), None).unwrap();
+    assert!(config.checkpoint_restore.is_some());
+    let old_stage = config
+        .restore_resources
+        .archive
+        .as_ref()
+        .unwrap()
+        .stage
+        .path()
+        .to_path_buf();
+
+    let mut replacement = SandboxBuilder::from(config)
+        .with_snapshot_reference(SnapshotReference::path(disk.to_string_lossy()));
+    replacement.prepare(local.clone()).await.unwrap();
+    let config = replacement
+        .finish_local(local.config_sources(), None)
+        .unwrap();
+    assert!(config.checkpoint_restore.is_none());
+    assert!(!config.resumed_from_full_snapshot);
+    let new_stage = config
+        .restore_resources
+        .archive
+        .as_ref()
+        .unwrap()
+        .stage
+        .path();
+    assert!(!config.snapshot_upper_layers.is_empty());
+    assert!(
+        config
+            .snapshot_upper_layers
+            .iter()
+            .all(|layer| { layer.path.starts_with(new_stage) && layer.path.is_file() })
+    );
+    assert!(config.snapshot_upper_source.is_none());
+    assert!(config.restore_resources.geometry.is_none());
+    assert!(config.restore_resources.agent_ready.is_none());
+    assert!(!old_stage.exists());
+    assert!(!config.spec.mounts.iter().any(|mount| matches!(mount,
+        microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(&old_stage)
+    )));
+}

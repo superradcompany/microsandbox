@@ -2839,23 +2839,22 @@ async fn handle_message_with_charge(
             };
             // Released peers do not acknowledge execution output. Preserve their legacy path.
             let policy = (msg.v >= 10).then_some(config.exec_limits).flatten();
-            if let Some(policy) = policy {
-                if state.sessions.len() + state.detached_sessions.len()
+            if let Some(policy) = policy
+                && state.sessions.len() + state.detached_sessions.len()
                     >= policy.max_executions as usize
-                {
-                    encode_exec_failed(
-                        msg.id,
-                        ExecFailed {
-                            kind: ExecFailureKind::ResourceLimit,
-                            errno: None,
-                            errno_name: None,
-                            message: "active execution limit reached".into(),
-                            stage: Some("execution_admission".into()),
-                        },
-                        out_buf,
-                    )?;
-                    return Ok(());
-                }
+            {
+                encode_exec_failed(
+                    msg.id,
+                    ExecFailed {
+                        kind: ExecFailureKind::ResourceLimit,
+                        errno: None,
+                        errno_name: None,
+                        message: "active execution limit reached".into(),
+                        stage: Some("execution_admission".into()),
+                    },
+                    out_buf,
+                )?;
+                return Ok(());
             }
             if req.cwd.is_none() {
                 req.cwd = config.default_cwd().map(str::to_string);
@@ -2943,10 +2942,10 @@ async fn handle_message_with_charge(
             let Some(stdin) = decode_payload_or_core_error::<ExecStdin>(&msg, out_buf)? else {
                 return Ok(());
             };
-            if let Some(session) = state.sessions.get_mut(&msg.id) {
-                if let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take()) {
-                    encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
-                }
+            if let Some(session) = state.sessions.get_mut(&msg.id)
+                && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
+            {
+                encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
             }
         }
 

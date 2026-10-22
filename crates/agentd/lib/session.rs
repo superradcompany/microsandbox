@@ -999,6 +999,7 @@ impl ExecSession {
 
 impl ExecSession {
     /// Spawns a process with a PTY.
+    #[allow(clippy::too_many_arguments)] // Keep both spawn modes explicit about their launch inputs.
     fn spawn_pty(
         id: u32,
         req: &ExecRequest,
@@ -1252,6 +1253,7 @@ impl ExecSession {
     }
 
     /// Spawns a process with piped stdio.
+    #[allow(clippy::too_many_arguments)] // Keep both spawn modes explicit about their launch inputs.
     fn spawn_pipe(
         id: u32,
         req: &ExecRequest,

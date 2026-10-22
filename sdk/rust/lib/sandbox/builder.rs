@@ -1520,7 +1520,7 @@ impl SandboxBuilder {
         inspection.apply_to(&mut config);
         config.snapshot_reference = snapshot_ref.clone();
         if snapshot_ref.is_some() {
-            config.restore_resources.clear_captured();
+            config.clear_prepared_restore();
         }
 
         #[cfg(feature = "local")]
