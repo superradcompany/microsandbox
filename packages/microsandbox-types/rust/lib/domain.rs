@@ -388,6 +388,7 @@ pub enum OwnedVolumeStorage {
 
 /// A volume mount specification for a sandbox.
 #[derive(Clone)]
+#[non_exhaustive]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[cfg_attr(feature = "ts", ts(tag = "type"))]
@@ -406,6 +407,7 @@ pub enum VolumeMount {
         host_permissions: HostPermissions,
     },
     /// Bind mount a host directory into the guest.
+    #[non_exhaustive]
     Bind {
         /// Host path to bind mount.
         #[cfg_attr(feature = "ts", ts(type = "string"))]
@@ -432,6 +434,12 @@ pub enum VolumeMount {
         /// contents. `None` applies the protective default at spawn time; set a
         /// value to override it.
         quota_mib: Option<u32>,
+        /// Host-side hide_path-list of gitignore-style patterns.
+        ///
+        /// Matching entries are hidden (lookup/getattr/readdir return ENOENT) and
+        /// writes to them are forbidden (EACCES). Enforced by the host filesystem
+        /// backend; patterns are relative to the mount root.
+        hide_path: Vec<String>,
     },
 
     /// Mount a named volume into the guest.
@@ -1602,6 +1610,27 @@ impl VolumeMount {
             _ => None,
         }
     }
+
+    /// Construct a bind mount with protective defaults.
+    ///
+    /// Use this instead of a `Bind { .. }` struct literal so a future field
+    /// cannot break external callers. Every optional field takes its
+    /// serialized default: default mount options, `strict` stat
+    /// virtualization, `private` host permissions, no root-symlink following,
+    /// no quota, and an empty `hide_path` list. Chain configuration through the
+    /// returned value's public fields or the sandbox builder afterward.
+    pub fn bind(host: impl Into<PathBuf>, guest: impl Into<String>) -> Self {
+        Self::Bind {
+            host: host.into(),
+            guest: guest.into(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: None,
+            hide_path: Vec::new(),
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2052,8 +2081,9 @@ impl Serialize for VolumeMount {
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                hide_path,
             } => {
-                let mut map = serializer.serialize_map(Some(8))?;
+                let mut map = serializer.serialize_map(Some(9))?;
                 map.serialize_entry("type", "Bind")?;
                 map.serialize_entry("host", host)?;
                 map.serialize_entry("guest", guest)?;
@@ -2062,6 +2092,7 @@ impl Serialize for VolumeMount {
                 map.serialize_entry("host_permissions", host_permissions)?;
                 map.serialize_entry("follow_root_symlinks", follow_root_symlinks)?;
                 map.serialize_entry("quota_mib", quota_mib)?;
+                map.serialize_entry("hide_path", hide_path)?;
                 map.end()
             }
             Self::Named {
@@ -2153,6 +2184,8 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 follow_root_symlinks: bool,
                 #[serde(default)]
                 quota_mib: Option<u32>,
+                #[serde(default)]
+                hide_path: Vec<String>,
             },
             Named {
                 name: String,
@@ -2214,6 +2247,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                hide_path,
             } => Self::Bind {
                 host,
                 guest,
@@ -2222,6 +2256,7 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                hide_path,
             },
             VolumeMountHelper::Named {
                 name,
@@ -2293,6 +2328,7 @@ impl fmt::Debug for VolumeMount {
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                hide_path,
             } => f
                 .debug_struct("Bind")
                 .field("host", host)
@@ -2302,6 +2338,7 @@ impl fmt::Debug for VolumeMount {
                 .field("host_permissions", host_permissions)
                 .field("follow_root_symlinks", follow_root_symlinks)
                 .field("quota_mib", quota_mib)
+                .field("hide_path", hide_path)
                 .finish(),
             Self::Named {
                 name,
@@ -3764,6 +3801,48 @@ mod tests {
             let parsed: SandboxLogLevel = input.parse().unwrap();
             assert_eq!(parsed, expected);
             assert_eq!(parsed.as_str(), input);
+        }
+    }
+
+    #[test]
+    fn volume_mount_bind_hide_path_roundtrips() {
+        let mount = VolumeMount::Bind {
+            host: PathBuf::from("/host/data"),
+            guest: "/data".to_string(),
+            options: MountOptions::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+            follow_root_symlinks: false,
+            quota_mib: Some(2048),
+            hide_path: vec!["sub/.env".to_string(), "*.log".to_string()],
+        };
+
+        let json = serde_json::to_string(&mount).unwrap();
+        assert!(json.contains(r#""hide_path":["sub/.env","*.log"]"#));
+
+        let decoded: VolumeMount = serde_json::from_str(&json).unwrap();
+        match decoded {
+            VolumeMount::Bind {
+                hide_path,
+                quota_mib,
+                ..
+            } => {
+                assert_eq!(hide_path, vec!["sub/.env".to_string(), "*.log".to_string()]);
+                assert_eq!(quota_mib, Some(2048));
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn volume_mount_bind_hide_path_defaults_empty() {
+        let decoded: VolumeMount = serde_json::from_str(
+            r#"{"type":"Bind","host":"/host/data","guest":"/data","quota_mib":null}"#,
+        )
+        .unwrap();
+        match decoded {
+            VolumeMount::Bind { hide_path, .. } => assert!(hide_path.is_empty()),
+            other => panic!("expected Bind, got {other:?}"),
         }
     }
 }

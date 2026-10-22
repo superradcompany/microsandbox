@@ -44,6 +44,7 @@ pub const SUPPORTED_REQUIRES: &[&str] = &[
     super::GUEST_CLOCK_EXTENSION,
     super::RESTORE_DEFAULTS_EXTENSION,
     super::OWNED_VOLUMES_EXTENSION,
+    super::BIND_MOUNT_DENY_EXTENSION,
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -482,6 +483,7 @@ impl Manifest {
         self.guest_clock()?;
         self.owned_volumes()?;
         self.external_mounts()?;
+        self.external_mount_policies()?;
         Ok(())
     }
 
@@ -963,6 +965,75 @@ mod tests {
         assert!(manifest.requires.is_empty());
         assert!(manifest.unsupported_requires().is_empty());
         assert_eq!(restored.external_mounts().unwrap(), ["/data", "/logs"]);
+    }
+
+    #[test]
+    fn bind_mount_hide_path_policy_is_a_required_extension_and_legacy_reads_as_unknown() {
+        use super::super::{
+            BIND_MOUNT_DENY_EXTENSION, EXTERNAL_MOUNTS_EXTENSION, ExternalMountPolicy,
+        };
+
+        let mut manifest = descriptor();
+        manifest.set_external_mounts(vec!["/data".into()]).unwrap();
+
+        // A hide_path-less capture records no policy extension and keeps the released bytes.
+        let without_policy = manifest.to_canonical_bytes().unwrap();
+        assert_eq!(manifest.external_mount_policies().unwrap(), None);
+        manifest.set_external_mount_policies(Vec::new()).unwrap();
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), without_policy);
+        assert!(manifest.requires.is_empty());
+
+        // A hide_path-bearing capture records the policy under its own must-understand
+        // extension, so an older reader refuses the snapshot instead of silently
+        // restoring a destination that re-exposes the captured files.
+        manifest
+            .set_external_mount_policies(vec![ExternalMountPolicy {
+                guest_path: "/data".into(),
+                hide_path: vec![".env".into()],
+            }])
+            .unwrap();
+        assert!(
+            manifest
+                .requires
+                .iter()
+                .any(|key| key == BIND_MOUNT_DENY_EXTENSION),
+            "a hide_path-bearing snapshot must require its policy extension"
+        );
+        assert!(
+            manifest.extensions.contains_key(BIND_MOUNT_DENY_EXTENSION),
+            "the requirement must name a present extension"
+        );
+        assert!(manifest.unsupported_requires().is_empty());
+
+        // The guest paths stay in the advisory extension, independent of the policy.
+        assert_eq!(manifest.external_mounts().unwrap(), ["/data"]);
+
+        let mut restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert_eq!(
+            restored.external_mount_policies().unwrap(),
+            Some(vec![ExternalMountPolicy {
+                guest_path: "/data".into(),
+                hide_path: vec![".env".into()],
+            }])
+        );
+
+        // Clearing the policy removes both the extension and its requirement.
+        restored.set_external_mount_policies(Vec::new()).unwrap();
+        assert!(
+            !restored
+                .requires
+                .iter()
+                .any(|key| key == BIND_MOUNT_DENY_EXTENSION)
+        );
+        assert!(!restored.extensions.contains_key(BIND_MOUNT_DENY_EXTENSION));
+
+        // A legacy extension without the field reads as unknown, never empty.
+        let mut legacy = descriptor();
+        legacy.extensions.insert(
+            EXTERNAL_MOUNTS_EXTENSION.into(),
+            serde_json::json!({ "guest_paths": ["/data"] }),
+        );
+        assert_eq!(legacy.external_mount_policies().unwrap(), None);
     }
 
     #[test]

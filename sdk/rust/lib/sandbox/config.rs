@@ -1015,15 +1015,7 @@ fn default_oci_tmpfs_size_mib(memory_mib: u32) -> u32 {
 }
 
 fn guest_mount_is(mount: &VolumeMount, path: &str) -> bool {
-    match mount {
-        VolumeMount::Bind { guest, .. }
-        | VolumeMount::Named { guest, .. }
-        | VolumeMount::Owned { guest, .. }
-        | VolumeMount::Tmpfs { guest, .. }
-        | VolumeMount::DiskImage { guest, .. } => {
-            Utf8UnixPath::new(guest).normalize() == Utf8UnixPath::new(path).normalize()
-        }
-    }
+    Utf8UnixPath::new(mount.guest()).normalize() == Utf8UnixPath::new(path).normalize()
 }
 
 pub(crate) fn sandbox_log_level_from_runtime(level: LogLevel) -> SandboxLogLevel {
@@ -2261,15 +2253,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
-                mounts: vec![VolumeMount::Bind {
-                    host: "/host/tmp".into(),
-                    guest: "/tmp/".into(),
-                    options: MountOptions::default(),
-                    stat_virtualization: crate::sandbox::StatVirtualization::Strict,
-                    host_permissions: crate::sandbox::HostPermissions::Private,
-                    follow_root_symlinks: false,
-                    quota_mib: None,
-                }],
+                mounts: vec![VolumeMount::bind("/host/tmp", "/tmp/")],
                 ..Default::default()
             },
             ..Default::default()
@@ -2289,15 +2273,7 @@ mod tests {
         let mut config = SandboxConfig {
             spec: SandboxSpec {
                 image: RootfsSource::oci("python:3.12"),
-                mounts: vec![VolumeMount::Bind {
-                    host: "/host/tmp".into(),
-                    guest: "/tmp/.".into(),
-                    options: MountOptions::default(),
-                    stat_virtualization: crate::sandbox::StatVirtualization::Strict,
-                    host_permissions: crate::sandbox::HostPermissions::Private,
-                    follow_root_symlinks: false,
-                    quota_mib: None,
-                }],
+                mounts: vec![VolumeMount::bind("/host/tmp", "/tmp/.")],
                 ..Default::default()
             },
             ..Default::default()

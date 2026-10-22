@@ -18,6 +18,10 @@ required-features = ["ts"]
 
 [features]
 default = []
+# Expose the cross-language test fixtures (e.g. the hide-path pattern disposition
+# matrix) as `microsandbox_types::fixtures`. Off by default so the embedded
+# payload never reaches a normal runtime or SDK build.
+test-support = []
 # Derive `utoipa::ToSchema` on the wire types an HTTP API (the cloud control
 # plane) exposes. Off by default so runtime/SDK builds never pull utoipa.
 utoipa = ["dep:utoipa"]

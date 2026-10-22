@@ -110,6 +110,34 @@ async fn rust_sandbox_fs_handle_api_stays_available(
 }
 
 #[test]
+fn volume_mount_bind_constructor_round_trips_with_default_hide_path() {
+    use microsandbox::sandbox::VolumeMount;
+
+    // The stable constructor is the external-crate construction path; it must
+    // not couple callers to the `Bind { .. }` struct literal, so a future field
+    // addition cannot break them.
+    let mount = VolumeMount::bind("/host/data", "/data");
+    let encoded = serde_json::to_value(&mount).unwrap();
+    assert_eq!(encoded["type"], "Bind");
+    assert_eq!(encoded["hide_path"], serde_json::json!([]));
+
+    let decoded: VolumeMount = serde_json::from_value(encoded).unwrap();
+    match decoded {
+        VolumeMount::Bind {
+            host,
+            guest,
+            hide_path,
+            ..
+        } => {
+            assert!(hide_path.is_empty());
+            assert_eq!(host, std::path::PathBuf::from("/host/data"));
+            assert_eq!(guest, "/data");
+        }
+        other => panic!("expected Bind, got {other:?}"),
+    }
+}
+
+#[test]
 fn boot_error_reason_is_preserved_in_every_backend_build() {
     use microsandbox::logs::{BootError, InitFailureReason};
 

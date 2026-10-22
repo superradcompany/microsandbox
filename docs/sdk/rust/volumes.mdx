@@ -1444,6 +1444,25 @@ fn nodev(self) -> Self
 
 Ignore device files on this mount.
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">hide_path()</span>
+
+<Tooltip tip="On microsandbox cloud, bind-mount hide-path lists are not supported; a non-empty hide-path list is rejected at creation."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn hide_path(self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self
+```
+
+Hide host paths matching gitignore-style patterns from the guest. Matching entries are invisible (ENOENT) and writes to them are forbidden (EACCES). Patterns are relative to the mount root and may be names (`.env`, `*.log`) or paths (`sub/secret`). Valid only for directory bind mounts; a host file bind has no namespace to filter and rejects them. Path patterns require a read-only mount, since a writable guest could rename an ancestor directory to bypass them; name-only and directory-only (`node_modules/`) patterns are valid on any mount.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>patterns</code><span className="msb-type">impl IntoIterator&lt;Item = impl Into&lt;String&gt;&gt;</span></div>
+    <div className="msb-param-desc">Gitignore-style patterns to hide from the guest.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">stat_virtualization()</span>
 
 ```rust

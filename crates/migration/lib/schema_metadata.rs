@@ -63,6 +63,10 @@ pub const SECRET_CONFIG_MIGRATION_ID: &str = "m20260922_000001_migrate_secret_co
 /// Migration that prevents old binaries from discarding the guest clock policy.
 pub const GUEST_CLOCK_CONFIG_MIGRATION_ID: &str = "m20261001_000001_guest_clock_config";
 
+/// Migration that prevents old binaries from discarding persisted bind-mount hide-path lists.
+pub const BIND_MOUNT_DENY_CONFIG_MIGRATION_ID: &str =
+    "m20261012_000001_bind_mount_hide_path_config";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -295,6 +299,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: false,
         summary: "remove the compatibility marker only when no sandbox disables guest clock sync",
     },
+    MigrationMetadata {
+        id: BIND_MOUNT_DENY_CONFIG_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: false,
+        summary: "remove the compatibility marker only when no sandbox carries a bind-mount hide-path list",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -381,6 +392,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            BIND_MOUNT_DENY_CONFIG_MIGRATION_ID,
             GUEST_CLOCK_CONFIG_MIGRATION_ID,
             SECRET_CONFIG_MIGRATION_ID,
             SNAPSHOT_GROUPS_MIGRATION_ID,
@@ -471,6 +483,7 @@ mod tests {
                 SNAPSHOT_GROUPS_MIGRATION_ID,
                 SECRET_CONFIG_MIGRATION_ID,
                 GUEST_CLOCK_CONFIG_MIGRATION_ID,
+                BIND_MOUNT_DENY_CONFIG_MIGRATION_ID,
             ],
         );
         assert!(canonical_applied_prefix(released).is_some());

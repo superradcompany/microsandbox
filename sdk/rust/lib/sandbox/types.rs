@@ -66,6 +66,7 @@ pub struct MountBuilder {
     stat_virtualization: Option<StatVirtualization>,
     host_permissions: Option<HostPermissions>,
     follow_root_symlinks: bool,
+    hide_path: Vec<String>,
     error: Option<crate::MicrosandboxError>,
 }
 
@@ -275,6 +276,7 @@ impl MountBuilder {
             stat_virtualization: None,
             host_permissions: None,
             follow_root_symlinks: false,
+            hide_path: Vec::new(),
             error: None,
         }
     }
@@ -495,6 +497,19 @@ impl MountBuilder {
         self
     }
 
+    /// Hide host paths matching gitignore-style patterns from the guest.
+    ///
+    /// Matching entries are invisible (ENOENT) and writes to them are forbidden
+    /// (EACCES). Patterns are relative to the mount root and may be component
+    /// names (`.env`, `*.log`) or paths (`sub/secret`). Valid only for directory
+    /// bind mounts; a host file bind has no namespace to filter and rejects them.
+    /// A path pattern requires a read-only mount, since a writable guest could
+    /// rename an ancestor directory to bypass it.
+    pub fn hide_path(mut self, patterns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.hide_path.extend(patterns.into_iter().map(Into::into));
+        self
+    }
+
     /// Select the snapshot's disk contents at this guest path for a private child disk.
     /// Only restore and fork builders accept this operation-local choice.
     pub fn captured(mut self) -> Self {
@@ -580,6 +595,13 @@ impl MountBuilder {
                     .into(),
             ));
         }
+        if !self.hide_path.is_empty() && !is_bind {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                ".hide_path() is only valid for bind mounts".into(),
+            ));
+        }
+        microsandbox_types::validate_hide_path_list(&self.hide_path, self.options.readonly)
+            .map_err(|err| crate::MicrosandboxError::InvalidConfig(err.to_string()))?;
         if self.disk_format.is_some() && !is_disk {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 ".format() is only valid for disk image mounts".into(),
@@ -672,15 +694,27 @@ impl MountBuilder {
                 // boundary so callers get a clear error. Windows drive
                 // prefixes are the one allowed colon shape.
                 validate_host_path_wire_safe(&host, "bind host path")?;
-                VolumeMount::Bind {
-                    host,
-                    guest: self.guest,
-                    options: self.options,
-                    stat_virtualization,
-                    host_permissions,
-                    follow_root_symlinks: self.follow_root_symlinks,
-                    quota_mib: self.quota_mib,
+                let mut mount = VolumeMount::bind(host, self.guest);
+                match &mut mount {
+                    VolumeMount::Bind {
+                        options,
+                        stat_virtualization: mount_stat,
+                        host_permissions: mount_perms,
+                        follow_root_symlinks,
+                        quota_mib,
+                        hide_path,
+                        ..
+                    } => {
+                        *options = self.options;
+                        *mount_stat = stat_virtualization;
+                        *mount_perms = host_permissions;
+                        *follow_root_symlinks = self.follow_root_symlinks;
+                        *quota_mib = self.quota_mib;
+                        *hide_path = self.hide_path.clone();
+                    }
+                    _ => unreachable!("VolumeMount::bind constructs a Bind mount"),
                 }
+                mount
             }
             MountKind::Named { name, create } => {
                 crate::volume::validate_volume_name(&name)?;
@@ -1319,10 +1353,13 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             options,
             stat_virtualization,
             host_permissions,
+            hide_path,
             ..
         } => {
             validate_host_path_wire_safe(host, "bind host path")?;
             validate_virtiofs_policies(*stat_virtualization, *host_permissions, options)?;
+            microsandbox_types::validate_hide_path_list(hide_path, options.readonly)
+                .map_err(|err| crate::MicrosandboxError::InvalidConfig(err.to_string()))?;
         }
         VolumeMount::Named {
             name,
@@ -1359,6 +1396,11 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             if let Some(fstype) = fstype {
                 validate_fstype(fstype)?;
             }
+        }
+        _ => {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "unrecognized volume mount variant; this SDK version cannot validate it".into(),
+            ));
         }
     }
     Ok(())
@@ -1536,6 +1578,43 @@ impl From<PathBuf> for ImageSource {
 mod tests {
     use super::*;
 
+    /// Construct a bind mount with explicit fields through the stable
+    /// constructor. `VolumeMount::Bind` is non-exhaustive, so in-repo tests
+    /// configure it by mutating the value returned by [`VolumeMount::bind`].
+    #[allow(clippy::too_many_arguments)]
+    fn bind_mount(
+        host: impl Into<PathBuf>,
+        guest: impl Into<String>,
+        options: MountOptions,
+        stat_virtualization: StatVirtualization,
+        host_permissions: HostPermissions,
+        follow_root_symlinks: bool,
+        quota_mib: Option<u32>,
+        hide_path: Vec<String>,
+    ) -> VolumeMount {
+        let mut mount = VolumeMount::bind(host, guest);
+        match &mut mount {
+            VolumeMount::Bind {
+                options: mount_options,
+                stat_virtualization: mount_stat,
+                host_permissions: mount_perms,
+                follow_root_symlinks: mount_follow,
+                quota_mib: mount_quota,
+                hide_path: mount_hide_path,
+                ..
+            } => {
+                *mount_options = options;
+                *mount_stat = stat_virtualization;
+                *mount_perms = host_permissions;
+                *mount_follow = follow_root_symlinks;
+                *mount_quota = quota_mib;
+                *mount_hide_path = hide_path;
+            }
+            _ => unreachable!("VolumeMount::bind constructs a Bind mount"),
+        }
+        mount
+    }
+
     #[test]
     fn owned_mounts_cannot_allocate_replacements_during_restore() {
         for mount in [
@@ -1700,6 +1779,105 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_builder_hide_path_on_bind() {
+        let mount = MountBuilder::new("/data")
+            .bind("/host/data")
+            // Path patterns (`sub/secret`) require a read-only mount.
+            .readonly()
+            .hide_path([".env", "*.log", "sub/secret"])
+            .build()
+            .unwrap();
+        match mount {
+            VolumeMount::Bind { hide_path, .. } => {
+                assert_eq!(hide_path, vec![".env", "*.log", "sub/secret"]);
+            }
+            other => panic!("expected bind mount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_hide_path_rejected_on_non_bind() {
+        let err = MountBuilder::new("/data")
+            .tmpfs()
+            .hide_path(["secret"])
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(".hide_path() is only valid for bind mounts")
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_hide_path_rejects_wire_separators() {
+        for bad in [",", ":", "\n", "\0"] {
+            let err = MountBuilder::new("/data")
+                .bind("/host/data")
+                .hide_path([format!("a{bad}b")])
+                .build()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("must not contain"),
+                "pattern {bad:?} should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_hide_path_rejects_empty_pattern() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .hide_path([""])
+            .build()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "empty pattern should be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_mount_builder_hide_path_rejects_surrounding_whitespace() {
+        for bad in [" .env", ".env ", " !secret", "\tsecret"] {
+            let err = MountBuilder::new("/data")
+                .bind("/host/data")
+                .hide_path([bad])
+                .build()
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("must not have leading or trailing whitespace"),
+                "pattern {bad:?} should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mount_builder_rejects_path_hide_path_on_writable_mount() {
+        let err = MountBuilder::new("/data")
+            .bind("/host/data")
+            .hide_path(["sub/.env"])
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("path pattern"), "{err}");
+
+        // Read-only mounts cannot rename an ancestor, so path patterns stay valid.
+        MountBuilder::new("/data")
+            .bind("/host/data")
+            .readonly()
+            .hide_path(["sub/.env"])
+            .build()
+            .unwrap();
+
+        // Name-only and directory-only patterns match anywhere and stay valid.
+        MountBuilder::new("/data")
+            .bind("/host/data")
+            .hide_path([".env", "node_modules/"])
+            .build()
+            .unwrap();
+    }
+
+    #[test]
     fn test_mount_builder_format_rejected_on_non_disk() {
         let err = MountBuilder::new("/data")
             .bind("/host/data")
@@ -1857,6 +2035,92 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_volume_mounts_rejects_direct_bind_hide_path_separators() {
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions::default(),
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            vec!["secret,ro".to_string()],
+        );
+
+        let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("must not contain"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_direct_bind_empty_hide_path_pattern() {
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions::default(),
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            vec![String::new()],
+        );
+
+        let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_accepts_direct_bind_valid_hide_path() {
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions::default(),
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            vec![".env".to_string(), "node_modules/".to_string()],
+        );
+
+        validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap();
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_rejects_path_hide_path_on_writable_bind() {
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions::default(),
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            vec!["sub/.env".to_string()],
+        );
+
+        let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
+        assert!(err.to_string().contains("path pattern"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_volume_mounts_accepts_path_hide_path_on_readonly_bind() {
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions {
+                readonly: true,
+                ..MountOptions::default()
+            },
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            vec!["sub/.env".to_string()],
+        );
+
+        validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap();
+    }
+
+    #[test]
     fn test_validate_volume_mounts_rejects_duplicate_guest_paths() {
         let mut mounts = vec![
             VolumeMount::Tmpfs {
@@ -1919,15 +2183,16 @@ mod tests {
     #[cfg(windows)]
     fn test_validate_volume_mounts_accepts_windows_drive_host_paths() {
         let mut mounts = vec![
-            VolumeMount::Bind {
-                host: PathBuf::from(r"C:\Users\Stephen\data"),
-                guest: "/data".to_string(),
-                options: MountOptions::default(),
-                stat_virtualization: StatVirtualization::Strict,
-                host_permissions: HostPermissions::Private,
-                follow_root_symlinks: false,
-                quota_mib: None,
-            },
+            bind_mount(
+                r"C:\Users\Stephen\data",
+                "/data",
+                MountOptions::default(),
+                StatVirtualization::Strict,
+                HostPermissions::Private,
+                false,
+                None,
+                Vec::new(),
+            ),
             VolumeMount::DiskImage {
                 host: PathBuf::from(r"C:\Users\Stephen\data.raw"),
                 guest: "/disk".to_string(),
@@ -1956,15 +2221,16 @@ mod tests {
 
     #[test]
     fn test_validate_volume_mounts_rejects_direct_off_mirror() {
-        let mut mount = VolumeMount::Bind {
-            host: PathBuf::from("/host/data"),
-            guest: "/data".to_string(),
-            options: MountOptions::default(),
-            stat_virtualization: StatVirtualization::Off,
-            host_permissions: HostPermissions::Mirror,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        };
+        let mut mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions::default(),
+            StatVirtualization::Off,
+            HostPermissions::Mirror,
+            false,
+            None,
+            Vec::new(),
+        );
 
         let err = validate_volume_mounts(std::slice::from_mut(&mut mount)).unwrap_err();
         assert!(err.to_string().contains("stat_virtualization=Off"));
@@ -1972,56 +2238,59 @@ mod tests {
 
     #[test]
     fn test_validate_volume_mounts_rejects_direct_invalid_ownership() {
-        let mut partial = VolumeMount::Bind {
-            host: PathBuf::from("/host/data"),
-            guest: "/data".to_string(),
-            options: MountOptions {
+        let mut partial = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions {
                 override_uid: Some(1000),
                 ..MountOptions::default()
             },
-            stat_virtualization: StatVirtualization::Strict,
-            host_permissions: HostPermissions::Private,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        };
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            Vec::new(),
+        );
         let err = validate_volume_mounts(std::slice::from_mut(&mut partial)).unwrap_err();
         assert!(
             err.to_string().contains("must be specified together"),
             "{err}"
         );
 
-        let mut off = VolumeMount::Bind {
-            host: PathBuf::from("/host/data"),
-            guest: "/data".to_string(),
-            options: MountOptions {
+        let mut off = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions {
                 override_uid: Some(1000),
                 override_gid: Some(1000),
                 ..MountOptions::default()
             },
-            stat_virtualization: StatVirtualization::Off,
-            host_permissions: HostPermissions::Private,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        };
+            StatVirtualization::Off,
+            HostPermissions::Private,
+            false,
+            None,
+            Vec::new(),
+        );
         let err = validate_volume_mounts(std::slice::from_mut(&mut off)).unwrap_err();
         assert!(err.to_string().contains("literal host metadata"), "{err}");
     }
 
     #[test]
     fn test_volume_mount_json_uses_options_object() {
-        let mount = VolumeMount::Bind {
-            host: PathBuf::from("/host/data"),
-            guest: "/data".to_string(),
-            options: MountOptions {
+        let mount = bind_mount(
+            "/host/data",
+            "/data",
+            MountOptions {
                 readonly: true,
                 noexec: true,
                 ..MountOptions::default()
             },
-            stat_virtualization: StatVirtualization::Strict,
-            host_permissions: HostPermissions::Private,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        };
+            StatVirtualization::Strict,
+            HostPermissions::Private,
+            false,
+            None,
+            Vec::new(),
+        );
 
         let value = serde_json::to_value(&mount).unwrap();
         assert!(value.get("readonly").is_none());

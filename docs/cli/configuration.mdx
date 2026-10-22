@@ -205,7 +205,7 @@ init:
 
 ### Mounts
 
-A string mount is a config-relative bind mount using the same `SOURCE:TARGET[:OPTIONS]` option grammar as a bind passed to `-v/--volume`. Options include `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `follow-root-symlinks`, `stat-virt=strict|relaxed|off`, `host-perms=private|mirror`, `quota=<size>`, and paired `uid=<N>,gid=<N>`:
+A string mount is a config-relative bind mount using the same `SOURCE:TARGET[:OPTIONS]` option grammar as a bind passed to `-v/--volume`. Options include `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `follow-root-symlinks`, `stat-virt=strict|relaxed|off`, `host-perms=private|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>`, and repeatable `hide-path=<pattern>` (directory binds only):
 
 <CodeGroup>
 ```yaml YAML
@@ -213,10 +213,11 @@ mounts:
   - "./src:/app"
   - "./certs:/etc/app/certs:ro,noexec"
   - "./workspace:/workspace:uid=1000,gid=1000"
+  - "./project:/src:hide-path=.env,hide-path=node_modules/"
 ```
 </CodeGroup>
 
-Object mounts require exactly one source and a guest `target`:
+Object mounts require exactly one source and a guest `target`. Bind objects accept a `hide_path` list (directory binds only):
 
 <CodeGroup>
 ```yaml YAML
@@ -227,6 +228,7 @@ mounts:
     host_permissions: private
     uid: 1000
     gid: 1000
+    hide_path: [".env", "sub/secret"]
   - named: cache
     target: "/var/cache/app"
     create: ensure-exists
@@ -241,7 +243,7 @@ mounts:
 ```
 </CodeGroup>
 
-All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to bind and directory-backed named mounts. Ownership changes only the guest fallback for files without a per-file stat override; it does not change host inode ownership. Duplicate guest targets are rejected.
+All mount kinds accept `readonly`, `noexec`, `nosuid`, and `nodev`. `stat_virtualization`, `host_permissions`, and paired `uid`/`gid` apply only to bind and directory-backed named mounts. `hide_path` applies only to directory binds; a path pattern in it requires `readonly: true`. It is local-only: the cloud backend rejects a non-empty hide-path list at creation. Ownership changes only the guest fallback for files without a per-file stat override; it does not change host inode ownership. Duplicate guest targets are rejected.
 
 ### Rootfs patches
 

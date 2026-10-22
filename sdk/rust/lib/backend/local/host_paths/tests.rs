@@ -16,15 +16,11 @@ use super::resolve_host_paths;
 //--------------------------------------------------------------------------------------------------
 
 fn bind(host: PathBuf, guest: &str) -> VolumeMount {
-    VolumeMount::Bind {
-        host,
-        guest: guest.into(),
-        options: Default::default(),
-        stat_virtualization: StatVirtualization::Strict,
-        host_permissions: HostPermissions::Private,
-        follow_root_symlinks: false,
-        quota_mib: Some(128),
+    let mut mount = VolumeMount::bind(host, guest);
+    if let VolumeMount::Bind { quota_mib, .. } = &mut mount {
+        *quota_mib = Some(128);
     }
+    mount
 }
 
 fn config_with_host_inputs(base: Option<&Path>) -> SandboxConfig {

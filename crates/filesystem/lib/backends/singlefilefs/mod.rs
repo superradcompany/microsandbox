@@ -908,7 +908,7 @@ mod tests {
         // Linux may issue OPEN against the cached old node ID without another
         // LOOKUP. A new descriptor must still follow the selected pathname.
         let (replacement_attr, _) = fs.getattr(context(), old_entry.inode, None).unwrap();
-        assert_eq!(replacement_attr.st_size, b"new contents".len() as _);
+        assert_eq!(replacement_attr.st_size, b"new contents".len() as i64);
         let (cached_handle, _) = fs.open(context(), old_entry.inode, false, 0).unwrap();
         let cached_handle = cached_handle.unwrap();
         let mut cached_writer = CaptureWriter { bytes: Vec::new() };

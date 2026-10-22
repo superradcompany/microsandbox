@@ -204,13 +204,9 @@ fn open_macos_inode_reopen(path: *const libc::c_char, flags: i32) -> io::Result<
     ))
 }
 
+/// Build a `/.vol/<dev>/<ino>` identity path as a `CString` (macOS only).
 #[cfg(target_os = "macos")]
-pub(crate) fn vol_path(dev: u64, ino: u64) -> std::ffi::CString {
-    use std::ffi::CString;
-
-    CString::new(format!("/.vol/{dev}/{ino}"))
-        .expect("formatted /.vol path never contains interior nul")
-}
+use crate::backends::shared::platform::vol_path;
 
 /// Look up a child name in a parent directory and return an [`Entry`].
 ///
@@ -222,11 +218,23 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
 
     let parent_fd = get_inode_fd(fs, parent)?;
 
+    // Name-only and path-only patterns do not depend on the entry type, so they
+    // can be decided before opening anything. Directory-only patterns need the
+    // type of the object actually returned, so each platform lookup resolves it
+    // from the opened object and denies there (see `do_lookup_linux` and
+    // `do_lookup_macos`); checking a separate stat here would let a concurrent
+    // file-to-directory replacement skip the rule.
+    if !fs.hide_path.has_dir_only_patterns()
+        && fs.hide_path_matches_name(parent, name.to_bytes(), false)
+    {
+        return Err(platform::enoent());
+    }
+
     #[cfg(target_os = "linux")]
     return do_lookup_linux(fs, parent, parent_fd.raw(), name);
 
     #[cfg(target_os = "macos")]
-    return do_lookup_macos(fs, parent_fd.raw(), name);
+    return do_lookup_macos(fs, parent, parent_fd.raw(), name);
 }
 
 /// Linux lookup: open → statx(AT_EMPTY_PATH) → patched_stat (3 syscalls).
@@ -275,6 +283,19 @@ fn do_lookup_linux(
     }
 
     let st = platform::statx_to_stat64(&stx);
+
+    // Directory-only hide-path patterns must be evaluated against the type of the
+    // object the handle actually references, not a separate stat. The `statx`
+    // above is on the opened `O_PATH` fd, so the decision and the returned entry
+    // cannot disagree even under concurrent host replacement.
+    if fs.hide_path.has_dir_only_patterns() {
+        let is_dir = platform::mode_file_type(st.st_mode) == platform::MODE_DIR;
+        if fs.hide_path_matches_name(parent, name.to_bytes(), is_dir) {
+            unsafe { libc::close(fd) };
+            return Err(platform::enoent());
+        }
+    }
+
     let mnt_id = stx.stx_mnt_id;
     let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
     let alias = NamespaceAlias::new(parent, name.to_bytes());
@@ -313,6 +334,9 @@ fn do_lookup_linux(
         aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
         anchor_children: std::sync::atomic::AtomicU64::new(0),
         retained_fd: std::sync::Mutex::new(None),
+        case_insensitive: std::sync::atomic::AtomicU8::new(
+            crate::backends::passthroughfs::hide_path::CASE_UNKNOWN,
+        ),
     });
     inodes.insert(inode_num, alt_key, data.clone());
     register_alias_locked(&mut inodes, &data, alias);
@@ -335,8 +359,24 @@ fn do_lookup_linux(
 /// path scheme references files by device+inode identity, making it
 /// stable across renames — similar to Linux's `/proc/self/fd/N`.
 #[cfg(target_os = "macos")]
-fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Result<Entry> {
+fn do_lookup_macos(
+    fs: &PassthroughFs,
+    parent: u64,
+    parent_fd: i32,
+    name: &CStr,
+) -> io::Result<Entry> {
     let st = platform::fstatat_nofollow(parent_fd, name)?;
+
+    // Directory-only hide-path patterns are evaluated against the object this single
+    // stat (and the `/.vol` open below, which references the same device+inode)
+    // resolves, so the decision and the returned entry cannot disagree.
+    if fs.hide_path.has_dir_only_patterns() {
+        let is_dir = platform::mode_file_type(st.st_mode) == platform::MODE_DIR;
+        if fs.hide_path_matches_name(parent, name.to_bytes(), is_dir) {
+            return Err(platform::enoent());
+        }
+    }
+
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
 
     // Open a real fd for xattr access via /.vol/dev/ino.
@@ -1096,4 +1136,102 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             fs.cfg.bind_identity_map.as_ref(),
         )
     }
+}
+
+/// Reconstruct the mount-relative path components for an inode by
+/// walking `anchor_parent` + `anchor_name` from the inode up to root.
+///
+/// Uses read locks so it can be called from any context without requiring
+/// write access. Returns `None` when the anchor chain is broken so the
+/// caller can fail closed. The `_root` argument is unused on Linux (the
+/// anchor chain is already mount-relative).
+#[cfg(target_os = "linux")]
+pub(crate) fn parent_path_components(
+    inodes: &std::sync::RwLock<
+        crate::backends::shared::inode_table::MultikeyBTreeMap<
+            u64,
+            crate::backends::shared::inode_table::InodeAltKey,
+            std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+        >,
+    >,
+    inode: u64,
+    _root: &std::path::Path,
+) -> Option<Vec<Vec<u8>>> {
+    let inodes_locked = inodes.read().unwrap();
+    _parent_path_components_locked(&inodes_locked, inode, &mut std::collections::HashSet::new())
+}
+
+#[cfg(target_os = "linux")]
+fn _parent_path_components_locked(
+    inodes: &crate::backends::shared::inode_table::MultikeyBTreeMap<
+        u64,
+        crate::backends::shared::inode_table::InodeAltKey,
+        std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+    >,
+    inode: u64,
+    seen: &mut std::collections::HashSet<u64>,
+) -> Option<Vec<Vec<u8>>> {
+    // Inode 1 is the mount root; its mount-relative path is empty.
+    if inode == 1 {
+        return Some(Vec::new());
+    }
+    if !seen.insert(inode) {
+        return None;
+    }
+
+    let data = inodes.get(&inode)?;
+    let anchor_parent = data
+        .anchor_parent
+        .load(std::sync::atomic::Ordering::Acquire);
+    if anchor_parent == 0 {
+        return None;
+    }
+
+    let mut components = _parent_path_components_locked(inodes, anchor_parent, seen)?;
+    let anchor_name = data.anchor_name.read().unwrap();
+    if !anchor_name.is_empty() {
+        components.push(anchor_name.clone());
+    }
+    Some(components)
+}
+
+/// Reconstruct the mount-relative path components for an inode on macOS by
+/// resolving its real host path via `/.vol/<dev>/<ino>` + `F_GETPATH`, then
+/// stripping the canonical mount root.
+///
+/// Returns `None` when the inode is absent from the table or its host path
+/// cannot be resolved (e.g. after unlink), so the caller can fail closed.
+#[cfg(target_os = "macos")]
+pub(crate) fn parent_path_components(
+    inodes: &std::sync::RwLock<
+        crate::backends::shared::inode_table::MultikeyBTreeMap<
+            u64,
+            crate::backends::shared::inode_table::InodeAltKey,
+            std::sync::Arc<crate::backends::shared::inode_table::InodeData>,
+        >,
+    >,
+    inode: u64,
+    root: &std::path::Path,
+) -> Option<Vec<Vec<u8>>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let dev;
+    let ino;
+    {
+        let inodes_locked = inodes.read().unwrap();
+        let data = inodes_locked.get(&inode)?;
+        dev = data.dev;
+        ino = data.ino;
+    }
+
+    let host = crate::backends::shared::platform::path_from_vol(dev, ino).ok()?;
+    let rel = host.strip_prefix(root).ok()?;
+
+    let mut components = Vec::new();
+    for part in rel.components() {
+        if let std::path::Component::Normal(part) = part {
+            components.push(part.as_bytes().to_vec());
+        }
+    }
+    Some(components)
 }

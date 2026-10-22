@@ -659,6 +659,14 @@ jobs:
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test -p microsandbox-network --lib --target ${{ matrix.rust_target }} dns::windows_resolver::
 
+      - name: Check Windows filesystem library
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
+          cargo +stable check --no-default-features -p microsandbox-filesystem --target ${{ matrix.rust_target }}
+
       - name: Test Windows filesystem DAX mappings
         shell: pwsh
         run: |
@@ -666,6 +674,44 @@ jobs:
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
           cargo +stable test --no-default-features -p microsandbox-filesystem --lib --target ${{ matrix.rust_target }} dax_
+
+  # ---------------------------------------------------------------------------
+  # Cross-check the non-linux cfg-gated filesystem backends (Windows and macOS)
+  #
+  # A backend gated to another platform can silently stop compiling;
+  # `cargo check` does not link, so both targets cross-check
+  # cheaply here. The native Windows build is also covered by `windows-quality`;
+  # this job is the only compile guard for macOS.
+  # ---------------------------------------------------------------------------
+  filesystem-backend-crosscheck:
+    name: Filesystem backend cross-check
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          cache-bin: false
+          cache-targets: true
+          shared-key: filesystem-backend-crosscheck
+
+      # `--no-default-features` avoids the `embed-binaries` OUT_DIR payload, which
+      # is not available in this cross-check; the hide-path code is not feature-gated,
+      # so this still compiles and covers the C1 windows-backend break.
+      - name: Check macOS filesystem backend
+        run: cargo +stable check --no-default-features -p microsandbox-filesystem --target aarch64-apple-darwin
+
+      - name: Check Windows filesystem backend
+        run: cargo +stable check --no-default-features -p microsandbox-filesystem --target x86_64-pc-windows-msvc
 
   windows-build:
     name: Build Windows ${{ matrix.component }} (${{ matrix.target }})

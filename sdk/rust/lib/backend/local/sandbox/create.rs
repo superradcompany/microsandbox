@@ -285,7 +285,7 @@ impl LocalBackend {
             }
             crate::sandbox::apply_snapshot_guest_clock(&mut config, &materialized.manifest)?;
             crate::sandbox::require_recorded_mounts(&config, &materialized.manifest)?;
-            crate::sandbox::require_guest_mounts(&config, materialized.required_bind_paths)?;
+            crate::sandbox::require_guest_mounts(&config, materialized.required_bind_paths, None)?;
             config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
             crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
             config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
@@ -2278,8 +2278,8 @@ mod tests {
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
-        HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, PullPolicy,
-        RootfsSource, SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
+        MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, PullPolicy, RootfsSource, SandboxConfig,
+        SandboxStatus, VolumeMount,
     };
     use crate::snapshot::SnapshotReference;
 
@@ -3394,19 +3394,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let pools = open_test_pools(&temp.path().join("test.db")).await;
         let mut config = test_config("owned-mount");
-        config.spec.mounts.push(VolumeMount::Bind {
-            host: "/host/data".into(),
-            guest: "/data".into(),
-            options: MountOptions {
-                override_uid: Some(1000),
-                override_gid: Some(1001),
-                ..MountOptions::default()
-            },
-            stat_virtualization: StatVirtualization::Strict,
-            host_permissions: HostPermissions::Private,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        });
+        config.spec.mounts.push(
+            crate::sandbox::MountBuilder::new("/data")
+                .bind("/host/data")
+                .owner(1000, 1001)
+                .build()
+                .unwrap(),
+        );
 
         let sandbox_id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await

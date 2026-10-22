@@ -473,8 +473,43 @@ Mounts use normal Linux behavior by default: writable, executable, suid-enabled,
 - `noexec` when files on the mount should not be executed directly.
 - `nosuid` when setuid/setgid bits should be ignored.
 - `nodev` when device files should be ignored.
+- `hide-path=<pattern>` when some host paths should be hidden.
+
+### `noexec`
 
 `noexec` does not stop interpreters from reading scripts from the mount, for example `sh /app/src/script.sh`.
+
+<span id="hide-path-pattern" />
+
+### `hide-path=<pattern>`
+
+<Tooltip tip="On microsandbox cloud, bind-mount hide-path lists are not supported; a non-empty hide-path list is rejected when the sandbox is created."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+This option hides host paths from the guest matching a gitignore-style pattern. Matching entries are invisible (ENOENT) and writes to them are forbidden (EACCES). Patterns are relative to the mount root and may be names (`.env`, `*.log`), directory-only names (`node_modules/`), or paths (`sub/secret`). Repeatable to hide several patterns.
+
+Patterns match whole path components: a pattern cannot match a substring of a component name. A `.` or `..` component is never present in a reconstructed mount-relative path and never names an entry, so those components are rejected rather than silently hiding nothing.
+
+A bind's hide-path list is captured in snapshots and validated on restore, so a restore cannot silently drop or weaken it. See [hide-path policy durability](/sandboxes/snapshots#hide-path-policy-durability).
+
+Matching follows the host filesystem's case behavior. Windows/NTFS is always matched case-insensitively, because NTFS can enable case sensitivity per directory and a mount-root probe cannot see that; a pattern such as `.env` therefore also hides `.ENV` and `.Env` on NTFS. On other filesystems, exact matching is guaranteed only where case sensitivity is positively known: a writable mount (probed with git's `core.ignorecase` technique) or a read-only Linux mount on a filesystem type known to be case-sensitive (for example ext4, xfs, btrfs, tmpfs). Linux ext4 and btrfs can also enable case folding per directory (`FS_CASEFOLD_FL`); that flag is read on the directory being matched, so a casefolded directory is matched case-insensitively even when the mount root is not. Because non-ASCII patterns cannot be folded safely, such a pattern makes a casefolded directory fail closed (its entries stay hidden). On a read-only mount whose filesystem type is unknown or ambiguous (like remote filesystems such as NFS and CIFS, or a case-sensitive APFS volume) matching may be case-insensitive and can hide a differently-cased sibling. That over-matching is deliberate: it can never let a differently-cased name bypass a pattern.
+
+**Path patterns require a read-only mount.** A path pattern like `sub/.env` is matched against each entry's mount-relative path at lookup time, so a guest with a writable mount could `rename` an ancestor directory (for example `mv sub x`) and make the hidden path stop matching. To keep the guarantee, `hide-path` rejects path patterns on a writable mount: use a **name-only pattern** (`.env`, `*.log`) to hide a name anywhere, or make the mount read-only to use path patterns.
+
+On the CLI, patterns are transported as part of the `SOURCE:DEST[:OPTIONS]` mount string, where commas separate options and the `:` after `DEST` separates the destination from the option block. A pattern therefore cannot contain `,` or `:` (nor a newline or NUL), and must not begin with `#` (gitignore treats a leading `#` as a comment, which would silently hide nothing; escape a literal leading `#` as `\#`) or begin or end with whitespace (option tokens are trimmed, so a value like `" !secret"` would otherwise be silently reinterpreted as the allow rule `!secret`). Because a comma is the option separator, a file whose name contains `,` or `:` cannot be hidden by a `hide-path` pattern. The SDK builders reject these patterns up front; at the CLI a `,` is consumed as an option separator. `hide-path` applies to directory binds only: a single-file bind (for example `--mount-file`) exposes exactly one file and has no namespace to filter, so a hide-path list on it is rejected rather than silently ignored.
+
+Matching is by **path, not by inode**. A host-created hard link to a hidden file under a non-hidden name is served, because only the name being looked up is checked. Symlinks behave differently from hard links: the link entry itself is served when its own name is not hidden, but following it issues a fresh lookup of the target name, which the hide-path list rejects, so a symlink cannot expose a hidden target's contents. The hard-link case is inherent to name-based hide-path lists: hiding one name cannot hide other names that alias the same inode, and a read-only mount does not change that. To defend against host-created hard links, hide a directory wholesale or leave the directory unmounted; an allowlist (`hide-path=*` plus explicit `hide-path=!keep.txt` allows) that leaves only reviewed names visible is the most robust configuration.
+
+A **concurrent host writer** (another process, or a second mount on the same host directory) can also race a rename: replacing the source or, for an atomic exchange, the destination between the hide-path check and the move could let a directory land at a directory-only-hidden name. Directory-only checks re-read the source's type and, for an exchange, pin both endpoints (including a destination that was absent when it was assessed) and retry on mismatch, but no kernel offers a rename-conditional-on-inode operation, so a sub-millisecond window remains. On Windows, directory inodes are path-backed and `opendir` and every child operation re-apply the directory-only rule to the live path, so a host writer replacing an allowed file with a directory at a directory-only-hidden name cannot expose or modify its contents after lookup (only the name's type remains observable through metadata). Both are the same name-based limitation as the cases above; a read-only mount is the robust answer.
+
+**Negations** (gitignore `!`) are supported, so a broad hide plus explicit allows can act as an allowlist: `hide-path=*` with `hide-path=!keep.txt` hides everything except `keep.txt`.
+
+**Performance.** Deny checking adds work to name-taking operations (lookup, create, readdir, ...), and how much depends on the pattern kinds in the list:
+
+- **Name-only patterns** (`.env`, `*.log`) are the cheapest. Each entry is matched by its single component name; no extra filesystem calls are made beyond the operation itself.
+- **Directory-only patterns** (`node_modules/`) must know whether an entry is a directory to hide it but not a same-named file, so they add a type lookup per operation (an `fstatat` on Unix lookups and per readdir entry when the filesystem does not supply a dirent type, a metadata query per readdir entry on Windows). Skip them unless you need to hide a directory while leaving a same-named file visible.
+- **Path patterns** (`sub/secret`, `**/env.secret`) must match against the entry's full mount-relative path, which is reconstructed per operation. On Linux this is an in-memory walk of the inode table (no extra syscalls); on macOS it resolves the parent path through `/.vol`/`F_GETPATH`, which is real per-operation syscall work, most visible on directories with many entries. During `readdir` the parent path is resolved once per directory and reused for all entries. Use name-only patterns when you do not need to match across directories.
+
+In practice the overhead matters most for `readdir`-heavy and lookup-heavy workloads on very large directories with a long path-pattern list. Name-only patterns keep the hide-path fast path.
 
 For stronger in-guest hardening, create the sandbox with the restricted security profile. Restricted sandboxes set `no_new_privs`, drop mount-admin capability from user commands, and force `nosuid,nodev` on user mounts. This profile is incompatible with workloads such as `sudo` and Docker-in-Docker.
 
@@ -490,7 +525,8 @@ Most CLI mount flags use `SOURCE:DEST[:OPTIONS]`; `--mount-owned` only needs `DE
 
 | Flag | Source | Options |
 |------|--------|---------|
-| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
+| `-v`, `--volume` | Host directory, host file, or named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>`, `hide-path=<pattern>` (repeatable, directory binds only) |
+| `--mount-dir` | Host directory | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>`, `hide-path=<pattern>` (repeatable) |
 | `--mount-file` | Host file | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, `quota=<size>`, paired `uid=<N>,gid=<N>` |
 | `--mount-named` | Named volume | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `kind=dir\|disk`, `size=<size>` for `kind=disk`, `quota=<size>` for directory volumes; directory-backed named volumes also support `stat-virt=strict\|relaxed\|off`, `host-perms=private\|mirror`, paired `uid=<N>,gid=<N>` |
 | `--mount-disk` | Host disk image | `ro`, `rw`, `noexec`, `nosuid`, `nodev`, `format=raw\|qcow2\|vmdk`, `fstype=<type>` |

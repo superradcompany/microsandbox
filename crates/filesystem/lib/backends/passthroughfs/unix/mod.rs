@@ -45,6 +45,8 @@ use crate::{
     stat64, statvfs64,
 };
 
+use super::hide_path::{self, HidePathList};
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -155,7 +157,7 @@ pub struct PassthroughConfig {
     ///
     /// This is host-side defense in depth for read-only virtiofs volume mounts.
     /// The guest mount also uses `MS_RDONLY`, but a privileged guest process can
-    /// attempt to remount; the backend must still deny writes.
+    /// attempt to remount; the backend must still hide_path writes.
     pub readonly: bool,
 
     /// FUSE entry cache timeout.
@@ -187,6 +189,11 @@ pub struct PassthroughConfig {
     /// Single-file mounts anchor pathname resolution at the parent directory,
     /// while accounting only the selected file. `None` uses `root_dir`.
     pub quota_root: Option<PathBuf>,
+
+    /// Gitignore-style patterns whose matching paths are hidden from the guest.
+    ///
+    /// Empty means no paths are denied.
+    pub hide_path: Vec<String>,
 }
 
 /// Passthrough filesystem backend.
@@ -201,6 +208,11 @@ pub struct PassthroughFs {
 
     /// Open file descriptor for the root directory.
     pub(crate) root_fd: File,
+
+    /// Canonical host path of the mount root, used to strip the root prefix
+    /// when reconstructing mount-relative paths for hide-path matching (macOS only).
+    #[cfg(target_os = "macos")]
+    pub(crate) root_path: PathBuf,
 
     /// Inode table with dual-key lookup (FUSE inode + host identity).
     pub(crate) inodes: RwLock<MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>>,
@@ -236,6 +248,9 @@ pub struct PassthroughFs {
 
     /// Optional guest-write byte budget for this mount's subtree.
     pub(crate) quota: Option<super::quota::DirQuota>,
+
+    /// Matcher for the hide-path list (empty = allow everything).
+    pub(crate) hide_path: HidePathList,
 }
 
 /// Open directory handle with a lazy point-in-time snapshot.
@@ -326,6 +341,16 @@ impl PassthroughFs {
         cfg: PassthroughConfig,
         probe_name: Option<&CStr>,
     ) -> io::Result<Self> {
+        // Defence in depth: a path pattern on a writable mount can be laundered
+        // by renaming an ancestor directory, so the SDK/runtime reject it at
+        // configuration time. Re-check here too, via the shared validator (the
+        // single source of truth), so a caller that reaches the backend
+        // constructor directly cannot bypass the rule.
+        if !cfg.readonly() {
+            microsandbox_types::reject_writable_path_patterns(&cfg.hide_path)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+        }
+
         if cfg.owned_checkpoint.is_some() && (cfg.external_checkpoint.is_some() || cfg.inject_init)
         {
             return Err(io::Error::new(
@@ -394,10 +419,21 @@ impl PassthroughFs {
             )
         });
 
+        let hide_path_patterns = cfg.hide_path.clone();
+
+        let hide_path = HidePathList::new(&cfg.root_dir, &hide_path_patterns, cfg.readonly)?;
+
+        // Canonical host path of the mount root for hide_path path-pattern matching.
+        #[cfg(target_os = "macos")]
+        let root_path =
+            platform::path_from_fd(root_fd.as_raw_fd()).unwrap_or_else(|_| cfg.root_dir.clone());
+
         Ok(Self {
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,
+            #[cfg(target_os = "macos")]
+            root_path,
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
             handles: RwLock::new(BTreeMap::new()),
@@ -410,6 +446,7 @@ impl PassthroughFs {
             #[cfg(target_os = "linux")]
             proc_self_fd,
             quota,
+            hide_path,
         })
     }
 }
@@ -467,6 +504,8 @@ impl PassthroughFs {
             anchor_children: AtomicU64::new(0),
             #[cfg(target_os = "linux")]
             retained_fd: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            case_insensitive: std::sync::atomic::AtomicU8::new(hide_path::CASE_UNKNOWN),
             #[cfg(target_os = "macos")]
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
         });
@@ -493,6 +532,223 @@ impl PassthroughFs {
             CachePolicy::Auto => OpenOptions::empty(),
             CachePolicy::Always => OpenOptions::CACHE_DIR,
         }
+    }
+}
+
+impl PassthroughFs {
+    /// Whether `name` in `parent` is denied by the hide-path list.
+    ///
+    /// `is_dir` defines whether the entry is a directory, enabling support for
+    /// dir-only hide-path patterns.
+    ///
+    /// Fails closed (returns `true`) when the parent-inode path cannot be
+    /// reconstructed under active path patterns, so a hide-path list is never
+    /// silently bypassed on an unresolvable path.
+    fn hide_path_matches_name(&self, parent: u64, name: &[u8], is_dir: bool) -> bool {
+        // The structural `.` and `..` entries must never be denied, otherwise a
+        // `.*` or `*` pattern would break path walks and directory listings.
+        if name == b"." || name == b".." {
+            return false;
+        }
+        let case_insensitive = if self.hide_path.needs_path_reconstruction() {
+            self.hide_path_pattern_case_insensitive(parent)
+        } else {
+            self.hide_path_case_insensitive(parent)
+        };
+        if !self.hide_path.needs_path_reconstruction() {
+            return self
+                .hide_path
+                .matches_basename_with_case(name, is_dir, case_insensitive);
+        }
+        let root = self.hide_path_root();
+        let Some(parent_components) =
+            crate::backends::passthroughfs::unix::inode::parent_path_components(
+                &self.inodes,
+                parent,
+                root,
+            )
+        else {
+            // Fail closed
+            return true;
+        };
+        self.hide_path_matches_name_in_dir(Some(&parent_components), name, is_dir, case_insensitive)
+    }
+
+    /// Whether `name` under a parent whose mount-relative components are
+    /// already known is denied by the hide-path list.
+    ///
+    /// Lets callers that check many names in the same directory (readdir) reuse
+    /// the parent's resolved components instead of reconstructing them (an
+    /// inode-table walk on Linux, an `F_GETPATH` syscall on macOS) once per
+    /// entry.
+    ///
+    /// `parent_components` is the parent's mount-relative components as produced
+    /// by [`inode::parent_path_components`], used only when a path pattern is
+    /// active. The caller is responsible for the parent-path resolution and its
+    /// fail-closed handling.
+    ///
+    /// `case_insensitive` is the parent directory's case behavior, from
+    /// [`Self::hide_path_case_insensitive`] or [`Self::hide_path_case_insensitive_from_fd`].
+    fn hide_path_matches_name_in_dir(
+        &self,
+        parent_components: Option<&[Vec<u8>]>,
+        name: &[u8],
+        is_dir: bool,
+        case_insensitive: bool,
+    ) -> bool {
+        // The structural `.` and `..` entries must never be denied.
+        if name == b"." || name == b".." {
+            return false;
+        }
+        if !self.hide_path.needs_path_reconstruction() {
+            return self
+                .hide_path
+                .matches_basename_with_case(name, is_dir, case_insensitive);
+        }
+        let mut components = parent_components.unwrap_or_default().to_vec();
+        components.push(name.to_vec());
+        self.hide_path.matches_path_with_case(
+            hide_path::join_path(&components).as_os_str().as_bytes(),
+            is_dir,
+            case_insensitive,
+        )
+    }
+
+    /// Case behavior of the directory `dir_inode` for hide-path matching.
+    ///
+    /// Linux ext4/btrfs can enable case folding per directory (`FS_CASEFOLD_FL`),
+    /// which a mount-root probe cannot see. The flag is probed once per inode and
+    /// cached alongside it, so a casefolded child cannot defeat a hide-path pattern on
+    /// an otherwise case-sensitive mount. Falls back to the mount default when
+    /// the flag cannot be read (or on non-Linux hosts, where case behavior is a
+    /// volume property).
+    #[cfg(target_os = "linux")]
+    fn hide_path_case_insensitive(&self, dir_inode: u64) -> bool {
+        if self.hide_path.is_empty() {
+            return false;
+        }
+        if self.hide_path.default_case_insensitive() {
+            return true;
+        }
+        let data = self.inodes.read().unwrap().get(&dir_inode).cloned();
+        let Some(data) = data else {
+            return false;
+        };
+        match data.case_insensitive.load(Ordering::Relaxed) {
+            hide_path::CASE_INSENSITIVE => true,
+            hide_path::CASE_SENSITIVE => false,
+            _ => {
+                // A casefold-capable filesystem always answers the flag ioctl;
+                // any other result means it does not fold, so keep the
+                // case-sensitive default rather than over-matching the whole
+                // mount.
+                let casefold = self.probe_dir_casefold(dir_inode).unwrap_or(false);
+                let state = if casefold {
+                    hide_path::CASE_INSENSITIVE
+                } else {
+                    hide_path::CASE_SENSITIVE
+                };
+                data.case_insensitive.store(state, Ordering::Relaxed);
+                casefold
+            }
+        }
+    }
+
+    /// Case behavior of the directory `dir_inode` for hide-path matching.
+    #[cfg(not(target_os = "linux"))]
+    fn hide_path_case_insensitive(&self, _dir_inode: u64) -> bool {
+        self.hide_path.default_case_insensitive()
+    }
+
+    /// Case behavior for matching a path pattern against an entry in `parent`.
+    ///
+    /// A path pattern matches the whole mount-relative path, so a casefold on
+    /// any directory the path crosses can change one of its components (Linux
+    /// ext4/btrfs set `FS_CASEFOLD_FL` per directory). Fold the comparison when
+    /// the entry's directory or any ancestor folds. This over-matches inside a
+    /// casefold tree, which is the safe direction: it can only hide more, never
+    /// re-expose a name the destination hide-path list hides.
+    #[cfg(target_os = "linux")]
+    fn hide_path_pattern_case_insensitive(&self, parent: u64) -> bool {
+        if self.hide_path.is_empty() {
+            return false;
+        }
+        if self.hide_path.default_case_insensitive() {
+            return true;
+        }
+        let mut current = parent;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if self.hide_path_case_insensitive(current) {
+                return true;
+            }
+            if current == 1 || !seen.insert(current) {
+                return false;
+            }
+            let data = self.inodes.read().unwrap().get(&current).cloned();
+            let Some(data) = data else {
+                return false;
+            };
+            let next = data.anchor_parent.load(Ordering::Acquire);
+            if next == 0 {
+                return false;
+            }
+            current = next;
+        }
+    }
+
+    /// Case behavior for matching a path pattern against an entry in `parent`.
+    #[cfg(not(target_os = "linux"))]
+    fn hide_path_pattern_case_insensitive(&self, _parent: u64) -> bool {
+        self.hide_path.default_case_insensitive()
+    }
+
+    /// Probe `dir_inode`'s `FS_CASEFOLD_FL` through a fresh directory fd.
+    #[cfg(target_os = "linux")]
+    fn probe_dir_casefold(&self, dir_inode: u64) -> Option<bool> {
+        let fd = crate::backends::passthroughfs::unix::inode::open_inode_fd(
+            self,
+            dir_inode,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+        )
+        .ok()?;
+        let result = hide_path::dir_is_casefold(fd);
+        unsafe { libc::close(fd) };
+        result
+    }
+
+    /// Case behavior for hide-path matching from an already-open directory
+    /// descriptor, used where a directory fd is at hand and no inode lookup is
+    /// needed (readdir snapshots, restore).
+    #[cfg(target_os = "linux")]
+    fn hide_path_case_insensitive_from_fd(&self, fd: RawFd) -> bool {
+        if self.hide_path.is_empty() {
+            return false;
+        }
+        if self.hide_path.default_case_insensitive() {
+            return true;
+        }
+        matches!(hide_path::dir_is_casefold(fd), Some(true))
+    }
+
+    /// Case behavior for hide-path matching from an already-open directory fd.
+    #[cfg(not(target_os = "linux"))]
+    fn hide_path_case_insensitive_from_fd(&self, _fd: RawFd) -> bool {
+        self.hide_path.default_case_insensitive()
+    }
+
+    /// Canonical mount root used to strip the root prefix when reconstructing
+    /// a mount-relative path on macOS.
+    #[cfg(target_os = "macos")]
+    fn hide_path_root(&self) -> &Path {
+        &self.root_path
+    }
+
+    /// Linux reconstructs mount-relative paths from the inode anchor chain,
+    /// so no separate root is needed.
+    #[cfg(target_os = "linux")]
+    fn hide_path_root(&self) -> &Path {
+        Path::new("/")
     }
 
     /// Whether this mount exposes the synthetic init binary.
@@ -576,6 +832,7 @@ impl Default for PassthroughConfig {
             bind_identity_map: None,
             quota_bytes: None,
             quota_root: None,
+            hide_path: Vec::new(),
         }
     }
 }

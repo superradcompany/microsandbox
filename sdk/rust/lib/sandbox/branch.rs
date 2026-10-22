@@ -403,6 +403,20 @@ pub(super) async fn prepare_branch(
     }
     // Owned declarations contain no source host path. Retain them as the required inventory
     // until capture proves that every one has independent child backing; clear external mounts.
+    let source_mounts = config.spec.mounts.clone();
+    if options.restore_resources.inherit {
+        // Inheritance reconnects the source's hide_path-bearing binds, so an omitted child
+        // mount is safe. An explicit child mount at the same guest path overrides the
+        // inherited source mount, though, so it must not drop or weaken the hide-path list.
+        crate::sandbox::require_preserved_inherited_bind_hide_path(
+            &source_mounts,
+            &options.spec.mounts,
+        )?;
+    } else {
+        // A local branch clears the source's external binds, so a child that does not inherit
+        // resources must re-declare any hide_path-bearing bind rather than silently dropping its policy.
+        crate::sandbox::require_preserved_bind_hide_path(&source_mounts, &options.spec.mounts)?;
+    }
     config
         .spec
         .mounts
@@ -754,5 +768,105 @@ mod tests {
             .volume("/data", |v| v.bind("/host/data"))
             .volume("/data", |v| v.disk("/images/seed.img"));
         assert_disk_mount(&builder.inner.config.clone().into_config());
+    }
+
+    #[test]
+    fn branch_of_hide_path_bearing_source_requires_redeclaration() {
+        use crate::sandbox::VolumeMount;
+
+        let bind = |guest: &str, hide_path: &[&str]| {
+            let mut mount = VolumeMount::bind("/host/data", guest);
+            if let VolumeMount::Bind {
+                hide_path: mount_hide_path,
+                ..
+            } = &mut mount
+            {
+                *mount_hide_path = hide_path
+                    .iter()
+                    .map(|pattern| (*pattern).to_string())
+                    .collect();
+            }
+            mount
+        };
+
+        let source = vec![bind("/data", &[".env"])];
+
+        // A plain child bind drops the hide-path list and must be refused.
+        let plain = vec![bind("/data", &[])];
+        assert!(crate::sandbox::require_preserved_bind_hide_path(&source, &plain).is_err());
+
+        // Re-declaring the same hide-path list is accepted.
+        crate::sandbox::require_preserved_bind_hide_path(&source, &source).unwrap();
+
+        // A stricter child hide-path list is accepted.
+        let stricter = vec![bind("/data", &[".env", "*.log"])];
+        crate::sandbox::require_preserved_bind_hide_path(&source, &stricter).unwrap();
+
+        // A child that omits the hide_path-bearing bind must re-declare it, not silently drop it.
+        let omitted = vec![bind("/other", &[".env"])];
+        let refusal = crate::sandbox::require_preserved_bind_hide_path(&source, &omitted)
+            .expect_err("an omitted hide_path-bearing bind must be refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("re-declare the hide_path-bearing mount at /data"),
+            "{refusal}"
+        );
+
+        // A source without hide_path imposes no requirement on the child.
+        let plain_source = vec![bind("/data", &[])];
+        crate::sandbox::require_preserved_bind_hide_path(&plain_source, &plain).unwrap();
+    }
+
+    #[test]
+    fn inherited_branch_guards_explicit_override_of_hide_path_bearing_bind() {
+        use crate::sandbox::VolumeMount;
+
+        let bind = |guest: &str, hide_path: &[&str]| {
+            let mut mount = VolumeMount::bind("/host/data", guest);
+            if let VolumeMount::Bind {
+                hide_path: mount_hide_path,
+                ..
+            } = &mut mount
+            {
+                *mount_hide_path = hide_path
+                    .iter()
+                    .map(|pattern| (*pattern).to_string())
+                    .collect();
+            }
+            mount
+        };
+
+        let source = vec![bind("/data", &[".env"])];
+
+        // Inherit + no explicit mount for the hide_path-bearing guest path is safe: the
+        // source bind (including its hide-path list) is reconnected.
+        let none = Vec::new();
+        crate::sandbox::require_preserved_inherited_bind_hide_path(&source, &none).unwrap();
+
+        // An explicit overlapping bind with no hide_path would override the inherited
+        // source mount and silently drop its policy, so it must be refused.
+        let weakened = vec![bind("/data", &[])];
+        assert!(
+            crate::sandbox::require_preserved_inherited_bind_hide_path(&source, &weakened).is_err(),
+            "an explicit inherit-mode bind that drops the source hide_path must be refused"
+        );
+
+        // An explicit overlapping bind that preserves or strengthens the hide_path is accepted.
+        let equal = vec![bind("/data", &[".env"])];
+        crate::sandbox::require_preserved_inherited_bind_hide_path(&source, &equal).unwrap();
+        let stronger = vec![bind("/data", &[".env", "*.log"])];
+        crate::sandbox::require_preserved_inherited_bind_hide_path(&source, &stronger).unwrap();
+
+        // A non-bind child mount at the same guest path also drops the hide-path policy.
+        let remapped = vec![VolumeMount::Tmpfs {
+            guest: "/data".into(),
+            size_mib: None,
+            options: Default::default(),
+        }];
+        assert!(
+            crate::sandbox::require_preserved_inherited_bind_hide_path(&source, &remapped).is_err(),
+            "remapping a hide_path-bearing guest path to a non-bind must be refused"
+        );
     }
 }

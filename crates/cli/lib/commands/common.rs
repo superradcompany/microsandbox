@@ -157,14 +157,17 @@ pub struct SandboxOpts {
     pub guest_clock: Option<GuestClockPolicy>,
 
     /// Mount a host path or named volume into the sandbox (`SOURCE:DEST[:OPTIONS]`).
-    /// OPTIONS may include paired `uid=<N>,gid=<N>` for directory-backed mounts.
+    /// OPTIONS may include `quota=<size>`, paired `uid=<N>,gid=<N>`, and repeatable
+    /// `hide-path=<pattern>` for directory bind mounts.
     #[arg(short, long)]
     pub volume: Vec<String>,
 
     /// Explicitly mount a host directory into the sandbox (`SOURCE:DEST[:OPTIONS]`).
     ///
-    /// OPTIONS may include `quota=<size>` and `uid=<N>,gid=<N>` to present
-    /// host-created files as that guest owner; both IDs are required together.
+    /// OPTIONS may include `quota=<size>`, `uid=<N>,gid=<N>` to present
+    /// host-created files as that guest owner (both `uid` and `gid` are required
+    /// together), and repeatable `hide-path=<pattern>` gitignore-style patterns to hide
+    /// matching host entries from the guest.
     #[arg(long = "mount-dir", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_dir: Vec<String>,
 
@@ -690,6 +693,7 @@ struct CliMountOptions {
     host_permissions: Option<microsandbox::sandbox::HostPermissions>,
     size_mib: Option<u32>,
     quota_mib: Option<u32>,
+    hide_path: Vec<String>,
     named_kind: Option<VolumeKind>,
     fstype: Option<String>,
     format: Option<DiskImageFormat>,
@@ -703,6 +707,7 @@ struct CliMountOptionSupport {
     policies: bool,
     size: bool,
     quota: bool,
+    hide_path: bool,
     named_kind: bool,
     fstype: bool,
     format: bool,
@@ -1938,6 +1943,7 @@ fn parse_volume_mount_spec(spec: &str) -> anyhow::Result<ParsedCliMountSpec<'_>>
             policies: true,
             quota: true,
             owner: true,
+            hide_path: true,
             ..CliMountOptionSupport::default()
         },
     )
@@ -2008,6 +2014,7 @@ pub fn apply_explicit_dir_mount(
             policies: true,
             quota: true,
             owner: true,
+            hide_path: true,
             ..CliMountOptionSupport::default()
         },
     )?;
@@ -2239,6 +2246,9 @@ fn apply_common_mount_options(mut mount: MountBuilder, options: CliMountOptions)
     if let (Some(uid), Some(gid)) = (options.override_uid, options.override_gid) {
         mount = mount.owner(uid, gid);
     }
+    if !options.hide_path.is_empty() {
+        mount = mount.hide_path(options.hide_path);
+    }
     mount
 }
 
@@ -2437,6 +2447,9 @@ fn parse_cli_mount_options(
                         parsed.quota_mib =
                             Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
                     }
+                    "hide-path" if support.hide_path => {
+                        parsed.hide_path.push(value.to_string());
+                    }
                     "kind" if support.named_kind => {
                         if seen_named_kind {
                             anyhow::bail!("mount option `kind` specified more than once");
@@ -2485,8 +2498,8 @@ fn parse_cli_mount_options(
                             anyhow::anyhow!("invalid gid {value:?} (expected an unsigned integer)")
                         })?);
                     }
-                    "stat-virt" | "host-perms" | "size" | "quota" | "kind" | "fstype"
-                    | "format" | "uid" | "gid" => {
+                    "stat-virt" | "host-perms" | "size" | "quota" | "hide-path" | "kind"
+                    | "fstype" | "format" | "uid" | "gid" => {
                         anyhow::bail!("mount option `{key}` is not valid here");
                     }
                     other => anyhow::bail!("unknown mount option {other:?}"),
@@ -4741,6 +4754,120 @@ mod tests {
             }
             other => panic!("expected Bind, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_dir_mount_hide_path_single() {
+        let dir = make_temp_dir("msb-mount-dir-hide_path");
+        let spec = format!("{}:/work:hide-path=.env", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind { hide_path, .. } => assert_eq!(hide_path, vec![".env".to_string()]),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_dir_mount_hide_path_repeatable_preserves_inner_equals() {
+        let dir = make_temp_dir("msb-mount-dir-hide_path-rep");
+        let spec = format!(
+            "{}:/work:ro,hide-path=.env,hide-path=*.log,hide-path=sub/secret=file",
+            dir.display()
+        );
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind { hide_path, .. } => {
+                assert_eq!(
+                    hide_path,
+                    vec![
+                        ".env".to_string(),
+                        "*.log".to_string(),
+                        "sub/secret=file".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_dir_mount_hide_path_default_empty() {
+        let dir = make_temp_dir("msb-mount-dir-hide_path-none");
+        let spec = format!("{}:/work:ro", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind { hide_path, .. } => assert!(hide_path.is_empty()),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mount_dir_and_volume_help_document_hide_path() {
+        let mut command = SandboxOpts::augment_args(Command::new("test"));
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(
+            help.contains("hide-path=<pattern>"),
+            "missing hide_path help:\n{help}"
+        );
+        // Both `-v/--volume` and `--mount-dir` advertise the option.
+        assert_eq!(help.matches("hide-path=<pattern>").count(), 2, "{help}");
+    }
+
+    #[tokio::test]
+    async fn dir_mount_hide_path_comma_ro_parses_as_hide_path_and_readonly() {
+        let dir = make_temp_dir("msb-mount-dir-hide_path-ro");
+        let spec = format!("{}:/work:hide-path=a,ro", dir.display());
+        let mount = build_explicit(&spec, apply_explicit_dir_mount).await;
+        match mount {
+            VolumeMount::Bind {
+                hide_path, options, ..
+            } => {
+                assert_eq!(hide_path, vec!["a".to_string()]);
+                assert!(options.readonly);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dir_mount_hide_path_second_bare_token_errors() {
+        let dir = make_temp_dir("msb-mount-dir-hide_path-comma");
+        let spec = format!("{}:/work:hide-path=a,b", dir.display());
+        let err = match apply_explicit_dir_mount(SandboxBuilder::new("test"), &spec) {
+            Ok(_) => panic!("hide-path=a,b must error: `b` is not an option token"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("must be a flag or key=value"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_apply_volume_hide_path_bind_supported() {
+        let dir = make_temp_dir("msb-volume-hide_path");
+        let spec = format!("{}:/work:hide-path=.env,hide-path=*.log", dir.display());
+        let mount = build_explicit(&spec, apply_volume).await;
+        match mount {
+            VolumeMount::Bind { hide_path, .. } => {
+                assert_eq!(hide_path, vec![".env".to_string(), "*.log".to_string()]);
+            }
+            other => panic!("expected Bind, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_explicit_file_mount_rejects_hide_path() {
+        let file = write_temp("fixture-hide_path");
+        let spec = format!("{}:/fixture:hide-path=.env", file.display());
+        let err = match apply_explicit_file_mount(SandboxBuilder::new("test"), &spec) {
+            Ok(_) => panic!("expected hide_path to be rejected for --mount-file"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("`hide-path` is not valid here"),
+            "expected hide-path rejection, got {err:?}"
+        );
     }
 
     #[tokio::test]

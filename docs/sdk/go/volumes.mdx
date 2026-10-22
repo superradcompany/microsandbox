@@ -601,7 +601,7 @@ Attach key-value labels to the volume. When called repeatedly, the maps merge; l
 func (mountFactory) Bind(hostPath string, opts MountOptions) MountConfig
 ```
 
-Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Set [`MountOptions.QuotaMiB`](#mountoptions) to bound how much the guest may write beyond the host directory's existing contents, overriding the runtime's protective default. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
+Bind-mount a host directory into the sandbox. Changes in the guest are reflected on the host and vice versa. Set [`MountOptions.QuotaMiB`](#mountoptions) to bound how much the guest may write beyond the host directory's existing contents, overriding the runtime's protective default. Set [`MountOptions.HidePath`](#mountoptions) to hide matching host paths from the guest. Returns a [`MountConfig`](#mountconfig) for use with [`WithMounts`](/sdk/go/sandbox#withmounts).
 
 <p className="msb-label">Parameters</p>
 
@@ -883,6 +883,14 @@ Per-mount host-permission propagation policy (bind / named only)
 
 Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only)
 
+#### <span className="msb-recv">mount.</span><span className="msb-hn">Deny</span>
+
+<Tooltip tip="On microsandbox cloud, bind-mount hide-path lists are not supported; a non-empty hide-path list is rejected at creation."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+`[]string`
+
+Host-side hide-path list of gitignore-style patterns (e.g. `.env`, `sub/secret`). Matching entries are invisible to the guest (ENOENT) and writes to them are forbidden (EACCES). Set through [`MountOptions.HidePath`](#mountoptions). Directory bind mounts only; a host file bind has no namespace to filter and rejects them. A path pattern (`sub/secret`) requires a read-only mount, since a writable guest could rename an ancestor directory to bypass it; name-only and directory-only (`node_modules/`) patterns are valid on any mount. Empty patterns, wire separators (`,`, `:`, newline, NUL), a leading `#`, surrounding whitespace, `.`/`..` components, and repeated or leading `./`/`//` separators are rejected.
+
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 
 ```go
@@ -970,7 +978,7 @@ Discriminates between the four mount flavours. Inspect via `mount.Kind()`.
 
 ### MountOptions
 
-Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization`, `HostPermissions`, and `Owner` are virtiofs-only; owner is rejected for disk-backed named volumes and when stat virtualization is off. Zero policy values preserve the conservative defaults (strict, private), while a nil owner keeps the runtime fallback identity.
+Tuning struct for [`Mount.Bind`](#mount-bind), [`Mount.Named`](#mount-named), and [`Mount.NamedWith`](#mount-namedwith). `StatVirtualization`, `HostPermissions`, and `Owner` are virtiofs-only; owner is rejected for disk-backed named volumes and when stat virtualization is off. Zero policy values preserve the conservative defaults (strict, private), while a nil owner keeps the runtime fallback identity. `Deny` hides gitignore-style patterns from the guest; see [`MountConfig.Deny`](#mountconfig) for its rules.
 
 <p className="msb-backref">Used by <a href="#mount-bind">Mount.Bind()</a> · <a href="#mount-named">Mount.Named()</a> · <a href="#mount-namedwith">Mount.NamedWith()</a></p>
 

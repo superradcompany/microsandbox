@@ -205,6 +205,7 @@ fn visit_host_paths(
             VolumeMount::Bind { host, .. } => visit(host, "bind mount host path")?,
             VolumeMount::DiskImage { host, .. } => visit(host, "disk mount host path")?,
             VolumeMount::Owned { .. } | VolumeMount::Named { .. } | VolumeMount::Tmpfs { .. } => {}
+            _ => {}
         }
     }
 

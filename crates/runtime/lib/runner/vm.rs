@@ -2139,6 +2139,7 @@ fn build_vm(
         };
         let parsed = parse_mount_spec(&file_mount.mount)
             .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        reject_file_mount_hide_path(&file_mount.mount, &parsed.hide_path)?;
         let tag = parsed.tag;
         let host_path = PathBuf::from(&parsed.host_path);
         let override_owner = match (parsed.override_uid, parsed.override_gid) {
@@ -2348,6 +2349,7 @@ fn build_vm(
             #[cfg(windows)]
             default_owner: override_owner,
             quota_bytes: parsed.quota_bytes,
+            hide_path: parsed.hide_path,
             ..Default::default()
         };
         let backend = match PassthroughFs::new(cfg) {
@@ -3438,6 +3440,7 @@ struct ParsedMountSpec {
     /// (`gid=` option). `None` keeps the runtime default. Must be set together
     /// with [`override_uid`](Self::override_uid).
     override_gid: Option<u32>,
+    hide_path: Vec<String>,
 }
 
 /// Parse a `--mount` spec into [`ParsedMountSpec`].
@@ -3475,6 +3478,7 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let mut quota_bytes = None;
     let mut override_uid = None;
     let mut override_gid = None;
+    let mut hide_path: Vec<String> = Vec::new();
     let mut seen_stat_virt = false;
     let mut seen_host_perms = false;
     let mut seen_access = false;
@@ -3606,6 +3610,11 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                                 format!("invalid gid {value:?} (expected an unsigned integer)")
                             })?);
                         }
+                        "hide-path" => {
+                            microsandbox_types::validate_hide_path_pattern(value)
+                                .map_err(|err| err.to_string())?;
+                            hide_path.push(value.to_string())
+                        }
                         other => return Err(format!("unknown mount option {other:?}")),
                     }
                 }
@@ -3625,6 +3634,15 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         );
     }
 
+    // Path hide-path patterns (`sub/.env`) are matched against the entry's
+    // mount-relative path, so a writable guest can rename an ancestor directory
+    // to launder them. Reject them here; name-only and directory-only patterns
+    // stay valid, and a read-only mount cannot rename.
+    if !readonly {
+        microsandbox_types::reject_writable_path_patterns(&hide_path)
+            .map_err(|err| err.to_string())?;
+    }
+
     Ok(ParsedMountSpec {
         tag: tag.to_string(),
         host_path: host_path.to_string(),
@@ -3635,7 +3653,23 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         quota_bytes,
         override_uid,
         override_gid,
+        hide_path,
     })
+}
+
+/// Reject a hide-path list on a host file-mount spec.
+///
+/// A file host-mount exposes exactly one entry through `SingleFileFs`, which has
+/// no namespace to filter, so a hide-path list can never be enforced. Refuse it
+/// rather than start the sandbox with weaker protection than the caller asked
+/// for.
+fn reject_file_mount_hide_path(mount_spec: &str, hide_path: &[String]) -> Result<(), RuntimeError> {
+    if hide_path.is_empty() {
+        return Ok(());
+    }
+    Err(RuntimeError::Custom(format!(
+        "file mount {mount_spec:?}: hide-path patterns are not supported for a host file mount"
+    )))
 }
 
 /// Split `host_path[:opts]`, skipping the drive colon in Windows paths.
@@ -3749,8 +3783,8 @@ mod tests {
         HostPermissions, StatVirtualization, agent_kernel_cmdline, agent_primary_queue_size,
         append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
         guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
-        prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
-        thp_kernel_cmdline, validate_disk_format,
+        prepend_scripts_path, reject_file_mount_hide_path, request_guest_shutdown,
+        request_guest_shutdown_with_timeout, thp_kernel_cmdline, validate_disk_format,
     };
     #[cfg(unix)]
     use super::{
@@ -4225,6 +4259,104 @@ mod tests {
         assert!(
             err.contains("`quota` specified more than once"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_hide_path_single() {
+        let p = parse_mount_spec("foo:/host/data:hide-path=.env").unwrap();
+        assert_eq!(p.hide_path, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_hide_path_repeatable() {
+        // Path patterns require a read-only mount.
+        let p = parse_mount_spec(
+            "foo:/host/data:ro,hide-path=.env,hide-path=*.log,hide-path=sub/secret",
+        )
+        .unwrap();
+        assert!(p.readonly);
+        assert_eq!(p.hide_path, vec![".env", "*.log", "sub/secret"]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_hide_path_default_empty() {
+        let p = parse_mount_spec("foo:/host/data:ro").unwrap();
+        assert!(p.hide_path.is_empty());
+    }
+
+    #[test]
+    fn test_file_mount_hide_path_is_rejected() {
+        // A file host-mount has no namespace to filter, so a requested hide-path list
+        // must be refused rather than silently dropped.
+        let parsed = parse_mount_spec("foo:/host/data:hide-path=.env").unwrap();
+        let err = reject_file_mount_hide_path("foo:/host/data:hide-path=.env", &parsed.hide_path)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("hide-path patterns are not supported for a host file mount"),
+            "got: {err}"
+        );
+
+        // No hide-path list is accepted.
+        reject_file_mount_hide_path("foo:/host/data", &[]).unwrap();
+    }
+
+    #[test]
+    fn test_parse_mount_spec_hide_path_value_with_equals() {
+        let p = parse_mount_spec("foo:/host/data:hide-path=a=b").unwrap();
+        assert_eq!(p.hide_path, vec!["a=b".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_hide_path_with_colon() {
+        // A colon in the option block is consumed by the host/options split, so
+        // it cannot reach the hide_path handler; the spec still fails loudly rather
+        // than silently dropping the pattern.
+        assert!(parse_mount_spec("foo:/host/data:hide-path=a:b").is_err());
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_hide_path_with_newline() {
+        let err = parse_mount_spec("foo:/host/data:hide-path=bad\npattern").unwrap_err();
+        assert!(
+            err.contains("must not contain"),
+            "expected newline rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_empty_hide_path() {
+        let err = parse_mount_spec("foo:/host/data:hide-path=").unwrap_err();
+        assert!(
+            err.contains("must not be empty"),
+            "expected empty-pattern rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_path_hide_path_on_writable_mount() {
+        let err = parse_mount_spec("foo:/host/data:hide-path=sub/.env").unwrap_err();
+        assert!(
+            err.contains("path pattern"),
+            "expected path-pattern rejection, got: {err}"
+        );
+
+        // Read-only mounts cannot rename an ancestor, so path patterns are valid.
+        let p = parse_mount_spec("foo:/host/data:ro,hide-path=sub/.env").unwrap();
+        assert_eq!(p.hide_path, vec!["sub/.env".to_string()]);
+        assert!(p.readonly);
+    }
+
+    #[test]
+    fn test_parse_mount_spec_rejects_hide_path_with_leading_whitespace() {
+        // Option tokens are trimmed, but whitespace inside the value (after `=`)
+        // survives and must be rejected so `" !secret"` cannot silently become
+        // the allow rule `!secret`.
+        let err = parse_mount_spec("foo:/host/data:hide-path= !secret").unwrap_err();
+        assert!(
+            err.contains("leading or trailing whitespace"),
+            "expected whitespace rejection, got: {err}"
         );
     }
 

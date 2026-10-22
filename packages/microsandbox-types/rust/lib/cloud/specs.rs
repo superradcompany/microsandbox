@@ -556,6 +556,9 @@ impl From<CloudVolumeMount> for VolumeMount {
                 // the protective no-follow behavior.
                 follow_root_symlinks: false,
                 quota_mib,
+                // The cloud wire type carries no hide-path list; an empty list hides
+                // nothing.
+                hide_path: Vec::new(),
             },
             CloudVolumeMount::Named {
                 name,
@@ -622,6 +625,10 @@ impl From<VolumeMount> for CloudVolumeMount {
                 host_permissions,
                 follow_root_symlinks: _,
                 quota_mib,
+                // The cloud wire format has no hide_path field, so the policy cannot
+                // round-trip; the SDK create path rejects non-empty hide-path lists
+                // before this conversion is reached.
+                hide_path: _,
             } => CloudVolumeMount::Bind {
                 host,
                 guest,

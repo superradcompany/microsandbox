@@ -22,7 +22,7 @@ use crate::sandbox::{
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
-    RootDisk, SandboxRuntimeOptions, TlsConfig,
+    RootDisk, SandboxRuntimeOptions, TlsConfig, VolumeMount,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -636,6 +636,18 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     {
         return Err(unsupported("named volume inline create"));
     }
+
+    // The cloud wire format has no hide_path field, so a non-empty hide-path list would
+    // silently create a sandbox that exposes the files the caller asked to
+    // hide; hide-path lists are only enforceable on host bind mounts.
+    if config
+        .spec
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount, VolumeMount::Bind { hide_path, .. } if !hide_path.is_empty()))
+    {
+        return Err(unsupported("bind mount hide-path list"));
+    }
     if config
         .spec
         .mounts
@@ -645,12 +657,15 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         return Err(unsupported("sandbox-owned volumes"));
     }
     if config.spec.mounts.iter().any(|mount| {
-        let options = match mount {
-            microsandbox_types::VolumeMount::Bind { options, .. }
-            | microsandbox_types::VolumeMount::Owned { options, .. }
-            | microsandbox_types::VolumeMount::Named { options, .. }
-            | microsandbox_types::VolumeMount::Tmpfs { options, .. }
-            | microsandbox_types::VolumeMount::DiskImage { options, .. } => options,
+        let options = if let microsandbox_types::VolumeMount::Bind { options, .. }
+        | microsandbox_types::VolumeMount::Owned { options, .. }
+        | microsandbox_types::VolumeMount::Named { options, .. }
+        | microsandbox_types::VolumeMount::Tmpfs { options, .. }
+        | microsandbox_types::VolumeMount::DiskImage { options, .. } = mount
+        {
+            options
+        } else {
+            return false;
         };
         options.override_uid.is_some() || options.override_gid.is_some()
     }) {
@@ -991,7 +1006,7 @@ mod tests {
             .build()
             .unwrap();
         let error = crate::backend::with_backend(backend, async {
-            SandboxBuilder::new("http-deny-cloud")
+            SandboxBuilder::new("http-hide_path-cloud")
                 .image("alpine")
                 .network(|network| {
                     network.http(|h| {
@@ -1619,6 +1634,20 @@ mod tests {
     }
 
     #[test]
+    fn cloud_create_request_rejects_bind_mount_hide_path_list() {
+        let mut config = base_cloud_config();
+        config.spec.mounts.push(
+            crate::sandbox::MountBuilder::new("/data")
+                .bind("/data")
+                .hide_path([".env"])
+                .build()
+                .unwrap(),
+        );
+
+        assert_unsupported_config_field(config, "bind mount hide-path list");
+    }
+
+    #[test]
     fn cloud_create_rejects_owned_storage_before_sending_request() {
         for mount in [
             crate::sandbox::MountBuilder::new("/data")
@@ -1646,19 +1675,13 @@ mod tests {
     #[test]
     fn cloud_create_request_rejects_mount_owner_without_capability() {
         let mut config = base_cloud_config();
-        config.spec.mounts.push(VolumeMount::Bind {
-            host: "/host/data".into(),
-            guest: "/data".into(),
-            options: MountOptions {
-                override_uid: Some(1000),
-                override_gid: Some(1000),
-                ..MountOptions::default()
-            },
-            stat_virtualization: StatVirtualization::Strict,
-            host_permissions: HostPermissions::Private,
-            follow_root_symlinks: false,
-            quota_mib: None,
-        });
+        config.spec.mounts.push(
+            crate::sandbox::MountBuilder::new("/data")
+                .bind("/host/data")
+                .owner(1000, 1000)
+                .build()
+                .unwrap(),
+        );
 
         assert_unsupported_config_field(config, "mount owner");
     }

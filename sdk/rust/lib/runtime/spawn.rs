@@ -2478,7 +2478,13 @@ fn resolve_file_mounts(
 ) -> MicrosandboxResult<HashMap<String, (String, String)>> {
     let mut file_mounts = HashMap::new();
     for mount in &config.spec.mounts {
-        let VolumeMount::Bind { host, guest, .. } = mount else {
+        let VolumeMount::Bind {
+            host,
+            guest,
+            hide_path,
+            ..
+        } = mount
+        else {
             continue;
         };
         if let Some(binding) = config.checkpoint_restore.as_ref().and_then(|restore| {
@@ -2490,6 +2496,7 @@ fn resolve_file_mounts(
             // A missing or type-changed export must retain its captured transport,
             // never be reclassified from a file facade into a directory share.
             if let Some(filename) = &binding.filename {
+                reject_hide_path_on_file_bind(guest, hide_path)?;
                 file_mounts.insert(guest.clone(), (filename.clone(), binding.mount.tag.clone()));
             }
             continue;
@@ -2498,6 +2505,7 @@ fn resolve_file_mounts(
             continue;
         }
 
+        reject_hide_path_on_file_bind(guest, hide_path)?;
         let filename = host
             .file_name()
             .and_then(OsStr::to_str)
@@ -2513,6 +2521,21 @@ fn resolve_file_mounts(
     Ok(file_mounts)
 }
 
+/// Reject a hide-path list on a bind that resolves to a single host file.
+///
+/// File binds use the single-file backend, which exposes exactly one entry and
+/// has no namespace to filter, so a hide-path rule would be silently ignored.
+/// Refuse it rather than start the sandbox with weaker protection than the
+/// caller asked for.
+fn reject_hide_path_on_file_bind(guest: &str, hide_path: &[String]) -> MicrosandboxResult<()> {
+    if hide_path.is_empty() {
+        return Ok(());
+    }
+    Err(MicrosandboxError::InvalidConfig(format!(
+        "hide-path patterns are not supported for a host file bind at {guest:?}; mount its parent directory to hide entries by pattern"
+    )))
+}
+
 /// Push a `--mount tag:host_path[:ro]` arg pair.
 #[allow(clippy::too_many_arguments)]
 fn push_dir_mount_arg(
@@ -2524,6 +2547,7 @@ fn push_dir_mount_arg(
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
     quota_mib: Option<u32>,
+    hide_path: &[String],
 ) {
     let tag = guest_mount_tag(guest);
     push_dir_mount_arg_with_tag(
@@ -2535,6 +2559,7 @@ fn push_dir_mount_arg(
         host_permissions,
         follow_root_symlinks,
         quota_mib,
+        hide_path,
     );
 }
 
@@ -2549,6 +2574,7 @@ fn push_dir_mount_arg_with_tag(
     host_permissions: HostPermissions,
     follow_root_symlinks: bool,
     quota_mib: Option<u32>,
+    hide_path: &[String],
 ) {
     let mut arg = format!("{tag}:{host_display}");
     let mut opts = mount_option_tokens(options);
@@ -2562,6 +2588,13 @@ fn push_dir_mount_arg_with_tag(
     );
     if let Some(mib) = quota_mib {
         opts.push(format!("quota={mib}"));
+    }
+    for p in hide_path {
+        // Emit the pattern verbatim. `validate_hide_path_pattern` rejects leading or
+        // trailing whitespace because the runtime trims option tokens; trimming
+        // here would silently reinterpret a value like `" !secret"` as the
+        // allow rule `!secret`.
+        opts.push(format!("hide-path={p}"));
     }
     append_option_block(&mut arg, opts);
     mounts.push(arg);
@@ -3012,6 +3045,7 @@ fn machine_cli_args(
                             Some(
                                 quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB),
                             ),
+                            &[],
                         );
                         launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                             tag: id,
@@ -3052,10 +3086,14 @@ fn machine_cli_args(
                 host_permissions,
                 follow_root_symlinks,
                 quota_mib,
+                hide_path,
+                ..
             } => {
                 if let Some((filename, tag)) = file_mounts.get(guest) {
                     // File binds receive the same default-on host disk
-                    // protection as directory binds.
+                    // protection as directory binds. Deny lists are rejected for
+                    // file binds in `resolve_file_mounts`, since `SingleFileFs`
+                    // exposes exactly one file and cannot filter by name.
                     let quota = quota_mib.unwrap_or(crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB);
                     push_file_mount_arg(
                         &mut launch.file_mounts,
@@ -3086,6 +3124,7 @@ fn machine_cli_args(
                         *host_permissions,
                         *follow_root_symlinks,
                         Some(quota),
+                        hide_path,
                     );
                     launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                         tag: guest_mount_tag(guest),
@@ -3145,6 +3184,7 @@ fn machine_cli_args(
                             *host_permissions,
                             *follow_root_symlinks,
                             *quota_mib,
+                            &[],
                         );
                         launch.bootstrap.dir_mounts.push(BootstrapDirMount {
                             tag: guest_mount_tag(guest),
@@ -3194,6 +3234,12 @@ fn machine_cli_args(
                     fstype: fstype.clone(),
                     flags: bootstrap_mount_flags(*options),
                 });
+            }
+            _ => {
+                // `VolumeMount` is non-exhaustive across crates. Launch preflight
+                // rejects any variant this builder does not understand, so an
+                // unrecognized mount must not reach here.
+                unreachable!("unrecognized volume mount reached launch argument builder");
             }
         }
     }
@@ -3339,7 +3385,9 @@ mod tests {
         AUTO_BLOCK_WRITEBACK_LIMIT_BYTES, MIN_BLOCK_WRITEBACK_LIMIT_BYTES,
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
-    use super::{block_writeback_policy, is_owned_restored_disk, machine_cli_args};
+    use super::{
+        block_writeback_policy, is_owned_restored_disk, machine_cli_args, resolve_file_mounts,
+    };
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -5401,6 +5449,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_file_mounts_rejects_hide_path_on_file_bind() {
+        let dir = tempdir().unwrap();
+        let host_file = dir.path().join("secret.txt");
+        std::fs::write(&host_file, b"secret").unwrap();
+
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/guest/secret.txt", |m| {
+                m.bind(host_file.as_path()).hide_path([".env"])
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let err = resolve_file_mounts(&config).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("hide-path patterns are not supported for a host file bind"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_machine_cli_args_mixed_file_and_dir_mounts() {
         let config = SandboxBuilder::new("test")
             .image("/tmp/rootfs")
@@ -5568,6 +5639,46 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair[0] == "--mount" && pair[1] == expected),
             "missing override-quota --mount arg in {rendered:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_cli_args_bind_mount_hide_path_renders_arg_only() {
+        let config = SandboxBuilder::new("test")
+            .image("/tmp/rootfs")
+            .volume("/data", |m| {
+                // `sub/secret` is a path pattern, which is only valid on a
+                // read-only mount; the mount stays writable elsewhere.
+                m.bind("/host/data")
+                    .readonly()
+                    .hide_path([".env", "sub/secret"])
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let rendered = render_args(&config);
+        let data_tag = super::guest_mount_tag("/data");
+        let expected = format!(
+            "{data_tag}:/host/data:ro,quota={},hide-path=.env,hide-path=sub/secret",
+            crate::sandbox::config::DEFAULT_BIND_QUOTA_MIB
+        );
+        assert!(
+            rendered
+                .windows(2)
+                .any(|pair| pair[0] == "--mount" && pair[1] == expected),
+            "missing hide_path --mount arg in {rendered:?}"
+        );
+
+        // Deny rides only in the --mount arg, never the agentd env spec.
+        let dir_mounts = rendered
+            .iter()
+            .find(|arg| arg.starts_with("MSB_DIR_MOUNTS="))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !dir_mounts.contains("hide-path"),
+            "MSB_DIR_MOUNTS must not carry hide_path, got {dir_mounts:?}"
         );
     }
 

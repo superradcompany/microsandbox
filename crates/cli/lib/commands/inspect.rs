@@ -54,6 +54,18 @@ fn mount_flags_suffix(options: MountOptions) -> String {
     format!(" ({})", flags.join(","))
 }
 
+/// Render the hide_path-list suffix for a bind mount in `msb inspect` output.
+///
+/// Returns an empty string when there is no hide-path list so common mounts stay
+/// terse; otherwise renders `[hide-path=a, b]` with the patterns comma-joined.
+fn hide_path_suffix(hide_path: &[String]) -> String {
+    if hide_path.is_empty() {
+        String::new()
+    } else {
+        format!(" [hide-path={}]", hide_path.join(", "))
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -320,6 +332,8 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         host_permissions,
                         follow_root_symlinks,
                         quota_mib,
+                        hide_path,
+                        ..
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let suffix = mount_policy_suffix(
@@ -330,8 +344,9 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         let quota = quota_mib
                             .map(|mib| format!(" [quota={mib}MiB]"))
                             .unwrap_or_default();
+                        let hide_path = hide_path_suffix(hide_path);
                         println!(
-                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}",
+                            "  {guest:<16}\u{2192} {}{flags}{suffix}{quota}{hide_path}",
                             host.display()
                         );
                     }
@@ -376,6 +391,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                             format.as_str()
                         );
                     }
+                    _ => {}
                 }
             }
         }
@@ -534,5 +550,35 @@ mod tests {
         let changes = pending_config_changes(SandboxStatus::Stopped, Some(&desired), Some(&active));
 
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn hide_path_suffix_empty_list_is_terse() {
+        assert_eq!(hide_path_suffix(&[]), "");
+    }
+
+    #[test]
+    fn hide_path_suffix_single_pattern() {
+        assert_eq!(hide_path_suffix(&[".env".to_string()]), " [hide-path=.env]");
+    }
+
+    #[test]
+    fn hide_path_suffix_multiple_patterns_are_comma_joined() {
+        let patterns = vec![
+            ".env".to_string(),
+            "*.log".to_string(),
+            "sub/secret".to_string(),
+        ];
+        assert_eq!(
+            hide_path_suffix(&patterns),
+            " [hide-path=.env, *.log, sub/secret]"
+        );
+    }
+
+    #[test]
+    fn inspect_mount_line_renders_hide_path_suffix() {
+        // The suffix is appended verbatim to the `msb inspect` mount listing.
+        let patterns = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(hide_path_suffix(&patterns), " [hide-path=a, b]");
     }
 }

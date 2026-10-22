@@ -157,7 +157,9 @@ pub mod manifest;
 pub mod owned;
 mod restore_defaults;
 
-pub use external_mounts::EXTERNAL_MOUNTS_EXTENSION;
+pub use external_mounts::{
+    BIND_MOUNT_DENY_EXTENSION, EXTERNAL_MOUNTS_EXTENSION, ExternalMountPolicy,
+};
 pub use guest_clock::GUEST_CLOCK_EXTENSION;
 pub use manifest::*;
 pub use owned::{

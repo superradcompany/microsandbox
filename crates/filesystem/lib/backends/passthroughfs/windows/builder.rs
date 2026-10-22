@@ -94,6 +94,11 @@ pub struct PassthroughConfig {
     /// virtualization is enabled.
     pub default_owner: Option<(u32, u32)>,
 
+    /// Gitignore-style patterns whose matching paths are hidden from the guest.
+    ///
+    /// Empty means no paths are denied.
+    pub hide_path: Vec<String>,
+
     /// Explicit external-mount checkpoint policy and destination diagnostic report.
     pub external_checkpoint: Option<super::super::ExternalCheckpointOptions>,
 
@@ -187,6 +192,9 @@ impl PassthroughFs {
             )
         });
 
+        let hide_path =
+            super::super::hide_path::HidePathList::new(&root, &cfg.hide_path, cfg.readonly)?;
+
         Ok(Self {
             cfg,
             root,
@@ -198,6 +206,7 @@ impl PassthroughFs {
             init_file,
             stat_store,
             quota,
+            hide_path,
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             map_windows: Mutex::new(DaxWindows::default()),
             dax_files: DaxFiles::default(),
@@ -265,6 +274,7 @@ impl Default for PassthroughConfig {
             quota_bytes: None,
             quota_root: None,
             default_owner: None,
+            hide_path: Vec::new(),
             external_checkpoint: None,
             owned_checkpoint: None,
         }

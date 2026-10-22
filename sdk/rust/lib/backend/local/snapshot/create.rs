@@ -12,7 +12,7 @@ use microsandbox_image::snapshot::{
     ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
     SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, layer_path,
 };
-use microsandbox_types::{VolumeMount, canonicalize_volume_mounts};
+use microsandbox_types::{VolumeMount, canonicalize_volume_mounts, snapshot::ExternalMountPolicy};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
@@ -68,6 +68,8 @@ struct FileSnapshotMetadata<'a> {
     user: Option<String>,
     /// Guest paths of source mounts whose host-side backing this snapshot does not carry.
     external_mounts: Vec<String>,
+    /// Captured host-side hide-path policy for each host-backed bind mount.
+    mount_policies: Vec<ExternalMountPolicy>,
 }
 
 #[derive(Clone)]
@@ -397,6 +399,7 @@ async fn capture_installed(
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
     let artifact_started = Instant::now();
     let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
+    let mount_policies = captured_mount_policies(&sandbox_config.spec.mounts)?;
     let built = build_artifact(
         &staging_dir,
         &disk,
@@ -409,6 +412,7 @@ async fn capture_installed(
             root_disk,
             user: sandbox_config.spec.runtime.user.clone(),
             external_mounts,
+            mount_policies,
         },
     )
     .await;
@@ -729,7 +733,9 @@ pub(super) async fn create_snapshot_archive(
         user: sandbox_config.spec.runtime.user.clone(),
     })?;
     let external_mounts = uncaptured_mount_paths(&sandbox_config.spec.mounts)?;
+    let mount_policies = captured_mount_policies(&sandbox_config.spec.mounts)?;
     manifest.set_external_mounts(external_mounts)?;
+    manifest.set_external_mount_policies(mount_policies)?;
     if record_integrity && let SnapshotState::File(file) = &mut manifest.state {
         for index in 0..file.layers.len() {
             let source = &disk.sources[index].path;
@@ -996,6 +1002,13 @@ async fn capture_full_snapshot(
         // so restores do not step that timeline to host time unless they ask to.
         manifest.set_guest_clock(sandbox_config.spec.runtime.guest_clock.unwrap_or_default())?;
         manifest.set_owned_volumes(closure.checkpoint().owned_volumes.clone())?;
+        // A full snapshot resolves external mounts from the checkpoint closure, not
+        // from the manifest, so the guest paths stay unrecorded. The hide-path policy must
+        // still be captured: restore compares it even when the mapping comes from the
+        // closure, so without it a destination bind with a dropped hide-path list would
+        // silently re-expose a hidden path.
+        manifest
+            .set_external_mount_policies(captured_mount_policies(&sandbox_config.spec.mounts)?)?;
         manifest
             .validate()
             .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
@@ -1090,6 +1103,7 @@ async fn build_artifact(
         root_disk,
         user,
         external_mounts,
+        mount_policies,
     } = metadata;
     let total_started = Instant::now();
     let snapshot_id = SnapshotId::new(format!("snap_{:032x}", rand::random::<u128>()))
@@ -1165,6 +1179,7 @@ async fn build_artifact(
     )?;
     manifest.set_restore_defaults(microsandbox_image::snapshot::RestoreDefaults { user })?;
     manifest.set_external_mounts(external_mounts)?;
+    manifest.set_external_mount_policies(mount_policies)?;
     let canonical = manifest
         .to_canonical_bytes()
         .map_err(|e| MicrosandboxError::Custom(format!("manifest serialize: {e}")))?;
@@ -1351,6 +1366,33 @@ fn uncaptured_mount_paths(mounts: &[VolumeMount]) -> MicrosandboxResult<Vec<Stri
     }
 
     Ok(guest_paths)
+}
+
+/// Captured host-side hide-path policy of every bind mount that carries one.
+///
+/// Only host-backed bind mounts have a hide-path list; a bind with an empty list
+/// contributes no entry, so a snapshot that denies nothing keeps its released
+/// bytes and an older reader stays compatible.
+fn captured_mount_policies(mounts: &[VolumeMount]) -> MicrosandboxResult<Vec<ExternalMountPolicy>> {
+    let mut policies = Vec::new();
+    for mount in mounts {
+        let VolumeMount::Bind { hide_path, .. } = mount else {
+            continue;
+        };
+        if hide_path.is_empty() {
+            continue;
+        }
+
+        let mut mount = mount.clone();
+        canonicalize_volume_mounts(std::slice::from_mut(&mut mount))?;
+
+        policies.push(ExternalMountPolicy {
+            guest_path: mount.guest().to_string(),
+            hide_path: hide_path.clone(),
+        });
+    }
+
+    Ok(policies)
 }
 
 /// Resolve the root layout carried by a snapshot while retaining the ownership boundary for
@@ -2202,6 +2244,7 @@ mod tests {
             root_disk,
             user: None,
             external_mounts: Vec::new(),
+            mount_policies: Vec::new(),
         }
     }
 
@@ -3049,6 +3092,25 @@ mod tests {
 
         assert_eq!(paths, ["/data", "/shared", "/disk"]);
         assert_eq!(config.spec.mounts[0].guest(), "/data//./");
+    }
+
+    #[test]
+    fn snapshot_manifest_records_bind_hide_path_policy() {
+        let config = SandboxBuilder::new("source")
+            .volume("/data", |m| m.bind("/host/data").hide_path([".env"]))
+            .volume("/plain", |m| m.bind("/host/plain"))
+            .config
+            .into_config();
+
+        let policies = captured_mount_policies(&config.spec.mounts).unwrap();
+
+        assert_eq!(
+            policies,
+            [ExternalMountPolicy {
+                guest_path: "/data".into(),
+                hide_path: vec![".env".into()],
+            }]
+        );
     }
 
     #[tokio::test]

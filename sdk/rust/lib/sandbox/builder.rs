@@ -2074,7 +2074,7 @@ pub(crate) fn prepare_local_snapshot_restore(
                 let required_bind_paths =
                     crate::sandbox::external_bind_guest_paths(&opened.resources)?;
 
-                crate::sandbox::require_guest_mounts(config, required_bind_paths)?;
+                crate::sandbox::require_guest_mounts(config, required_bind_paths, None)?;
             }
             if config.snapshot_restore_mode == SnapshotRestoreMode::Full {
                 if opened.architecture != std::env::consts::ARCH {

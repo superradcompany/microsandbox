@@ -10,7 +10,7 @@ use std::{borrow::Borrow, collections::BTreeMap, sync::atomic::AtomicU64};
 use std::{
     collections::BTreeSet,
     fs::File,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, atomic::AtomicU8},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -93,6 +93,16 @@ pub(crate) struct InodeData {
     /// Retained fd for detached objects that lost their last visible alias.
     #[cfg(target_os = "linux")]
     pub retained_fd: Mutex<Option<File>>,
+
+    /// Cached per-directory casefold state for hide-path matching (Linux only).
+    ///
+    /// Case folding is a per-directory property (ext4/btrfs `FS_CASEFOLD_FL`),
+    /// so the hide_path matcher selects its case-insensitive variant per directory.
+    /// Holds `CASE_UNKNOWN` until a directory fd has been probed with
+    /// `FS_IOC_GETFLAGS`; the value is dropped with the inode when its refcount
+    /// reaches zero, so it is re-probed for any later re-interning.
+    #[cfg(target_os = "linux")]
+    pub case_insensitive: AtomicU8,
 
     /// Fd grabbed before unlink, keeping the file accessible after deletion.
     ///

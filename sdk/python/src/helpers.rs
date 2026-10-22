@@ -1072,6 +1072,16 @@ fn apply_mount<B: ResourceBuilder>(
         .transpose()?;
     let override_uid = extract_opt::<u32>(mount, "override_uid")?;
     let override_gid = extract_opt::<u32>(mount, "override_gid")?;
+    let hide_path = extract_opt::<Vec<String>>(mount, "hide_path")?.unwrap_or_default();
+
+    // A direct native caller can hand this function a dict that never passed
+    // through `MountConfig._to_dict`. Reject `hide_path` on any non-bind arm here so
+    // it is never silently dropped by the owned/named branches below.
+    if !hide_path.is_empty() && !mount.contains("bind")? {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "hide_path is only valid for BIND mounts",
+        ));
+    }
 
     if let Some(kind) = extract_opt::<String>(mount, "owned")? {
         // The selector is exclusive at the native boundary too: callers can
@@ -1171,6 +1181,9 @@ fn apply_mount<B: ResourceBuilder>(
             }
             if let Some(quota_mib) = quota_mib {
                 m = m.quota(quota_mib);
+            }
+            if !hide_path.is_empty() {
+                m = m.hide_path(hide_path);
             }
             m
         }))
