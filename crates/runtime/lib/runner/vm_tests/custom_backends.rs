@@ -7,7 +7,7 @@ use microsandbox_filesystem::DynFileSystem;
 
 use super::{
     AgentConsoleBackend, AgentConsoleBackends, AgentTransportProfile, Config, ConsoleSharedState,
-    HostPlacement, VmBuildOutput, VmBuildRuntime, VmConfig, build_vm,
+    HostPlacement, TrampolineRootfsGuard, VmBuildOutput, VmBuildRuntime, VmConfig, build_vm,
 };
 use crate::RuntimeResult;
 use crate::ipc::acquire_lifecycle_guard;
@@ -152,6 +152,9 @@ async fn empty_custom_backends_preserve_vm_construction() {
 }
 
 fn build(config: &mut Config) -> RuntimeResult<VmBuildOutput> {
+    let mut trampoline_rootfs = TrampolineRootfsGuard {
+        rootfs_dirs: Vec::new(),
+    };
     build_vm(
         config,
         AgentConsoleBackends {
@@ -170,6 +173,7 @@ fn build(config: &mut Config) -> RuntimeResult<VmBuildOutput> {
             numa_topology: None,
         },
         None,
+        &mut trampoline_rootfs.rootfs_dirs,
     )
 }
 
