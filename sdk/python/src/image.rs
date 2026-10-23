@@ -36,7 +36,7 @@ pub enum ReferenceArg {
 }
 
 /// A lightweight handle to a cached OCI image.
-#[pyclass(name = "ImageHandle")]
+#[pyclass(from_py_object, name = "ImageHandle")]
 #[derive(Clone)]
 pub struct PyImageHandle {
     reference: String,
@@ -58,7 +58,7 @@ pub struct PyImageDetail {
 }
 
 /// OCI image config fields extracted from the local cache.
-#[pyclass(name = "ImageConfigDetail")]
+#[pyclass(from_py_object, name = "ImageConfigDetail")]
 #[derive(Clone)]
 pub struct PyImageConfigDetail {
     digest: String,
@@ -72,7 +72,7 @@ pub struct PyImageConfigDetail {
 }
 
 /// Metadata for a single image layer.
-#[pyclass(name = "ImageLayerDetail")]
+#[pyclass(from_py_object, name = "ImageLayerDetail")]
 #[derive(Clone)]
 pub struct PyImageLayerDetail {
     diff_id: String,
@@ -84,7 +84,7 @@ pub struct PyImageLayerDetail {
 }
 
 /// Summary of cached image data removed by `Image.prune()`.
-#[pyclass(name = "ImagePruneReport")]
+#[pyclass(from_py_object, name = "ImagePruneReport")]
 #[derive(Clone)]
 pub struct PyImagePruneReport {
     image_refs_removed: u32,
@@ -114,7 +114,7 @@ impl PyImage {
         reference: String,
         root_disk: Option<Bound<'_, PyAny>>,
         upper_size_mib: Option<u32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         if root_disk.is_some() && upper_size_mib.is_some() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "pass either root_disk= or upper_size_mib=, not both",
@@ -148,7 +148,7 @@ impl PyImage {
 
     /// Create a bind rootfs image source.
     #[staticmethod]
-    fn bind(py: Python<'_>, path: String) -> PyResult<PyObject> {
+    fn bind(py: Python<'_>, path: String) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "bind")?)?;
         kwargs.set_item("_path", path)?;
@@ -158,7 +158,7 @@ impl PyImage {
     /// Create a disk-image rootfs source. Format is inferred from extension.
     #[staticmethod]
     #[pyo3(signature = (path, *, fstype = None))]
-    fn disk(py: Python<'_>, path: String, fstype: Option<String>) -> PyResult<PyObject> {
+    fn disk(py: Python<'_>, path: String, fstype: Option<String>) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("_type", str_enum_member(py, "ImageSourceKind", "disk")?)?;
         kwargs.set_item("_path", path)?;
@@ -498,7 +498,7 @@ impl PyImageConfigDetail {
     }
 
     #[getter]
-    fn labels(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn labels(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.labels
             .clone()
             .map(|value| json_object_to_py(py, value))
@@ -657,7 +657,7 @@ async fn read_stdin_to_temp_file() -> microsandbox::MicrosandboxResult<tempfile:
     })?
 }
 
-fn json_object_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn json_object_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Object(values) => {
             let dict = PyDict::new(py);
@@ -670,7 +670,7 @@ fn json_object_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObj
     }
 }
 
-fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn json_value_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     match value {
         serde_json::Value::Null => Ok(py.None()),
         serde_json::Value::Bool(value) => Ok(PyBool::new(py, value).to_owned().unbind().into()),

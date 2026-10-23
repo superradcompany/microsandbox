@@ -57,7 +57,7 @@
   "devDependencies": {
     "@types/node": "^25.5.2",
     "typescript": "^5.6",
-    "vitest": "^5.0"
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "@microsandbox/protocol-client": "0.7.9",

@@ -206,8 +206,11 @@ mod tests {
         unsafe { std::env::remove_var(PASSWORD_VAR) };
 
         let rendered = format!("{resolved:?}");
-        assert!(rendered.contains("[REDACTED]"), "{rendered}");
-        assert!(!rendered.contains("hunter2-socks5-sentinel"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "password was not redacted");
+        assert!(
+            !rendered.contains("hunter2-socks5-sentinel"),
+            "password appeared in debug output"
+        );
     }
 
     #[test]
@@ -232,10 +235,10 @@ mod tests {
         unsafe { std::env::remove_var(PASSWORD_VAR) };
 
         let rendered = format!("{resolved:?}");
-        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "password was not redacted");
         assert!(
             !rendered.contains("hunter2-http-connect-sentinel"),
-            "{rendered}"
+            "password appeared in debug output"
         );
     }
 }

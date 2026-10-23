@@ -103,7 +103,7 @@ impl PyAgentClient {
                 .stream_open(flags, body)
                 .await
                 .map_err(to_py_err_agent)?;
-            Python::with_gil(|py| -> PyResult<PyObject> {
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let out = PyDict::new(py);
                 out.set_item("id", id)?;
                 out.set_item("handle", handle)?;
@@ -169,8 +169,8 @@ impl PyAgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn frame_to_py(frame: BridgeFrame) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
+fn frame_to_py(frame: BridgeFrame) -> PyResult<Py<PyAny>> {
+    Python::attach(|py| {
         let out = PyDict::new(py);
         out.set_item("id", frame.id)?;
         out.set_item("flags", frame.flags)?;

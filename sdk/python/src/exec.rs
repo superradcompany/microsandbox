@@ -244,7 +244,7 @@ impl PyExecSink {
 impl PyExecEvent {
     /// Canonical kind of execution event.
     #[getter]
-    fn event_type(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn event_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "ExecEventType", self.event_type)
     }
 }
