@@ -49,6 +49,8 @@ use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
 use crate::ipc::RuntimeSocketPaths;
+#[cfg(unix)]
+use crate::launch::BOOTSTRAP_ROOTFS_DIR;
 use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
@@ -1987,7 +1989,10 @@ fn build_vm(
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
         {
-            let (backend, rootfs_dir) = bootstrap_trampoline_backend(vm.fs_state_limit())?;
+            let (backend, rootfs_dir) = bootstrap_trampoline_backend(
+                vm.fs_state_limit(),
+                &config.sandboxes_dir.join(&config.sandbox_name),
+            )?;
             trampoline_rootfs_dirs.push(rootfs_dir);
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -2037,7 +2042,10 @@ fn build_vm(
     } else if vm.rootfs_disk_spec.is_some() || vm.rootfs_disk.is_some() {
         #[cfg(unix)]
         {
-            let (backend, rootfs_dir) = bootstrap_trampoline_backend(vm.fs_state_limit())?;
+            let (backend, rootfs_dir) = bootstrap_trampoline_backend(
+                vm.fs_state_limit(),
+                &config.sandboxes_dir.join(&config.sandbox_name),
+            )?;
             trampoline_rootfs_dirs.push(rootfs_dir);
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -2970,8 +2978,16 @@ fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
 /// A restored virtio-fs session retains their inode numbers, so the destination
 /// provider must recreate the same pathname namespace before backend restore.
 #[cfg(unix)]
-fn bootstrap_trampoline_backend(limit: usize) -> RuntimeResult<(PassthroughFs, PathBuf)> {
-    let trampoline = tempfile::tempdir()?;
+fn bootstrap_trampoline_backend(
+    limit: usize,
+    sandbox_dir: &Path,
+) -> RuntimeResult<(PassthroughFs, PathBuf)> {
+    let parent = sandbox_dir.join(BOOTSTRAP_ROOTFS_DIR);
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        RuntimeError::Custom(format!("create bootstrap trampoline directory: {error}"))
+    })?;
+
+    let trampoline = tempfile::tempdir_in(parent)?;
     for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
         std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
             RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
@@ -3841,9 +3857,9 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{
-        BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
-        bind_identity_map_for_mount, bootstrap_trampoline_backend, read_parent_watchdog_signal,
-        trampoline_rootfs_cleanup_on_exit,
+        BOOTSTRAP_ROOTFS_DIR, BindIdentityMapRegistration, PARENT_WATCH_DETACH,
+        ParentWatchdogSignal, bind_identity_map_for_mount, bootstrap_trampoline_backend,
+        read_parent_watchdog_signal, trampoline_rootfs_cleanup_on_exit,
     };
     use super::{
         DiskMountSpec, TrampolineRootfsGuard, UpperLayerSpec, UpperSpec,
@@ -4172,8 +4188,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_trampoline_recreates_agent_mountpoints() {
-        let (fs, rootfs_dir) =
-            bootstrap_trampoline_backend(msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
+        let sandbox_dir = tempfile::tempdir().unwrap();
+        let (fs, rootfs_dir) = bootstrap_trampoline_backend(
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+            sandbox_dir.path(),
+        )
+        .unwrap();
+        let parent = sandbox_dir.path().join(BOOTSTRAP_ROOTFS_DIR);
+        assert_eq!(rootfs_dir.parent(), Some(parent.as_path()));
         fs.init(FsOptions::empty()).unwrap();
         for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
             fs.lookup(fs_context(), 1, &std::ffi::CString::new(directory).unwrap())
