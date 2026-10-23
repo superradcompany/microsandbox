@@ -20,5 +20,5 @@
     "test": "vitest run tests && node --expose-gc tests/finalization.mjs"
   },
   "dependencies": { "cbor-x": "^1.6.0" },
-  "devDependencies": { "@types/node": "^25.5.2", "typescript": "^5.6", "vitest": "^4.1" }
+  "devDependencies": { "@types/node": "^25.5.2", "typescript": "^5.6", "vitest": "^4.1.12" }
 }

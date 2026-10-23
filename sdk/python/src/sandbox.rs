@@ -182,7 +182,7 @@ impl PySandboxStopResult {
     }
 
     #[getter]
-    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "SandboxStatus", &self.status)
     }
 
@@ -1481,7 +1481,7 @@ impl PySandbox {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let obj: PyObject = slf.into();
+        let obj: Py<PyAny> = slf.into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -1757,7 +1757,7 @@ pub(crate) fn apply_modify_policy(
 pub(crate) async fn run_modify(
     builder: microsandbox::sandbox::SandboxModificationBuilder,
     dry_run: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let plan = if dry_run {
         builder.dry_run().await
     } else {
@@ -1766,7 +1766,7 @@ pub(crate) async fn run_modify(
     .map_err(to_py_err)?;
     let value = serde_json::to_value(&plan)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    Python::with_gil(|py| modification_plan_to_py(py, value))
+    Python::attach(|py| modification_plan_to_py(py, value))
 }
 
 /// Drive the shared compaction builder and return its measured result as a Python dictionary.
@@ -1776,7 +1776,7 @@ pub(crate) async fn run_compact(
     dry_run: bool,
     disk: Option<String>,
     root_disk_only: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     if let Some(layers) = layers {
         builder = builder.layers(layers);
     }
@@ -1794,14 +1794,14 @@ pub(crate) async fn run_compact(
     .map_err(to_py_err)?;
     let value =
         serde_json::to_value(result).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Python::with_gil(|py| modification_plan_to_py(py, value))
+    Python::attach(|py| modification_plan_to_py(py, value))
 }
 
 /// Convert a serialized modification plan while restoring its closed domain types.
 ///
 /// The public shape intentionally remains a dictionary, but known discriminators
 /// must not degrade back into raw strings at the native boundary.
-fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification plan must be an object",
@@ -1823,7 +1823,7 @@ fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult
 }
 
 /// Convert planned changes, selecting the correct change enum from `kind`.
-fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Array(changes) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification plan changes must be an array",
@@ -1837,7 +1837,7 @@ fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<P
     Ok(PyList::new(py, changes)?.unbind().into())
 }
 
-fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized planned change must be an object",
@@ -1872,7 +1872,7 @@ fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py
     Ok(dict.unbind().into())
 }
 
-fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Array(statuses) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification resize_status must be an array",
@@ -1886,7 +1886,7 @@ fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<P
     Ok(PyList::new(py, statuses)?.unbind().into())
 }
 
-fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized resource resize status must be an object",
@@ -1914,7 +1914,7 @@ fn serialized_enum_to_py(
     value: serde_json::Value,
     enum_name: &str,
     field: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let serde_json::Value::String(value) = value else {
         return Err(PyRuntimeError::new_err(format!(
             "serialized {field} must be a string"
@@ -1972,7 +1972,7 @@ fn parse_exec_call(
     };
 
     if let Some(args_or_options) = args {
-        if let Ok(dict) = args_or_options.downcast::<PyDict>() {
+        if let Ok(dict) = args_or_options.cast::<PyDict>() {
             validate_exec_options_keys(dict)?;
             parsed_args = parse_options_args(dict)?;
             apply_exec_options_dict(&mut opts, dict)?;
@@ -2046,7 +2046,7 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     Ok(())
 }
 
-fn extract_optional_dict_value<'py, T: FromPyObject<'py>>(
+fn extract_optional_dict_value<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<Option<T>> {
@@ -2102,18 +2102,18 @@ fn parse_args(args: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     let Some(args) = args else {
         return Ok(Vec::new());
     };
-    if args.downcast::<PyDict>().is_ok() {
+    if args.cast::<PyDict>().is_ok() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "args must be a list of strings",
         ));
     }
-    if args.downcast::<PyBytes>().is_ok() || args.extract::<String>().is_ok() {
+    if args.cast::<PyBytes>().is_ok() || args.extract::<String>().is_ok() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "args must be a list of strings, not a string",
         ));
     }
     let list = args
-        .downcast::<PyList>()
+        .cast::<PyList>()
         .map_err(|_| pyo3::exceptions::PyTypeError::new_err("args must be a list of strings"))?;
     list.iter().map(|item| item.extract::<String>()).collect()
 }
@@ -2127,7 +2127,7 @@ fn parse_stdin(stdin: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<String>, Op
         return Ok((None, None));
     };
 
-    if let Ok(bytes) = stdin.downcast::<PyBytes>() {
+    if let Ok(bytes) = stdin.cast::<PyBytes>() {
         return Ok((Some("bytes".to_string()), Some(bytes.as_bytes().to_vec())));
     }
 
@@ -2182,7 +2182,7 @@ fn parse_rlimit(obj: &Bound<'_, PyAny>) -> PyResult<(String, u64, u64)> {
     // enum before exposing its wire value to the native execution builder.
     let dict = obj.call_method0("_to_dict")?;
     let dict = dict
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| PyRuntimeError::new_err("Rlimit._to_dict() must return a dict"))?;
     let resource = required_string_from_dict(dict, "resource")?;
     let soft = required_from_dict(dict, "soft")?;
@@ -2235,7 +2235,7 @@ fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
     optional_duration(timeout_secs).map(|_| ())
 }
 
-fn required_from_dict<'py, T: FromPyObject<'py>>(
+fn required_from_dict<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<T> {
@@ -2429,7 +2429,7 @@ impl PyPullSession {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let obj: PyObject = slf.into();
+        let obj: Py<PyAny> = slf.into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -2521,7 +2521,7 @@ impl PyPullProgressIter {
 impl PyPullEvent {
     /// Canonical kind of pull-progress event.
     #[getter]
-    fn event_type(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn event_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "PullEventType", self.event_type)
     }
 }
@@ -2655,7 +2655,7 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 pub(crate) fn branch_outcomes(
     outcomes: Vec<microsandbox::sandbox::ForkOutcome>,
 ) -> PyResult<Vec<PyForkOutcome>> {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         outcomes
             .into_iter()
             .map(|outcome| {
@@ -2760,7 +2760,7 @@ mod tests {
 
     #[test]
     fn execution_timeouts_reject_non_finite_and_overflowing_values() {
-        pyo3::prepare_freethreaded_python();
+        Python::initialize();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
             assert!(validate_timeout(Some(value)).is_err());
         }
@@ -2863,8 +2863,8 @@ mod tests {
     #[test]
     fn python_secret_modify_options_reach_rust_patch() {
         let _guard = crate::helpers::tests::PYTHON_TYPES_LOCK.lock().unwrap();
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             // Load the public Python types without requiring a built extension or VM.
             let modules = py.import("sys").unwrap().getattr("modules").unwrap();
             let previous_package = modules.get_item("microsandbox").ok();

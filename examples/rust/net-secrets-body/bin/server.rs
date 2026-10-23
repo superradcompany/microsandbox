@@ -1,4 +1,4 @@
-//! Self-signed HTTPS mock server that logs received request bodies.
+//! Self-signed HTTPS mock server that confirms receipt without logging secrets.
 
 use axum::{Router, extract::Json, routing::post};
 use rcgen::generate_simple_self_signed;
@@ -15,7 +15,7 @@ pub struct ServerHandle {
     pub ca_cert_path: PathBuf,
 }
 
-/// Spawn an HTTPS server in the background that echoes POST bodies.
+/// Spawn an HTTPS server in the background that acknowledges POST bodies.
 /// Returns a handle containing the path to the server's CA cert PEM.
 pub async fn spawn(hostname: &str, port: u16) -> std::io::Result<ServerHandle> {
     let (tls_config, cert_pem) = build_tls_config(hostname);
@@ -56,9 +56,8 @@ pub async fn spawn(hostname: &str, port: u16) -> std::io::Result<ServerHandle> {
 }
 
 async fn handle_echo(Json(body): Json<serde_json::Value>) -> String {
-    let key = body.get("key").and_then(|v| v.as_str()).unwrap_or("?");
-    println!("[server] Received key = {key}");
-    format!("{{\"received_key\": \"{key}\"}}")
+    let received_key = body.get("key").and_then(|v| v.as_str()).is_some();
+    format!("{{\"received_key\": {received_key}}}")
 }
 
 fn build_tls_config(hostname: &str) -> (Arc<ServerConfig>, String) {

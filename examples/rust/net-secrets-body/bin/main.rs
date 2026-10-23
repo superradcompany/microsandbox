@@ -19,9 +19,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let sb = sandbox::create(SECRET, HOSTNAME, PORT, &handle.ca_cert_path).await?;
 
-    let out = sb.shell("echo $API_KEY").await?;
-    println!("[guest]  API_KEY = {}", out.stdout()?.trim());
-
     let response = sandbox::post_secret(&sb, HOSTNAME, &host_ip, PORT).await?;
     println!("[guest]  Server responded: {response}");
 

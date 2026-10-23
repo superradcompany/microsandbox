@@ -68,11 +68,11 @@ fn print_entry(e: &microsandbox::logs::LogEntry) {
         .map(|i| format!("id={i:>3}"))
         .unwrap_or_else(|| "id=---".into());
     println!(
-        "  [{}] {} {}: {}",
+        "  [{}] {} {}: {} bytes",
         e.timestamp.to_rfc3339(),
         id,
         source_label(e.source),
-        String::from_utf8_lossy(&e.data).trim_end()
+        e.data.len()
     );
 }
 

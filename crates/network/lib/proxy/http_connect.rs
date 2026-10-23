@@ -1147,7 +1147,7 @@ mod tests {
             destination()
         )
         .into_bytes();
-        assert_eq!(request, expected);
+        assert!(request == expected, "unexpected authorization request");
         // Regression guard: exactly one authorization header, never a duplicate.
         assert_eq!(
             request
@@ -1175,7 +1175,7 @@ mod tests {
             request
                 .windows(expected.len())
                 .any(|window| window == expected),
-            "{request:?}"
+            "missing expected authorization header"
         );
     }
 
@@ -1206,7 +1206,7 @@ mod tests {
                 request
                     .windows(expected.len())
                     .any(|window| window == expected),
-                "password {password:?}: {request:?}"
+                "missing expected authorization header"
             );
         }
     }
@@ -1259,9 +1259,12 @@ mod tests {
     fn resolved_credentials_never_render_the_password() {
         let credentials = ResolvedHttpConnectCredentials::new("user", "hunter2");
         let debug = format!("{credentials:?}");
-        assert!(debug.contains("user"), "{debug}");
-        assert!(debug.contains("[REDACTED]"), "{debug}");
-        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(debug.contains("user"), "username missing from debug output");
+        assert!(debug.contains("[REDACTED]"), "password was not redacted");
+        assert!(
+            !debug.contains("hunter2"),
+            "password appeared in debug output"
+        );
     }
 
     #[test]
@@ -1281,7 +1284,7 @@ mod tests {
                     error,
                     OutboundProxyBuildError::InvalidHttpConnectCredentials { .. }
                 ),
-                "{username:?}/{var:?}: {error}"
+                "invalid credentials were accepted"
             );
         }
 

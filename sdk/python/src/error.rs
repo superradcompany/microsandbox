@@ -15,7 +15,7 @@ pub fn consumed() -> PyErr {
 /// backend but have no SDK [`Operation`] (Python-only diagnostic hooks).
 pub fn local_only(name: &str) -> PyErr {
     let msg = format!("{name}() is not supported by this backend: use a local backend");
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let instance = py
             .import("microsandbox.errors")
             .and_then(|m| m.getattr("UnsupportedError"))
@@ -37,7 +37,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
         return pyo3::exceptions::PyFileNotFoundError::new_err(err.to_string());
     }
 
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let errors_mod = match py.import("microsandbox.errors") {
             Ok(m) => m,
             Err(_) => return pyo3::exceptions::PyRuntimeError::new_err(err.to_string()),
@@ -51,7 +51,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
                     pyo3::exceptions::PyRuntimeError::new_err(error.to_string())
                 })?;
                 let details = py.import("json")?.call_method1("loads", (payload,))?;
-                let details = details.downcast::<pyo3::types::PyDict>()?;
+                let details = details.cast::<pyo3::types::PyDict>()?;
                 errors_mod
                     .getattr("SnapshotSourceRecoveryError")?
                     .call((err.to_string(),), Some(details))

@@ -191,7 +191,7 @@ fn backend_scope(
 
 /// Return the active default backend kind.
 #[pyfunction]
-fn default_backend_kind(py: Python<'_>) -> PyResult<PyObject> {
+fn default_backend_kind(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let kind = match microsandbox::default_backend_info()
         .map_err(error::to_py_err)?
         .kind

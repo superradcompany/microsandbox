@@ -173,7 +173,7 @@ impl PyVolume {
         host_permissions: Option<Py<PyAny>>,
         uid: Option<Py<PyAny>>,
         gid: Option<Py<PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "BIND")?)?;
         kwargs.set_item("bind", path)?;
@@ -204,7 +204,7 @@ impl PyVolume {
         host_permissions: Option<Py<PyAny>>,
         uid: Option<Py<PyAny>>,
         gid: Option<Py<PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "NAMED")?)?;
         kwargs.set_item("named", name)?;
@@ -247,7 +247,7 @@ impl PyVolume {
         host_permissions: Option<Py<PyAny>>,
         uid: Option<Py<PyAny>>,
         gid: Option<Py<PyAny>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "OWNED")?)?;
         if let Some(kind) = kind {
@@ -282,7 +282,7 @@ impl PyVolume {
         noexec: bool,
         nosuid: bool,
         nodev: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("kind", mount_kind(py, "TMPFS")?)?;
         if let Some(size) = size_mib {
@@ -312,8 +312,8 @@ impl PyVolume {
         noexec: bool,
         nosuid: bool,
         nodev: bool,
-    ) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
+    ) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| {
             let kwargs = PyDict::new(py);
             kwargs.set_item("kind", mount_kind(py, "DISK")?)?;
             kwargs.set_item("disk", path)?;
@@ -355,7 +355,7 @@ impl PyVolumeHandle {
     }
 
     #[getter]
-    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "VolumeKind", self.inner.kind().as_str())
     }
 
@@ -370,7 +370,7 @@ impl PyVolumeHandle {
     }
 
     #[getter]
-    fn disk_format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn disk_format(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .disk_format()
             .map(|format| str_enum_member(py, "DiskImageFormat", format))
