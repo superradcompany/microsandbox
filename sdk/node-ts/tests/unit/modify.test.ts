@@ -7,9 +7,11 @@ import {
   modifyOptionsToNapi,
   type ModifyOptions,
 } from "../../dist/modify.js";
+import { UnsupportedOperationError } from "../../dist/errors.js";
+import { napi } from "../../dist/internal/napi.js";
+import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
 import { Sandbox } from "../../dist/sandbox.js";
 import { SandboxHandle } from "../../dist/sandbox-handle.js";
-import type { NapiSandbox, NapiSandboxHandle } from "../../dist/internal/napi.js";
 
 describe("modifyOptionsToNapi", () => {
   it("returns undefined for omitted options", () => {
@@ -74,6 +76,25 @@ describe("modifyOptionsToNapi", () => {
       STRIPE_KEY: { value: "sk_test_123" },
     });
     expect(napi?.secretsRemove).toEqual(["OLD"]);
+  });
+
+  it("passes mounts and removals through to the native layer", () => {
+    const mount = {
+      kind: "bind",
+      guest: "/data",
+      readonly: true,
+      noexec: false,
+      nosuid: false,
+      nodev: false,
+      host: "/srv/data",
+    } as const;
+    const napi = modifyOptionsToNapi({
+      mounts: [mount],
+      mountsRemove: ["/old"],
+    });
+
+    expect(napi?.mounts).toEqual([mount]);
+    expect(napi?.mountsRemove).toEqual(["/old"]);
   });
 
   it("rejects unknown secret spec keys without echoing their values", () => {
@@ -227,5 +248,50 @@ describe("modificationPlanFromJson", () => {
     expect(plan.warnings).toEqual([{ field: "cpus", message: "warning" }]);
     // `resize_status` is omitted from the wire format when empty.
     expect(plan.resizeStatus).toEqual([]);
+  });
+});
+
+describe("modify mounts native capability", () => {
+  const native = napi as { supportsModifyMounts?: () => boolean };
+  const original = native.supportsModifyMounts;
+  const plan = JSON.stringify({ sandbox: "api", status: "stopped", applied: true });
+  const mount = {
+    kind: "tmpfs", guest: "/scratch", readonly: false, noexec: false, nosuid: false, nodev: false,
+  } as const;
+
+  afterEach(() => {
+    native.supportsModifyMounts = original;
+  });
+
+  it("refuses a mixed mount and env request before dispatch on an older native addon", async () => {
+    native.supportsModifyMounts = undefined;
+    const modify = vi.fn(async () => plan);
+    const sandbox = new Sandbox({ modify } as unknown as NapiSandbox, "api");
+    const handle = new SandboxHandle({ modify } as unknown as NapiSandboxHandle);
+    const mixed = { env: { A: "1" }, mounts: [mount] };
+    const removal = { env: { A: "1" }, mountsRemove: ["/old"] };
+
+    for (const call of [
+      () => sandbox.modify(mixed),
+      () => sandbox.modify(removal),
+      () => handle.modify(mixed),
+      () => handle.modify(removal),
+    ]) {
+      await expect(call()).rejects.toThrow(UnsupportedOperationError);
+    }
+    expect(modify).not.toHaveBeenCalled();
+  });
+
+  it("still dispatches ordinary and mount requests when the capability is present", async () => {
+    const modify = vi.fn(async () => plan);
+    const sandbox = new Sandbox({ modify } as unknown as NapiSandbox, "api");
+
+    native.supportsModifyMounts = undefined;
+    await sandbox.modify({ env: { A: "1" }, mounts: [] });
+    expect(modify).toHaveBeenCalledTimes(1);
+
+    native.supportsModifyMounts = () => true;
+    await sandbox.modify({ mounts: [mount] });
+    expect(modify).toHaveBeenCalledTimes(2);
   });
 });

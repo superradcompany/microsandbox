@@ -1314,22 +1314,7 @@ func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, e
 	var cwd string
 	for guestPath, spec := range specs {
 		for _, hostPath := range []*string{&spec.Bind, &spec.Disk} {
-			if *hostPath == "" || filepath.IsAbs(*hostPath) {
-				continue
-			}
-			var abs string
-			var err error
-			if filepath.Separator == '\\' {
-				abs, err = filepath.Abs(*hostPath)
-			} else {
-				if cwd == "" {
-					cwd, err = os.Getwd()
-				}
-				if err == nil {
-					// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
-					abs = strings.TrimSuffix(cwd, "/") + "/" + *hostPath
-				}
-			}
+			abs, err := localHostPath(*hostPath, &cwd)
 			if err != nil {
 				return nil, fmt.Errorf("microsandbox: resolve host path %q for fork volume %q: %w", *hostPath, guestPath, err)
 			}
@@ -1338,6 +1323,26 @@ func ffiForkVolumes(volumes map[string]MountConfig) (map[string]ffi.MountSpec, e
 		specs[guestPath] = spec
 	}
 	return specs, nil
+}
+
+// localHostPath makes a relative local host path absolute against the working
+// directory, read once into cwd. Empty and absolute paths are returned unchanged.
+func localHostPath(path string, cwd *string) (string, error) {
+	if path == "" || filepath.IsAbs(path) {
+		return path, nil
+	}
+	if filepath.Separator == '\\' {
+		return filepath.Abs(path)
+	}
+	if *cwd == "" {
+		dir, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		*cwd = dir
+	}
+	// Keep ".." components uncleaned so symlinked parents resolve as the native call resolves them.
+	return strings.TrimSuffix(*cwd, "/") + "/" + path, nil
 }
 
 func wrapBranchOutcomes(rows []ffi.BranchOutcome, err error) ([]ForkOutcome, error) {
