@@ -14,7 +14,7 @@ const SECRET: &str = "sk-real-secret-value-12345";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host_ip = local_ip().to_string();
 
-    let handle = server::spawn(HOSTNAME, PORT).await?;
+    let handle = server::spawn(HOSTNAME, PORT, SECRET).await?;
     println!("[server] Listening on https://{host_ip}:{PORT}");
 
     let sb = sandbox::create(SECRET, HOSTNAME, PORT, &handle.ca_cert_path).await?;
