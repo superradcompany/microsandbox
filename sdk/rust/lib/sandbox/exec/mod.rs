@@ -7,6 +7,7 @@ mod session;
 // Exports
 //--------------------------------------------------------------------------------------------------
 
+pub(crate) use io::InputWindow;
 pub use session::{
     ExecControl, ExecEvent, ExecHandle, ExecOptions, ExecOptionsBuilder, ExecOutput, ExecSink,
     ExitStatus, Rlimit, RlimitResource, StdinMode,
