@@ -454,7 +454,7 @@ If the host starts without IPv4 or IPv6 routes, microsandbox assigns private gue
 
 Sandbox startup reserves every requested TCP and UDP host socket before reporting ready. If a binding fails, startup fails, identifies the protocol and host address, and releases sockets already reserved for that attempt. Full snapshot restores reserve the sockets first but keep traffic deferred until guest activation and local control endpoint publication have both completed.
 
-Before forwarding begins after a Full restore, each listener discards its queued TCP connections or UDP datagrams instead of replaying them. A TCP handshake during restore does not mean the guest has accepted the request; connections can be reset until forwarding starts.
+Full restore activation replaces the reserved host sockets before the SDK Ready handshake. Closing the old sockets discards their queued TCP connections and UDP datagrams without waiting for incoming traffic to stop. A TCP handshake during restore is not guest application acceptance, and the connection may be reset. There is a brief close-and-rebind window; if another process claims an endpoint, restore fails instead of reporting Ready. Ordinary cold startup does not replace its reserved sockets.
 
 Port publication readiness only confirms the host sockets. Your application inside the guest may still need its own readiness check.
 

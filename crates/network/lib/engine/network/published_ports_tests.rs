@@ -1,6 +1,6 @@
 //! Published ports through the real network engine and virtio-net frame boundary.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
@@ -63,21 +63,33 @@ fn published_ports_work_without_host_routes() {
 
 #[test]
 fn deferred_tcp_publication_discards_stale_connections() {
-    check_deferred_published_port(PortProtocol::Tcp);
+    check_deferred_published_port(PortProtocol::Tcp, false);
 }
 
 #[test]
 fn deferred_udp_publication_discards_stale_datagrams() {
-    check_deferred_published_port(PortProtocol::Udp);
+    check_deferred_published_port(PortProtocol::Udp, false);
 }
 
-fn check_deferred_published_port(protocol: PortProtocol) {
+#[test]
+fn deferred_busy_tcp_publication_forwards_fresh_connections() {
+    check_deferred_published_port(PortProtocol::Tcp, true);
+}
+
+#[test]
+fn deferred_busy_udp_publication_forwards_fresh_datagrams() {
+    check_deferred_published_port(PortProtocol::Udp, true);
+}
+
+fn check_deferred_published_port(protocol: PortProtocol, busy: bool) {
     // The poll thread and its listeners live until process exit.
     const CHILD_ENV: &str = "MSB_TEST_DEFERRED_PUBLICATION";
     if std::env::var_os(CHILD_ENV).is_none() {
-        let test = match protocol {
-            PortProtocol::Tcp => "deferred_tcp_publication_discards_stale_connections",
-            PortProtocol::Udp => "deferred_udp_publication_discards_stale_datagrams",
+        let test = match (protocol, busy) {
+            (PortProtocol::Tcp, false) => "deferred_tcp_publication_discards_stale_connections",
+            (PortProtocol::Udp, false) => "deferred_udp_publication_discards_stale_datagrams",
+            (PortProtocol::Tcp, true) => "deferred_busy_tcp_publication_forwards_fresh_connections",
+            (PortProtocol::Udp, true) => "deferred_busy_udp_publication_forwards_fresh_datagrams",
         };
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -104,21 +116,22 @@ fn check_deferred_published_port(protocol: PortProtocol) {
     runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(5),
-            check_published_port_with_activation(protocol, Ipv4Addr::LOCALHOST.into(), true),
+            check_published_port_with_activation(protocol, Ipv4Addr::LOCALHOST.into(), true, busy),
         )
         .await
-        .unwrap_or_else(|_| panic!("deferred published {protocol:?} timed out"));
+        .unwrap_or_else(|_| panic!("deferred published {protocol:?} (busy={busy}) timed out"));
     });
 }
 
 async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
-    check_published_port_with_activation(protocol, bind, false).await;
+    check_published_port_with_activation(protocol, bind, false, false).await;
 }
 
 async fn check_published_port_with_activation(
     protocol: PortProtocol,
     bind: IpAddr,
     deferred: bool,
+    busy: bool,
 ) {
     let host_address = match protocol {
         PortProtocol::Tcp => {
@@ -216,8 +229,8 @@ async fn check_published_port_with_activation(
         .expect_err("deferred publication must reserve its host endpoint");
         assert_eq!(conflict.kind(), std::io::ErrorKind::AddrInUse);
 
-        // Use blocking OS sockets on this current-thread runtime: no reactor turn can
-        // cache listener readiness between queuing stale traffic and activation.
+        // Queue stale traffic in the reserved kernel socket without polling this
+        // runtime's reactor; activation must reset that queue before opening the gate.
         match protocol {
             PortProtocol::Tcp => {
                 for attempt in 0..96 {
@@ -268,11 +281,17 @@ async fn check_published_port_with_activation(
             // Let the independent poll thread run, but not this runtime's reactor.
             std::thread::sleep(Duration::from_millis(1));
         }
-        activation.activate();
+        activation
+            .activate()
+            .expect("reset reserved published sockets before activation");
     }
-    // Do not yield between activation and spawning fresh traffic. Activation is
-    // not an acknowledgement that every listener has finished purging its queue.
+    // Start fresh traffic immediately after activation resets the reserved kernel
+    // queues; forwarding must work without waiting for a quiet traffic interval.
     let client = tokio::spawn(async move {
+        if busy {
+            check_busy_published_client(protocol, address).await;
+            return;
+        }
         let mut response = [0; 4];
         match protocol {
             PortProtocol::Tcp => loop {
@@ -324,6 +343,7 @@ async fn check_published_port_with_activation(
     let started = std::time::Instant::now();
     let mut request = Vec::new();
     let mut tail_started = None;
+    let mut received_while_busy = false;
     loop {
         if client.is_finished() {
             if !deferred {
@@ -355,6 +375,7 @@ async fn check_published_port_with_activation(
                     );
                     if request.len() == 4 {
                         assert_eq!(request, b"ping");
+                        received_while_busy |= busy && !client.is_finished();
                         assert_eq!(socket.send_slice(b"pong").unwrap(), 4);
                     }
                 }
@@ -376,6 +397,7 @@ async fn check_published_port_with_activation(
                         bytes, b"ping",
                         "guest received stale or unexpected UDP payload",
                     );
+                    received_while_busy |= busy && !client.is_finished();
                     socket.send_slice(b"pong", peer.endpoint).unwrap();
                 }
             }
@@ -383,4 +405,115 @@ async fn check_published_port_with_activation(
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     client.await.unwrap();
+    assert!(
+        !busy || received_while_busy,
+        "guest must receive a fresh request while the producer is still running",
+    );
+}
+
+async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr) {
+    // These OS operations do not poll Tokio's reactor. Queue a burst each turn,
+    // then explicitly let the listener run. Keep producing until an actual guest
+    // response arrives, never creating a timer-based quiet traffic interval.
+    match protocol {
+        PortProtocol::Udp => {
+            let socket = std::net::UdpSocket::bind((address.ip(), 0)).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            loop {
+                for _ in 0..128 {
+                    assert_eq!(socket.send_to(b"ping", address).unwrap(), 4);
+                }
+                let mut response = [0; 32];
+                match socket.recv_from(&mut response) {
+                    Ok((len, peer)) => {
+                        assert_eq!(peer, address);
+                        assert_eq!(&response[..len], b"pong");
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("receiving busy published UDP response: {error}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+        PortProtocol::Tcp => {
+            struct Pending {
+                stream: std::net::TcpStream,
+                response: [u8; 4],
+                received: usize,
+            }
+
+            let mut pending = Vec::<Pending>::with_capacity(256);
+            loop {
+                let mut got_pong = false;
+                pending.retain_mut(|request| {
+                    match request
+                        .stream
+                        .read(&mut request.response[request.received..])
+                    {
+                        Ok(0) => false,
+                        Ok(len) => {
+                            request.received += len;
+                            if request.received == request.response.len() {
+                                assert_eq!(&request.response, b"pong");
+                                got_pong = true;
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                                    | std::io::ErrorKind::BrokenPipe
+                            ) =>
+                        {
+                            false
+                        }
+                        Err(error) => panic!("receiving busy published TCP response: {error}"),
+                    }
+                });
+                if got_pong {
+                    return;
+                }
+                for _ in 0..128 {
+                    // A full/clamped backlog ends this batch, not the producer.
+                    // Both the batch length and every blocking operation are bounded.
+                    let mut stream = match std::net::TcpStream::connect_timeout(
+                        &address,
+                        Duration::from_millis(2),
+                    ) {
+                        Ok(stream) => stream,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            ) =>
+                        {
+                            break;
+                        }
+                        Err(error) => panic!("connecting busy published TCP request: {error}"),
+                    };
+                    stream
+                        .set_write_timeout(Some(Duration::from_millis(2)))
+                        .unwrap();
+                    stream.write_all(b"ping").unwrap();
+                    stream.set_nonblocking(true).unwrap();
+                    if pending.len() < 256 {
+                        pending.push(Pending {
+                            stream,
+                            response: [0; 4],
+                            received: 0,
+                        });
+                    }
+                    // At the cap, dropping this already-written stream still
+                    // queues traffic while preserving earlier response candidates.
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    }
 }

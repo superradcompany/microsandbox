@@ -102,9 +102,8 @@ pub struct PortPublisher {
     /// UDP published-port routes, keyed by guest-side port.
     udp_routes: PublishedUdpRoutes,
     /// Sockets reserved before activation, without accepting or forwarding traffic.
-    bound_ports: Vec<BoundPort>,
-    /// Clear startup queues before forwarding after a deferred activation.
-    discard_pending: bool,
+    /// `None` once listeners start or a reservation reset fails.
+    bound_ports: Option<Vec<BoundPort>>,
 }
 
 enum BoundPort {
@@ -112,6 +111,7 @@ enum BoundPort {
         address: SocketAddr,
         guest_port: u16,
         listener: TcpListener,
+        backlog: TcpAcceptQueueSize,
     },
     Udp {
         address: SocketAddr,
@@ -257,14 +257,65 @@ impl PortPublisher {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes,
-            bound_ports,
-            discard_pending: false,
+            bound_ports: Some(bound_ports),
         })
     }
 
-    /// Drop queued startup traffic before each listener begins forwarding.
-    pub(crate) fn discard_pending_on_start(&mut self) {
-        self.discard_pending = true;
+    /// Replace reserved sockets so their queued startup traffic cannot be forwarded.
+    ///
+    /// Must run before [`start`](Self::start), with a Tokio runtime entered. Each
+    /// old socket closes before its endpoint is rebound with the original options.
+    /// Any failure releases both the replacement set and all remaining reservations.
+    pub(crate) fn reset_reserved_ports(&mut self) -> std::io::Result<()> {
+        let reserved = self
+            .bound_ports
+            .take()
+            .expect("published ports must still be reserved before resetting");
+        let mut replacement = Vec::with_capacity(reserved.len());
+        for port in reserved {
+            replacement.push(match port {
+                BoundPort::Tcp {
+                    address,
+                    guest_port,
+                    listener,
+                    backlog,
+                } => {
+                    let address = listener
+                        .local_addr()
+                        .map_err(|error| bind_error("TCP", address, error))?;
+                    drop(listener);
+                    BoundPort::Tcp {
+                        address,
+                        guest_port,
+                        listener: bind_listener(address, backlog)
+                            .map_err(|error| bind_error("TCP", address, error))?,
+                        backlog,
+                    }
+                }
+                BoundPort::Udp {
+                    address,
+                    guest_port,
+                    guest_ip,
+                    gateway_ip,
+                    socket,
+                } => {
+                    let address = socket
+                        .local_addr()
+                        .map_err(|error| bind_error("UDP", address, error))?;
+                    drop(socket);
+                    BoundPort::Udp {
+                        address,
+                        guest_port,
+                        guest_ip,
+                        gateway_ip,
+                        socket: bind_udp_socket(address)
+                            .map_err(|error| bind_error("UDP", address, error))?,
+                    }
+                }
+            });
+        }
+        self.bound_ports = Some(replacement);
+        Ok(())
     }
 
     /// Start listeners after the runtime activation barrier has completed.
@@ -277,7 +328,7 @@ impl PortPublisher {
         tokio_handle: &tokio::runtime::Handle,
     ) {
         Self::spawn_listeners(
-            std::mem::take(&mut self.bound_ports),
+            self.bound_ports.take().unwrap_or_default(),
             &self._inbound_tx,
             self.udp_routes.clone(),
             self.ephemeral_port.clone(),
@@ -286,7 +337,6 @@ impl PortPublisher {
             policy,
             shared,
             tokio_handle,
-            self.discard_pending,
         );
     }
 
@@ -617,6 +667,7 @@ impl PortPublisher {
                     guest_port: port.guest_port,
                     listener: bind_listener(address, tcp_accept_queue_size)
                         .map_err(|error| bind_error("TCP", address, error))?,
+                    backlog: tcp_accept_queue_size,
                 }),
                 PortProtocol::Udp => {
                     let (guest_ip, gateway_ip) = udp_ips_for_bind(
@@ -636,17 +687,12 @@ impl PortPublisher {
                             ),
                         )
                     })?;
-                    let socket = std::net::UdpSocket::bind(address)
-                        .map_err(|error| bind_error("UDP", address, error))?;
-                    socket
-                        .set_nonblocking(true)
-                        .map_err(|error| bind_error("UDP", address, error))?;
                     bound.push(BoundPort::Udp {
                         address,
                         guest_port: port.guest_port,
                         guest_ip,
                         gateway_ip,
-                        socket: UdpSocket::from_std(socket)
+                        socket: bind_udp_socket(address)
                             .map_err(|error| bind_error("UDP", address, error))?,
                     });
                 }
@@ -666,7 +712,6 @@ impl PortPublisher {
         policy: Arc<NetworkPolicy>,
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
-        discard_pending: bool,
     ) {
         for port in ports {
             match port {
@@ -674,21 +719,15 @@ impl PortPublisher {
                     address: bind_addr,
                     guest_port,
                     listener,
+                    ..
                 } => {
                     let tx = inbound_tx.clone();
                     let policy = policy.clone();
                     let shared = shared.clone();
                     tokio_handle.spawn(async move {
-                        if let Err(e) = tcp_listener_task(
-                            bind_addr,
-                            listener,
-                            guest_port,
-                            tx,
-                            policy,
-                            shared,
-                            discard_pending,
-                        )
-                        .await
+                        if let Err(e) =
+                            tcp_listener_task(bind_addr, listener, guest_port, tx, policy, shared)
+                                .await
                         {
                             tracing::error!(
                                 bind = %bind_addr,
@@ -733,7 +772,6 @@ impl PortPublisher {
                             shared,
                             EthernetAddress(gateway_mac),
                             EthernetAddress(guest_mac),
-                            discard_pending,
                         )
                         .await
                         {
@@ -816,24 +854,6 @@ fn reject_with_rst(stream: &TcpStream) {
     let _ = socket2::SockRef::from(stream).set_linger(Some(Duration::ZERO));
 }
 
-/// Drop the kernel queue, not Tokio's cached readiness, before admitting fresh traffic.
-async fn discard_startup_queue(
-    mut discard: impl FnMut() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    loop {
-        // A continuously busy port must not starve the poll loop or other listeners.
-        for _ in 0..64 {
-            match discard() {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(()),
-                Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
-            }
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
 /// Bind a published port's listener with an explicit accept-queue depth.
 ///
 /// `TcpListener::bind` leaves the backlog to mio, which passes 128. Connections that arrive while
@@ -862,6 +882,13 @@ fn bind_listener(
     socket.listen(backlog.get())
 }
 
+/// Bind a nonblocking UDP socket using the same options for reservation and reset.
+fn bind_udp_socket(bind_addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = std::net::UdpSocket::bind(bind_addr)?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
+}
+
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues
 /// allowed connections for the publisher's accept loop. Denied
@@ -874,18 +901,7 @@ async fn tcp_listener_task(
     inbound_tx: mpsc::Sender<InboundConnection>,
     policy: Arc<NetworkPolicy>,
     shared: Arc<SharedState>,
-    discard_pending: bool,
 ) -> std::io::Result<()> {
-    if discard_pending {
-        let socket = socket2::SockRef::from(&listener);
-        discard_startup_queue(|| {
-            let (stream, _) = socket.accept()?;
-            let _ = stream.set_linger(Some(Duration::ZERO));
-            Ok(())
-        })
-        .await?;
-    }
-
     log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
@@ -929,16 +945,10 @@ async fn udp_listener_task(
     shared: Arc<SharedState>,
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
-    discard_pending: bool,
 ) -> std::io::Result<()> {
     log_published_port_listener("UDP", bind_addr, guest_port);
 
-    let mut buf = Vec::with_capacity(UDP_RELAY_BUF_SIZE);
-    if discard_pending {
-        let socket = socket2::SockRef::from(&socket);
-        discard_startup_queue(|| socket.recv_from(buf.spare_capacity_mut()).map(|_| ())).await?;
-    }
-    buf.resize(UDP_RELAY_BUF_SIZE, 0);
+    let mut buf = vec![0u8; UDP_RELAY_BUF_SIZE];
     loop {
         tokio::select! {
             inbound = socket.recv_from(&mut buf) => {
@@ -1355,8 +1365,7 @@ mod tests {
                 tcp_ports: HashSet::new(),
                 last_capacity_warning: None,
                 udp_routes: Arc::new(Mutex::new(HashMap::new())),
-                bound_ports: Vec::new(),
-                discard_pending: false,
+                bound_ports: Some(Vec::new()),
             };
 
             Self {
@@ -2225,8 +2234,7 @@ mod tests {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes: routes,
-            bound_ports: Vec::new(),
-            discard_pending: false,
+            bound_ports: Some(Vec::new()),
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
         let frame = construct_udp_response(
@@ -2275,8 +2283,7 @@ mod tests {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes: routes,
-            bound_ports: Vec::new(),
-            discard_pending: false,
+            bound_ports: Some(Vec::new()),
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
         let frame = construct_udp_response(
