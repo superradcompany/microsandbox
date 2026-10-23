@@ -40,6 +40,11 @@ class CloudHttpError(MicrosandboxError):
     code = "cloud-http"
 
 
+class ModificationNotConfirmedError(MicrosandboxError):
+    """A Cloud change did not complete as asked: saved but not in effect, or result unknown."""
+    code = "modification-not-confirmed"
+
+
 class SandboxNotFoundError(MicrosandboxError):
     """Sandbox does not exist."""
     code = "sandbox-not-found"

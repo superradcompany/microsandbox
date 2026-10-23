@@ -100,6 +100,7 @@ pub fn to_py_err(err: microsandbox::MicrosandboxError) -> PyErr {
             }
             NoDefaultCommand => ("NoDefaultCommandError", err.to_string()),
             CloudHttp { .. } => ("CloudHttpError", err.to_string()),
+            ModificationNotConfirmed { .. } => ("ModificationNotConfirmedError", err.to_string()),
             SandboxNotFound(_) => ("SandboxNotFoundError", err.to_string()),
             SandboxAlreadyExists(_) => ("SandboxAlreadyExistsError", err.to_string()),
             SandboxReplaced { .. } => ("SandboxReplacedError", err.to_string()),
@@ -174,4 +175,57 @@ fn camel_to_snake(name: &str) -> String {
         }
     }
     out
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Make `microsandbox.errors` importable from the source tree without the
+    /// native module: an empty `microsandbox` package over the source dir.
+    fn import_source_errors(py: Python<'_>) {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+        let package = pyo3::types::PyModule::new(py, "microsandbox").unwrap();
+        package.setattr("__path__", vec![dir]).unwrap();
+        py.import("sys")
+            .unwrap()
+            .getattr("modules")
+            .unwrap()
+            .set_item("microsandbox", package)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_unconfirmed_modification_keeps_its_class_and_message() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            import_source_errors(py);
+            let error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+                cause: "the running sandbox does not hold the secret".to_string(),
+            };
+            let message = error.to_string();
+
+            let raised = to_py_err(error);
+            let class = py
+                .import("microsandbox.errors")
+                .unwrap()
+                .getattr("ModificationNotConfirmedError")
+                .unwrap();
+            assert!(raised.value(py).is_instance(&class).unwrap());
+            assert_eq!(raised.value(py).str().unwrap().to_string(), message);
+            assert_eq!(
+                raised
+                    .value(py)
+                    .getattr("code")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "modification-not-confirmed"
+            );
+        });
+    }
 }

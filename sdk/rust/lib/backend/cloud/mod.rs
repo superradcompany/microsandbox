@@ -12,6 +12,7 @@
 
 mod agent;
 mod http;
+mod modify;
 pub(in crate::backend) mod sandbox;
 mod snapshot;
 mod volume;

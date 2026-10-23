@@ -31,6 +31,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrMetricsDisabled, "MetricsDisabled"},
 		{ErrMetricsUnavailable, "MetricsUnavailable"},
 		{ErrUnsupportedOperation, "UnsupportedOperation"},
+		{ErrModificationNotConfirmed, "ModificationNotConfirmed"},
 		{ErrInternal, "Internal"},
 		{ErrNoDefaultCommand, "NoDefaultCommand"},
 		{ErrorKind(9999), "Unknown"},
@@ -48,6 +49,21 @@ func TestErrorError(t *testing.T) {
 	want := "no such sandbox"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestModificationNotConfirmedErrorPreservesMessage(t *testing.T) {
+	message := "the change did not complete as asked: the running sandbox does not hold the secret"
+	err := wrapFFI(&ffi.Error{
+		Kind:    ffi.KindModificationNotConfirmed,
+		Message: message,
+	})
+
+	if !IsKind(err, ErrModificationNotConfirmed) {
+		t.Fatalf("got %v, want ErrModificationNotConfirmed", err)
+	}
+	if err.Error() != message {
+		t.Fatalf("got %q, want %q", err.Error(), message)
 	}
 }
 
@@ -194,6 +210,7 @@ func TestKindFromFFIAllTags(t *testing.T) {
 		{ffi.KindMetricsDisabled, ErrMetricsDisabled},
 		{ffi.KindMetricsUnavailable, ErrMetricsUnavailable},
 		{ffi.KindUnsupportedOperation, ErrUnsupportedOperation},
+		{ffi.KindModificationNotConfirmed, ErrModificationNotConfirmed},
 		{"unrecognized_tag", ErrInternal},
 	}
 	for _, c := range cases {

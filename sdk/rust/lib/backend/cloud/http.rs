@@ -19,10 +19,12 @@ use super::{CloudBackend, sandbox::CloudCreateBody, volume::CloudVolume};
 use crate::backend::sandbox::LogStream;
 use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{LogCursor, LogEntry, LogOptions, LogSource, LogStreamOptions, LogStreamStart};
-use crate::sandbox::SandboxListBuilder;
+use crate::sandbox::{SandboxListBuilder, SandboxModificationPlan};
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
     CloudCreateSandboxResponse, CloudErrorBody, CloudMessageResponse, CloudPaginated,
+    CloudSandboxModificationApplyRequest, CloudSandboxModificationPlan,
+    CloudSandboxModificationPlanRequest,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -212,6 +214,45 @@ impl CloudBackend {
             .await
             .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/start", e))?;
         decode_json(resp, "POST /v1/sandboxes/:id/start").await
+    }
+
+    /// `POST /v1/sandboxes/:id/modifications/plan`, a dry run whose body carries no secret value.
+    pub(in crate::backend) async fn post_modification_plan(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationPlanRequest,
+    ) -> MicrosandboxResult<SandboxModificationPlan> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/modifications/plan",
+            self.url,
+            urlencoding(id)
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/modifications/plan", e))?;
+        let plan: CloudSandboxModificationPlan =
+            decode_json(resp, "POST /v1/sandboxes/:id/modifications/plan").await?;
+        Ok(plan.into())
+    }
+
+    /// `POST /v1/sandboxes/:id/modifications`, sent once. The body is the only
+    /// place a secret value travels; the caller reads and classifies the outcome.
+    pub(in crate::backend) async fn post_modification(
+        &self,
+        id: &str,
+        req: &CloudSandboxModificationApplyRequest,
+        timeout: Duration,
+    ) -> Result<Response, reqwest::Error> {
+        let url = format!(
+            "{}/v1/sandboxes/{}/modifications",
+            self.url,
+            urlencoding(id)
+        );
+        self.http.post(&url).json(req).timeout(timeout).send().await
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.
@@ -521,7 +562,7 @@ pub(super) fn cloud_io_error(op: &str, e: reqwest::Error) -> MicrosandboxError {
     MicrosandboxError::Http(e)
 }
 
-fn cloud_http_error(
+pub(super) fn cloud_http_error(
     status: u16,
     body: Option<&CloudErrorBody>,
     raw_body: &str,
@@ -553,6 +594,12 @@ fn cloud_http_error(
         }
         Some("orchestrator_unreachable") | Some("nomad_job_failed") => {
             return MicrosandboxError::Runtime(message);
+        }
+        Some(microsandbox_types::CLOUD_MODIFICATION_UNSUPPORTED) => {
+            return MicrosandboxError::unsupported(
+                Operation::SandboxModify,
+                UnsupportedReason::NotAvailable(message),
+            );
         }
         _ => {}
     }
@@ -728,7 +775,7 @@ fn parse_cloud_log_source(source: &str) -> MicrosandboxResult<LogSource> {
     }
 }
 
-fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
+pub(super) fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
     body.and_then(|body| {
         body.error
             .as_ref()
@@ -737,7 +784,7 @@ fn cloud_error_code(body: Option<&CloudErrorBody>) -> Option<&str> {
     })
 }
 
-fn cloud_error_message(body: Option<&CloudErrorBody>) -> Option<&str> {
+pub(super) fn cloud_error_message(body: Option<&CloudErrorBody>) -> Option<&str> {
     body.and_then(|body| {
         body.error
             .as_ref()
@@ -833,6 +880,23 @@ mod tests {
         assert!(matches!(
             cloud_http_error(404, Some(&file), "", "volume filesystem request"),
             MicrosandboxError::SandboxFsOps(_)
+        ));
+    }
+
+    #[test]
+    fn cloud_http_error_maps_modification_unsupported() {
+        let unsupported: CloudErrorBody = serde_json::from_str(
+            r#"{"error":{"code":"modification_unsupported","message":"secrets: not supported"}}"#,
+        )
+        .unwrap();
+        let op = "POST /v1/sandboxes/:id/modifications";
+
+        assert!(matches!(
+            cloud_http_error(409, Some(&unsupported), "", op),
+            MicrosandboxError::Unsupported {
+                op: Operation::SandboxModify,
+                reason: UnsupportedReason::NotAvailable(message),
+            } if message == format!("{op}: secrets: not supported")
         ));
     }
 

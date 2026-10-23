@@ -21,7 +21,7 @@ use crate::{
     error::Operation,
 };
 
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 use super::SandboxModificationBuilder;
 use super::{Sandbox, SandboxConfig, SandboxId, SandboxStatus, SandboxStopResult};
 
@@ -317,9 +317,10 @@ impl SandboxHandle {
     /// The builder fetches a fresh handle during [`dry_run`](SandboxModificationBuilder::dry_run)
     /// so planning uses current status and persisted config rather than this
     /// handle's possibly stale snapshot.
-    #[cfg(feature = "local")]
+    #[cfg(any(feature = "local", feature = "cloud"))]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+            .bound_to(self.identity())
     }
 
     /// Compact sealed backing layers of the root and sandbox-owned data disks, running or stopped.
@@ -467,6 +468,12 @@ impl SandboxHandle {
     /// Boots the VM using the persisted configuration and pinned rootfs state
     /// for local; routes through `POST /v1/sandboxes/by-name/:name/start` for
     /// cloud. The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
             .sandboxes()
@@ -477,6 +484,12 @@ impl SandboxHandle {
     /// Start this sandbox in detached/background mode.
     ///
     /// The handle remains usable if start fails.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(&self) -> MicrosandboxResult<Sandbox> {
         self.backend
             .sandboxes()
