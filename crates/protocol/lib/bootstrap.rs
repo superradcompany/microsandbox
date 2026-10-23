@@ -72,6 +72,11 @@ pub struct GuestBootstrap {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_env: Vec<BootstrapEnvVar>,
 
+    /// Keys of the `default_env` entries that carry secret placeholders. `None`
+    /// (an older runtime) turns off replacing the default environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_env_keys: Option<Vec<String>>,
+
     /// In-guest security policy.
     #[serde(default)]
     pub security_profile: BootstrapSecurityProfile,
@@ -405,7 +410,12 @@ mod tests {
                     key: "EMPTY".to_string(),
                     value: String::new(),
                 },
+                BootstrapEnvVar {
+                    key: "API_KEY".to_string(),
+                    value: "$MSB_API_KEY".to_string(),
+                },
             ],
+            secret_env_keys: Some(vec!["API_KEY".to_string()]),
             security_profile: BootstrapSecurityProfile::Restricted,
             handoff_init: Some(BootstrapHandoffInit {
                 cmd: "/sbin/init".to_string(),
@@ -424,5 +434,42 @@ mod tests {
         codec::encode_to_buf(&message, &mut frame).unwrap();
         let decoded = codec::decode_message_frame(&frame).unwrap();
         assert_eq!(decoded.payload::<GuestBootstrap>().unwrap(), bootstrap);
+    }
+
+    #[test]
+    fn bootstrap_without_secret_env_keys_is_unchanged_on_the_wire() {
+        let bootstrap = GuestBootstrap {
+            default_env: vec![BootstrapEnvVar {
+                key: "MODE".to_string(),
+                value: "dev".to_string(),
+            }],
+            ..GuestBootstrap::default()
+        };
+
+        let value = serde_json::to_value(&bootstrap).unwrap();
+        assert!(value.get("secret_env_keys").is_none(), "{value}");
+        let older: GuestBootstrap = serde_json::from_value(
+            serde_json::json!({"default_env": [{"key": "MODE", "value": "dev"}]}),
+        )
+        .unwrap();
+        assert_eq!(older, bootstrap);
+        assert_eq!(older.secret_env_keys, None);
+    }
+
+    #[test]
+    fn empty_secret_env_keys_stay_distinct_from_absent() {
+        let bootstrap = GuestBootstrap {
+            secret_env_keys: Some(Vec::new()),
+            ..GuestBootstrap::default()
+        };
+
+        let message = Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
+        let mut frame = Vec::new();
+        codec::encode_to_buf(&message, &mut frame).unwrap();
+        let decoded = codec::decode_message_frame(&frame).unwrap();
+        assert_eq!(
+            decoded.payload::<GuestBootstrap>().unwrap().secret_env_keys,
+            Some(Vec::new())
+        );
     }
 }

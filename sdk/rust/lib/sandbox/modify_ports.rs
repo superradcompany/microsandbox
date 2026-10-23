@@ -349,6 +349,7 @@ mod tests {
                 &config,
                 Some(&config),
                 LiveControl::default(),
+                false,
                 patch.clone(),
                 policy,
             );
@@ -369,6 +370,7 @@ mod tests {
             &saved,
             Some(&config),
             LiveControl::default(),
+            false,
             patch,
             ModificationPolicy::Restart,
         );
@@ -417,6 +419,7 @@ mod tests {
                 &config,
                 Some(&config),
                 LiveControl::default(),
+                false,
                 patch,
                 ModificationPolicy::Restart,
             );

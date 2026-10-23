@@ -288,7 +288,9 @@ impl SandboxHandle {
     /// Parse the stored configuration. Returns an error if the JSON
     /// is malformed (e.g., schema changed since the sandbox was created).
     ///
-    /// For local handles this deserializes the persisted [`SandboxConfig`].
+    /// For local handles this deserializes the saved [`SandboxConfig`], which
+    /// the next start uses. [`active_config`](Self::active_config) is the one
+    /// the running VM uses.
     /// For cloud handles this returns an `Unsupported` error: the cloud wire
     /// shape is [`CloudCreateSandboxRequest`](crate::backend::CloudCreateSandboxRequest),
     /// not `SandboxConfig`. Use [`config_json`](Self::config_json) to read the
@@ -604,8 +606,14 @@ impl SandboxHandle {
                 // The local transport is name-addressed. Recheck after the
                 // handshake so concurrent name reuse cannot silently rebind
                 // this receiver to the replacement.
-                self.refresh().await?;
-                let config = serde_json::from_str::<SandboxConfig>(&local.config_json)?;
+                let current = self.refresh().await?;
+                // Execs build their env and workdir from this config, so take the
+                // copy the running VM uses as of the handshake. Sandboxes started
+                // before that copy was recorded fall back to the saved config.
+                let config_json = current
+                    .active_config_json()
+                    .unwrap_or(current.config_json());
+                let config = serde_json::from_str::<SandboxConfig>(config_json)?;
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),

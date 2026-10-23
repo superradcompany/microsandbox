@@ -37,6 +37,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -89,6 +90,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -132,6 +134,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 1,
             init_time_ns: 2,
             ready_time_ns: 3,
@@ -184,6 +187,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -214,6 +218,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let stream = client
             .stream(TypedMessage::new(MessageType::ExecRequest, &request))
@@ -282,6 +287,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -322,6 +328,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -372,6 +379,7 @@ mod tests {
             local_transport: None,
             relay_lease: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
             boot_time_ns: 11,
             init_time_ns: 22,
             ready_time_ns: 33,
@@ -423,6 +431,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let mut rx = client
             .stream(TypedMessage::new(MessageType::ExecRequest, &request))

@@ -307,6 +307,22 @@ pub(crate) fn validate_rlimits(rlimits: &[Rlimit]) -> MicrosandboxResult<()> {
     Ok(())
 }
 
+/// Whether exec requests from a [`Sandbox`](crate::Sandbox) of this backend ask agentd to drop
+/// boot env defaults the config no longer has. Only local: its config is the one
+/// the VM runs, so its env is complete; a cloud config is the curated spec, which
+/// can leave env out.
+pub(crate) fn replaces_default_env(backend: &dyn crate::backend::Backend) -> bool {
+    #[cfg(feature = "local")]
+    {
+        backend.as_local().is_some()
+    }
+    #[cfg(not(feature = "local"))]
+    {
+        let _ = backend;
+        false
+    }
+}
+
 impl ExecOutput {
     /// Exit code and success flag of the completed process.
     pub fn status(&self) -> ExitStatus {
@@ -709,7 +725,7 @@ pub(crate) mod agent {
         );
 
         let req = build_exec_request(
-            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
+            backend, config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
         );
         let input_window = policy.filter(|_| controlled).map(|policy| {
             io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)

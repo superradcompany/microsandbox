@@ -39,10 +39,10 @@ use crate::runtime::{
     ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
 };
 use crate::sandbox::{
-    FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
-    SandboxStatus, apply_patches, build_flat_tree, build_upper_tree, config::SnapshotRestoreMode,
-    remove_dir_if_exists, validate_env, validate_hostname, validate_labels, validate_sandbox_name,
-    validate_volume_mounts,
+    PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxStatus,
+    apply_patches, build_flat_tree, build_upper_tree, config::SnapshotRestoreMode,
+    remove_dir_if_exists, validate_env, validate_guest_workdir, validate_hostname, validate_labels,
+    validate_sandbox_name, validate_volume_mounts, validate_workdir,
 };
 use crate::timing::{self, TARGET};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -231,6 +231,7 @@ impl LocalBackend {
         Self::validate_rootfs_source(&config.spec.image)?;
         validate_env(&config.spec.env)?;
         validate_labels(&config.spec.labels)?;
+        validate_workdir(config.spec.runtime.workdir.as_deref())?;
         validate_volume_mounts(&mut config.spec.mounts)?;
         if let Some(init) = &config.spec.init {
             crate::sandbox::init::validate(init)?;
@@ -902,42 +903,19 @@ impl LocalBackend {
         // Validate that the configured workdir exists inside the guest and is a
         // directory before returning a ready sandbox. Shell/exec calls inherit this
         // cwd, so accepting a regular file here leads to later, murkier failures.
-        if let Some(ref workdir) = sandbox.config().spec.runtime.workdir {
-            match sandbox.fs().stat(workdir).await {
-                Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
-                Ok(_) => {
-                    let error = MicrosandboxError::InvalidConfig(format!(
-                        "workdir is not a directory in guest: {workdir}"
-                    ));
-                    sandbox.terminate_creation_owner().await;
-                    self.rollback_failed_startup(
-                        write_db,
-                        sandbox_id,
-                        sandbox.name(),
-                        &created_named_volumes,
-                    )
-                    .await
-                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_owned_failure(error).await);
-                }
-                Err(cause) => {
-                    // A fast-exiting startup command can close the transport during stat.
-                    // Preserve that cause instead of claiming the directory is missing.
-                    let error = MicrosandboxError::InvalidConfig(format!(
-                        "could not validate workdir in guest {workdir:?}: {cause}"
-                    ));
-                    sandbox.terminate_creation_owner().await;
-                    self.rollback_failed_startup(
-                        write_db,
-                        sandbox_id,
-                        sandbox.name(),
-                        &created_named_volumes,
-                    )
-                    .await
-                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_owned_failure(error).await);
-                }
-            }
+        if let Some(workdir) = sandbox.config().spec.runtime.workdir.as_deref()
+            && let Err(error) = validate_guest_workdir(&sandbox, workdir).await
+        {
+            sandbox.terminate_creation_owner().await;
+            self.rollback_failed_startup(
+                write_db,
+                sandbox_id,
+                sandbox.name(),
+                &created_named_volumes,
+            )
+            .await
+            .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
+            return Err(creation_cleanup.finish_owned_failure(error).await);
         }
 
         if let Some(closure) = restore_closure {
@@ -947,7 +925,7 @@ impl LocalBackend {
                 write_db,
                 sandbox_id,
                 &persisted_config,
-                sandbox.config(),
+                &sandbox.config(),
             )
             .await
             {

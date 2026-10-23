@@ -130,7 +130,7 @@ msb create python --name worker \
 | `max_memory` | same as `memory` | Boot-time maximum hotpluggable memory in MiB |
 | `thp` | `madvise` | Guest transparent huge-page policy selected at boot |
 | `guest_clock` | `sync` | Follow host time (`sync`) or stop host clock updates after boot (`off`). Local Rust SDK and CLI only |
-| `workdir` | image default | Default working directory for commands |
+| `workdir` | image default | Default working directory for commands (an absolute path) |
 | `shell` | `/bin/sh` | Shell used by `shell()` calls |
 | `env` | empty | Environment variables |
 | `labels` | empty | Key/value metadata for metric attribution |

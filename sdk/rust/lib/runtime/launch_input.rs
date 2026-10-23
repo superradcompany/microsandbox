@@ -42,11 +42,8 @@ pub(super) fn legacy_env(bootstrap: &GuestBootstrap) -> MicrosandboxResult<Vec<S
     }) {
         return unsupported("invalid environment entry");
     }
-    if bootstrap.default_cwd.as_deref().is_some_and(|cwd| {
-        cwd.bytes()
-            .any(|b| !(0x20..=0x7e).contains(&b) || b == b'"')
-    }) {
-        return unsupported("working directory requiring the typed transport");
+    if let Some(cwd) = &bootstrap.default_cwd {
+        legacy_cwd(cwd)?;
     }
     let mut env: Vec<String> = bootstrap
         .default_env
@@ -289,6 +286,18 @@ fn options(mut base: String, flags: BootstrapMountFlags, mut values: Vec<String>
         base.push_str(&values.join(","));
     }
     base
+}
+
+/// Refuse a working directory the environment-based transport cannot carry:
+/// it accepts printable ASCII only, without `"`.
+pub(super) fn legacy_cwd(cwd: &str) -> MicrosandboxResult<()> {
+    if cwd
+        .bytes()
+        .any(|b| !(0x20..=0x7e).contains(&b) || b == b'"')
+    {
+        return unsupported("working directory requiring the typed transport");
+    }
+    Ok(())
 }
 
 pub(super) fn unsupported<T>(feature: &str) -> MicrosandboxResult<T> {

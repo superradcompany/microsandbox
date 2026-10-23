@@ -229,7 +229,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 #### <span className="msb-recv">sb.</span><span className="msb-hn">config()</span>
 
 ```rust
-fn config(&self) -> &SandboxConfig
+fn config(&self) -> Arc<SandboxConfig>
 ```
 
 <Accordion title="Example">
@@ -240,13 +240,13 @@ println!("{} MiB", sb.config().memory_mib);
 
 </Accordion>
 
-Access the sandbox's full configuration.
+Access the configuration the sandbox's running VM uses, which later execs are built from. It returns a snapshot. After a successful [`modify()`](#sb-modify) through this sandbox or a clone, it returns the config the VM now uses: changes saved for the next start are not included until a restart. [`SandboxHandle::config()`](#h-config) returns the saved config.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfig">&amp;SandboxConfig</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandboxconfig">Arc&lt;SandboxConfig&gt;</a></div>
     <div className="msb-param-desc">Sandbox configuration.</div>
   </div>
 </div>
@@ -577,7 +577,7 @@ fn modify(&self) -> SandboxModificationBuilder
 let plan = sb.modify()
     .cpus(4)             // live when 4 <= max_cpus
     .memory(4096)        // live when 4096 MiB <= max_memory
-    .env("MODE", "prod") // future execs only; the plan warns about this
+    .env("MODE", "prod") // new commands only; the plan warns about this
     .apply()
     .await?;
 
@@ -590,9 +590,11 @@ for r in &plan.resize_status {
 
 Plan or apply a configuration change. Set what to change (CPUs, memory, env vars, labels, workdir, secrets), then call [`dry_run()`](#modification-dry_run) to preview or [`apply()`](#modification-apply) to commit. Both return a [`SandboxModificationPlan`](#sandboxmodificationplan) labeling each change `live`, `next start`, `requires restart`, or `unsupported`. Apply is all-or-nothing.
 
+After a successful apply, this sandbox object uses the config the running VM now uses for later execs, the same config a new connect loads. A change saved for the next start is not included until a restart. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
+
 CPU and memory resize live within the [`max_cpus`](#modification-max_cpus) / [`max_memory`](#modification-max_memory) ceilings; raising a ceiling requires a restart.
 
-Env and workdir changes affect future execs only. On a stopped sandbox, changes are saved for the next boot.
+Env and workdir changes on a running sandbox apply live to commands started afterwards. Running processes, PID 1 and its services, and the startup command keep their old values until a restart. Removing a variable live needs a guest agent that can drop it; on a sandbox started by an older runtime, removal needs a restart or next-start policy. On a stopped sandbox, changes are saved for the next boot.
 
 Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `.restart()` to apply now, or `.next_start()` to save for the next start. Omitted options keep their current settings.
 
@@ -2114,7 +2116,7 @@ Compute the modification plan without applying anything. Use it to preview how e
 fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
 ```
 
-Set an environment variable for future execs. Can be called multiple times. On a running sandbox this applies to future execs only; running processes keep their current environment.
+Set an environment variable for new commands. Can be called multiple times. On a running sandbox this applies live to commands started afterwards; running processes keep their current environment.
 
 <p className="msb-label">Parameters</p>
 
@@ -2135,7 +2137,7 @@ Set an environment variable for future execs. Can be called multiple times. On a
 fn remove_env(self, key: impl Into<String>) -> Self
 ```
 
-Remove an environment variable. Same future-execs-only semantics as [`env()`](#modification-env).
+Remove an environment variable. Same new-commands-only semantics as [`env()`](#modification-env). On a running sandbox started by an older runtime, whose guest agent cannot drop the variable, removal needs [`restart()`](#modification-restart) or [`next_start()`](#modification-next_start).
 
 <p className="msb-label">Parameters</p>
 
@@ -2341,7 +2343,7 @@ on a running sandbox. See [published port changes](/sandboxes/tuning#change-publ
 fn workdir(self, path: impl Into<String>) -> Self
 ```
 
-Set the working directory for future execs. On a running sandbox this applies to future execs only.
+Set the working directory for new commands. It must be an absolute path. On a running sandbox this applies live to commands started afterwards, once modify has checked that the directory exists in the guest.
 
 <p className="msb-label">Parameters</p>
 
@@ -2460,7 +2462,7 @@ cleanup. This does not disable idle timeouts or enable automatic snapshots.
 config()
 ```
 
-Parsed configuration
+Parsed saved configuration, which the next start uses.
 
 <p className="msb-label">Returns</p>
 

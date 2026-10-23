@@ -588,12 +588,13 @@ msb touch --label app=engine
 
 `msb mod` is a shorter alias for `msb modify`.
 
-Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings; other changes that can't apply live need `--restart` or `--next-start`.
+Change a running sandbox's configuration. Every change is planned and applied all-or-nothing. CPU and memory resize live within the `max_cpus` / `max_memory` ceilings, and labels, env, and workdir change live; other changes that can't apply live need `--restart` or `--next-start`.
 
 <CodeGroup>
 ```bash Shell
 msb modify api -c 4                         # Live when 4 <= max_cpus
-msb modify api -e MODE=prod --restart       # Restart to apply now
+msb modify api -e MODE=prod                 # New commands see MODE=prod
+msb modify api -e MODE=prod --restart       # Restart so every process sees it
 msb modify api --max-memory 16G --next-start # Raise the ceiling on next start
 msb modify api --cpus 8 --dry-run           # Show the plan, apply nothing
 ```
@@ -605,7 +606,9 @@ Set `--max-cpus` and `--max-memory` at creation to leave room for live growth. T
 
 Resize can take time. The output and JSON `resize_status` report each resource’s [resize state](/sdk/rust/sandbox#resourceresizestatus). With `guest-refused`, the host still enforces the new limit.
 
-Env and workdir changes on a running sandbox apply to future execs only; running processes keep their current environment. The plan reports this as a warning.
+Env and workdir changes on a running sandbox apply to commands started afterwards. Running processes, PID 1 and its services, and the startup command keep their values until a restart; the plan reports this as a warning. With `--next-start`, new commands keep the current values until the next start. See [Set command defaults](/sandboxes/tuning#environment-and-workdir) for the limits.
+
+`--workdir` must be an absolute path. When the change reaches a running sandbox now (live or with `--restart`), modify also checks that the directory exists in the guest before it saves the change or stops the sandbox.
 
 <Accordion title="Secret updates, substitution, and passthrough">
 
@@ -619,9 +622,9 @@ Env and workdir changes on a running sandbox apply to future execs only; running
 | `--max-cpus` | Boot-time maximum possible vCPUs (restart-backed) |
 | `--memory` | Desired effective guest memory, such as `512M` or `4G` |
 | `--max-memory` | Boot-time maximum hotpluggable memory (restart-backed) |
-| `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for future execs |
+| `--env`, `--env-rm` | Set (`KEY=VALUE`) or remove an environment variable for new commands |
 | `--label`, `--label-rm` | Set (`KEY=VALUE`) or remove a label |
-| `--workdir` | Working directory for future execs |
+| `--workdir` | Working directory for new commands |
 | `--secret`, `--secret-rm` | Add or rotate a secret (`NAME[:OPTIONS]@HOST[,HOST...]`), or remove one |
 | `--secret-violation-action` | Set the sandbox-wide blocking action for placeholder violations |
 | `-p`, `--port` | Add or update `[BIND_ADDR:]HOST[-END]:GUEST[-END][/tcp\|udp]`; ranges must have equal lengths and other mappings stay unchanged |

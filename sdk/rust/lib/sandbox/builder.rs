@@ -1863,6 +1863,7 @@ impl SandboxBuilder {
         super::types::validate_volume_mounts(&mut sandbox.spec.mounts)?;
         super::validate_env(&sandbox.spec.env)?;
         super::validate_labels(&sandbox.spec.labels)?;
+        super::validate_workdir(sandbox.spec.runtime.workdir.as_deref())?;
         Self::validate_vsock_routes(sandbox)?;
 
         if let Err(error) = microsandbox_types::resolve_default_command(
@@ -3527,6 +3528,24 @@ mod tests {
                 .unwrap_err();
 
             assert!(err.to_string().contains(expected), "{key:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_builder_rejects_workdir_the_guest_cannot_boot_with() {
+        for (workdir, expected) in [
+            ("", "workdir must not be empty"),
+            ("app", "workdir must be an absolute guest path"),
+            ("/app\0x", "workdir must not contain NUL"),
+        ] {
+            let err = SandboxBuilder::new("test")
+                .image("alpine")
+                .workdir(workdir)
+                .build()
+                .await
+                .unwrap_err();
+
+            assert!(err.to_string().contains(expected), "{workdir:?}: {err}");
         }
     }
 

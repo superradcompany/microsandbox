@@ -12,8 +12,9 @@
 //!
 //! [`init::init`]: crate::init::init
 
+use std::collections::HashSet;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
@@ -28,6 +29,7 @@ use microsandbox_protocol::{
         BootstrapBlockRoot, BootstrapBlockRootUpper, BootstrapEnvVar, BootstrapHandoffInit,
         BootstrapSecurityProfile, GuestBootstrap,
     },
+    core::REPLACE_DEFAULT_ENV_VERSION,
     exec::ExecRlimit,
 };
 use serde::de::DeserializeOwned;
@@ -131,6 +133,10 @@ pub struct AgentdConfig {
 
     /// Baseline image/user environment plus host-generated placeholders.
     pub(crate) default_env: Vec<BootstrapEnvVar>,
+
+    /// Keys of the `default_env` entries that carry secret placeholders, or
+    /// `None` when the runtime did not name them.
+    pub(crate) secret_env_keys: Option<Vec<String>>,
 
     /// Execution policy supplied by the owning runtime; absent for older launchers.
     pub(crate) exec_limits: Option<ExecLimits>,
@@ -308,6 +314,7 @@ impl BootParams {
             user,
             default_cwd,
             default_env,
+            secret_env_keys,
             security_profile,
             handoff_init,
             exec_limits,
@@ -438,6 +445,7 @@ impl BootParams {
                 security_profile,
                 default_cwd,
                 default_env,
+                secret_env_keys,
                 exec_limits,
             },
         ))
@@ -540,6 +548,42 @@ impl AgentdConfig {
         unsafe { env::set_var("PATH", scripts_path(configured_path)) };
     }
 
+    /// `None` when the runtime did not name its secret placeholders.
+    pub(crate) fn replace_default_env_version(&self) -> Option<u8> {
+        self.secret_env_keys
+            .as_ref()
+            .map(|_| REPLACE_DEFAULT_ENV_VERSION)
+    }
+
+    /// Boot defaults an exec request omits, still at their boot value.
+    pub(crate) fn omitted_default_env(
+        &self,
+        request_env: &[String],
+        agentd_owned: &[&str],
+        inherited: impl Fn(&str) -> Option<OsString>,
+    ) -> Vec<String> {
+        let Some(secret_env_keys) = &self.secret_env_keys else {
+            return Vec::new();
+        };
+        let mut seen = HashSet::new();
+        let mut omitted = Vec::new();
+        // The last entry for a key is the value agentd installed.
+        for variable in self.default_env.iter().rev() {
+            let key = variable.key.as_str();
+            if !seen.insert(key)
+                || key == "PATH"
+                || agentd_owned.contains(&key)
+                || secret_env_keys.iter().any(|secret| secret == key)
+                || crate::session::env_contains_key(request_env, key)
+                || inherited(key).as_deref() != Some(OsStr::new(&variable.value))
+            {
+                continue;
+            }
+            omitted.push(key.to_string());
+        }
+        omitted
+    }
+
     /// Reads the runtime-config `MSB_*` environment variables.
     ///
     /// Empty or whitespace-only values are treated as absent (`None`).
@@ -552,6 +596,7 @@ impl AgentdConfig {
                 .unwrap_or_default(),
             default_cwd: None,
             default_env: Vec::new(),
+            secret_env_keys: None,
             exec_limits: None,
         })
     }
@@ -1550,6 +1595,118 @@ mod tests {
         assert_eq!(
             scripts_path(Some("/bin:/.msb/scripts:/usr/bin")),
             "/bin:/.msb/scripts:/usr/bin"
+        );
+    }
+
+    fn env_var(key: &str, value: &str) -> BootstrapEnvVar {
+        BootstrapEnvVar {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_omitted_default_env_drops_only_spec_defaults_the_request_leaves_out() {
+        let (_, config) = BootParams::from_bootstrap(GuestBootstrap {
+            default_env: vec![
+                env_var("MODE", "dev"),
+                env_var("REMOVED", "1"),
+                env_var("DUPLICATE", "first"),
+                env_var("DUPLICATE", "last"),
+                env_var("PATH", "/custom/bin"),
+                env_var("HOME", "/home/app"),
+                env_var("SSL_CERT_FILE", "/user/ca.pem"),
+                env_var("SHARED_KEY", "plain"),
+                env_var("API_KEY", "$MSB_API_KEY"),
+                env_var("SHARED_KEY", "$MSB_SHARED_KEY"),
+            ],
+            secret_env_keys: Some(vec!["API_KEY".to_string(), "SHARED_KEY".to_string()]),
+            ..GuestBootstrap::default()
+        })
+        .unwrap();
+        // agentd's environment after boot: TLS setup replaced the user's bundle path.
+        let inherited = |key: &str| {
+            let value = match key {
+                "MODE" => "dev",
+                "REMOVED" => "1",
+                "DUPLICATE" => "last",
+                "PATH" => "/.msb/scripts:/custom/bin",
+                "HOME" => "/home/app",
+                "SSL_CERT_FILE" => "/etc/ssl/certs/ca-certificates.crt",
+                "API_KEY" => "$MSB_API_KEY",
+                "SHARED_KEY" => "$MSB_SHARED_KEY",
+                _ => return None,
+            };
+            Some(OsString::from(value))
+        };
+
+        let mut omitted = config.omitted_default_env(&["MODE=prod".to_string()], &[], inherited);
+        omitted.sort();
+
+        // HOME is dropped here and set again per exec from the user's account.
+        assert_eq!(omitted, vec!["DUPLICATE", "HOME", "REMOVED"]);
+    }
+
+    #[test]
+    fn test_omitted_default_env_keeps_agentd_owned_keys_with_the_boot_value() {
+        let (_, config) = BootParams::from_bootstrap(GuestBootstrap {
+            default_env: vec![
+                env_var(
+                    "NODE_EXTRA_CA_CERTS",
+                    microsandbox_protocol::GUEST_TLS_CA_PATH,
+                ),
+                env_var("REMOVED", "1"),
+            ],
+            secret_env_keys: Some(Vec::new()),
+            ..GuestBootstrap::default()
+        })
+        .unwrap();
+        // TLS setup wrote the same value the boot default held.
+        let inherited = |key: &str| match key {
+            "NODE_EXTRA_CA_CERTS" => Some(OsString::from(microsandbox_protocol::GUEST_TLS_CA_PATH)),
+            "REMOVED" => Some(OsString::from("1")),
+            _ => None,
+        };
+
+        let omitted = config.omitted_default_env(&[], &["NODE_EXTRA_CA_CERTS"], inherited);
+        assert_eq!(omitted, vec!["REMOVED"]);
+
+        // With interception off, the same key is a plain boot default.
+        let mut omitted = config.omitted_default_env(&[], &[], inherited);
+        omitted.sort();
+        assert_eq!(omitted, vec!["NODE_EXTRA_CA_CERTS", "REMOVED"]);
+    }
+
+    #[test]
+    fn test_unnamed_secret_placeholders_disable_default_env_replacement() {
+        let default_env = vec![env_var("REMOVED", "1"), env_var("API_KEY", "$MSB_API_KEY")];
+        let inherited = |key: &str| match key {
+            "REMOVED" => Some(OsString::from("1")),
+            "API_KEY" => Some(OsString::from("$MSB_API_KEY")),
+            _ => None,
+        };
+        // An older runtime appends placeholders without naming them.
+        let (_, older) = BootParams::from_bootstrap(GuestBootstrap {
+            default_env: default_env.clone(),
+            ..GuestBootstrap::default()
+        })
+        .unwrap();
+        assert_eq!(older.replace_default_env_version(), None);
+        assert!(older.omitted_default_env(&[], &[], inherited).is_empty());
+
+        let (_, current) = BootParams::from_bootstrap(GuestBootstrap {
+            default_env,
+            secret_env_keys: Some(vec!["API_KEY".to_string()]),
+            ..GuestBootstrap::default()
+        })
+        .unwrap();
+        assert_eq!(
+            current.replace_default_env_version(),
+            Some(REPLACE_DEFAULT_ENV_VERSION)
+        );
+        assert_eq!(
+            current.omitted_default_env(&[], &[], inherited),
+            vec!["REMOVED"]
         );
     }
 

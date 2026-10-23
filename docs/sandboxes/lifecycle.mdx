@@ -348,7 +348,7 @@ To wait for a specific lifecycle state, use the status-wait method in your SDK: 
 
 ## Change configuration
 
-Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply immediately, some affect future commands, and some take effect after a restart.
+Use `msb modify`, or the SDK `modify()` methods, to change an existing sandbox without recreating it. Some changes apply immediately, env and workdir changes apply to commands started afterwards, and some take effect after a restart.
 
 <CodeGroup>
 ```typescript TypeScript

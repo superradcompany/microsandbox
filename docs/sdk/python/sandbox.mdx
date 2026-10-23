@@ -614,11 +614,13 @@ await sb.modify(secrets_rm=["OLD_API_KEY"])
 
 Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect.
 
+After a successful apply, this sandbox object uses the config the running VM now uses for later execs, the same config a new connect loads. A change saved for the next start is not included until a restart. A change made elsewhere, such as `msb modify` in another process, reaches it only after you connect again.
+
 `cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart.
 
 `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
 
-Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+Env and workdir changes on a running sandbox apply live to commands started afterwards. Running processes, PID 1 and its services, and the startup command keep their old values until a restart. Removing a variable live needs a guest agent that can drop it; on a sandbox started by an older runtime, removal needs a restart or next-start policy. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
 
 Secrets are keyed by name. Each `SecretModifySpec` can set one source (`env`, `value`, or `store`) and optional settings listed below. Omitted fields stay unchanged. Plans never include secret values. Use `secrets_rm` to remove secrets.
 
@@ -634,7 +636,7 @@ The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed di
 | `policy` | [`ModificationPolicy`](#modificationpolicy) | Policy used to produce the plan |
 | `changes` | `list[ConfigPlannedChange \| SecretPlannedChange]` | Typed config or secret changes, discriminated by [`PlannedChangeKind`](#plannedchangekind) |
 | `conflicts` | `list[dict]` | Conflicts (`field` + `message`) that must be resolved before the patch can apply |
-| `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. the future-execs-only env caveat |
+| `warnings` | `list[dict]` | Non-fatal warnings (`field` + `message`), e.g. which processes keep their old env |
 | `resize_status` | `list[ResourceResizeStatus]` | Live resize outcomes after apply, using [`ResourceKind`](#resourcekind) and [`ResourceConvergenceState`](#resourceconvergencestate). Omitted when no live resize ran |
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and `resize_status` reports when the sandbox has finished adjusting.
@@ -664,7 +666,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>env</code><span className="msb-type">Mapping[str, str] | None</span></div>
-    <div className="msb-param-desc">Environment variables to set for future execs.</div>
+    <div className="msb-param-desc">Environment variables to set for new commands.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>env_rm</code><span className="msb-type">list[str] | None</span></div>
@@ -680,7 +682,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>workdir</code><span className="msb-type">str | None</span></div>
-    <div className="msb-param-desc">Working directory for future execs.</div>
+    <div className="msb-param-desc">Working directory for new commands; must be an absolute path.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>secrets</code><span className="msb-type">Mapping[str, SecretModifySpec] | None</span></div>
