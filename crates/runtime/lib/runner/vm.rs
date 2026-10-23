@@ -505,6 +505,41 @@ impl VmConfig {
             _ => Ok(()),
         }
     }
+
+    fn validate_custom_backends(&self) -> RuntimeResult<()> {
+        if self.backends.is_empty() {
+            return Ok(());
+        }
+        if self.checkpoint_restore.is_some() {
+            return Err(RuntimeError::Custom(
+                "custom filesystem backends are not supported during checkpoint restore".into(),
+            ));
+        }
+
+        let mut tags = BTreeSet::from(["/dev/root", microsandbox_protocol::RUNTIME_FS_TAG]);
+        for mount in self
+            .mounts
+            .iter()
+            .chain(self.file_mounts.iter().map(|m| &m.mount))
+        {
+            if let Some((tag, _)) = mount.split_once(':') {
+                tags.insert(tag);
+            }
+        }
+        for (tag, _) in &self.backends {
+            if tag.is_empty() || tag.len() > 36 || tag.as_bytes().contains(&0) {
+                return Err(RuntimeError::Custom(
+                    "custom filesystem tag must contain 1..36 bytes without NUL".into(),
+                ));
+            }
+            if !tags.insert(tag) {
+                return Err(RuntimeError::Custom(format!(
+                    "custom filesystem tag {tag:?} conflicts with another filesystem"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl AgentTransportProfile {
@@ -1863,7 +1898,7 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
-    validate_custom_backends(vm)?;
+    vm.validate_custom_backends()?;
     let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
@@ -2770,41 +2805,6 @@ fn build_vm(
         restored_agent,
         owned_directory_checkpoints,
     ))
-}
-
-fn validate_custom_backends(vm: &VmConfig) -> RuntimeResult<()> {
-    if vm.backends.is_empty() {
-        return Ok(());
-    }
-    if vm.checkpoint_restore.is_some() {
-        return Err(RuntimeError::Custom(
-            "custom filesystem backends are not supported during checkpoint restore".into(),
-        ));
-    }
-
-    let mut tags = BTreeSet::from(["/dev/root", microsandbox_protocol::RUNTIME_FS_TAG]);
-    for mount in vm
-        .mounts
-        .iter()
-        .chain(vm.file_mounts.iter().map(|m| &m.mount))
-    {
-        if let Some((tag, _)) = mount.split_once(':') {
-            tags.insert(tag);
-        }
-    }
-    for (tag, _) in &vm.backends {
-        if tag.is_empty() || tag.len() > 36 || tag.as_bytes().contains(&0) {
-            return Err(RuntimeError::Custom(
-                "custom filesystem tag must contain 1..36 bytes without NUL".into(),
-            ));
-        }
-        if !tags.insert(tag) {
-            return Err(RuntimeError::Custom(format!(
-                "custom filesystem tag {tag:?} conflicts with another filesystem"
-            )));
-        }
-    }
-    Ok(())
 }
 
 fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
