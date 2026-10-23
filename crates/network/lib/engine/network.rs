@@ -353,6 +353,7 @@ impl SmoltcpNetwork {
     /// Host sockets are reserved before the gate is released, so bind failures can be
     /// reported without enabling traffic. Checkpoint restore releases the gate only
     /// after guest activation and local control endpoint publication.
+    /// Each listener discards its startup queue before it begins forwarding.
     pub fn defer_activation(&mut self) -> NetworkActivationHandle {
         assert!(
             self.poll_handle.is_none(),
@@ -401,7 +402,7 @@ impl SmoltcpNetwork {
             mtu: self.mtu as usize,
         };
         let config = self.config.config();
-        let port_publisher = {
+        let mut port_publisher = {
             let _entered = tokio_handle.enter();
             PortPublisher::new(
                 &config.ports,
@@ -413,6 +414,9 @@ impl SmoltcpNetwork {
                 self.gateway_ipv6,
             )?
         };
+        if self.activation_gate.is_some() {
+            port_publisher.discard_pending_on_start();
+        }
         let network_policy = config.policy.clone();
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
@@ -595,6 +599,7 @@ impl SmoltcpNetwork {
 
 impl NetworkActivationHandle {
     /// Release a deferred network exactly once. Repeated calls are harmless.
+    /// This signals listener startup, not completion of startup queue discard.
     pub fn activate(&self) {
         let mut active = self.gate.active.lock().unwrap();
         if !*active {

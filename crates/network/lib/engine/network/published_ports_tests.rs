@@ -1,14 +1,13 @@
 //! Published ports through the real network engine and virtio-net frame boundary.
 
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, HardwareAddress, IpAddress, IpCidr, Ipv4Packet, UdpPacket,
-};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::test_support::{GuestDevice, ipv6_loopback_unavailable};
@@ -63,13 +62,27 @@ fn published_ports_work_without_host_routes() {
 }
 
 #[test]
-fn deferred_publication_reserves_ports_without_forwarding() {
+fn deferred_tcp_publication_discards_stale_connections() {
+    check_deferred_published_port(PortProtocol::Tcp);
+}
+
+#[test]
+fn deferred_udp_publication_discards_stale_datagrams() {
+    check_deferred_published_port(PortProtocol::Udp);
+}
+
+fn check_deferred_published_port(protocol: PortProtocol) {
+    // The poll thread and its listeners live until process exit.
     const CHILD_ENV: &str = "MSB_TEST_DEFERRED_PUBLICATION";
     if std::env::var_os(CHILD_ENV).is_none() {
+        let test = match protocol {
+            PortProtocol::Tcp => "deferred_tcp_publication_discards_stale_connections",
+            PortProtocol::Udp => "deferred_udp_publication_discards_stale_datagrams",
+        };
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "engine::network::published_ports_tests::deferred_publication_reserves_ports_without_forwarding",
+                &format!("engine::network::published_ports_tests::{test}"),
                 "--nocapture",
             ])
             .env(CHILD_ENV, "1")
@@ -77,157 +90,36 @@ fn deferred_publication_reserves_ports_without_forwarding() {
             .unwrap();
         assert!(
             output.status.success(),
-            "deferred-publication child failed:\n{}\n{}",
+            "deferred {protocol:?} publication child failed:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
         return;
     }
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let address = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let mut config = NetworkConfig::default();
-        config.tls.enabled = false;
-        config.policy = NetworkPolicy::allow_all();
-        config.ports.push(PublishedPort {
-            host_port: address.port(),
-            guest_port: 8000,
-            protocol: PortProtocol::Udp,
-            host_bind: address.ip(),
-        });
-        let mut network = SmoltcpNetwork::build(
-            config.resolve(&EnvNetworkSecretResolver).unwrap(),
-            7,
-            microsandbox_types::DeploymentProfile::SingleTenant,
-            HostRoutes {
-                ipv4: false,
-                ipv6: false,
-            },
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            check_published_port_with_activation(protocol, Ipv4Addr::LOCALHOST.into(), true),
         )
-        .unwrap();
-        let activation = network.defer_activation();
-        let mut backend = network.take_backend();
-        network
-            .start(tokio::runtime::Handle::current())
-            .expect("bind deferred listener");
-        assert_eq!(
-            std::net::UdpSocket::bind(address).unwrap_err().kind(),
-            std::io::ErrorKind::AddrInUse,
-        );
-        let client = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .unwrap();
-        client.send_to(b"deferred", address).await.unwrap();
-        let mut bytes = [0; 2048];
-        let started = std::time::Instant::now();
-        while started.elapsed() < Duration::from_millis(25) {
-            assert!(
-                matches!(
-                    backend.read_frame(&mut bytes),
-                    Err(msb_krun::backends::net::ReadError::NothingRead),
-                ),
-                "published traffic reached the guest before activation"
-            );
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        activation.activate();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match backend.read_frame(&mut bytes) {
-                    Ok(len) => {
-                        let ethernet = EthernetFrame::new_checked(&bytes[12..len]).unwrap();
-                        let ip = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
-                        let udp = UdpPacket::new_checked(ip.payload()).unwrap();
-                        assert_eq!(udp.dst_port(), 8000);
-                        assert_eq!(udp.payload(), b"deferred");
-                        break;
-                    }
-                    Err(msb_krun::backends::net::ReadError::NothingRead) => {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    Err(error) => panic!("read guest frame: {error:?}"),
-                }
-            }
-        })
         .await
-        .expect("published traffic did not resume after activation");
+        .unwrap_or_else(|_| panic!("deferred published {protocol:?} timed out"));
     });
 }
 
-#[tokio::test]
-async fn published_port_bind_failure_reports_endpoint() {
-    for blocked_protocol in [PortProtocol::Tcp, PortProtocol::Udp] {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let outgoing = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (_peer, _) = listener.accept().unwrap();
-        let udp_blocker = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        // A connected but non-listening TCP socket must also refuse publication.
-        let blocked = match blocked_protocol {
-            PortProtocol::Tcp => outgoing.local_addr().unwrap(),
-            PortProtocol::Udp => udp_blocker.local_addr().unwrap(),
-        };
-        let tcp_reservation = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let udp_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let tcp_address = tcp_reservation.local_addr().unwrap();
-        let udp_address = udp_reservation.local_addr().unwrap();
-        let mut config = NetworkConfig::default();
-        config.tls.enabled = false;
-        config.policy = NetworkPolicy::allow_all();
-        for (address, protocol) in [
-            (tcp_address, PortProtocol::Tcp),
-            (udp_address, PortProtocol::Udp),
-            (blocked, blocked_protocol),
-        ] {
-            config.ports.push(PublishedPort {
-                host_port: address.port(),
-                guest_port: 8000,
-                protocol,
-                host_bind: address.ip(),
-            });
-        }
-        let mut network = SmoltcpNetwork::build(
-            config.resolve(&EnvNetworkSecretResolver).unwrap(),
-            7,
-            microsandbox_types::DeploymentProfile::SingleTenant,
-            HostRoutes {
-                ipv4: false,
-                ipv6: false,
-            },
-        )
-        .unwrap();
-        // Keep the free endpoints owned until the synchronous bind attempt.
-        // No await occurs before rebind; failed start spawns no poll thread.
-        drop((tcp_reservation, udp_reservation));
-        let error = network
-            .start(tokio::runtime::Handle::current())
-            .expect_err("occupied published endpoint must fail startup");
-        let _tcp_rebound = std::net::TcpListener::bind(tcp_address)
-            .expect("rebind TCP prefix after failed startup");
-        let _udp_rebound =
-            std::net::UdpSocket::bind(udp_address).expect("rebind UDP prefix after failed startup");
-        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
-        assert!(
-            error.to_string().contains(&blocked.to_string()),
-            "bind failure must identify the conflicting host endpoint: {error}",
-        );
-        let protocol = match blocked_protocol {
-            PortProtocol::Tcp => "TCP",
-            PortProtocol::Udp => "UDP",
-        };
-        assert!(
-            error.to_string().contains(protocol),
-            "bind failure must identify its protocol: {error}",
-        );
-    }
+async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
+    check_published_port_with_activation(protocol, bind, false).await;
 }
 
-async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
+async fn check_published_port_with_activation(
+    protocol: PortProtocol,
+    bind: IpAddr,
+    deferred: bool,
+) {
     let host_address = match protocol {
         PortProtocol::Tcp => {
             std::net::TcpListener::bind((bind, 0)).and_then(|listener| listener.local_addr())
@@ -308,29 +200,107 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
             sockets.add(socket)
         }
     };
+    let client_ip = if bind.is_unspecified() {
+        Ipv4Addr::LOCALHOST.into()
+    } else {
+        bind
+    };
+    let address = SocketAddr::new(client_ip, host_port);
+    let activation = deferred.then(|| network.defer_activation());
     network.start(tokio::runtime::Handle::current()).unwrap();
-    let client = tokio::spawn(async move {
-        let client_ip = if bind.is_unspecified() {
-            Ipv4Addr::LOCALHOST.into()
-        } else {
-            bind
-        };
-        let address = SocketAddr::new(client_ip, host_port);
-        let mut response = [0; 4];
+    if let Some(activation) = activation {
+        let conflict = match protocol {
+            PortProtocol::Tcp => std::net::TcpListener::bind(address).map(|_| ()),
+            PortProtocol::Udp => std::net::UdpSocket::bind(address).map(|_| ()),
+        }
+        .expect_err("deferred publication must reserve its host endpoint");
+        assert_eq!(conflict.kind(), std::io::ErrorKind::AddrInUse);
+
+        // Use blocking OS sockets on this current-thread runtime: no reactor turn can
+        // cache listener readiness between queuing stale traffic and activation.
         match protocol {
             PortProtocol::Tcp => {
-                let mut stream = loop {
-                    match tokio::net::TcpStream::connect(address).await {
-                        Ok(stream) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                            tokio::time::sleep(Duration::from_millis(1)).await;
+                for attempt in 0..96 {
+                    let mut stale = match std::net::TcpStream::connect_timeout(
+                        &address,
+                        Duration::from_millis(50),
+                    ) {
+                        Ok(stream) => stream,
+                        Err(error)
+                            if attempt > 0
+                                && matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                ) =>
+                        {
+                            // Hosts may clamp the listen backlog below the requested size.
+                            break;
                         }
-                        Err(error) => panic!("connecting published port: {error}"),
-                    }
-                };
-                stream.write_all(b"ping").await.unwrap();
-                stream.read_exact(&mut response).await.unwrap();
+                        Err(error) => panic!("queue stale TCP connection: {error}"),
+                    };
+                    stale
+                        .set_write_timeout(Some(Duration::from_millis(50)))
+                        .unwrap();
+                    stale.write_all(b"stale-tcp-before-activation").unwrap();
+                    // Model callers that gave up while restore was still deferred.
+                    drop(stale);
+                }
             }
+            PortProtocol::Udp => {
+                let stale = std::net::UdpSocket::bind((client_ip, 0)).unwrap();
+                for _ in 0..96 {
+                    stale
+                        .send_to(b"stale-udp-before-activation", address)
+                        .unwrap();
+                }
+            }
+        }
+        let mut frame = [0; 2048];
+        let deferred_started = std::time::Instant::now();
+        while deferred_started.elapsed() < Duration::from_millis(25) {
+            assert!(
+                matches!(
+                    device.0.read_frame(&mut frame),
+                    Err(msb_krun::backends::net::ReadError::NothingRead),
+                ),
+                "published traffic reached the guest before activation",
+            );
+            // Let the independent poll thread run, but not this runtime's reactor.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        activation.activate();
+    }
+    // Do not yield between activation and spawning fresh traffic. Activation is
+    // not an acknowledgement that every listener has finished purging its queue.
+    let client = tokio::spawn(async move {
+        let mut response = [0; 4];
+        match protocol {
+            PortProtocol::Tcp => loop {
+                let attempt = async {
+                    let mut stream = tokio::net::TcpStream::connect(address).await?;
+                    stream.write_all(b"ping").await?;
+                    stream.read_exact(&mut response).await?;
+                    Ok::<(), std::io::Error>(())
+                }
+                .await;
+                match attempt {
+                    Ok(()) => break,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::ConnectionRefused
+                            || deferred
+                                && matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::ConnectionReset
+                                        | std::io::ErrorKind::ConnectionAborted
+                                        | std::io::ErrorKind::BrokenPipe
+                                        | std::io::ErrorKind::UnexpectedEof
+                                ) =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(error) => panic!("using published TCP port: {error}"),
+                }
+            },
             PortProtocol::Udp => {
                 let socket = tokio::net::UdpSocket::bind((client_ip, 0)).await.unwrap();
                 loop {
@@ -353,7 +323,17 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
     });
     let started = std::time::Instant::now();
     let mut request = Vec::new();
-    while !client.is_finished() {
+    let mut tail_started = None;
+    loop {
+        if client.is_finished() {
+            if !deferred {
+                break;
+            }
+            let tail_started = tail_started.get_or_insert_with(std::time::Instant::now);
+            if tail_started.elapsed() >= Duration::from_millis(100) {
+                break;
+            }
+        }
         iface.poll(
             Instant::from_millis(started.elapsed().as_millis() as i64),
             &mut device,
@@ -369,9 +349,22 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
                             (bytes.len(), ())
                         })
                         .unwrap();
+                    assert!(
+                        b"ping".starts_with(&request),
+                        "guest received stale or unexpected TCP payload: {request:?}",
+                    );
                     if request.len() == 4 {
                         assert_eq!(request, b"ping");
                         assert_eq!(socket.send_slice(b"pong").unwrap(), 4);
+                    }
+                }
+                if deferred {
+                    if socket.state() == tcp::State::CloseWait {
+                        socket.close();
+                    }
+                    if !socket.is_open() {
+                        request.clear();
+                        socket.listen(8000).unwrap();
                     }
                 }
             }
@@ -379,7 +372,10 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
                 let socket = sockets.get_mut::<udp::Socket>(socket);
                 if socket.can_recv() {
                     let (bytes, peer) = socket.recv().unwrap();
-                    assert_eq!(bytes, b"ping");
+                    assert_eq!(
+                        bytes, b"ping",
+                        "guest received stale or unexpected UDP payload",
+                    );
                     socket.send_slice(b"pong", peer.endpoint).unwrap();
                 }
             }

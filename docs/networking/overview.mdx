@@ -454,6 +454,8 @@ If the host starts without IPv4 or IPv6 routes, microsandbox assigns private gue
 
 Sandbox startup reserves every requested TCP and UDP host socket before reporting ready. If a binding fails, startup fails, identifies the protocol and host address, and releases sockets already reserved for that attempt. Full snapshot restores reserve the sockets first but keep traffic deferred until guest activation and local control endpoint publication have both completed.
 
+Before forwarding begins after a Full restore, each listener discards its queued TCP connections or UDP datagrams instead of replaying them. A TCP handshake during restore does not mean the guest has accepted the request; connections can be reset until forwarding starts.
+
 Port publication readiness only confirms the host sockets. Your application inside the guest may still need its own readiness check.
 
 CLI `-p` and YAML `ports` lists also accept inclusive, equal-length port ranges: `-p 8000-8002:80-82` forwards three TCP ports, while `-p 0.0.0.0:10240-11264:10240-11264/udp` publishes 1,025 UDP ports. Ranges expand into the same individual mappings used by the SDKs, with one host socket per port. See [Published ports](/cli/sandbox-commands#published-ports) for validation and host resource requirements.
