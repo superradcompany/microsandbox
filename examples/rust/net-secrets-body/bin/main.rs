@@ -20,10 +20,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sb = sandbox::create(SECRET, HOSTNAME, PORT, &handle.ca_cert_path).await?;
 
     let response = sandbox::post_secret(&sb, HOSTNAME, &host_ip, PORT).await?;
-    println!("[guest]  Server responded: {response}");
-
     sb.stop().await?;
     Sandbox::remove("net-secrets-body").await?;
+
+    let confirmation: serde_json::Value = serde_json::from_str(&response)?;
+    if confirmation
+        .get("received_key")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return Err(std::io::Error::other("secret substitution failed").into());
+    }
+    println!("[guest]  Secret substitution confirmed");
 
     Ok(())
 }
