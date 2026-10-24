@@ -27,11 +27,20 @@ impl PassthroughFs {
             return Err(linux_error(LINUX_EISDIR));
         }
 
-        let file = if flags & LINUX_O_TRUNC as u32 != 0 {
+        let account_truncate = flags & LINUX_O_TRUNC as u32 != 0
+            && self.quota.as_ref().is_some_and(|quota| quota.incremental());
+        let file = if account_truncate {
+            self.open_inode_file(&data, flags & !(LINUX_O_TRUNC as u32))?
+        } else if flags & LINUX_O_TRUNC as u32 != 0 {
             self.resize_inode(inode, || self.open_inode_file(&data, flags))?
         } else {
             self.open_inode_file(&data, flags)?
         };
+        if account_truncate {
+            self.resize_inode(inode, || {
+                self.quota_mutate(inode, &file, |_| 0, |_| file.set_len(0).map_err(host_error))
+            })?;
+        }
 
         reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
         if kill_priv && flags as i32 & LINUX_O_TRUNC != 0 {

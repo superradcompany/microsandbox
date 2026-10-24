@@ -554,3 +554,11 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+## Incremental passthrough quota accounting
+
+New local passthrough mounts track per-inode logical guest-growth ranges. Their filesystem state uses schema 2 around the existing backend payload and a validated inode charge ledger; the outer snapshot format, SDK/runtime launch contract, and quota configuration are unchanged. Older filesystem readers reject schema 2 with the existing upgrade-required error. Quota-free mounts retain schema 1.
+
+By explicit user direction, schema-1 quota snapshots restore the original aggregate baseline-and-rescan implementation and continue to emit schema 1. They are not converted into per-file charges because their aggregate counters cannot identify which bytes belonged to the guest. Frozen schema-1 quota bytes and schema-2 refusal/round-trip tests cover this boundary.
+
+For new mounts, `statfs` reports the guest quota and recorded guest usage without adding a host-tree baseline. Growth reserves quota before I/O and settles against the observed result; deletions and shrinks reclaim only recorded charges. Host changes are observed through charged identities, without directory traversal. New accounting retains guest inode identities for outstanding charges, including across full snapshots, but does not hold an additional host descriptor per charged file.

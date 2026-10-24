@@ -34,6 +34,7 @@ mod metadata;
 mod mobility;
 mod ops;
 mod owned_metadata;
+mod quota_ops;
 mod remove_ops;
 mod stat_store;
 
@@ -223,32 +224,6 @@ impl PassthroughFs {
         limit: usize,
     ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
         mobility::prepare_single_file_state(bytes, source, destination, limit)
-    }
-
-    /// Charge the quota for growing from `old_len` to `new_end` bytes.
-    pub(super) fn quota_charge_growth(&self, old_len: u64, new_end: u64) -> io::Result<()> {
-        if let Some(quota) = &self.quota {
-            quota.charge(new_end.saturating_sub(old_len))?;
-        }
-        Ok(())
-    }
-
-    /// Charge the quota for growing an open file to `new_end` bytes.
-    ///
-    /// Used on create-like paths where the file was just created and the
-    /// handle metadata is enough to determine growth before bytes are written.
-    pub(super) fn quota_charge_file_to(&self, file: &File, new_end: u64) -> io::Result<()> {
-        self.quota_charge_growth(super::quota::file_size(file), new_end)
-    }
-
-    /// Capture the quota baseline now if it has not been captured yet.
-    ///
-    /// The first write-intent operation pays the one-time directory walk so
-    /// pre-existing host files become baseline instead of guest growth.
-    pub(super) fn quota_ensure_baseline(&self) {
-        if let Some(quota) = &self.quota {
-            quota.ensure_baseline();
-        }
     }
 }
 

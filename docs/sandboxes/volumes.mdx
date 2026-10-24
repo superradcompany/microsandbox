@@ -137,6 +137,16 @@ msb create alpine --name config-reader \
 ```
 </CodeGroup>
 
+## Guest-write quotas
+
+For a new local directory or file mount, `quota=<size>` limits logical file growth caused by guest writes. Existing host data and host additions observed before a guest write do not consume that budget. Overwrites within a file's current length do not add usage; shrinking a file releases its charged bytes. Hard links share one charge. Removing a file releases its charge once no remaining guest references keep it accessible.
+
+Guest `df` reports the quota as total capacity and the remaining guest budget as available space. It does not include pre-existing host data, so its used figure can differ from `du`. Neither `df` nor the first write walks the mounted directory tree.
+
+Host-side changes are reconciled when a charged file is observed or when more quota is needed, using metadata for recorded files only. Changes that happen entirely between observations cannot be attributed exactly; usage can remain conservative until a later observed shrink or removal. This is a logical growth budget, not an allocation-based host filesystem quota.
+
+Full snapshots created with the previous aggregate quota format keep that accounting and its directory scans when restored. Full snapshots containing incremental quota state require a runtime that supports the new filesystem state format; older runtimes refuse them with an upgrade-required error.
+
 ## Owned volumes
 
 <Tooltip tip="Owned volumes are currently local-only."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
