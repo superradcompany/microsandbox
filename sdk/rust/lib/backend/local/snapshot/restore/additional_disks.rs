@@ -6,6 +6,7 @@ use std::path::Path;
 use microsandbox_image::checkpoint::{DiskGenerationManifest, ResourceDescriptor};
 use microsandbox_types::{DiskImageFormat, MountOptions, VolumeMount};
 
+use crate::backend::local::creation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -131,7 +132,7 @@ pub(crate) async fn materialize_additional_disks(
         let expected_size = layer.file_size;
         let qcow2 = layer.format == "qcow2";
         let pin = super::super::lease::pin_source(&source)?;
-        let worker = tokio::task::spawn_blocking(move || {
+        let worker = creation::spawn_blocking(move || {
             let _pin = pin;
             stage_additional_disk(
                 &source,

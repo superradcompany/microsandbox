@@ -504,7 +504,7 @@ pub(crate) async fn capture_child(
         &local.cache_dir().join("memory"),
         &id,
     )?;
-    tokio::fs::write(child.join(".branch-reservation"), &id).await?;
+    std::fs::write(child.join(".branch-reservation"), &id)?;
     #[cfg(not(target_os = "linux"))]
     let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
@@ -581,7 +581,7 @@ pub(crate) async fn capture_child(
     // and readiness do not need to exclude later source lifecycle operations.
     drop(lineage);
     drop(_transition);
-    tokio::fs::remove_file(child.join(".branch-reservation")).await?;
+    std::fs::remove_file(child.join(".branch-reservation"))?;
     adopt_capture(config, child, closure, &state, pin).await
 }
 
@@ -713,6 +713,7 @@ fn reclaim_abandoned_memory(root: &Path) {
     let root = root.to_owned();
     // Filesystem metadata and unlink may stall on cold or remote storage. Recovery is
     // best-effort and must not occupy the async worker that drives branch capture.
+    // This shared cache sweep must not retain the child's preparation lock.
     tokio::task::spawn_blocking(move || {
         let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
             branches_only: true,

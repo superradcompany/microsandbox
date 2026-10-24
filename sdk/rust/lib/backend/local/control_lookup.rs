@@ -271,7 +271,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("schema is newer")
+                .contains("newer or unrecognized database schema")
         );
         writer
             .execute_unprepared(

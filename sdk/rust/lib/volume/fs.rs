@@ -368,6 +368,7 @@ pub(crate) mod local {
 
     use bytes::Bytes;
     use cap_std::fs::Metadata;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
@@ -385,6 +386,20 @@ pub(crate) mod local {
         operation: impl FnOnce(RootedVolumeFs) -> MicrosandboxResult<T> + Send + 'static,
     ) -> MicrosandboxResult<T> {
         crate::volume::validate_volume_name(name)?;
+        let pools = local.db().await?;
+        if let Some(volume) = crate::db::entity::volume::Entity::find()
+            .filter(crate::db::entity::volume::Column::Name.eq(name))
+            .one(pools.read())
+            .await?
+        {
+            crate::backend::local::creation::require_volume_available(
+                pools.read(),
+                volume.id,
+                None,
+            )
+            .await?;
+        }
+
         let root_path = local.volume_path(name);
         tokio::task::spawn_blocking(move || operation(RootedVolumeFs::open(&root_path)?))
             .await

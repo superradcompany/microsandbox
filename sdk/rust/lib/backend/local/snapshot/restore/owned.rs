@@ -7,6 +7,7 @@ use microsandbox_image::snapshot::{OwnedVolumeCapture, OwnedVolumeData};
 use microsandbox_runtime::checkpoint::RuntimeOwnedRootLayer;
 use microsandbox_types::VolumeMount;
 
+use crate::backend::local::creation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -49,7 +50,7 @@ pub(crate) async fn materialize_owned_volumes(
                 let mount_id = volume.mount_id.clone();
                 let readonly = volume.mount.options.readonly;
                 let pin = super::super::lease::pin_source(&source)?;
-                let staging = tokio::task::spawn_blocking(move || {
+                let staging = creation::spawn_blocking(move || {
                     let _lease = pin;
                     stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)
                 })
@@ -78,8 +79,8 @@ pub(crate) async fn materialize_owned_volumes(
                 let descriptor = descriptor.clone();
                 let files = files.clone();
                 let pin = super::super::lease::pin_source(&source)?;
-                let staging = tokio::task::spawn_blocking(
-                    move || -> MicrosandboxResult<tempfile::TempDir> {
+                let staging =
+                    creation::spawn_blocking(move || -> MicrosandboxResult<tempfile::TempDir> {
                         let _lease = pin;
                         let snapshot =
                             microsandbox_filesystem::OwnedDirectorySnapshot::open_expected(
@@ -102,10 +103,11 @@ pub(crate) async fn materialize_owned_volumes(
                             .tempdir_in(parent)?;
                         snapshot.materialize(&source, &staging.path().join("data"))?;
                         Ok(staging)
-                    },
-                )
-                .await
-                .map_err(|error| invalid(&format!("owned directory restore worker: {error}")))??;
+                    })
+                    .await
+                    .map_err(|error| {
+                        invalid(&format!("owned directory restore worker: {error}"))
+                    })??;
                 // A cancelled copy knows only unique staging. Publish while this async poll
                 // still holds the caller's sandbox transition and lifecycle guards.
                 std::fs::create_dir_all(&directory)?;

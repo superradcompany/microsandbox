@@ -32,6 +32,8 @@
 #[cfg(all(test, unix))]
 mod archive_tests;
 mod cleanup;
+#[cfg(test)]
+mod recovery_tests;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -45,12 +47,16 @@ use microsandbox_image::{
     PullResult, Reference, Registry, RootfsMaterialization, ext4, tree,
 };
 use microsandbox_runtime::ipc::SandboxSocketPaths;
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set, Statement,
+    sea_query::Expr,
+};
 use tokio::sync::Mutex;
 
 use super::LocalBackend;
 use crate::agent::AgentClient;
 use crate::backend::Backend;
+use crate::backend::local::creation;
 use crate::config::RegistryOptions;
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
@@ -329,6 +335,10 @@ impl LocalBackend {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
         )
         .await?;
+        if config.replace_existing {
+            self.remove_interrupted_create_for_replacement(db, &config)
+                .await?;
+        }
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
         // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
         // under the lock so two creates cannot both own the same child staging directory.
@@ -342,512 +352,558 @@ impl LocalBackend {
         reserved_config.replace_existing = false;
         Self::prepare_create_target(db, &reserved_config, &sandbox_dir, &self.config().run_dir())
             .await?;
+        let preparation = creation::lock_preparation(self, &config.spec.name)?;
+
+        // Persist ownership before any deterministic sandbox path is created. An interrupted
+        // insert can leave a row, but never untracked storage.
+        let sandbox_id = Self::insert_sandbox_record_impl(
+            db.write(),
+            &config.clone_for_persistence(),
+            SandboxStatus::Starting,
+            true,
+        )
+        .await?;
+
         let mut child_stage_guard = None;
-        if let Some(stage) = archive_stage {
-            relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
-            // Keep rename and guard installation in one poll: cancellation must never
-            // leave published child storage without an owner.
-            std::fs::rename(stage.path(), &sandbox_dir)?;
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-        }
-        let _branch_pin = if let Some(source) = config.branch_source.take() {
-            tokio::fs::create_dir(&sandbox_dir).await?;
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let pin =
-                crate::sandbox::branch::capture_child(self, &mut config, &source, &sandbox_dir)
-                    .await?;
-
-            // Capture resolves automatic nesting to its actual execution mode. Recheck
-            // managed policy before publishing or launching the child, as for archives.
-            config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
-            launch_contract::validate_runtime_config(&config, self.config()).await?;
-
-            Some(pin)
-        } else {
-            None
-        };
-
-        // Installed full snapshots likewise become child-owned before image resolution. The
-        // closure is retained only through eager construction; the disk layers and fresh writable
-        // head remain under the ordinary sandbox directory and root-disk journal.
-        if let Some(source) = installed_checkpoint_restore {
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let root_layout = snapshot_root_layout_from_config(&config)?;
-            match config.snapshot_restore_mode {
-                SnapshotRestoreMode::Full => {
-                    let materialized = crate::snapshot::materialize_checkpoint_for_child(
-                        &source,
-                        &sandbox_dir,
-                        &root_layout,
-                        &config.restore_resources,
-                        self.config().fs_state_limit(),
-                    )
-                    .await?;
-                    config.checkpoint_restore = Some(materialized.restore);
-                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
-                    config.snapshot_upper_layers = materialized.upper_layers;
-                    config.suppress_launch_for_full_restore();
+        // Preparation errors are handled only after awaited filesystem work has finished.
+        let prepared = creation::preparing(
+            preparation,
+            Box::pin(async {
+                if let Some(stage) = archive_stage {
+                    relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
+                    // Keep rename and guard installation in one poll: cancellation must never
+                    // leave published child storage without an owner.
+                    std::fs::rename(stage.path(), &sandbox_dir)?;
+                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
                 }
-                SnapshotRestoreMode::DiskOnly => {
-                    let materialized = crate::snapshot::materialize_checkpoint_disk_for_child(
-                        &source,
-                        &sandbox_dir,
-                        &root_layout,
-                        &config.restore_resources,
-                        self.config().fs_state_limit(),
-                    )
-                    .await?;
-                    crate::snapshot::apply_additional_disks(&mut config, materialized.disk_mounts);
-                    config.snapshot_upper_layers = materialized.upper_layers;
-                }
-            }
-        }
-        crate::sandbox::resolve_external_mounts(self, &mut config).await?;
-        // Resource inheritance may add legacy relative bindings after initial admission.
-        // This is a new child: pin its launch inputs without rewriting the saved source.
-        super::super::host_paths::resolve_host_paths(&mut config)?;
-        // After external-mount admission, so a relaxed restore can still mark a vanished
-        // mount unavailable, and before the sandbox row is inserted. Earlier work (image
-        // pull, archive decode, child materialization, a `--replace` deletion) has already
-        // happened, as with the runtime's own boot-time failure. Older runtimes follow
-        // root symlinks, so only a runtime that refuses them is checked.
-        let enforce = match crate::setup::resolve_runtime(self.config()) {
-            Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
-                .await?
-                .refuses_symlinked_bind_roots(),
-            Err(MicrosandboxError::RuntimeNotInstalled(_)) => true,
-            Err(error) => return Err(error),
-        };
-        if enforce {
-            super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
-        }
+                let _branch_pin = if let Some(source) = config.branch_source.take() {
+                    std::fs::create_dir(&sandbox_dir)?;
+                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+                    let pin = crate::sandbox::branch::capture_child(
+                        self, &mut config, &source, &sandbox_dir,
+                    ).await?;
 
-        if !installed_file_sources.is_empty() {
-            child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
-            let virtual_size = installed_file_virtual_size.ok_or_else(|| {
-                MicrosandboxError::SnapshotIntegrity(
-                    "file snapshot is missing its root-disk capacity".into(),
-                )
-            })?;
-            let root_layout = snapshot_root_layout_from_config(&config)?;
-            let materialized = crate::snapshot::materialize_file_snapshot_for_child(
-                &installed_file_sources,
-                virtual_size,
-                &sandbox_dir,
-                &root_layout,
-            )
-            .await?;
-            config.snapshot_upper_layers = materialized.upper_layers;
-        }
-        if let Some((source, owned)) = config.snapshot_owned_source.take() {
-            let mounts = crate::snapshot::materialize_owned_volumes(
-                &owned,
-                &source,
-                &sandbox_dir,
-                &config.restore_resources,
-            )
-            .await?;
-            crate::snapshot::apply_additional_disks(&mut config, mounts);
-        }
-        // All source payloads are now child-owned; runtime handles must not retain the source.
-        config.snapshot_lease = None;
+                    // Capture resolves automatic nesting to its actual execution mode. Recheck
+                    // managed policy before publishing or launching the child, as for archives.
+                    config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
+                    launch_contract::validate_runtime_config(&config, self.config()).await?;
 
-        // Re-evaluate ownership from the materialized restore state before process creation.
-        // A full restore must not receive an attached parent watchdog or Windows kill-on-close job.
-        let mode = crate::sandbox::create_spawn_mode(&config, mode);
-
-        // Resolve OCI images before spawning the sandbox process.
-        if let RootfsSource::Oci(oci) = config.spec.image.clone() {
-            let reference = oci.reference;
-            let expected_snapshot_manifest_digest = (config.snapshot_upper_source.is_some()
-                || config.checkpoint_restore.is_some()
-                || !config.snapshot_upper_layers.is_empty())
-            .then(|| config.manifest_digest.clone())
-            .flatten();
-            let root_disk = oci
-                .root_disk
-                .clone()
-                .unwrap_or(RootDisk::Managed { size_mib: None });
-            // Reject incompatible snapshot + patch combinations before image resolution and
-            // before the sandbox directory exists. A rejected run must leave no on-disk state,
-            // because the leftover directory blocks retries under the same name (see #1550).
-            // Flat roots bake patches into a private tree and are compatible with both paths.
-            if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
-                if config.snapshot_upper_source.is_some() {
-                    return Err(MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with from_snapshot".into(),
-                    ));
-                }
-                if !config.snapshot_upper_layers.is_empty() {
-                    return Err(MicrosandboxError::InvalidConfig(
-                        "patches cannot be combined with full snapshot restore".into(),
-                    ));
-                }
-            }
-            let image_materialization = if matches!(root_disk, RootDisk::Flat { .. }) {
-                RootfsMaterialization::Flat
-            } else {
-                RootfsMaterialization::Layered
-            };
-            let overrides = RegistryOptions {
-                auth: config.registry_auth.clone(),
-                insecure: config.insecure,
-                ca_certs: config.ca_certs.clone(),
-                ..Default::default()
-            };
-            let ResolvedOciImage {
-                cache_operation,
-                pull_result,
-                metadata_reference,
-                cached_metadata,
-            } = if let Some(image) = resolved_image.take() {
-                image
-            } else {
-                timing::measure(
-                    &timing_name,
-                    "image_resolution",
-                    self.resolve_oci_image_for_create(
-                        &reference,
-                        config.spec.pull_policy,
-                        overrides,
-                        expected_snapshot_manifest_digest.as_deref(),
-                        image_materialization,
-                        progress,
-                    ),
-                )
-                .await?
-            };
-
-            // Retain file ownership through insertion of the sandbox/rootfs catalog rows.
-            image_operations.push(cache_operation);
-            tracing::trace!(
-                target: timing::TARGET,
-                sandbox_name = %timing_name,
-                layers_cached = pull_result.cached,
-                layer_count = pull_result.layer_diff_ids.len(),
-                materialization = ?image_materialization,
-                "sandbox image resolved"
-            );
-
-            // Snapshot overlays are meaningful only against the exact base
-            // image digest captured in their descriptor.
-            if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
-                && pull_result.manifest_digest.to_string() != expected
-            {
-                return Err(MicrosandboxError::SnapshotIntegrity(format!(
-                    "snapshot image digest mismatch: manifest pinned {}, resolved {}",
-                    expected, pull_result.manifest_digest
-                )));
-            }
-
-            // Merge image config defaults under user-provided config.
-            if restoring {
-                config.merge_image_defaults(&pull_result.config);
-            }
-            if let Some(init) = &config.spec.init {
-                crate::sandbox::init::validate(init)?;
-            }
-
-            pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
-            pinned_reference = Some(metadata_reference.clone());
-
-            // Layered roots boot through the stitched VMDK descriptor. Flat
-            // roots intentionally skip both fsmeta and VMDK materialization,
-            // so requiring the descriptor here would make a cold SDK create
-            // fail after successfully publishing its flat ext4 artifact.
-            let cache_dir = self.cache_dir();
-            let cache = GlobalCache::new_async(&cache_dir).await?;
-            if image_materialization.includes_layered() {
-                let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
-                if tokio::fs::metadata(&vmdk_path).await.is_err() {
-                    return Err(MicrosandboxError::Custom(format!(
-                        "VMDK not materialized: {}",
-                        vmdk_path.display()
-                    )));
-                }
-            }
-
-            // For patches, pass per-layer EROFS paths.
-            let layer_erofs_paths: Vec<std::path::PathBuf> = pull_result
-                .layer_diff_ids
-                .iter()
-                .map(|d| cache.layer_erofs_path(d))
-                .collect();
-
-            let flat_spec = match &root_disk {
-                RootDisk::Flat {
-                    size_mib,
-                    clone,
-                    fstype,
-                } => {
-                    if fstype.as_deref().unwrap_or("ext4") != "ext4" {
-                        return Err(MicrosandboxError::InvalidConfig(format!(
-                            "flat root disks currently require fstype=ext4, got {}",
-                            fstype.as_deref().unwrap_or_default()
-                        )));
-                    }
-                    if config.snapshot_upper_source.is_some()
-                        || !config.snapshot_upper_layers.is_empty()
-                        || !config.spec.patches.is_empty()
-                    {
-                        None
-                    } else {
-                        let flat_ref = cache
-                            .read_flat_ref(&pull_result.manifest_digest)?
-                            .ok_or_else(|| {
-                                MicrosandboxError::Custom(
-                                    "flat rootfs was not published by the image pull".into(),
-                                )
-                            })?;
-                        let artifact_digest: Digest =
-                            flat_ref.artifact_digest.parse().map_err(|e| {
-                                MicrosandboxError::Custom(format!(
-                                    "invalid flat rootfs artifact digest in cache: {e}"
-                                ))
-                            })?;
-                        let minimum_mib = flat_ref.virtual_size_bytes.div_ceil(1024 * 1024);
-                        let requested_mib = size_mib.map(u64::from).unwrap_or(u64::from(
-                            crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB,
-                        ));
-                        let target_mib = size_mib
-                            .map(|_| requested_mib)
-                            .unwrap_or_else(|| requested_mib.max(minimum_mib));
-                        let target_mib = u32::try_from(target_mib).map_err(|_| {
-                            MicrosandboxError::InvalidConfig(
-                                "flat root disk size exceeds supported MiB range".into(),
-                            )
-                        })?;
-                        Some((cache.flat_blob_path(&artifact_digest), target_mib, *clone))
-                    }
-                }
-                _ => None,
-            };
-
-            // Flat patches modify a complete private tree. Managed patches remain a compact
-            // OverlayFS upper and therefore retain their existing fast path.
-            tokio::fs::create_dir_all(&sandbox_dir).await?;
-            let flat_patch_spool = sandbox_dir.join(".flat-patch.spool");
-            let flat_tree = if !config.spec.patches.is_empty()
-                && matches!(root_disk, RootDisk::Flat { .. })
-            {
-                match timing::measure(
-                    &timing_name,
-                    "patch_tree",
-                    build_flat_tree(&config.spec.patches, &layer_erofs_paths, &flat_patch_spool),
-                )
-                .await
-                {
-                    Ok(tree) => Some(tree),
-                    Err(error) => {
-                        let _ = tokio::fs::remove_file(&flat_patch_spool).await;
-                        return Err(error);
-                    }
-                }
-            } else {
-                None
-            };
-            let upper_tree =
-                if !config.spec.patches.is_empty() && !matches!(root_disk, RootDisk::Flat { .. }) {
-                    Some(
-                        timing::measure(
-                            &timing_name,
-                            "patch_tree",
-                            build_upper_tree(&config.spec.patches, &layer_erofs_paths),
-                        )
-                        .await?,
-                    )
+                    Some(pin)
                 } else {
                     None
                 };
 
-            // Ensure sandbox storage exists before provisioning either a private flat rootfs or
-            // the writable overlay upper image.
-            let upper_path = sandbox_dir.join("upper.ext4");
-            let writable_disk_path = if matches!(root_disk, RootDisk::Flat { .. }) {
-                sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME)
-            } else {
-                upper_path.clone()
-            };
-            if let Some(flat_tree) = flat_tree {
-                let requested_mib = match &root_disk {
-                    RootDisk::Flat { size_mib, .. } => *size_mib,
-                    _ => unreachable!("flat patch tree requires a flat root"),
-                };
-                let materialized = crate::sandbox::flat_rootfs::create_patched_flat_rootfs(
-                    writable_disk_path.clone(),
-                    flat_tree,
-                    requested_mib,
-                )
-                .await;
-                let _ = tokio::fs::remove_file(&flat_patch_spool).await;
-                let target_mib = materialized?;
-                if let RootfsSource::Oci(oci) = &mut config.spec.image
-                    && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
-                {
-                    *size_mib = Some(target_mib);
-                }
-            } else if let Some((base, target_mib, clone)) = flat_spec {
-                timing::measure(
-                    &timing_name,
-                    "flat_root_clone",
-                    crate::sandbox::flat_rootfs::create_private_flat_rootfs(
-                        base,
-                        sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
-                        target_mib,
-                        clone,
-                    ),
-                )
-                .await?;
-                if let RootfsSource::Oci(oci) = &mut config.spec.image
-                    && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
-                {
-                    *size_mib = Some(target_mib);
-                }
-            } else if !config.snapshot_upper_layers.is_empty() {
-                // Restored upper layers are attached by the runtime, so there is no writable
-                // disk to provision here.
-            } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
-                // Booting from a snapshot: copy the captured upper into
-                // place, preserving sparseness. Patches are not
-                // compatible with this path because they'd need to be
-                // re-baked into the snapshot's upper, which we don't do.
-                // That combination is rejected before this directory exists.
-                if snap_upper != writable_disk_path {
-                    let dst = writable_disk_path.clone();
-                    tokio::task::spawn_blocking(move || {
-                        microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
-                    })
-                    .await
-                    .map_err(|e| MicrosandboxError::Custom(format!("snapshot copy task: {e}")))??;
-                }
-            } else {
-                match &root_disk {
-                    RootDisk::Managed { size_mib } => {
-                        let upper_size_mib =
-                            size_mib.unwrap_or(crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB);
-                        if !upper_path.exists() || upper_tree.is_some() {
-                            timing::measure(
-                                &timing_name,
-                                "writable_disk_create",
-                                Self::create_upper_ext4(&upper_path, upper_size_mib, upper_tree),
+                // Installed full snapshots likewise become child-owned before image resolution. The
+                // closure is retained only through eager construction; the disk layers and fresh writable
+                // head remain under the ordinary sandbox directory and root-disk journal.
+                if let Some(source) = installed_checkpoint_restore {
+                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+                    let root_layout = snapshot_root_layout_from_config(&config)?;
+                    match config.snapshot_restore_mode {
+                        SnapshotRestoreMode::Full => {
+                            let materialized = crate::snapshot::materialize_checkpoint_for_child(
+                                &source,
+                                &sandbox_dir,
+                                &root_layout,
+                                &config.restore_resources,
+                                self.config().fs_state_limit(),
                             )
                             .await?;
+                            config.checkpoint_restore = Some(materialized.restore);
+                            crate::snapshot::apply_additional_disks(
+                                &mut config,
+                                materialized.disk_mounts,
+                            );
+                            config.snapshot_upper_layers = materialized.upper_layers;
+                            config.suppress_launch_for_full_restore();
+                        }
+                        SnapshotRestoreMode::DiskOnly => {
+                            let materialized =
+                                crate::snapshot::materialize_checkpoint_disk_for_child(
+                                    &source,
+                                    &sandbox_dir,
+                                    &root_layout,
+                                    &config.restore_resources,
+                                    self.config().fs_state_limit(),
+                                )
+                                .await?;
+                            crate::snapshot::apply_additional_disks(
+                                &mut config,
+                                materialized.disk_mounts,
+                            );
+                            config.snapshot_upper_layers = materialized.upper_layers;
                         }
                     }
-                    // The builder rejects patches with tmpfs root disks and
-                    // agentd creates the in-memory upper inside the guest.
-                    RootDisk::Tmpfs { .. } => {}
-                    RootDisk::DiskImage { path, .. } => {
-                        if tokio::fs::metadata(path).await.is_err() {
-                            return Err(MicrosandboxError::InvalidConfig(format!(
-                                "root disk image not found: {}",
-                                path.display()
+                }
+                crate::sandbox::resolve_external_mounts(self, &mut config).await?;
+                // Resource inheritance may add legacy relative bindings after initial admission.
+                // This is a new child: pin its launch inputs without rewriting the saved source.
+                super::super::host_paths::resolve_host_paths(&mut config)?;
+                // After external-mount admission, so a relaxed restore can still mark a vanished
+                // mount unavailable, and before the sandbox row is inserted. Earlier work (image
+                // pull, archive decode, child materialization, a `--replace` deletion) has already
+                // happened, as with the runtime's own boot-time failure. Older runtimes follow
+                // root symlinks, so only a runtime that refuses them is checked.
+                let enforce = match crate::setup::resolve_runtime(self.config()) {
+                    Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
+                        .await?
+                        .refuses_symlinked_bind_roots(),
+                    Err(MicrosandboxError::RuntimeNotInstalled(_)) => true,
+                    Err(error) => return Err(error),
+                };
+                if enforce {
+                    super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
+                }
+
+                if !installed_file_sources.is_empty() {
+                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+                    let virtual_size = installed_file_virtual_size.ok_or_else(|| {
+                        MicrosandboxError::SnapshotIntegrity(
+                            "file snapshot is missing its root-disk capacity".into(),
+                        )
+                    })?;
+                    let root_layout = snapshot_root_layout_from_config(&config)?;
+                    let materialized = crate::snapshot::materialize_file_snapshot_for_child(
+                        &installed_file_sources,
+                        virtual_size,
+                        &sandbox_dir,
+                        &root_layout,
+                    )
+                    .await?;
+                    config.snapshot_upper_layers = materialized.upper_layers;
+                }
+                if let Some((source, owned)) = config.snapshot_owned_source.take() {
+                    let mounts = crate::snapshot::materialize_owned_volumes(
+                        &owned,
+                        &source,
+                        &sandbox_dir,
+                        &config.restore_resources,
+                    )
+                    .await?;
+                    crate::snapshot::apply_additional_disks(&mut config, mounts);
+                }
+                // All source payloads are now child-owned; runtime handles must not retain the source.
+                config.snapshot_lease = None;
+
+                // Resolve OCI images before spawning the sandbox process.
+                if let RootfsSource::Oci(oci) = config.spec.image.clone() {
+                    let reference = oci.reference;
+                    let expected_snapshot_manifest_digest =
+                        (config.snapshot_upper_source.is_some()
+                            || config.checkpoint_restore.is_some()
+                            || !config.snapshot_upper_layers.is_empty())
+                        .then(|| config.manifest_digest.clone())
+                        .flatten();
+                    let root_disk = oci
+                        .root_disk
+                        .clone()
+                        .unwrap_or(RootDisk::Managed { size_mib: None });
+                    // Reject incompatible snapshot + patch combinations before image resolution and
+                    // before the sandbox directory exists. A rejected run must leave no on-disk state,
+                    // because the leftover directory blocks retries under the same name (see #1550).
+                    // Flat roots bake patches into a private tree and are compatible with both paths.
+                    if !config.spec.patches.is_empty()
+                        && !matches!(root_disk, RootDisk::Flat { .. })
+                    {
+                        if config.snapshot_upper_source.is_some() {
+                            return Err(MicrosandboxError::InvalidConfig(
+                                "patches cannot be combined with from_snapshot".into(),
+                            ));
+                        }
+                        if !config.snapshot_upper_layers.is_empty() {
+                            return Err(MicrosandboxError::InvalidConfig(
+                                "patches cannot be combined with full snapshot restore".into(),
+                            ));
+                        }
+                    }
+                    let image_materialization = if matches!(root_disk, RootDisk::Flat { .. }) {
+                        RootfsMaterialization::Flat
+                    } else {
+                        RootfsMaterialization::Layered
+                    };
+                    let overrides = RegistryOptions {
+                        auth: config.registry_auth.clone(),
+                        insecure: config.insecure,
+                        ca_certs: config.ca_certs.clone(),
+                        ..Default::default()
+                    };
+                    let ResolvedOciImage {
+                        cache_operation,
+                        pull_result,
+                        metadata_reference,
+                        cached_metadata,
+                    } = if let Some(image) = resolved_image.take() {
+                        image
+                    } else {
+                        timing::measure(
+                            &timing_name,
+                            "image_resolution",
+                            self.resolve_oci_image_for_create(
+                                &reference,
+                                config.spec.pull_policy,
+                                overrides,
+                                expected_snapshot_manifest_digest.as_deref(),
+                                image_materialization,
+                                progress,
+                            ),
+                        )
+                        .await?
+                    };
+
+                    // Retain file ownership through insertion of the sandbox/rootfs catalog rows.
+                    image_operations.push(cache_operation);
+                    tracing::trace!(
+                        target: timing::TARGET,
+                        sandbox_name = %timing_name,
+                        layers_cached = pull_result.cached,
+                        layer_count = pull_result.layer_diff_ids.len(),
+                        materialization = ?image_materialization,
+                        "sandbox image resolved"
+                    );
+
+                    // Snapshot overlays are meaningful only against the exact base
+                    // image digest captured in their descriptor.
+                    if let Some(expected) = expected_snapshot_manifest_digest.as_deref()
+                        && pull_result.manifest_digest.to_string() != expected
+                    {
+                        return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                            "snapshot image digest mismatch: manifest pinned {}, resolved {}",
+                            expected, pull_result.manifest_digest
+                        )));
+                    }
+
+                    // Merge image config defaults under user-provided config.
+                    if restoring {
+                        config.merge_image_defaults(&pull_result.config);
+                    }
+                    if let Some(init) = &config.spec.init {
+                        crate::sandbox::init::validate(init)?;
+                    }
+
+                    pinned_manifest_digest = Some(pull_result.manifest_digest.to_string());
+                    pinned_reference = Some(metadata_reference.clone());
+
+                    // Layered roots boot through the stitched VMDK descriptor. Flat
+                    // roots intentionally skip both fsmeta and VMDK materialization,
+                    // so requiring the descriptor here would make a cold SDK create
+                    // fail after successfully publishing its flat ext4 artifact.
+                    let cache_dir = self.cache_dir();
+                    let cache = GlobalCache::new_async(&cache_dir).await?;
+                    if image_materialization.includes_layered() {
+                        let vmdk_path = cache.vmdk_path(&pull_result.manifest_digest);
+                        if tokio::fs::metadata(&vmdk_path).await.is_err() {
+                            return Err(MicrosandboxError::Custom(format!(
+                                "VMDK not materialized: {}",
+                                vmdk_path.display()
                             )));
                         }
                     }
-                    RootDisk::Flat { .. } => {
-                        unreachable!("flat root disks are provisioned before overlay handling")
+
+                    // For patches, pass per-layer EROFS paths.
+                    let layer_erofs_paths: Vec<std::path::PathBuf> = pull_result
+                        .layer_diff_ids
+                        .iter()
+                        .map(|d| cache.layer_erofs_path(d))
+                        .collect();
+
+                    let flat_spec = match &root_disk {
+                        RootDisk::Flat {
+                            size_mib,
+                            clone,
+                            fstype,
+                        } => {
+                            if fstype.as_deref().unwrap_or("ext4") != "ext4" {
+                                return Err(MicrosandboxError::InvalidConfig(format!(
+                                    "flat root disks currently require fstype=ext4, got {}",
+                                    fstype.as_deref().unwrap_or_default()
+                                )));
+                            }
+                            if config.snapshot_upper_source.is_some()
+                                || !config.snapshot_upper_layers.is_empty()
+                                || !config.spec.patches.is_empty()
+                            {
+                                None
+                            } else {
+                                let flat_ref = cache
+                                    .read_flat_ref(&pull_result.manifest_digest)?
+                                    .ok_or_else(|| {
+                                    MicrosandboxError::Custom(
+                                        "flat rootfs was not published by the image pull".into(),
+                                    )
+                                })?;
+                                let artifact_digest: Digest =
+                                    flat_ref.artifact_digest.parse().map_err(|e| {
+                                        MicrosandboxError::Custom(format!(
+                                            "invalid flat rootfs artifact digest in cache: {e}"
+                                        ))
+                                    })?;
+                                let minimum_mib = flat_ref.virtual_size_bytes.div_ceil(1024 * 1024);
+                                let requested_mib = size_mib.map(u64::from).unwrap_or(u64::from(
+                                    crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB,
+                                ));
+                                let target_mib = size_mib
+                                    .map(|_| requested_mib)
+                                    .unwrap_or_else(|| requested_mib.max(minimum_mib));
+                                let target_mib = u32::try_from(target_mib).map_err(|_| {
+                                    MicrosandboxError::InvalidConfig(
+                                        "flat root disk size exceeds supported MiB range".into(),
+                                    )
+                                })?;
+                                Some((cache.flat_blob_path(&artifact_digest), target_mib, *clone))
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    // Flat patches modify a complete private tree. Managed patches remain a compact
+                    // OverlayFS upper and therefore retain their existing fast path.
+                    std::fs::create_dir_all(&sandbox_dir)?;
+                    let flat_patch_spool = sandbox_dir.join(".flat-patch.spool");
+                    let flat_tree = if !config.spec.patches.is_empty()
+                        && matches!(root_disk, RootDisk::Flat { .. })
+                    {
+                        match timing::measure(
+                            &timing_name,
+                            "patch_tree",
+                            build_flat_tree(
+                                &config.spec.patches,
+                                &layer_erofs_paths,
+                                &flat_patch_spool,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(tree) => Some(tree),
+                            Err(error) => {
+                                let _ = std::fs::remove_file(&flat_patch_spool);
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let upper_tree = if !config.spec.patches.is_empty()
+                        && !matches!(root_disk, RootDisk::Flat { .. })
+                    {
+                        Some(
+                            timing::measure(
+                                &timing_name,
+                                "patch_tree",
+                                build_upper_tree(&config.spec.patches, &layer_erofs_paths),
+                            )
+                            .await?,
+                        )
+                    } else {
+                        None
+                    };
+
+                    // Ensure sandbox storage exists before provisioning either a private flat rootfs or
+                    // the writable overlay upper image.
+                    let upper_path = sandbox_dir.join("upper.ext4");
+                    let writable_disk_path = if matches!(root_disk, RootDisk::Flat { .. }) {
+                        sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME)
+                    } else {
+                        upper_path.clone()
+                    };
+                    if let Some(flat_tree) = flat_tree {
+                        let requested_mib = match &root_disk {
+                            RootDisk::Flat { size_mib, .. } => *size_mib,
+                            _ => unreachable!("flat patch tree requires a flat root"),
+                        };
+                        let materialized = crate::sandbox::flat_rootfs::create_patched_flat_rootfs(
+                            writable_disk_path.clone(),
+                            flat_tree,
+                            requested_mib,
+                        )
+                        .await;
+                        let _ = std::fs::remove_file(&flat_patch_spool);
+                        let target_mib = materialized?;
+                        if let RootfsSource::Oci(oci) = &mut config.spec.image
+                            && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
+                        {
+                            *size_mib = Some(target_mib);
+                        }
+                    } else if let Some((base, target_mib, clone)) = flat_spec {
+                        timing::measure(
+                            &timing_name,
+                            "flat_root_clone",
+                            crate::sandbox::flat_rootfs::create_private_flat_rootfs(
+                                base,
+                                sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
+                                target_mib,
+                                clone,
+                            ),
+                        )
+                        .await?;
+                        if let RootfsSource::Oci(oci) = &mut config.spec.image
+                            && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
+                        {
+                            *size_mib = Some(target_mib);
+                        }
+                    } else if !config.snapshot_upper_layers.is_empty() {
+                        // Restored upper layers are attached by the runtime, so there is no writable
+                        // disk to provision here.
+                    } else if let Some(snap_upper) = config.snapshot_upper_source.take() {
+                        // Booting from a snapshot: copy the captured upper into
+                        // place, preserving sparseness. Patches are not
+                        // compatible with this path because they'd need to be
+                        // re-baked into the snapshot's upper, which we don't do.
+                        // That combination is rejected before this directory exists.
+                        if snap_upper != writable_disk_path {
+                            let dst = writable_disk_path.clone();
+                            creation::spawn_blocking(move || {
+                                microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
+                            })
+                            .await
+                            .map_err(|e| {
+                                MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
+                            })??;
+                        }
+                    } else {
+                        match &root_disk {
+                            RootDisk::Managed { size_mib } => {
+                                let upper_size_mib = size_mib
+                                    .unwrap_or(crate::sandbox::config::DEFAULT_OCI_UPPER_SIZE_MIB);
+                                if !upper_path.exists() || upper_tree.is_some() {
+                                    timing::measure(
+                                        &timing_name,
+                                        "writable_disk_create",
+                                        Self::create_upper_ext4(
+                                            &upper_path,
+                                            upper_size_mib,
+                                            upper_tree,
+                                        ),
+                                    )
+                                    .await?;
+                                }
+                            }
+                            // The builder rejects patches with tmpfs root disks and
+                            // agentd creates the in-memory upper inside the guest.
+                            RootDisk::Tmpfs { .. } => {}
+                            RootDisk::DiskImage { path, .. } => {
+                                if tokio::fs::metadata(path).await.is_err() {
+                                    return Err(MicrosandboxError::InvalidConfig(format!(
+                                        "root disk image not found: {}",
+                                        path.display()
+                                    )));
+                                }
+                            }
+                            RootDisk::Flat { .. } => {
+                                unreachable!(
+                                    "flat root disks are provisioned before overlay handling"
+                                )
+                            }
+                        }
                     }
+
+                    // Store manifest digest for spawn to derive paths.
+                    config.manifest_digest = Some(pull_result.manifest_digest.to_string());
+
+                    // Persist snapshot restores under their immutable digest-pinned
+                    // reference, even when the cache match came from an older tag.
+                    let metadata = match cached_metadata {
+                        Some(metadata) => metadata,
+                        None => {
+                            let image_ref =
+                                metadata_reference.parse::<Reference>().map_err(|error| {
+                                    MicrosandboxError::InvalidConfig(error.to_string())
+                                })?;
+                            cache
+                                .read_image_metadata_async(&image_ref)
+                                .await?
+                                .ok_or_else(|| {
+                                    MicrosandboxError::ImageNotFound(metadata_reference.clone())
+                                })?
+                        }
+                    };
+                    // Releasing operation leases is safe only after durable ownership is recorded.
+                    // A catalog failure must not produce a live sandbox with untracked image backing.
+                    crate::image::Image::persist(self, &metadata_reference, metadata).await?;
+                    Self::persist_oci_manifest_pin(
+                        db.write(),
+                        sandbox_id,
+                        &pull_result.manifest_digest.to_string(),
+                    )
+                    .await?;
                 }
+
+                // Apply rootfs patches before VM start. OCI patches were baked into their managed upper or
+                // complete private flat root above; this path handles bind roots only.
+                if !config.spec.patches.is_empty()
+                    && !matches!(config.spec.image, RootfsSource::Oci(_))
+                {
+                    apply_patches(&config.spec.image, &config.spec.patches).await?;
+                }
+
+                crate::runtime::owned_volumes::prepare(
+                    &sandbox_dir,
+                    &config.spec.mounts,
+                    config.snapshot_parent.is_some() || config.checkpoint_restore.is_some(),
+                )
+                .await?;
+
+                // Track newly provisioned named volumes under the reserved sandbox so
+                // interruption cannot leave their ownership ambiguous.
+                timing::measure(
+                    &timing_name,
+                    "named_volumes",
+                    ensure_named_volumes(self, &config),
+                )
+                .await
+                .map(|volumes| (volumes, _branch_pin))
+            }),
+        )
+        .await;
+        let (created_named_volumes, _branch_pin) = match prepared {
+            Ok((volumes, pin)) => (Arc::new(volumes), pin),
+            Err(error) => {
+                // Both guards are still held and no runtime has been published. Retain the
+                // recovery row if cleanup fails; otherwise remove it after all files are gone.
+                if let Err(cleanup) = creation::remove(
+                    self,
+                    sandbox_id,
+                    &config.spec.name,
+                    creation::RemovalMode::PreparationFailed,
+                )
+                .await
+                {
+                    return Err(MicrosandboxError::Runtime(format!("{error}; {cleanup}")));
+                }
+                return Err(error);
             }
+        };
 
-            // Store manifest digest for spawn to derive paths.
-            config.manifest_digest = Some(pull_result.manifest_digest.to_string());
-
-            // Persist snapshot restores under their immutable digest-pinned
-            // reference, even when the cache match came from an older tag.
-            let metadata = match cached_metadata {
-                Some(metadata) => metadata,
-                None => {
-                    let image_ref = metadata_reference
-                        .parse::<Reference>()
-                        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
-                    cache
-                        .read_image_metadata_async(&image_ref)
-                        .await?
-                        .ok_or_else(|| {
-                            MicrosandboxError::ImageNotFound(metadata_reference.clone())
-                        })?
-                }
-            };
-            // Releasing operation leases is safe only after durable ownership is recorded.
-            // A catalog failure must not produce a live sandbox with untracked image backing.
-            crate::image::Image::persist(self, &metadata_reference, metadata).await?;
-        }
-
-        // Apply rootfs patches before VM start. OCI patches were baked into their managed upper or
-        // complete private flat root above; this path handles bind roots only.
-        if !config.spec.patches.is_empty() && !matches!(config.spec.image, RootfsSource::Oci(_)) {
-            apply_patches(&config.spec.image, &config.spec.patches).await?;
-        }
-
-        // Sandbox-time named-volume creation is one-shot create intent. Provision
-        // before inserting the sandbox row so volume conflicts or incompatibilities
-        // cannot leave a stopped sandbox that never booted.
-        let created_named_volumes = Arc::new(
-            timing::measure(
-                &timing_name,
-                "named_volumes",
-                ensure_named_volumes(self, &config),
-            )
-            .await?,
-        );
-        let has_owned_volumes = config
-            .spec
-            .mounts
-            .iter()
-            .any(|mount| matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
+        // Restores must not receive an attached watchdog or Windows kill-on-close job.
+        let mode = crate::sandbox::create_spawn_mode(&config, mode);
         let mut creation_cleanup = CreationCleanup::new(
             backend.clone(),
             config.spec.name.clone(),
             _transition_guard,
             created_named_volumes.clone(),
-            has_owned_volumes,
             child_stage_guard.as_mut(),
         );
-        if let Err(error) = crate::runtime::owned_volumes::prepare(
-            &sandbox_dir,
-            &config.spec.mounts,
-            config.snapshot_parent.is_some() || config.checkpoint_restore.is_some(),
-        )
-        .await
-        {
-            // Preparation still holds the initial lifecycle lock locally. Release it so
-            // awaited cleanup can prove the name is free before a CLI caller exits.
-            drop(lifecycle_guard);
-            return Err(creation_cleanup.finish_owned_failure(error).await);
-        }
 
-        // Claim the persisted identity in Starting state. Running is published only after the
-        // guest agent and all create-time validation are ready for callers.
+        // Persist the fully prepared config before launch. The recovery row remains armed
+        // until all create-time validation and publication have succeeded.
         let write_db = db.write();
         let mut persisted_config = config.clone_for_persistence();
         // Keep restore intent until activation succeeds so an interrupted restore cannot boot cold.
         persisted_config.checkpoint_restore = config.checkpoint_restore.clone();
-        let sandbox_id = match timing::measure(
+        match timing::measure(
             &timing_name,
             "persist_start",
-            Self::insert_starting_sandbox_record(write_db, &persisted_config, Some(self.config())),
+            self.prepare_reserved_sandbox(write_db, sandbox_id, &persisted_config),
         )
         .await
         {
-            Ok(sandbox_id) => sandbox_id,
+            Ok(()) => {}
             Err(err) => {
-                rollback_created_named_volumes(self, &created_named_volumes).await;
-                if has_owned_volumes {
-                    // A failed commit may have an uncertain catalog outcome. Staging
-                    // already belongs to cleanup's writer-side ownership recheck.
-                    drop(lifecycle_guard);
-                    return Err(creation_cleanup.finish_owned_failure(err).await);
-                }
-                return Err(err);
+                // A failed commit may have an uncertain catalog outcome. Staging
+                // already belongs to cleanup's writer-side ownership recheck.
+                drop(lifecycle_guard);
+                return Err(creation_cleanup.finish_failure(err).await);
             }
         };
-        if let Some(guard) = child_stage_guard.as_mut() {
-            // The database row now owns the fully materialized child storage;
-            // later failures intentionally follow ordinary sandbox cleanup.
-            guard.disarm();
-        }
         tracing::debug!(sandbox_id, sandbox = %config.spec.name, "create_local: db record inserted");
 
         // Spawn the sandbox process and create the bridge. On failure, mark the sandbox
@@ -856,9 +912,12 @@ impl LocalBackend {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
-        let created = self
-            .create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))
-            .await;
+        let preparation = creation::lock_preparation(self, &config.spec.name)?;
+        let created = creation::preparing(
+            preparation,
+            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))),
+        )
+        .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
@@ -870,7 +929,7 @@ impl LocalBackend {
                 )
                 .await
                 .map_err(|cleanup| MicrosandboxError::Runtime(format!("{e}; {cleanup}")))?;
-                return Err(creation_cleanup.finish_owned_failure(e).await);
+                return Err(creation_cleanup.finish_failure(e).await);
             }
         };
         creation_cleanup.retain_process(local_state.handle.clone());
@@ -881,23 +940,8 @@ impl LocalBackend {
         }
         returned_config.snapshot_upper_layers.clear();
         let mut sandbox = Sandbox::from_local(backend.clone(), local_state, returned_config);
-        // This is the readiness publication boundary: create_sandbox_inner returns only after
-        // the relay is connected and agentd has accepted its readiness handshake.
-        if !Self::compare_and_set_sandbox_status(
-            write_db,
-            sandbox_id,
-            &[SandboxStatus::Starting],
-            SandboxStatus::Running,
-        )
-        .await?
-        {
-            sandbox.terminate_creation_owner().await;
-            let error = MicrosandboxError::Runtime(format!(
-                "sandbox {:?} lost its Starting state before readiness publication",
-                sandbox.name()
-            ));
-            return Err(creation_cleanup.finish_owned_failure(error).await);
-        }
+        // Keep Starting through every create-time validation. Publication and retirement of
+        // recovery ownership commit together only after the sandbox is ready to return.
         if let Err(err) = Self::update_sandbox_active_config(
             write_db,
             sandbox_id,
@@ -906,7 +950,7 @@ impl LocalBackend {
         .await
         {
             sandbox.terminate_creation_owner().await;
-            return Err(creation_cleanup.finish_owned_failure(err).await);
+            return Err(creation_cleanup.finish_failure(err).await);
         }
 
         if let (Some(_reference), Some(manifest_digest)) = (
@@ -926,7 +970,7 @@ impl LocalBackend {
             )
             .await
             .map_err(|cleanup| MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
-            return Err(creation_cleanup.finish_owned_failure(err).await);
+            return Err(creation_cleanup.finish_failure(err).await);
         }
 
         // Validate that the configured workdir exists inside the guest and is a
@@ -948,7 +992,7 @@ impl LocalBackend {
                     )
                     .await
                     .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_owned_failure(error).await);
+                    return Err(creation_cleanup.finish_failure(error).await);
                 }
                 Err(cause) => {
                     // A fast-exiting startup command can close the transport during stat.
@@ -965,7 +1009,7 @@ impl LocalBackend {
                     )
                     .await
                     .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_owned_failure(error).await);
+                    return Err(creation_cleanup.finish_failure(error).await);
                 }
             }
         }
@@ -982,7 +1026,7 @@ impl LocalBackend {
             .await
             {
                 sandbox.terminate_creation_owner().await;
-                return Err(creation_cleanup.finish_owned_failure(error).await);
+                return Err(creation_cleanup.finish_failure(error).await);
             }
             if let Err(error) = remove_dir_if_exists(&closure) {
                 tracing::warn!(error = %error, path = %closure.display(), "failed to remove consumed checkpoint closure");
@@ -990,6 +1034,10 @@ impl LocalBackend {
         }
         if matches!(mode, SpawnMode::Detached) {
             sandbox.finish_detached_creation().await?;
+        }
+        creation_cleanup.begin_publication();
+        if let Err(error) = creation::complete(write_db, sandbox_id, SandboxStatus::Running).await {
+            return Err(creation_cleanup.finish_failure(error).await);
         }
         creation_cleanup.disarm();
         Ok(sandbox)
@@ -1047,6 +1095,29 @@ impl LocalBackend {
             .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
             .exec(write_db)
             .await?;
+        if creation::pending(write_db, sandbox_id).await? {
+            if creation::can_retain(write_db, sandbox_id).await? {
+                creation::complete(write_db, sandbox_id, SandboxStatus::Stopped).await?;
+            } else {
+                let model = sandbox_entity::Entity::find_by_id(sandbox_id)
+                    .one(write_db)
+                    .await?
+                    .ok_or_else(|| {
+                        MicrosandboxError::Runtime(
+                            "incomplete sandbox lost its catalog owner".into(),
+                        )
+                    })?;
+                creation::remove(
+                    self,
+                    sandbox_id,
+                    &model.name,
+                    creation::RemovalMode::Creator,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+
         if created_named_volumes.is_empty() {
             Self::compare_and_set_sandbox_status(
                 write_db,
@@ -1993,7 +2064,95 @@ impl LocalBackend {
         Self::insert_sandbox_record_with_status(db, config, SandboxStatus::Running).await
     }
 
+    async fn prepare_reserved_sandbox(
+        &self,
+        db: &DbWriteConnection,
+        id: i32,
+        config: &SandboxConfig,
+    ) -> MicrosandboxResult<()> {
+        launch_contract::validate_runtime_config(config, self.config()).await?;
+        let config_json = serde_json::to_string(config)?;
+        let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
+        db.transaction(|txn| {
+            let config_json = config_json.clone();
+            let caller_config_overrides_json = caller_config_overrides_json.clone();
+            async move {
+                sandbox_entity::Entity::update_many()
+                    .col_expr(sandbox_entity::Column::Config, Expr::value(config_json))
+                    .col_expr(
+                        sandbox_entity::Column::CallerConfigOverrides,
+                        Expr::value(caller_config_overrides_json),
+                    )
+                    .col_expr(
+                        sandbox_entity::Column::Status,
+                        Expr::value(SandboxStatus::Starting),
+                    )
+                    .filter(sandbox_entity::Column::Id.eq(id))
+                    .exec(&txn)
+                    .await?;
+                // Restore preparation can merge image labels after the name was reserved.
+                sandbox_label_entity::Entity::delete_many()
+                    .filter(sandbox_label_entity::Column::SandboxId.eq(id))
+                    .exec(&txn)
+                    .await?;
+                if !config.spec.labels.is_empty() {
+                    sandbox_label_entity::Entity::insert_many(config.spec.labels.iter().map(
+                        |(key, value)| sandbox_label_entity::ActiveModel {
+                            sandbox_id: Set(id),
+                            key: Set(key.clone()),
+                            value: Set(value.clone()),
+                        },
+                    ))
+                    .exec(&txn)
+                    .await?;
+                }
+
+                if let Some(digest) = &config.manifest_digest {
+                    Self::replace_oci_manifest_pin(&txn, id, digest).await?;
+                }
+                txn.execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "UPDATE sandbox SET creation_state = 'prepared' WHERE id = ? AND creation_state = 'preparing'",
+                    [id.into()],
+                ))
+                .await?;
+                Ok::<_, MicrosandboxError>((txn, ()))
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Called with transition ownership; recovery never runs during an ordinary create retry.
+    async fn remove_interrupted_create_for_replacement(
+        &self,
+        pools: &DbPools,
+        config: &SandboxConfig,
+    ) -> MicrosandboxResult<()> {
+        let Some(model) = sandbox_entity::Entity::find()
+            .filter(sandbox_entity::Column::Name.eq(&config.spec.name))
+            .one(pools.write())
+            .await?
+        else {
+            return Ok(());
+        };
+        if !creation::pending(pools.write(), model.id).await? {
+            return Ok(());
+        }
+        Self::stop_sandbox_for_replacement(pools, &model, config.replace_with_timeout).await?;
+        let _lineage =
+            crate::snapshot::lineage::lock_source(&self.config().run_dir(), &model.name).await?;
+        let _runtime = crate::runtime::acquire_sandbox_lifecycle_guard(
+            &self.config().run_dir(),
+            &model.name,
+            std::time::Duration::from_secs(5),
+        )
+        .await?;
+        creation::remove(self, model.id, &model.name, creation::RemovalMode::Recovery).await
+    }
+
     /// Insert a provisional local create record that remains non-connectable until ready.
+    #[cfg(test)]
     async fn insert_starting_sandbox_record(
         db: &DbWriteConnection,
         config: &SandboxConfig,
@@ -2009,10 +2168,20 @@ impl LocalBackend {
     }
 
     /// Insert the sandbox record with an explicit initial lifecycle status.
+    #[cfg(test)]
     async fn insert_sandbox_record_with_status(
         db: &DbWriteConnection,
         config: &SandboxConfig,
         status: SandboxStatus,
+    ) -> MicrosandboxResult<i32> {
+        Self::insert_sandbox_record_impl(db, config, status, false).await
+    }
+
+    async fn insert_sandbox_record_impl(
+        db: &DbWriteConnection,
+        config: &SandboxConfig,
+        status: SandboxStatus,
+        reserve: bool,
     ) -> MicrosandboxResult<i32> {
         let config_json = serde_json::to_string(config)?;
         let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
@@ -2029,13 +2198,21 @@ impl LocalBackend {
                     config: Set(config_json),
                     caller_config_overrides: Set(caller_config_overrides_json.clone()),
                     status: Set(status),
-                    ephemeral: Set(config.spec.lifecycle.ephemeral),
+                    ephemeral: Set(!reserve && config.spec.lifecycle.ephemeral),
                     created_at: Set(Some(now)),
                     updated_at: Set(Some(now)),
                     ..Default::default()
                 };
                 let result = sandbox_entity::Entity::insert(model).exec(&txn).await?;
                 let sandbox_id = result.last_insert_id;
+                if reserve {
+                    txn.execute_raw(Statement::from_sql_and_values(
+                        DatabaseBackend::Sqlite,
+                        "UPDATE sandbox SET creation_state = 'preparing' WHERE id = ?",
+                        [sandbox_id.into()],
+                    ))
+                    .await?;
+                }
                 // Starting already owns backing: cancellation or a crash during VM launch
                 // must not release operation leases before a durable root protects it.
                 if status == SandboxStatus::Starting
@@ -2127,7 +2304,7 @@ impl LocalBackend {
         size_mib: u32,
         tree: Option<tree::FileTree>,
     ) -> MicrosandboxResult<()> {
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = std::fs::remove_file(path);
         let ext4_options = ext4::Ext4FormatOptions {
             size_bytes: u64::from(size_mib) * 1024 * 1024,
             ..Default::default()
@@ -2135,7 +2312,7 @@ impl LocalBackend {
         let overlay_tree = Self::build_overlay_upper_tree(tree);
         let path = path.to_path_buf();
 
-        tokio::task::spawn_blocking(move || {
+        creation::spawn_blocking(move || {
             ext4::format_ext4_with_tree(&path, &ext4_options, overlay_tree)
         })
         .await

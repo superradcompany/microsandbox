@@ -67,6 +67,9 @@ pub const GUEST_CLOCK_CONFIG_MIGRATION_ID: &str = "m20261001_000001_guest_clock_
 pub const SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID: &str =
     "m20261022_000001_sandbox_caller_config_overrides";
 
+/// Migration that retains ownership of unfinished sandbox creation.
+pub const SANDBOX_CREATION_MIGRATION_ID: &str = "m20261024_000001_sandbox_creation";
+
 /// Frozen migration baseline for the transitional 0.6.0 release.
 ///
 /// The released 0.6.0 binary predates `msb __schema-baseline --json`, so
@@ -306,6 +309,13 @@ pub const MIGRATION_METADATA: &[MigrationMetadata] = &[
         affects_user_data: true,
         summary: "drop sparse caller intent while keeping resolved sandbox configuration",
     },
+    MigrationMetadata {
+        id: SANDBOX_CREATION_MIGRATION_ID,
+        reversible: true,
+        affects_cache: false,
+        affects_user_data: true,
+        summary: "remove creation recovery columns only when no incomplete creates remain",
+    },
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -392,6 +402,7 @@ mod tests {
     #[test]
     fn canonical_applied_prefix_uses_metadata_order() {
         let applied = [
+            SANDBOX_CREATION_MIGRATION_ID,
             SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID,
             GUEST_CLOCK_CONFIG_MIGRATION_ID,
             SECRET_CONFIG_MIGRATION_ID,
@@ -484,6 +495,7 @@ mod tests {
                 SECRET_CONFIG_MIGRATION_ID,
                 GUEST_CLOCK_CONFIG_MIGRATION_ID,
                 SANDBOX_CALLER_CONFIG_OVERRIDES_MIGRATION_ID,
+                SANDBOX_CREATION_MIGRATION_ID,
             ],
         );
         assert!(canonical_applied_prefix(released).is_some());

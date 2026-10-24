@@ -186,6 +186,7 @@ impl LocalBackend {
             }
         }
 
+        super::creation::require_complete(write_db, model.id, name).await?;
         let mut config =
             SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
