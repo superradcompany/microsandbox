@@ -13,6 +13,9 @@ mod process_exit;
 mod process_exit;
 mod stop;
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod signal_tests;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -362,47 +365,43 @@ impl LocalBackend {
         }
 
         self.invalidate_control_session(model.id);
-        let mut pids = Vec::new();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let departing = process_exit::RuntimeExit::capture(
-            pid,
-            &microsandbox_runtime::ipc::lifecycle_lock_path(&self.config().run_dir(), name),
-        )?;
-        if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
-            Self::kill_pid(pid)?;
-            pids.push(pid);
-        }
-
-        if !pids.is_empty() {
-            let timeout = Duration::from_secs(5);
-            let start = std::time::Instant::now();
-            let poll_interval = Duration::from_millis(50);
-            while start.elapsed() < timeout {
-                if pids.iter().all(|pid| Self::pid_has_exited(*pid)) {
-                    break;
-                }
-                tokio::time::sleep(poll_interval).await;
+        let all_dead = {
+            let exit_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            if let Some(departing) = self.signal_runtime(name, pid, libc::SIGKILL)? {
+                tokio::time::timeout_at(exit_deadline, async {
+                    while !departing.has_exited()? {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Ok::<_, std::io::Error>(())
+                })
+                .await
+                .map_err(|_| {
+                    crate::MicrosandboxError::Runtime(format!(
+                        "sandbox {name:?} runtime has not finished releasing resources after kill"
+                    ))
+                })??;
             }
-        }
-
-        let all_dead = pids.is_empty() || pids.iter().all(|pid| Self::pid_has_exited(*pid));
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        if let Some(departing) = departing {
-            tokio::time::timeout_at(exit_deadline, async {
-                while !departing.has_exited()? {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+            true
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let all_dead = {
+            let signaled_pid = pid.filter(|p| Self::pid_is_alive(*p));
+            if let Some(pid) = signaled_pid {
+                Self::kill_pid(pid)?;
+                let timeout = Duration::from_secs(5);
+                let start = std::time::Instant::now();
+                let poll_interval = Duration::from_millis(50);
+                while start.elapsed() < timeout {
+                    if Self::pid_has_exited(pid) {
+                        break;
+                    }
+                    tokio::time::sleep(poll_interval).await;
                 }
-                Ok::<_, std::io::Error>(())
-            })
-            .await
-            .map_err(|_| {
-                crate::MicrosandboxError::Runtime(format!(
-                    "sandbox {name:?} runtime has not finished releasing resources after kill"
-                ))
-            })??;
-        }
+            }
+            signaled_pid.is_none_or(Self::pid_has_exited)
+        };
+
         if all_dead {
             #[cfg(unix)]
             {
@@ -463,11 +462,17 @@ impl LocalBackend {
             Ok(())
         }
 
-        #[cfg(unix)]
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
         {
             if let Some(pid) = pid.filter(|p| Self::pid_is_alive(*p)) {
                 Self::drain_pid(pid)?;
             }
+            Ok(())
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.signal_runtime(name, pid, libc::SIGUSR1)?;
             Ok(())
         }
     }
@@ -1186,7 +1191,7 @@ impl LocalBackend {
     }
 
     /// Trigger the legacy drain path (SIGUSR1).
-    #[cfg(unix)]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     fn drain_pid(pid: i32) -> MicrosandboxResult<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid),
