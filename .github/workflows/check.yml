@@ -10,6 +10,8 @@ on:
     branches:
       - main
       - mintlify
+      # Run the full matrix for the nested-virtualization stack before landing.
+      - toks/windows-bootstrap-devtmpfs
       - "releases/**"
 
 concurrency:
@@ -167,7 +169,7 @@ jobs:
           path: vendor/libkrunfw/kernel.c
 
   build-kernel-x86_64:
-    name: Build kernel.c (x86_64)
+    name: Build Windows kernel.c (x86_64)
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -184,7 +186,7 @@ jobs:
           path: vendor/libkrunfw/kernel.c
           # The build recipe is inline below, so hash this workflow along with
           # the source to prevent reusing output built with stale flags.
-          key: kernel-c-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
+          key: kernel-c-windows-x86_64-${{ hashFiles('vendor/libkrunfw/**', '.github/actions/cache-libkrunfw-kernel/action.yml', '.github/workflows/check.yml') }}
 
       - name: Prepare kernel source
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -198,12 +200,12 @@ jobs:
         if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
           cd vendor/libkrunfw
-          make -j$(nproc)
+          make -j$(nproc) OS=Windows kernel.c
 
       - name: Upload kernel.c
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: kernel-c-x86_64
+          name: kernel-c-windows-x86_64
           path: vendor/libkrunfw/kernel.c
 
   # ---------------------------------------------------------------------------
@@ -537,7 +539,7 @@ jobs:
           - target: windows-x86_64
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            kernel_artifact: kernel-c-x86_64
+            kernel_artifact: kernel-c-windows-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64
@@ -698,7 +700,7 @@ jobs:
             component: CLI
             runner: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            kernel_artifact: kernel-c-x86_64
+            kernel_artifact: kernel-c-windows-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64
@@ -718,7 +720,7 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
             go_arch: amd64
             go_cc: clang -fuse-ld=lld
-            kernel_artifact: kernel-c-x86_64
+            kernel_artifact: kernel-c-windows-x86_64
             agentd_artifact: agentd-x86_64-linux-musl
             vs_arch: amd64
             vs_host_arch: amd64

@@ -530,7 +530,7 @@ pub(crate) async fn capture_child(
     let response = local
         .control_session_for_run(&source.name, source.run)
         .await?
-        .request(&CreateBranch(request))
+        .capture(&CreateBranch(request))
         .await
         .map_err(MicrosandboxError::ControlClient)?;
     #[cfg(target_os = "linux")]
@@ -604,6 +604,10 @@ async fn adopt_capture(
     config.spec.resources.max_cpus = state.max_cpus;
     config.spec.resources.memory_mib = state.memory_mib;
     config.spec.resources.max_memory_mib = state.max_memory_mib;
+    let nested = microsandbox_runtime::checkpoint::captured_nested_virt(&state.resources)
+        .map_err(MicrosandboxError::SnapshotIntegrity)?;
+    // Forks retain captured execution state instead of the current host default.
+    config.spec.resources.nested_virt = Some(nested);
     // The captured effective address wins over launch-time pools/defaults. Each user-mode
     // network stack is isolated; host listeners were rejected before source mutation.
     config.spec.network.interface = None;

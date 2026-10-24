@@ -112,9 +112,19 @@ jobs:
           compression-level: 0
 
   firmware-x86_64:
-    name: Firmware (x86_64)
+    name: Firmware (${{ matrix.host }} x86_64)
     needs: kernel-sources
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: Linux
+            artifact: firmware-x86_64
+            make_args: ""
+          - host: Windows
+            artifact: firmware-windows-x86_64
+            make_args: OS=Windows kernel.c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -128,7 +138,7 @@ jobs:
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
-          key: release-firmware-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          key: release-${{ matrix.artifact }}-${{ hashFiles('vendor/libkrunfw/**') }}
 
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
@@ -144,12 +154,12 @@ jobs:
       - name: Build firmware
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         working-directory: vendor/libkrunfw
-        run: make -j$(nproc)
+        run: make -j$(nproc) ${{ matrix.make_args }}
 
       - name: Upload firmware
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: firmware-x86_64
+          name: ${{ matrix.artifact }}
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
@@ -280,7 +290,7 @@ jobs:
       target: windows-x86_64
       runner: windows-latest
       rust_target: x86_64-pc-windows-msvc
-      firmware_artifact: firmware-x86_64
+      firmware_artifact: firmware-windows-x86_64
       agentd_artifact: agentd-x86_64-linux-musl
       vs_arch: amd64
       vs_host_arch: amd64

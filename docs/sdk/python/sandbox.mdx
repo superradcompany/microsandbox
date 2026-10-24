@@ -2267,3 +2267,11 @@ Discriminator returned by [`PullEvent.event_type`](#pullevent).
 | `PullEventType.STITCH_WRITING_VMDK` | `"stitch_writing_vmdk"` | VMDK image is being written |
 | `PullEventType.STITCH_COMPLETE` | `"stitch_complete"` | Image stitching completed |
 | `PullEventType.COMPLETE` | `"complete"` | Image pull completed |
+
+## Nested virtualization
+
+`nested_virt: bool | None` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```python
+sandbox = await Sandbox.create(name="nested", image="alpine", nested_virt=True)
+```

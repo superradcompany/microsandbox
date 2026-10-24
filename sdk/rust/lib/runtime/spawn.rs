@@ -339,6 +339,9 @@ pub async fn spawn_sandbox(
     launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
     launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
     launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+    launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
+        .await?;
+
     if config.checkpoint_restore.as_ref().is_some_and(|restore| {
         restore
             .external_mounts
@@ -639,7 +642,7 @@ pub async fn spawn_sandbox(
     if !launch_contract.machine {
         visible[0] = OsString::from("sandbox");
     }
-    let launch_value = match launch_contract.encode(&launch) {
+    let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
         Ok(launch) => launch,
         Err(error) => {
             release_metrics_reservation(config, metrics_reservation.as_ref());
@@ -2851,6 +2854,7 @@ fn machine_cli_args(
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
+        nested_virt: config.spec.resources.nested_virt,
         guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
         fs_state_limit_bytes: local.config().fs_state_limit_override(),
         memory_cache_dir: Some(local.cache_dir().join("memory")),

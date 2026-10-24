@@ -3334,3 +3334,13 @@ The preserved terminal sample of a stopped sandbox; this is not a live reading.
 | `Paused` | VM is paused |
 | `Stopped` | VM shut down; configuration persisted; can be restarted |
 | `Crashed` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nested_virt(enabled: bool)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```rust
+use microsandbox::Sandbox;
+
+Sandbox::builder("nested").image("alpine").nested_virt(true).create().await?;
+```

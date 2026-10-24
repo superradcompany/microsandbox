@@ -3219,6 +3219,13 @@ mod tests {
                     } else {
                         assert_eq!(request["op"], "checkpoint_create");
                         assert_eq!(request["record_integrity"], label == "second");
+                        if label == "first" {
+                            // A valid capture can outlast the short control-operation deadline.
+                            // Start virtual time only after real socket and database setup.
+                            tokio::time::pause();
+                            tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+                            tokio::time::resume();
+                        }
                         serde_json::json!({"ok":resume_ok,"error":"source resume failed","checkpoint":{
                             "checkpoint_id":request["checkpoint_id"], "checkpoint_root":format!("sha256:{}", "a".repeat(64)),
                             "path":format!("/capture/{label}"), "memory_mode":"full", "memory_logical_bytes":4096, "memory_emitted_bytes":4096
@@ -5797,13 +5804,18 @@ mod tests {
             "the durable network configuration must be unchanged"
         );
 
-        // The refusal is the launch-contract gate, not a stop or start failure. The
-        // legacy gate names the proxy feature itself, so it cannot be satisfied by
-        // the `HTTP CONNECT proxy authentication` capability refusal.
+        // Both refusals must happen before stopping or persisting the change.
+        // Historical Linux x86 runtimes also cannot enforce nesting off; other
+        // hosts reach the legacy proxy gate. Proxy capability checks have their
+        // own launch-contract coverage.
         let error = result.expect_err("an unsupported runtime must refuse the restart");
+        let expected = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            "nested virtualization policy"
+        } else {
+            "HTTP CONNECT outbound proxies"
+        };
         assert!(
-            error.to_string().contains("HTTP CONNECT outbound proxies")
-                && error.to_string().contains("upgrade msb"),
+            error.to_string().contains(expected) && error.to_string().contains("upgrade msb"),
             "unexpected error: {error}"
         );
     }

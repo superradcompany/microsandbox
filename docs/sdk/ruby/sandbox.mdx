@@ -2191,3 +2191,11 @@ stream.close # => nil
 ```
 
 Stop observing logs. This does not stop the job.
+
+## Nested virtualization
+
+`nested_virt: true | false` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
+```

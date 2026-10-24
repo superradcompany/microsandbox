@@ -9,6 +9,7 @@ mod compaction;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
+mod execution;
 mod external_mounts;
 mod local;
 #[cfg(feature = "runner")]
@@ -40,6 +41,7 @@ pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
     grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
+pub use execution::captured_nested_virt;
 pub use external_mounts::ExternalMountAuthorization;
 pub use local::LocalBranchState;
 pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};

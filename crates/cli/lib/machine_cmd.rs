@@ -218,6 +218,7 @@ pub fn run(args: MachineArgs) -> ! {
                 eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
                 std::process::exit(2);
             });
+    let nested_virt = launch.resolve_nested_virt();
     let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
@@ -321,6 +322,7 @@ pub fn run(args: MachineArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        nested_virt,
         guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,

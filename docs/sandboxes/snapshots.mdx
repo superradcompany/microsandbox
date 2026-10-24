@@ -17,6 +17,31 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 | **Disk** | Files and owned volumes | Boots a new VM |
 | **Full** | Disk, memory, and running processes | Resumes execution |
 
+<Accordion title="Capture timeouts">
+Local captures, including Windows and macOS forks, allow up to 30 minutes. Requests are not automatically retried after an uncertain timeout.
+</Accordion>
+
+## Nested VM snapshots
+
+Full snapshots save a running inner VM alongside its sandbox. Restore resumes both; a fork creates an independent copy. Disk snapshots boot a new VM.
+
+Nesting is off by default. Enable it per sandbox with `--nested-virt` or the SDK's nesting option, or set [`sandbox_defaults.nested_virt`](/configuration#sandbox_defaults) globally.
+
+| Host | Requirements |
+| --- | --- |
+| Linux x86-64 (Intel or AMD) | Host nesting support |
+| Windows x86-64 (Intel or AMD) | Windows Hypervisor Platform nesting; enlightened VMCS on Intel |
+| Apple Silicon macOS | Hypervisor.framework nesting support |
+| Linux ARM64 / Windows ARM64 | Nested virtualization is not supported |
+
+Use a runtime and guest firmware with nested snapshot support, including guest KVM. Enabling nesting on an unsupported host fails startup; ordinary ARM64 sandboxes and snapshots are unaffected.
+
+<Accordion title="Restore compatibility">
+Restore preserves the captured nesting setting. You cannot change it or switch host architectures or hypervisor backends. Cross-host migration, external mount recovery, and network connection recovery are not guaranteed.
+
+Older runtimes that cannot enforce disabled nesting require an upgrade. On Intel Windows, the runtime requests enlightened VMCS automatically; active nested VMs using ordinary VMCS cannot be fully captured or resumed. See [Windows snapshot recovery](#recapture-an-older-windows-nested-snapshot).
+</Accordion>
+
 ## Disk snapshots
 
 Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped persistent source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
@@ -407,6 +432,31 @@ msb snap restore worker:snap --name rebooted --disk-only
 </CodeGroup>
 
 Snapshots with a tmpfs root cannot be restored disk-only.
+
+### Recapture an older Windows nested snapshot
+
+Older Intel Windows nested snapshots without enlightened VMCS state need a fresh boot with updated runtime and firmware:
+
+```bash
+msb snapshot restore worker:old --name recovered --disk-only
+```
+
+Restart your application and inner VM, finish any detached exec jobs, then capture and test a replacement:
+
+```bash
+msb snapshot create upgraded --from-sandbox recovered --full
+msb snapshot restore recovered:upgraded --name verified
+```
+
+<Accordion title="Recovery limits">
+Disk-only restore preserves saved files, but loses running processes, RAM, the inner VM's execution state, and writes buffered only in memory. It requires a disk-backed root and the base image; supply external mounts again.
+
+Recapturing a still-running old sandbox does not enable enlightened VMCS. Keep the original snapshot until the replacement is verified. Full restore never silently falls back to disk-only recovery.
+</Accordion>
+
+### Recover missing Windows timer state
+
+New Windows x86 full snapshots save PIT timer state. Older snapshots lack it and are rejected to prevent frozen clocks or hanging commands. Prefer a [disk-only restart](#recapture-an-older-windows-nested-snapshot).
 
 ### Keep the guest clock
 

@@ -176,6 +176,7 @@ impl PreviousLaunch {
             agent_sock: self.agent_sock,
             libkrunfw_path: self.libkrunfw_path,
             thp: self.thp,
+            nested_virt: None,
             // Previous launch formats had no clock policy; they always synchronized.
             guest_clock: Default::default(),
             fs_state_limit_bytes: None,
