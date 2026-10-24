@@ -140,6 +140,7 @@ fn capabilities_response_serializes_flags() {
             cpu_resize: true,
             memory_resize: false,
             secrets_update: true,
+            network_policy_update: false,
             checkpoint_create: true,
             disk_checkpoint_create: true,
         }),

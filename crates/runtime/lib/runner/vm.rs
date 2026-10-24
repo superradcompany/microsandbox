@@ -455,6 +455,12 @@ type NetworkSecretsHandle = microsandbox_network::secrets::handle::SecretsHandle
 type NetworkSecretsHandle = ();
 
 #[cfg(feature = "net")]
+type NetworkPolicyHandle = microsandbox_network::policy::handle::PolicyHandle;
+
+#[cfg(not(feature = "net"))]
+type NetworkPolicyHandle = ();
+
+#[cfg(feature = "net")]
 type NetworkActivationHandle = microsandbox_network::network::NetworkActivationHandle;
 
 #[cfg(not(feature = "net"))]
@@ -465,6 +471,7 @@ type VmBuildOutput = (
     Option<NetworkTerminationHandle>,
     Option<NetworkMetricsHandle>,
     Option<NetworkSecretsHandle>,
+    Option<NetworkPolicyHandle>,
     Option<NetworkActivationHandle>,
     Option<Vec<u8>>,
     GuestBootstrap,
@@ -1131,6 +1138,7 @@ fn run(
         _network_termination_handle,
         network_metrics_handle,
         _network_secrets_handle,
+        _network_policy_handle,
         network_activation_handle,
         bootstrap_frame,
         resolved_bootstrap,
@@ -1200,11 +1208,15 @@ fn run(
         let secrets = _network_secrets_handle.clone();
         #[cfg(not(feature = "net"))]
         let secrets: Option<()> = None;
+        #[cfg(feature = "net")]
+        let network_policy = _network_policy_handle.clone();
         let control_sock_path = crate::control::control_socket_path_for(&config.agent_sock_path);
         let executor = super::control::RuntimeControlExecutor::new(
             control,
             #[cfg(feature = "net")]
             secrets,
+            #[cfg(feature = "net")]
+            network_policy,
             &config.runtime_dir,
             &config.vm,
             &resolved_bootstrap,
@@ -2561,6 +2573,7 @@ fn build_vm(
     let mut network_termination_handle = None;
     let mut network_metrics_handle = None;
     let mut network_secrets_handle = None;
+    let mut network_policy_handle = None;
     #[cfg(feature = "net")]
     let mut network_activation_handle = None;
     #[cfg(not(feature = "net"))]
@@ -2690,6 +2703,7 @@ fn build_vm(
         if !vm.network.config().secrets.secrets.is_empty() {
             network_secrets_handle = Some(network.secrets_handle());
         }
+        network_policy_handle = Some(network.policy_handle());
 
         if vm.checkpoint_restore.is_some() {
             network_activation_handle = Some(network.defer_activation());
@@ -2844,6 +2858,7 @@ fn build_vm(
         network_termination_handle,
         network_metrics_handle,
         network_secrets_handle,
+        network_policy_handle,
         network_activation_handle,
         bootstrap_frame,
         bootstrap,

@@ -87,6 +87,7 @@ pub(crate) enum Reply {
     Pause(PauseState),
     RootDisk(RootDiskState),
     DiskCompact(DiskCompactionResult),
+    NetworkPolicy,
     Error(ControlError),
 }
 
@@ -138,6 +139,9 @@ impl Reply {
             Self::RootDisk(value) => Envelope::new(generation, "control.root-disk.state", value),
             Self::DiskCompact(value) => {
                 Envelope::new(generation, "control.disk.compact.result", value)
+            }
+            Self::NetworkPolicy => {
+                Envelope::new(generation, "control.network.policy.result", &Empty {})
             }
             Self::Error(value) => Envelope::new(generation, "control.error", value),
         }
@@ -234,6 +238,7 @@ impl Handler for ControlContext {
                 cpu_resize: caps.cpu_resize,
                 memory_resize: caps.memory_resize,
                 secrets_update: caps.secrets_update,
+                network_policy_update: caps.network_policy_update,
                 checkpoint_create: caps.checkpoint_create,
                 disk_checkpoint_create: caps.disk_checkpoint_create,
             };
@@ -281,6 +286,8 @@ impl Handler for ControlContext {
             })
         } else if let Some(result) = result.compaction {
             Reply::DiskCompact(result)
+        } else if result.network_policy_updated {
+            Reply::NetworkPolicy
         } else {
             Reply::Error(ControlError::rejected(
                 "invalid_response",
@@ -359,6 +366,9 @@ fn operation_to_legacy(
         ControlOperation::RootDiskGrow(request) => Legacy::RootDiskGrow {
             size_bytes: request.size_bytes,
         },
+        ControlOperation::NetworkPolicyUpdate(request) => Legacy::NetworkPolicyUpdate {
+            policy: request.policy,
+        },
         ControlOperation::DiskCompact(request) => Legacy::DiskCompact {
             target: request.target,
             layers: request
@@ -371,6 +381,43 @@ fn operation_to_legacy(
             dry_run: request.dry_run,
         },
     })
+}
+
+/// Replace a running sandbox's network policy. Shared execution path, also exercised against
+/// the actual network policy handle.
+#[cfg(feature = "net")]
+pub(super) fn apply_network_policy(
+    policy: Option<&microsandbox_network::policy::handle::PolicyHandle>,
+    update: microsandbox_types::NetworkPolicy,
+) -> Response {
+    let Some(policy) = policy else {
+        return Response::error(
+            ControlError::rejected(
+                "unsupported_operation",
+                "network policy updates are unavailable",
+            ),
+            "live network reconfiguration is not available for this sandbox",
+        );
+    };
+    let parsed = serde_json::to_value(&update)
+        .and_then(serde_json::from_value::<microsandbox_network::policy::NetworkPolicy>);
+    let engine = match parsed {
+        Ok(engine) => engine,
+        Err(error) => {
+            return Response::error(
+                ControlError::rejected("invalid_network_policy", "the network policy is invalid"),
+                format!("invalid network policy: {error}"),
+            );
+        }
+    };
+    policy.set(engine);
+    Response {
+        json: JsonControlResponse {
+            ok: true,
+            ..Default::default()
+        },
+        framed: Reply::NetworkPolicy,
+    }
 }
 
 /// Shared execution path, also exercised against the actual host secret store.

@@ -52,6 +52,7 @@ use crate::netstack::{
     poll::GatewayIps,
     shared::{ResolvedHostnameFamily, SharedState},
 };
+use crate::policy::handle::PolicyHandle;
 use crate::policy::{Action, DomainName, NetworkPolicy};
 
 //--------------------------------------------------------------------------------------------------
@@ -97,9 +98,9 @@ pub(crate) struct DnsForwarder {
     /// the configured upstream; queries to other IPs go through the
     /// direct path subject to network egress policy.
     gateway_ips: Arc<HashSet<IpAddr>>,
-    /// Network policy. Direct-path queries consult this for outbound
-    /// permission to the chosen `@target` resolver IP.
-    network_policy: Arc<NetworkPolicy>,
+    /// Network policy, live-swappable; every query loads the current one. Direct-path queries
+    /// consult it for outbound permission to the chosen `@target` resolver IP.
+    policy: PolicyHandle,
     /// Optional host-owned policy floor. Direct resolvers and private DNS
     /// answers must pass this policy in addition to the tenant policy.
     platform_policy: Option<Arc<NetworkPolicy>>,
@@ -290,7 +291,7 @@ impl DnsForwarder {
         // as egress over the guest-facing DNS transport, so deny-by-
         // default policies fail closed unless a rule allows the name or
         // the DNS protocol/port.
-        if decide_dns_action(&self.network_policy, &domain, transport).is_deny() {
+        if decide_dns_action(&self.policy.load(), &domain, transport).is_deny() {
             tracing::debug!(domain = %domain, "DNS query denied by network policy");
             // NXDOMAIN, not REFUSED: stub resolvers (e.g. glibc) don't
             // fail-fast on REFUSED, so a denied lookup hangs the guest in a
@@ -360,7 +361,7 @@ impl DnsForwarder {
                 };
                 if private_addr.is_some_and(|addr| {
                     !policies_allow_rebind_address(
-                        &self.network_policy,
+                        &self.policy.load(),
                         self.platform_policy.as_deref(),
                         &self.shared,
                         addr,
@@ -429,7 +430,7 @@ impl DnsForwarder {
     ) -> UpstreamChoice {
         match decide_upstream_with_platform(
             &self.gateway_ips,
-            &self.network_policy,
+            &self.policy.load(),
             self.platform_policy.as_deref(),
             &self.shared,
             original_dst,
@@ -579,7 +580,7 @@ impl DnsForwarder {
         handle: &tokio::runtime::Handle,
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
-        network_policy: Arc<NetworkPolicy>,
+        policy: PolicyHandle,
         platform_policy: Option<Arc<NetworkPolicy>>,
         shared: Arc<SharedState>,
         gateway: GatewayIps,
@@ -589,7 +590,7 @@ impl DnsForwarder {
             let Some(forwarder) = Self::build(
                 config,
                 gateway_ips,
-                network_policy,
+                policy,
                 platform_policy,
                 shared,
                 gateway,
@@ -611,7 +612,7 @@ impl DnsForwarder {
     async fn build(
         config: Arc<NormalizedDnsConfig>,
         gateway_ips: Arc<HashSet<IpAddr>>,
-        network_policy: Arc<NetworkPolicy>,
+        policy: PolicyHandle,
         platform_policy: Option<Arc<NetworkPolicy>>,
         shared: Arc<SharedState>,
         gateway: GatewayIps,
@@ -659,7 +660,7 @@ impl DnsForwarder {
         Some(Arc::new(Self {
             configured,
             gateway_ips,
-            network_policy,
+            policy,
             platform_policy,
             shared,
             gateway,
@@ -737,7 +738,7 @@ impl DnsForwarder {
                 tcp: OnceCell::new(),
             }]),
             gateway_ips,
-            network_policy: Arc::new(NetworkPolicy::allow_all()),
+            policy: PolicyHandle::new(NetworkPolicy::allow_all()),
             platform_policy: None,
             shared,
             gateway,
@@ -1110,7 +1111,7 @@ mod tests {
         Arc::new(DnsForwarder {
             configured: ConfiguredResolver::Direct(configured),
             gateway_ips: Arc::new(HashSet::from([gateway_ip])),
-            network_policy: Arc::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
+            policy: PolicyHandle::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
             platform_policy: None,
             shared: Arc::new(SharedState::new(4)),
             gateway: GatewayIps {
@@ -1146,7 +1147,7 @@ mod tests {
         let (upstream, hits) = responding_udp(expected).await;
         let mut forwarder = forwarder_over(&[upstream]).await;
         let forwarder_mut = Arc::get_mut(&mut forwarder).expect("unique test forwarder");
-        forwarder_mut.network_policy = Arc::new(NetworkPolicy::none());
+        forwarder_mut.policy = PolicyHandle::new(NetworkPolicy::none());
         forwarder_mut.config = Arc::new(NormalizedDnsConfig {
             rebind_protection: true,
             nameservers: Vec::new(),
