@@ -1,0 +1,66 @@
+---
+title: "v0.7.11"
+sidebarTitle: "v0.7.11"
+description: "Authenticate to HTTP CONNECT proxies from every SDK, and stop terminal sessions from hanging after output."
+icon: "bolt"
+---
+
+October 24, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.11) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.10...v0.7.11)
+
+## New features
+
+**HTTP CONNECT proxy credentials in every SDK.** Python, TypeScript, Go, and Ruby can now send a username and password to an authenticated HTTP CONNECT proxy. Previously, only the CLI and Rust SDK could. The password stays in a host environment variable, and saved configuration stores only the variable name. Outbound proxies are local-only. [Outbound proxy](/networking/outbound-proxy)
+
+```python
+from microsandbox import OutboundProxy, SecretSource
+
+proxy = OutboundProxy.http_connect("127.0.0.1:3128").credentials(
+    "sandbox",
+    SecretSource.env("HTTP_CONNECT_PASSWORD"),
+)
+```
+
+## Fixes
+
+- **Terminal sessions exit when the command does.** `msb run`, interactive `msb exec`, and Rust `Sandbox::attach` could print a command's output and never return. Large stdin transfers no longer block output or detach.
+- **Empty stdin writes no longer close stdin.** Writing empty data to an exec stdin sink now does nothing in Rust, Python, TypeScript, and Go. Call `close()` to send EOF.
+- **Rebuilt sandbox configs keep your explicit choices.** Settings and clears you set explicitly now survive rebuilds and local database reloads instead of reverting to defaults.
+- Python now applies SOCKS5 proxy credentials passed to `Sandbox.create`.
+- **Image pruning is safer under load.** Prune skips files in use by pulls or sandbox creation, and no longer delays unrelated work while it waits on locks.
+
+## Before upgrading
+
+- **Upgrade every client sharing `MSB_HOME` together.** v0.7.11 adds a database migration. Older CLIs and SDKs cannot open an upgraded home until you update them. To roll back, use `msb self downgrade`. [Management commands](/cli/management)
+- **Detached jobs no longer keep a sandbox awake.** The idle timeout now counts only attached exec sessions. A detached job keeps running, but its existence alone no longer resets the timer. Set a maximum lifetime if a detached service needs a fixed one. [Automatic lifecycle policies](/sandboxes/lifecycle#automatic-lifecycle-policies)
+- **Rust: edit configs through the builder.** Use builder setters, `overlay()`, or modification APIs. Saved caller overrides can overwrite direct edits to a resolved `SandboxConfig`. [Rust configuration](/sdk/rust/configuration#sandbox-configuration-patches)
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/gregwebs">
+      <img src="https://avatars.githubusercontent.com/u/1183?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@gregwebs</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/jackiectl2">
+      <img src="https://avatars.githubusercontent.com/u/305351710?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@jackiectl2</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/prateek041">
+      <img src="https://avatars.githubusercontent.com/u/89681447?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@prateek041</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>
