@@ -739,6 +739,57 @@ fn host_hard_link_keeps_both_names() {
 }
 
 #[test]
+fn host_rename_of_cached_hard_link_keeps_alias_usable() {
+    // Both names cached, then the canonical name is renamed on the host.
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("a.txt"), b"a").unwrap();
+    std::fs::hard_link(temp.path.join("a.txt"), temp.path.join("b.txt")).unwrap();
+    let fs = fs_for(&temp.path);
+    let a = fs.lookup(context(), ROOT_INODE, c"a.txt").unwrap();
+    let b = fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+    assert_eq!(a.inode, b.inode);
+
+    std::fs::rename(temp.path.join("a.txt"), temp.path.join("c.txt")).unwrap();
+
+    // Through the cached alias first, then by listing (b.txt sorts before c.txt).
+    let again = fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+    assert_eq!(again.inode, a.inode);
+    let (stat, _) = fs.getattr(context(), a.inode, None).unwrap();
+    assert_eq!(stat.st_size, 1);
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(ROOT_INODE)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"b.txt".to_vec()), "{names:?}");
+    assert!(names.contains(&b"c.txt".to_vec()), "{names:?}");
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"a.txt"), LINUX_ENOENT);
+}
+
+#[test]
+fn host_rename_of_cached_hard_link_repairs_during_listing() {
+    // Same, but the first access after the rename is a directory listing.
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("a.txt"), b"a").unwrap();
+    std::fs::hard_link(temp.path.join("a.txt"), temp.path.join("b.txt")).unwrap();
+    let fs = fs_for(&temp.path);
+    fs.lookup(context(), ROOT_INODE, c"a.txt").unwrap();
+    fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+
+    std::fs::rename(temp.path.join("a.txt"), temp.path.join("c.txt")).unwrap();
+
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(ROOT_INODE)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"b.txt".to_vec()), "{names:?}");
+    assert!(names.contains(&b"c.txt".to_vec()), "{names:?}");
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();

@@ -189,8 +189,12 @@ impl PassthroughFs {
     pub(super) fn intern_path(&self, path: PathBuf) -> io::Result<Arc<InodeData>> {
         let identity = self.path_identity(&path)?;
         let mut inodes = self.inodes.write().unwrap();
-        if let Some(data) = inodes.by_path.get(&path) {
-            return Ok(data.clone());
+        if let Some(data) = inodes.by_path.get(&path).cloned() {
+            // A cached alias (hard link) can outlive the canonical name.
+            if identity.is_some() && data.identity == identity {
+                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+            }
+            return Ok(data);
         }
         if let Some(identity) = identity
             && let Some(data) = inodes.by_identity.get(&identity).cloned()
@@ -203,17 +207,7 @@ impl PassthroughFs {
                 *data.retained.lock().unwrap() = None;
                 *data.retained_stat.lock().unwrap() = None;
             } else {
-                // Renamed or moved on the host (same file identity, new name):
-                // the canonical path still names the old location, which no
-                // longer resolves to this object. Follow the object, otherwise
-                // every operation through the inode (stat, open, and the
-                // readdir of its directory) fails until the sandbox restarts.
-                // A live hard link keeps its canonical path.
-                let canonical = data.path();
-                if canonical != path && self.path_identity(&canonical).ok().flatten() != Some(identity) {
-                    inodes.by_path.remove(&canonical);
-                    *data.path.write().unwrap() = path;
-                }
+                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
             }
             return Ok(data);
         }
@@ -234,6 +228,35 @@ impl PassthroughFs {
             inodes.by_identity.insert(identity, data.clone());
         }
         Ok(data)
+    }
+
+    /// Renamed or moved on the host (same file identity, new name): if the
+    /// canonical path no longer resolves to this object, re-point it to
+    /// `path` (a live name of the same object) and drop the stale alias.
+    /// Otherwise every operation through the inode (stat, open, and the
+    /// readdir of its directory) fails until the sandbox restarts. A live
+    /// hard link keeps its canonical path.
+    fn follow_host_rename(
+        inodes: &mut InodeTable,
+        data: &Arc<InodeData>,
+        path: &Path,
+        identity_of: impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
+    ) {
+        if data.retained.lock().unwrap().is_some() {
+            return;
+        }
+        let canonical = data.path();
+        if canonical == path || identity_of(&canonical).ok().flatten() == data.identity {
+            return;
+        }
+        if inodes
+            .by_path
+            .get(&canonical)
+            .is_some_and(|alias| Arc::ptr_eq(alias, data))
+        {
+            inodes.by_path.remove(&canonical);
+        }
+        *data.path.write().unwrap() = path.to_path_buf();
     }
 
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {
