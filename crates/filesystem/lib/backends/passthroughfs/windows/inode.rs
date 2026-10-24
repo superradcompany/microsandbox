@@ -202,6 +202,18 @@ impl PassthroughFs {
                 *data.path.write().unwrap() = path;
                 *data.retained.lock().unwrap() = None;
                 *data.retained_stat.lock().unwrap() = None;
+            } else {
+                // Renamed or moved on the host (same file identity, new name):
+                // the canonical path still names the old location, which no
+                // longer resolves to this object. Follow the object, otherwise
+                // every operation through the inode (stat, open, and the
+                // readdir of its directory) fails until the sandbox restarts.
+                // A live hard link keeps its canonical path.
+                let canonical = data.path();
+                if canonical != path && self.path_identity(&canonical).ok().flatten() != Some(identity) {
+                    inodes.by_path.remove(&canonical);
+                    *data.path.write().unwrap() = path;
+                }
             }
             return Ok(data);
         }
