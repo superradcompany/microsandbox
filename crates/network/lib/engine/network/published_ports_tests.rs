@@ -221,7 +221,8 @@ async fn check_published_port_with_activation(
     let address = SocketAddr::new(client_ip, host_port);
     let activation = deferred.then(|| network.defer_activation());
     network.start(tokio::runtime::Handle::current()).unwrap();
-    if let Some(activation) = activation {
+    let (busy_done_tx, busy_done_rx) = tokio::sync::oneshot::channel();
+    let busy_client = if let Some(activation) = activation {
         let conflict = match protocol {
             PortProtocol::Tcp => std::net::TcpListener::bind(address).map(|_| ()),
             PortProtocol::Udp => std::net::UdpSocket::bind(address).map(|_| ()),
@@ -231,6 +232,7 @@ async fn check_published_port_with_activation(
 
         // Queue stale traffic in the reserved kernel socket without polling this
         // runtime's reactor; activation must reset that queue before opening the gate.
+        let mut stale_tcp = None;
         match protocol {
             PortProtocol::Tcp => {
                 for attempt in 0..96 {
@@ -255,8 +257,14 @@ async fn check_published_port_with_activation(
                         .set_write_timeout(Some(Duration::from_millis(50)))
                         .unwrap();
                     stale.write_all(b"stale-tcp-before-activation").unwrap();
-                    // Model callers that gave up while restore was still deferred.
-                    drop(stale);
+                    if attempt == 0 {
+                        // Keep one caller open to check that activation closes
+                        // the old listener before it returns.
+                        stale_tcp = Some(stale);
+                    } else {
+                        // Model callers that gave up while restore was deferred.
+                        drop(stale);
+                    }
                 }
             }
             PortProtocol::Udp => {
@@ -281,15 +289,64 @@ async fn check_published_port_with_activation(
             // Let the independent poll thread run, but not this runtime's reactor.
             std::thread::sleep(Duration::from_millis(1));
         }
+        // Run the producer on an OS thread so it keeps sending while this
+        // current-thread Tokio runtime is blocked in activate().
+        let busy_client = busy.then(|| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let client = std::thread::spawn(move || {
+                check_busy_published_client(protocol, address, started_tx);
+                let _ = busy_done_tx.send(());
+            });
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("busy producer did not start before activation");
+            client
+        });
         activation
             .activate()
             .expect("reset reserved published sockets before activation");
-    }
-    // Start fresh traffic immediately after activation resets the reserved kernel
-    // queues; forwarding must work without waiting for a quiet traffic interval.
+        if let Some(mut stale) = stale_tcp {
+            stale.set_nonblocking(true).unwrap();
+            let mut response = [0; 1];
+            let deadline = std::time::Instant::now() + Duration::from_millis(100);
+            let closed = loop {
+                match stale.read(&mut response) {
+                    Ok(0) => break true,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        break true;
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        // Do not poll Tokio here: the old listener must have
+                        // closed before activation returns.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    _ => break false,
+                }
+            };
+            assert!(
+                closed,
+                "activation returned before closing the old TCP listener"
+            );
+        }
+        busy_client
+    } else {
+        None
+    };
+    // Start fresh traffic immediately after activation resets the reserved kernel queues.
     let client = tokio::spawn(async move {
         if busy {
-            check_busy_published_client(protocol, address).await;
+            busy_done_rx
+                .await
+                .expect("busy producer stopped without a guest response");
             return;
         }
         let mut response = [0; 4];
@@ -405,23 +462,33 @@ async fn check_published_port_with_activation(
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     client.await.unwrap();
+    if let Some(busy_client) = busy_client {
+        busy_client.join().unwrap();
+    }
     assert!(
         !busy || received_while_busy,
         "guest must receive a fresh request while the producer is still running",
     );
 }
 
-async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr) {
-    // These OS operations do not poll Tokio's reactor. Queue a burst each turn,
-    // then explicitly let the listener run. Keep producing until an actual guest
-    // response arrives, never creating a timer-based quiet traffic interval.
+fn check_busy_published_client(
+    protocol: PortProtocol,
+    address: SocketAddr,
+    started: std::sync::mpsc::Sender<()>,
+) {
+    // Keep sending across activation until the guest answers. A Tokio task on
+    // this test's current-thread runtime would not run during activate().
     match protocol {
         PortProtocol::Udp => {
             let socket = std::net::UdpSocket::bind((address.ip(), 0)).unwrap();
             socket.set_nonblocking(true).unwrap();
+            let mut started = Some(started);
             loop {
                 for _ in 0..128 {
                     assert_eq!(socket.send_to(b"ping", address).unwrap(), 4);
+                }
+                if let Some(started) = started.take() {
+                    started.send(()).unwrap();
                 }
                 let mut response = [0; 32];
                 match socket.recv_from(&mut response) {
@@ -433,7 +500,7 @@ async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(error) => panic!("receiving busy published UDP response: {error}"),
                 }
-                tokio::task::yield_now().await;
+                std::thread::yield_now();
             }
         }
         PortProtocol::Tcp => {
@@ -444,6 +511,7 @@ async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr
             }
 
             let mut pending = Vec::<Pending>::with_capacity(256);
+            let mut started = Some(started);
             loop {
                 let mut got_pong = false;
                 pending.retain_mut(|request| {
@@ -490,7 +558,11 @@ async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr
                         Err(error)
                             if matches!(
                                 error.kind(),
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::ConnectionRefused
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
                             ) =>
                         {
                             break;
@@ -500,7 +572,19 @@ async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr
                     stream
                         .set_write_timeout(Some(Duration::from_millis(2)))
                         .unwrap();
-                    stream.write_all(b"ping").unwrap();
+                    if let Err(error) = stream.write_all(b"ping") {
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::WouldBlock
+                        ) {
+                            continue;
+                        }
+                        panic!("sending busy published TCP request: {error}");
+                    }
                     stream.set_nonblocking(true).unwrap();
                     if pending.len() < 256 {
                         pending.push(Pending {
@@ -512,7 +596,10 @@ async fn check_busy_published_client(protocol: PortProtocol, address: SocketAddr
                     // At the cap, dropping this already-written stream still
                     // queues traffic while preserving earlier response candidates.
                 }
-                tokio::task::yield_now().await;
+                if let Some(started) = started.take() {
+                    started.send(()).unwrap();
+                }
+                std::thread::yield_now();
             }
         }
     }

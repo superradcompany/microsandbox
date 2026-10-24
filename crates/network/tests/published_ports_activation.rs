@@ -10,6 +10,27 @@ use microsandbox_network::config::{
 use microsandbox_network::network::SmoltcpNetwork;
 use microsandbox_types::DeploymentProfile;
 
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+struct RestoreDescriptorLimit(libc::rlimit);
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl Drop for RestoreDescriptorLimit {
+    fn drop(&mut self) {
+        // SAFETY: restore the saved limit in the same isolated child process.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.0) }, 0);
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
 #[test]
 fn failed_activation_releases_reservations_and_remains_failed() {
     // Descriptor limits are process-wide; never change the parent test runner's limits.
@@ -111,13 +132,4 @@ fn failed_activation_releases_reservations_and_remains_failed() {
                 .expect("failed activation must release the UDP reservation");
         }
     });
-}
-
-struct RestoreDescriptorLimit(libc::rlimit);
-
-impl Drop for RestoreDescriptorLimit {
-    fn drop(&mut self) {
-        // SAFETY: restore the saved limit in the same isolated child process.
-        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &self.0) }, 0);
-    }
 }

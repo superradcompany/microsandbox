@@ -70,9 +70,9 @@ const UDP_EPHEMERAL_PORT_COUNT: usize =
 
 /// Manages published port listeners and inbound connections.
 ///
-/// Spawns tokio listeners for each published port. When connections arrive,
-/// they are queued for the poll loop to create smoltcp sockets and initiate
-/// connections to the guest.
+/// Reserves host sockets for each published port, then starts Tokio listeners
+/// when network traffic is enabled. Accepted connections are queued for the
+/// poll loop to create smoltcp sockets into the guest.
 pub struct PortPublisher {
     /// Receives accepted connections from listener tasks.
     inbound_rx: mpsc::Receiver<InboundConnection>,

@@ -5,7 +5,7 @@
 
 #![cfg(feature = "engine")]
 
-use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 
 use microsandbox_network::config::{
     EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort,
@@ -14,16 +14,17 @@ use microsandbox_network::network::SmoltcpNetwork;
 use microsandbox_network::policy::NetworkPolicy;
 use microsandbox_types::DeploymentProfile;
 
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
 #[tokio::test]
 async fn published_port_bind_failure_reports_endpoint_and_releases_reservations() {
     for blocked_protocol in [PortProtocol::Tcp, PortProtocol::Udp] {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let outgoing = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (_peer, _) = listener.accept().unwrap();
+        let tcp_blocker = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let udp_blocker = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        // A connected but non-listening TCP socket must also refuse publication.
         let blocked = match blocked_protocol {
-            PortProtocol::Tcp => outgoing.local_addr().unwrap(),
+            PortProtocol::Tcp => tcp_blocker.local_addr().unwrap(),
             PortProtocol::Udp => udp_blocker.local_addr().unwrap(),
         };
         let tcp_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
