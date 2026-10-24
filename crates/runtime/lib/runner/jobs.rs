@@ -19,13 +19,16 @@ use microsandbox_protocol::exec::{
     ExecExited, ExecFailed, ExecOutputAck, ExecRequest, ExecResize, ExecStarted, ExecStderr,
     ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
 };
+use microsandbox_protocol::exec_control::ExecControlDiscovery;
 use microsandbox_protocol::jobs::*;
 use microsandbox_protocol::message::MessageType;
+use microsandbox_protocol::wire::Envelope;
 use microsandbox_types::ExecLimits;
 use sha2::{Digest as _, Sha256};
 use tokio::sync::mpsc;
 
 use crate::jobs::{JobStore, StoredJob};
+use crate::relay::RelayIdleState;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -45,6 +48,7 @@ const MAX_ADMISSIONS: usize = 65_536;
 pub(crate) struct JobManager {
     boot_id: String,
     agent_path: PathBuf,
+    relay_idle: Arc<RelayIdleState>,
     runtime: tokio::runtime::Handle,
     store: JobStore,
     entries: Mutex<BTreeMap<JobId, Entry>>,
@@ -175,6 +179,7 @@ impl JobManager {
         sandbox_directory: &Path,
         agent_path: &Path,
         runtime: tokio::runtime::Handle,
+        relay_idle: Arc<RelayIdleState>,
     ) -> Result<Arc<Self>, String> {
         let store = JobStore::new(sandbox_directory);
         let recovered = (|| -> Result<BTreeMap<JobId, Entry>, String> {
@@ -217,6 +222,7 @@ impl JobManager {
             initialization_error,
             boot_id,
             agent_path: agent_path.into(),
+            relay_idle,
             runtime,
             store,
             admitted: Mutex::new(entries.keys().cloned().collect()),
@@ -230,6 +236,15 @@ impl JobManager {
             .unwrap()
             .values()
             .any(|entry| entry.record.info.state.is_active())
+    }
+
+    /// An unexpired caller lease on an active job keeps its sandbox resident.
+    pub(crate) fn has_active_attachments(&self) -> bool {
+        let now = Instant::now();
+        self.entries.lock().unwrap().values().any(|entry| {
+            entry.record.info.state.is_active()
+                && entry.attachments.values().any(|lease| lease.expires > now)
+        })
     }
 
     /// Caller holds lifecycle admission, so Start cannot race a capture or resident pause.
@@ -746,6 +761,16 @@ impl JobManager {
             let controller = ExecController::from_ready_body(client.ready().ready_bytes())
                 .map_err(|error| error.to_string())?
                 .ok_or("guest lacks managed execution control support")?;
+            let ready = Envelope::decode(client.ready().ready_bytes())
+                .map_err(|error| error.to_string())?;
+            let capability = ready
+                .payload::<ExecControlDiscovery>()
+                .map_err(|error| error.to_string())?
+                .exec_control
+                .ok_or("relay did not advertise managed execution control")?;
+            let _managed_connection = self
+                .relay_idle
+                .register_managed_connection(capability.connection);
             let stream = client
                 .stream(TypedMessage::new(MessageType::ExecRequest, &command))
                 .await
@@ -1096,6 +1121,7 @@ mod tests {
             directory,
             &directory.join("absent-agent.sock"),
             tokio::runtime::Handle::current(),
+            Arc::new(RelayIdleState::default()),
         )
         .unwrap()
     }
@@ -1126,6 +1152,48 @@ mod tests {
             JobResponse::Error { code, .. } => code,
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn only_unexpired_attachments_on_active_jobs_hold_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = manager(directory.path());
+        let id = id(1);
+        let record = StoredJob {
+            info: JobInfo::starting(id.clone(), "boot-one".into(), &command(), false, now()),
+            fingerprint: String::new(),
+        };
+        manager.entries.lock().unwrap().insert(
+            id.clone(),
+            Entry {
+                record,
+                output: VecDeque::new(),
+                output_bytes: 0,
+                capture_error: None,
+                sequence: 0,
+                input: None,
+                control: None,
+                resize: None,
+                attachments: BTreeMap::new(),
+            },
+        );
+        assert!(!manager.has_active_attachments());
+        let mut entries = manager.entries.lock().unwrap();
+        let entry = entries.get_mut(&id).unwrap();
+        entry.attachments.insert(
+            "caller".into(),
+            Attachment {
+                read_only: true,
+                expires: Instant::now() + Duration::from_secs(30),
+            },
+        );
+        drop(entries);
+        assert!(manager.has_active_attachments());
+        let mut entries = manager.entries.lock().unwrap();
+        let entry = entries.get_mut(&id).unwrap();
+        entry.attachments.get_mut("caller").unwrap().expires = Instant::now();
+        drop(entries);
+        assert!(!manager.has_active_attachments());
     }
 
     #[tokio::test]
@@ -1412,6 +1480,7 @@ mod tests {
             directory.path(),
             &directory.path().join("other.sock"),
             tokio::runtime::Handle::current(),
+            Arc::new(RelayIdleState::default()),
         )
         .unwrap();
         assert!(!restored.active());

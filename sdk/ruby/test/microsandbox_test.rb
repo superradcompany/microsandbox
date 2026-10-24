@@ -65,6 +65,13 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_raise(ArgumentError) do
       Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").user_id("sandbox")
     end
+    assert_raise(ArgumentError) do
+      Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128").user_id("sandbox")
+    end
+
+    http_connect = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+      .credentials("sandbox", Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD"))
+    assert_instance_of Microsandbox::OutboundProxy, http_connect
   end
 
   def test_secret_source_rejects_an_empty_environment_variable
@@ -95,6 +102,17 @@ class MicrosandboxTest < Test::Unit::TestCase
 
     assert_match(/invalid SOCKS4 user ID/, socks4_error.message)
     assert_match(/invalid SOCKS5 credentials/, socks5_error.message)
+  end
+
+  def test_create_applies_http_connect_credentials
+    proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+      .credentials("user:name", Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD"))
+
+    error = assert_raise(Microsandbox::NetworkPolicyError) do
+      Microsandbox::Sandbox.create("ruby-test", proxy: proxy)
+    end
+
+    assert_match(/invalid HTTP CONNECT credentials/, error.message)
   end
 
   def test_unknown_create_keyword_is_rejected_before_runtime_start

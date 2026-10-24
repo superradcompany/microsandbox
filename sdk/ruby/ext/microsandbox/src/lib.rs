@@ -617,6 +617,7 @@ fn apply_secret_options(
 enum RubyOutboundProxyConfig {
     HttpConnect {
         address: String,
+        credentials: Option<(String, SecretSource)>,
     },
     Socks4 {
         address: String,
@@ -630,9 +631,14 @@ enum RubyOutboundProxyConfig {
 
 fn apply_outbound_proxy(builder: SandboxBuilder, proxy: &RubyOutboundProxy) -> SandboxBuilder {
     match proxy.inner.borrow().clone() {
-        RubyOutboundProxyConfig::HttpConnect { address } => {
-            builder.proxy(|proxy| proxy.http_connect(address))
-        }
+        RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: Some((username, password)),
+        } => builder.proxy(|proxy| proxy.http_connect(address).credentials(username, password)),
+        RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: None,
+        } => builder.proxy(|proxy| proxy.http_connect(address)),
         RubyOutboundProxyConfig::Socks4 {
             address,
             user_id: Some(user_id),
@@ -2147,7 +2153,10 @@ fn outbound_proxy_socks4(address: String) -> RubyOutboundProxy {
 
 fn outbound_proxy_http_connect(address: String) -> RubyOutboundProxy {
     RubyOutboundProxy {
-        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::HttpConnect { address }),
+        inner: std::cell::RefCell::new(RubyOutboundProxyConfig::HttpConnect {
+            address,
+            credentials: None,
+        }),
     }
 }
 
@@ -2202,13 +2211,10 @@ impl RubyOutboundProxy {
         match &mut *this.inner.borrow_mut() {
             RubyOutboundProxyConfig::Socks4 { .. } => Err(argument_error(
                 ruby,
-                "credentials are only supported for SOCKS5 proxies",
+                "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
             )),
-            RubyOutboundProxyConfig::HttpConnect { .. } => Err(argument_error(
-                ruby,
-                "credentials are only supported for SOCKS5 proxies",
-            )),
-            RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
+            RubyOutboundProxyConfig::HttpConnect { credentials, .. }
+            | RubyOutboundProxyConfig::Socks5 { credentials, .. } => {
                 *credentials = Some((username, password.inner.clone()));
                 Ok(())
             }

@@ -8,7 +8,7 @@ use crate::backend::{Backend, LocalBackend};
 use crate::error::Operation;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxHandle, SandboxPauseState, modify};
+use super::{Sandbox, SandboxHandle, SandboxPauseState};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -190,7 +190,7 @@ async fn lifecycle(
     let _transition =
         LocalBackend::acquire_sandbox_transition_guard(&local.config().run_dir(), name).await?;
     let run = local.control_run_identity(name, expected_id).await?;
-    let session = modify::control_session_for_run(local, name, run).await?;
+    let session = local.control_session_for_run(name, run).await?;
     if matches!(request, ControlRequest::PauseWithGuestFlush { .. }) {
         // Even Auto is explicit on this new entry point; unknown runtimes must refuse.
         if !session.capabilities().guest_flush_policy {
@@ -556,17 +556,17 @@ mod tests {
                 0
             );
         });
-        let result = modify::control_request_for_run(
-            &backend,
-            "source",
-            super::super::identity::SandboxRunIdentity {
-                sandbox_id: 1,
-                run_id: 1,
-                pid: std::process::id() as i32 + 1,
-            },
-            "{\"op\":\"pause\"}\n".into(),
-        )
-        .await;
+        let result = backend
+            .control_request_for_run(
+                "source",
+                super::super::identity::SandboxRunIdentity {
+                    sandbox_id: 1,
+                    run_id: 1,
+                    pid: std::process::id() as i32 + 1,
+                },
+                "{\"op\":\"pause\"}\n".into(),
+            )
+            .await;
         assert!(
             result
                 .unwrap_err()

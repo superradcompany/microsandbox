@@ -32,7 +32,9 @@ pub(crate) enum OutboundProxySelection {
 
 /// Builds an HTTP CONNECT outbound proxy.
 #[napi(js_name = "HttpConnectProxyBuilder")]
-pub struct JsHttpConnectProxyBuilder {}
+pub struct JsHttpConnectProxyBuilder {
+    selection: SharedOutboundProxySelection,
+}
 
 /// Builds a SOCKS4 outbound proxy.
 #[napi(js_name = "Socks4ProxyBuilder")]
@@ -59,6 +61,19 @@ pub struct JsSecretSourceInput {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl OutboundProxySelection {
+    /// Apply credentials to a proxy protocol that supports them.
+    fn credentials(self, username: String, password: SecretSource) -> Option<Self> {
+        match self {
+            Self::HttpConnect(builder) => {
+                Some(Self::HttpConnect(builder.credentials(username, password)))
+            }
+            Self::Socks5(builder) => Some(Self::Socks5(builder.credentials(username, password))),
+            Self::Socks4(_) => None,
+        }
+    }
+}
+
 #[napi]
 impl JsOutboundProxyBuilder {
     #[napi(constructor)]
@@ -84,7 +99,9 @@ impl JsOutboundProxyBuilder {
             .replace(Some(OutboundProxySelection::HttpConnect(
                 builder.http_connect(address),
             )));
-        Ok(JsHttpConnectProxyBuilder {})
+        Ok(JsHttpConnectProxyBuilder {
+            selection: Rc::clone(&self.selection),
+        })
     }
 
     /// Select a SOCKS4 proxy at `address`.
@@ -119,6 +136,26 @@ impl JsOutboundProxyBuilder {
 }
 
 #[napi]
+impl JsHttpConnectProxyBuilder {
+    /// Set username authentication and a host-side password source.
+    #[napi]
+    pub fn credentials(
+        &mut self,
+        username: String,
+        password: JsSecretSourceInput,
+    ) -> Result<&Self> {
+        apply_selection_credentials(
+            &self.selection,
+            "HttpConnectProxyBuilder",
+            "HTTP CONNECT",
+            username,
+            password,
+        )?;
+        Ok(self)
+    }
+}
+
+#[napi]
 impl JsSocks4ProxyBuilder {
     /// Set the optional user ID sent during the SOCKS4 handshake.
     #[napi]
@@ -148,24 +185,13 @@ impl JsSocks5ProxyBuilder {
         username: String,
         password: JsSecretSourceInput,
     ) -> Result<&Self> {
-        if password.kind != "env" {
-            return Err(napi::Error::from_reason(format!(
-                "unsupported SOCKS5 password source {:?}; only env is supported",
-                password.kind
-            )));
-        }
-        let builder = self
-            .selection
-            .take()
-            .ok_or_else(|| napi::Error::from_reason("Socks5ProxyBuilder already consumed"))?;
-        let OutboundProxySelection::Socks5(builder) = builder else {
-            return Err(napi::Error::from_reason(
-                "Socks5ProxyBuilder selection was replaced",
-            ));
-        };
-        self.selection.replace(Some(OutboundProxySelection::Socks5(
-            builder.credentials(username, SecretSource::env(password.var)),
-        )));
+        apply_selection_credentials(
+            &self.selection,
+            "Socks5ProxyBuilder",
+            "SOCKS5",
+            username,
+            password,
+        )?;
         Ok(self)
     }
 }
@@ -173,6 +199,38 @@ impl JsSocks5ProxyBuilder {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Apply credentials to the proxy builder currently selected for `protocol`.
+///
+/// `builder_name` names the JavaScript builder class so the errors keep pointing
+/// at the object the caller holds.
+fn apply_selection_credentials(
+    selection: &SharedOutboundProxySelection,
+    builder_name: &str,
+    protocol: &str,
+    username: String,
+    password: JsSecretSourceInput,
+) -> Result<()> {
+    if password.kind != "env" {
+        return Err(napi::Error::from_reason(format!(
+            "unsupported {protocol} password source {:?}; only env is supported",
+            password.kind
+        )));
+    }
+
+    let builder = selection
+        .borrow_mut()
+        .take()
+        .ok_or_else(|| napi::Error::from_reason(format!("{builder_name} already consumed")))?;
+    let selected = builder
+        .credentials(username, SecretSource::env(password.var))
+        .ok_or_else(|| {
+            napi::Error::from_reason(format!("{builder_name} selection was replaced"))
+        })?;
+    *selection.borrow_mut() = Some(selected);
+
+    Ok(())
+}
 
 pub(crate) fn take_selected_proxy(
     selection: &SharedOutboundProxySelection,

@@ -104,14 +104,11 @@ impl DiskCompactionBuilder {
         crate::LocalBackend::validate_completed_restore(&config)?;
         validate_root_selection(&config, &target)?;
         if model.status == SandboxStatus::Running {
-            return super::modify::control_disk_compact(
-                local,
-                &self.name,
-                target,
-                self.layers,
-                dry_run,
-            )
-            .await;
+            return local
+                .require_control_session(&self.name)
+                .await?
+                .compact_disks(target, self.layers, dry_run)
+                .await;
         }
         if matches!(
             model.status,

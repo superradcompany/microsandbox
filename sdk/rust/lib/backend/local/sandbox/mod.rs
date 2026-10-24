@@ -186,7 +186,8 @@ impl LocalBackend {
             }
         }
 
-        let mut config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&model.config)?;
+        let mut config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail

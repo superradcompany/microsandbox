@@ -735,9 +735,21 @@ pub fn sandbox_builder_from_args(
         let proxy = config_dict(&proxy, "OutboundProxy")?;
         let protocol = extract_required::<String>(&proxy, "protocol")?;
         let address = extract_required::<String>(&proxy, "address")?;
+        let credentials = parse_proxy_credentials(&proxy)?;
         builder = match protocol.as_str() {
-            "http_connect" => builder.proxy(move |p| p.http_connect(address)),
+            "http_connect" => builder.proxy(move |p| {
+                let proxy = p.http_connect(address);
+                match credentials {
+                    Some((username, password)) => proxy.credentials(username, password),
+                    None => proxy,
+                }
+            }),
             "socks4" => {
+                if credentials.is_some() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
+                    ));
+                }
                 let user_id = extract_opt::<String>(&proxy, "user_id")?;
                 builder.proxy(move |p| {
                     let proxy = p.socks4(address);
@@ -747,43 +759,13 @@ pub fn sandbox_builder_from_args(
                     }
                 })
             }
-            "socks5" => {
-                let credentials = proxy
-                    .get_item("credentials")?
-                    .filter(|value| !value.is_none())
-                    .map(|value| config_dict(&value, "SOCKS5 credentials"))
-                    .transpose()?;
-                let username = credentials
-                    .as_ref()
-                    .map(|value| extract_required::<String>(value, "username"))
-                    .transpose()?;
-                let password = credentials
-                    .as_ref()
-                    .map(|value| {
-                        let password = value.get_item("password")?.ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(
-                                "SOCKS5 credentials requires password",
-                            )
-                        })?;
-                        let source = config_dict(&password, "SOCKS5 password source")?;
-                        let kind = extract_required::<String>(&source, "kind")?;
-                        if kind != "env" {
-                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                                "unsupported SOCKS5 password source {kind:?}; only env is supported"
-                            )));
-                        }
-                        let var = extract_required::<String>(&source, "var")?;
-                        Ok(SecretSource::env(var))
-                    })
-                    .transpose()?;
-                builder.proxy(move |p| {
-                    let proxy = p.socks5(address);
-                    match (username, password) {
-                        (Some(username), Some(password)) => proxy.credentials(username, password),
-                        _ => proxy,
-                    }
-                })
-            }
+            "socks5" => builder.proxy(move |p| {
+                let proxy = p.socks5(address);
+                match credentials {
+                    Some((username, password)) => proxy.credentials(username, password),
+                    None => proxy,
+                }
+            }),
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unsupported outbound proxy protocol {protocol:?}"
@@ -2154,6 +2136,37 @@ fn require_mapping_dict<'py>(
     })
 }
 
+/// Parse the optional nested `credentials` object of an outbound proxy mapping.
+///
+/// HTTP CONNECT and SOCKS5 share this durable shape. The backend validates the
+/// username for the selected protocol and rejects store-backed password sources.
+fn parse_proxy_credentials(proxy: &Bound<'_, PyDict>) -> PyResult<Option<(String, SecretSource)>> {
+    let Some(credentials) = proxy
+        .get_item("credentials")?
+        .filter(|value| !value.is_none())
+    else {
+        return Ok(None);
+    };
+
+    let credentials = require_mapping_dict(&credentials, "proxy credentials")?;
+    let username = extract_required::<String>(&credentials, "username")?;
+    let password = credentials.get_item("password")?.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("proxy credentials requires password")
+    })?;
+
+    let source = require_mapping_dict(&password, "proxy password source")?;
+    let kind = extract_required::<String>(&source, "kind")?;
+    if kind != "env" {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unsupported proxy password source {kind:?}; only env is supported"
+        )));
+    }
+
+    let var = extract_required::<String>(&source, "var")?;
+
+    Ok(Some((username, SecretSource::env(var))))
+}
+
 /// Serialize one concrete public SDK configuration object.
 ///
 /// Requiring the declared class before calling `_to_dict` is the boundary
@@ -2605,5 +2618,145 @@ pub(crate) mod tests {
                 }
             }
         });
+    }
+
+    /// Build the proxy argument from the Python SDK type, as `Sandbox.create` receives it.
+    ///
+    /// The native parser accepts only the exact `microsandbox.types.OutboundProxy`
+    /// class, so the module is loaded from the source tree under a package stub.
+    fn proxy_from_python<'py>(py: Python<'py>, expression: &str) -> PyResult<Bound<'py, PyAny>> {
+        let package = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
+        let code = format!(
+            "import sys, types\n\
+             package = types.ModuleType('microsandbox')\n\
+             package.__path__ = [{package:?}]\n\
+             sys.modules['microsandbox'] = package\n\
+             from microsandbox.types import OutboundProxy, SecretSource\n\
+             proxy = {expression}\n"
+        );
+        let globals = PyDict::new(py);
+        py.run(&CString::new(code)?, Some(&globals), None)?;
+        Ok(globals.get_item("proxy")?.unwrap())
+    }
+
+    fn proxy_kwargs<'py>(py: Python<'py>, expression: &str) -> PyResult<Bound<'py, PyDict>> {
+        let proxy = proxy_from_python(py, expression)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("image", "alpine")?;
+        kwargs.set_item("proxy", proxy)?;
+        Ok(kwargs)
+    }
+
+    fn build_created_config(builder: SandboxBuilder) -> microsandbox::SandboxConfig {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(builder.build()).unwrap()
+    }
+
+    fn build_created_error(builder: SandboxBuilder) -> microsandbox::MicrosandboxError {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        match runtime.block_on(builder.build()) {
+            Ok(_) => panic!("expected the sandbox configuration to be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn http_connect_proxy_credentials_reach_the_builder() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+
+        // `Sandbox.create` raises before returning an awaitable outside an event
+        // loop, so assert the applied value on the builder the parser returns.
+        let builder = Python::attach(|py| {
+            let kwargs = proxy_kwargs(
+                py,
+                "OutboundProxy.http_connect('127.0.0.1:3128').credentials(
+                    'sandbox', SecretSource.env('HTTP_CONNECT_PASSWORD'),)",
+            )
+            .unwrap();
+            sandbox_builder_from_args("proxy-parse-probe".into(), Some(&kwargs))
+        })
+        .unwrap();
+
+        let config = build_created_config(builder);
+        let proxy = serde_json::to_value(config.spec.network.outbound_proxy).unwrap();
+
+        assert_eq!(
+            proxy,
+            serde_json::json!({
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "sandbox",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"},
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn socks5_proxy_credentials_reach_the_builder() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+
+        let builder = Python::attach(|py| {
+            let kwargs = proxy_kwargs(
+                py,
+                "OutboundProxy.socks5('127.0.0.1:1080').credentials(
+                    'sandbox', SecretSource.env('SOCKS5_PASSWORD'),)",
+            )
+            .unwrap();
+            sandbox_builder_from_args("proxy-parse-probe".into(), Some(&kwargs))
+        })
+        .unwrap();
+
+        let config = build_created_config(builder);
+        let proxy = serde_json::to_value(config.spec.network.outbound_proxy).unwrap();
+
+        assert_eq!(
+            proxy,
+            serde_json::json!({
+                "protocol": "socks5",
+                "address": "127.0.0.1:1080",
+                "credentials": {
+                    "username": "sandbox",
+                    "password": {"kind": "env", "var": "SOCKS5_PASSWORD"},
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn http_connect_proxy_credentials_are_validated_after_parsing() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+
+        // The Python class stores the username as given; the native parser must
+        // apply it so the backend rejects the `:` it does not accept.
+        let builder = Python::attach(|py| {
+            let kwargs = proxy_kwargs(
+                py,
+                "OutboundProxy.http_connect('127.0.0.1:3128').credentials(
+                    'user:name', SecretSource.env('HTTP_CONNECT_PASSWORD'),)",
+            )
+            .unwrap();
+            sandbox_builder_from_args("proxy-parse-probe".into(), Some(&kwargs))
+        })
+        .unwrap();
+
+        let error = build_created_error(builder);
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid HTTP CONNECT credentials"),
+            "{error}"
+        );
     }
 }

@@ -48,15 +48,23 @@ pub async fn has_column<C: ConnectionTrait>(
 
 /// Select a sandbox using the historical absence of active-config tracking.
 pub async fn sandbox_query<C: ConnectionTrait>(db: &C) -> Result<Select<sandbox::Entity>, DbErr> {
+    let caller_config_overrides = has_column(db, "sandbox", "caller_config_overrides").await?;
     let active = has_column(db, "sandbox", "active_config").await?;
     let network = has_column(db, "sandbox", "network_slot").await?;
     let mut query = sandbox::Entity::find()
         .select_only()
         .columns(sandbox::Column::iter().filter(|column| match column {
+            sandbox::Column::CallerConfigOverrides => caller_config_overrides,
             sandbox::Column::ActiveConfig => active,
             sandbox::Column::NetworkSlot => network,
             _ => true,
         }));
+    if !caller_config_overrides {
+        query = query.column_as(
+            Expr::val(Option::<String>::None),
+            sandbox::Column::CallerConfigOverrides,
+        );
+    }
     if !active {
         query = query.column_as(
             Expr::val(Option::<String>::None),

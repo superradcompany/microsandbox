@@ -539,33 +539,24 @@ impl ExecSink {
     }
 
     /// Write data to the process's stdin, waiting until all bytes have been sent.
+    /// Empty data is a no-op, never EOF. Call [`close`](Self::close) when done writing; in pipe
+    /// mode it sends EOF.
     /// A cancelled write may have queued a prefix that is still delivered.
     pub async fn write(&self, data: impl AsRef<[u8]>) -> MicrosandboxResult<()> {
-        // Serialize chunks so concurrent writes and EOF keep their original operation order.
-        let mut closed = self.write_lock.lock().await;
         let data = data.as_ref();
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        // Serialize chunks so concurrent writes and EOF keep their original operation order.
+        let closed = self.write_lock.lock().await;
         if *closed {
-            return if data.is_empty() {
-                Ok(())
-            } else {
-                Err(crate::MicrosandboxError::Runtime(
-                    "execution stdin closed".into(),
-                ))
-            };
+            return Err(crate::MicrosandboxError::Runtime(
+                "execution stdin closed".into(),
+            ));
         }
         if let Some(window) = &self.window {
             window.wait_started().await?;
-        }
-        if data.is_empty() {
-            self.client
-                .send_and_commit(
-                    self.id,
-                    MessageType::ExecStdin,
-                    &ExecStdin { data: Vec::new() },
-                    || *closed = true,
-                )
-                .await?;
-            return Ok(());
         }
 
         if let Some(window) = &self.window {
@@ -589,7 +580,24 @@ impl ExecSink {
     /// Waits for any current write to finish. Cancel a blocked write first if the process
     /// is not consuming input; any prefix already sent may still arrive before EOF.
     pub async fn close(&self) -> MicrosandboxResult<()> {
-        self.write([]).await
+        let mut closed = self.write_lock.lock().await;
+        if *closed {
+            return Ok(());
+        }
+        if let Some(window) = &self.window {
+            window.wait_started().await?;
+        }
+
+        // An empty frame is the protocol's EOF marker.
+        self.client
+            .send_and_commit(
+                self.id,
+                MessageType::ExecStdin,
+                &ExecStdin { data: Vec::new() },
+                || *closed = true,
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -1112,6 +1120,44 @@ pub(crate) mod agent {
                 })
                 .await
                 .unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn empty_stdin_write_does_not_send_eof() {
+            use microsandbox_protocol::exec::ExecStdin;
+
+            for controlled in [false, true] {
+                let (client, mut peer) = flow_test_client().await;
+                let window = controlled.then(|| {
+                    let window = super::super::io::InputWindow::new(TEST_INPUT_LIMIT, 16384);
+                    window.mark_started();
+                    window
+                });
+                let sink = ExecSink::new(77, client, window);
+
+                sink.write(b"aaaaa").await.unwrap();
+                sink.write(b"").await.unwrap();
+                sink.write(b"bbbbb").await.unwrap();
+                sink.close().await.unwrap();
+
+                let mut frames = Vec::new();
+                for _ in 0..3 {
+                    let msg = codec::read_message(&mut peer).await.unwrap();
+                    assert_eq!(msg.id, 77);
+                    frames.push(msg.payload::<ExecStdin>().unwrap().data);
+                }
+                assert_eq!(frames, [b"aaaaa".to_vec(), b"bbbbb".to_vec(), Vec::new()]);
+
+                sink.write(b"").await.unwrap();
+                assert!(sink.write(b"after EOF").await.is_err());
+                sink.close().await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(20), codec::read_message(&mut peer))
+                        .await
+                        .is_err(),
+                    "only the first close may send EOF"
+                );
             }
         }
 

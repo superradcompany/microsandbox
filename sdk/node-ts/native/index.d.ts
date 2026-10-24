@@ -245,7 +245,8 @@ export type JsHttpBuilder = HttpBuilder
 
 /** Builds an HTTP CONNECT outbound proxy. */
 export declare class HttpConnectProxyBuilder {
-
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
 }
 export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
 

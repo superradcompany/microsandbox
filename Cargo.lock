@@ -3793,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "anyhow",
  "astral-tokio-tar",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agent-client"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "bytes",
  "ciborium",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-agentd"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-cli"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3948,7 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-control-client"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "ciborium",
  "microsandbox-protocol",
@@ -3964,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-db"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "async-trait",
  "microsandbox-types",
@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-filesystem"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "bincode",
  "crossbeam-channel",
@@ -3999,7 +3999,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-go"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "base64 0.23.1",
  "cap-std",
@@ -4018,7 +4018,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-image"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "astral-tokio-tar",
  "async-compression",
@@ -4036,6 +4036,7 @@ dependencies = [
  "rand 0.10.3",
  "rcgen",
  "rustls-pki-types",
+ "scc",
  "scopeguard",
  "serde",
  "serde_json",
@@ -4050,7 +4051,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "chrono",
  "libc",
@@ -4061,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-metrics-collector"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4089,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-migration"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "microsandbox-db",
  "microsandbox-types",
@@ -4100,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-network"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4144,7 +4145,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-node"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "bytes",
  "chrono",
@@ -4162,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "bytes",
  "chrono",
@@ -4179,7 +4180,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-protocol-client"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "microsandbox-protocol",
  "serde",
@@ -4191,7 +4192,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-py"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "chrono",
  "futures",
@@ -4208,7 +4209,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-runtime"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -4252,7 +4253,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "chrono",
  "dprint-plugin-typescript",
@@ -4271,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-types-macros"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4280,7 +4281,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-utils"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "dirs",
  "libc",
@@ -4293,7 +4294,7 @@ dependencies = [
 
 [[package]]
 name = "microsandbox-vsock"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "libc",
  "msb_krun",
@@ -6459,6 +6460,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "saa"
+version = "5.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd85992a680de788217d9c70b74aa7685b108cf1aba02f728fb27f1b27199ad1"
+
+[[package]]
 name = "salsa20"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6475,6 +6482,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "scc"
+version = "3.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d5f8ca67c4f6208caf824037a6a9df0211b4e0937fccc4f543441f294d04511"
+dependencies = [
+ "saa",
+ "sdd",
 ]
 
 [[package]]
@@ -6508,6 +6525,15 @@ dependencies = [
  "pbkdf2",
  "salsa20",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "sdd"
+version = "4.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31877eee03686b905845993b5d9809a220c9dd5a10e9d6021d7ca67384c9070"
+dependencies = [
+ "saa",
 ]
 
 [[package]]
@@ -7729,14 +7755,14 @@ dependencies = [
 
 [[package]]
 name = "test-init"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "test-macros"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7745,7 +7771,7 @@ dependencies = [
 
 [[package]]
 name = "test-utils"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "tempfile",
  "test-macros",

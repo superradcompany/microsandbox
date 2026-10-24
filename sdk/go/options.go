@@ -1154,13 +1154,13 @@ func SOCKS5Proxy(address string) *OutboundProxy {
 }
 
 // HTTPConnectProxy configures an HTTP proxy that opens outbound TCP tunnels
-// with CONNECT at address.
+// with CONNECT at address. Add Credentials for HTTP Basic authentication.
 func HTTPConnectProxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "http_connect", address: address}
 }
 
-// Credentials returns a copy configured with SOCKS5 username authentication
-// and a host-side password source.
+// Credentials returns a copy configured with SOCKS5 or HTTP CONNECT username
+// authentication and a host-side password source.
 func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy {
 	if p == nil {
 		return nil

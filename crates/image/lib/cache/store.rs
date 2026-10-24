@@ -1,13 +1,16 @@
 //! Global on-disk image and layer cache.
 
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use oci_client::Reference;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 
-use super::lock;
+use super::lock::CacheLockGuard;
+use crate::storage_lease::StorageLease;
 use crate::{
     config::ImageConfig,
     digest::Digest,
@@ -70,18 +73,12 @@ pub(crate) enum VmdkWriteMode {
 /// ~/.microsandbox/cache/fsmeta/<manifest_safe>.erofs         # fsmeta EROFS (fsmerge metadata)
 /// ~/.microsandbox/cache/fsmeta/<manifest_safe>.erofs.lock    # materialization flock
 /// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk            # VMDK descriptor
-/// ~/.microsandbox/cache/vmdk/<manifest_safe>.vmdk.lock       # materialization flock
 /// ```
 #[derive(Clone)]
 pub struct GlobalCache {
     /// An explicitly scoped operation retains all admitted entries through catalog publication.
-    pub(super) operation: Option<
-        std::sync::Arc<
-            std::sync::Mutex<
-                std::collections::BTreeMap<PathBuf, crate::storage_lease::StorageLease>,
-            >,
-        >,
-    >,
+    pub(super) operation: Option<Arc<Mutex<BTreeMap<PathBuf, StorageLease>>>>,
+
     /// Root of the layer EROFS cache (`~/.microsandbox/cache/layers/`).
     layers_dir: PathBuf,
 
@@ -317,7 +314,10 @@ impl GlobalCache {
             .join(format!("{}.vmdk", manifest_digest.to_path_safe()))
     }
 
-    /// Path to the materialization lock for a VMDK descriptor.
+    /// Legacy VMDK lock path, retained for source compatibility.
+    ///
+    /// Current writers use [`Self::fsmeta_erofs_lock_path`] to serialize descriptors
+    /// with fsmeta materialization. This path does not coordinate those writers.
     pub fn vmdk_lock_path(&self, manifest_digest: &Digest) -> PathBuf {
         self.vmdk_dir
             .join(format!("{}.vmdk.lock", manifest_digest.to_path_safe()))
@@ -333,6 +333,9 @@ impl GlobalCache {
     ///
     /// Descriptors reference extents by absolute path, so one copied from
     /// another cache must be regenerated rather than reused.
+    ///
+    /// This blocking variant is retained for external callers. Async callers should use
+    /// [`Self::rewrite_vmdk_async`] to avoid blocking on the materialization lock.
     pub fn rewrite_vmdk(
         &self,
         manifest_digest: &Digest,
@@ -346,8 +349,60 @@ impl GlobalCache {
         )
     }
 
+    /// Rewrite a VMDK descriptor without blocking an async worker on its materialization lock.
+    pub async fn rewrite_vmdk_async(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+    ) -> ImageResult<()> {
+        self.write_vmdk_async(
+            manifest_digest,
+            layer_diff_ids,
+            VmdkWriteMode::ReplaceExisting,
+            None,
+        )
+        .await
+    }
+
+    /// Write a descriptor after asynchronously acquiring its materialization lock.
+    pub(crate) async fn write_vmdk_async(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+        mode: VmdkWriteMode,
+        progress: Option<PullProgressSender>,
+    ) -> ImageResult<()> {
+        let cache = self.clone();
+        let manifest_digest = manifest_digest.clone();
+        let layer_diff_ids = layer_diff_ids.to_vec();
+        let materializer_guard =
+            CacheLockGuard::acquire_async(&self.fsmeta_erofs_lock_path(&manifest_digest)).await?;
+
+        tokio::task::spawn_blocking(move || {
+            let _materializer_guard = materializer_guard;
+            cache.write_vmdk_locked(&manifest_digest, &layer_diff_ids, mode, progress.as_ref())
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
     /// Write a descriptor under the image materialization lock.
     pub(crate) fn write_vmdk(
+        &self,
+        manifest_digest: &Digest,
+        layer_diff_ids: &[Digest],
+        mode: VmdkWriteMode,
+        progress: Option<&PullProgressSender>,
+    ) -> ImageResult<()> {
+        // Serialize with image materialization, which writes the VMDK under this lock.
+        let _materializer_guard =
+            CacheLockGuard::acquire(&self.fsmeta_erofs_lock_path(manifest_digest))?;
+
+        self.write_vmdk_locked(manifest_digest, layer_diff_ids, mode, progress)
+    }
+
+    /// Write a descriptor while the caller holds the image materialization lock.
+    pub(crate) fn write_vmdk_locked(
         &self,
         manifest_digest: &Digest,
         layer_diff_ids: &[Digest],
@@ -361,13 +416,6 @@ impl GlobalCache {
             .collect();
         let mut extents: Vec<&Path> = vec![&fsmeta];
         extents.extend(layers.iter().map(PathBuf::as_path));
-
-        // Serialize with image materialization, which writes the VMDK under this lock.
-        let lock = lock::open_lock_file(&self.fsmeta_erofs_lock_path(manifest_digest))?;
-        lock::lock_exclusive(&lock)?;
-        let _unlock = scopeguard::guard(lock, |file| {
-            let _ = lock::flock_unlock(&file);
-        });
 
         let vmdk = self.vmdk_path(manifest_digest);
         if mode == VmdkWriteMode::KeepExisting {
@@ -609,9 +657,12 @@ impl GlobalCache {
     ) -> ImageResult<Option<CachedImageMetadata>> {
         // Scanning by digest must release each nonmatching entry immediately. Retaining
         // every scanned image in the caller's operation can exhaust its descriptor limit.
-        let _entry = crate::storage_lease::StorageLease::shared(path)?;
-        let _gate =
-            crate::storage_lease::StorageLease::shared(&path.with_extension("publication"))?;
+        let key = StorageLease::key(path)?;
+        let entry = match self.retained_lease(&key)? {
+            Some(lease) => lease,
+            None => StorageLease::shared_keyed(&key)?,
+        };
+        let _gate = StorageLease::shared_keyed(&key.with_extension("publication"))?;
         let data = match std::fs::read_to_string(path) {
             Ok(data) => data,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -627,10 +678,12 @@ impl GlobalCache {
             if manifest_digest.is_some_and(|digest| digest != metadata.manifest_digest) {
                 return Ok(None);
             }
-            let Ok(mut paths) = self.metadata_paths(metadata) else {
+            let Ok(paths) = self.metadata_paths(metadata) else {
                 return Ok(None);
             };
-            paths.push(path.to_path_buf());
+            self.retain_lease(key, entry.clone())?;
+            // Safe under the publication gate: artifact deletion only tries exclusive
+            // leases, so no waiting dependency writer can close a lock-order cycle.
             let _dependencies = self.lease_paths(paths)?;
         }
         Ok(metadata)
@@ -649,10 +702,8 @@ impl GlobalCache {
         &self,
         path: PathBuf,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        let cache = self.clone();
-        tokio::task::spawn_blocking(move || cache.read_image_metadata_path(&path))
+        self.read_image_metadata_matching_async_inner(path, None)
             .await
-            .map_err(std::io::Error::other)?
     }
 
     pub(crate) async fn read_image_metadata_matching_async(
@@ -660,37 +711,74 @@ impl GlobalCache {
         path: PathBuf,
         manifest_digest: String,
     ) -> ImageResult<Option<CachedImageMetadata>> {
-        let cache = self.clone();
-        tokio::task::spawn_blocking(move || {
-            cache.read_image_metadata_matching(&path, Some(&manifest_digest))
+        self.read_image_metadata_matching_async_inner(path, Some(manifest_digest))
+            .await
+    }
+
+    async fn read_image_metadata_matching_async_inner(
+        &self,
+        path: PathBuf,
+        manifest_digest: Option<String>,
+    ) -> ImageResult<Option<CachedImageMetadata>> {
+        // Scans release nonmatching entries immediately instead of retaining every candidate
+        // in the operation scope. That keeps descriptor use bounded on large caches.
+        let key_path = path.clone();
+        let key = tokio::task::spawn_blocking(move || StorageLease::key(&key_path))
+            .await
+            .map_err(std::io::Error::other)??;
+        let entry = match self.retained_lease(&key)? {
+            Some(lease) => lease,
+            None => StorageLease::shared_async_keyed(key.clone()).await?,
+        };
+        let _gate = StorageLease::shared_async_keyed(key.with_extension("publication")).await?;
+
+        let read_path = key.clone();
+        let metadata = tokio::task::spawn_blocking(move || {
+            let data = match std::fs::read_to_string(&read_path) {
+                Ok(data) => data,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => {
+                    return Err(ImageError::Cache { path, source });
+                }
+            };
+
+            parse_cached_image_metadata(&path, &data)
         })
         .await
-        .map_err(std::io::Error::other)?
+        .map_err(std::io::Error::other)??;
+
+        if let Some(metadata) = &metadata {
+            if manifest_digest
+                .as_deref()
+                .is_some_and(|digest| digest != metadata.manifest_digest)
+            {
+                return Ok(None);
+            }
+            let Ok(paths) = self.metadata_paths(metadata) else {
+                return Ok(None);
+            };
+            self.retain_lease(key, entry.clone())?;
+            // Artifact deletion only tries exclusive leases; a waiting dependency
+            // writer here could deadlock with publication while this gate is held.
+            let _dependencies = self.lease_paths_async(paths).await?;
+        }
+        Ok(metadata)
     }
 
     /// Publish complete metadata under a short exclusive gate. Lifetime pins use a
     /// different lock, allowing existing readers to finish using an older generation.
+    #[cfg(test)]
     pub(crate) fn write_image_metadata(
         &self,
         reference: &Reference,
         metadata: &CachedImageMetadata,
     ) -> ImageResult<()> {
-        use std::io::Write;
         let path = self.image_metadata_path(reference);
         let mut paths = self.metadata_paths(metadata)?;
         paths.push(path.clone());
         let _leases = self.lease_paths(paths)?;
-        let _gate =
-            crate::storage_lease::StorageLease::exclusive(&path.with_extension("publication"))?;
-        let temporary_path = path.with_extension("json.part");
-        let mut temporary = std::fs::File::create(&temporary_path)?;
-        serde_json::to_writer(&mut temporary, metadata)
-            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
-        temporary.flush()?;
-        temporary.sync_all()?;
-        std::fs::rename(&temporary_path, &path)?;
-        sync_directory(&self.manifests_dir)?;
-        Ok(())
+        let _gate = StorageLease::exclusive(&path.with_extension("publication"))?;
+        self.write_image_metadata_file(&path, metadata)
     }
 
     /// Publish metadata from an owned worker so cancellation cannot release its gate
@@ -701,11 +789,18 @@ impl GlobalCache {
         metadata: &CachedImageMetadata,
     ) -> ImageResult<()> {
         let cache = self.clone();
-        let reference = reference.clone();
+        let path = self.image_metadata_path(reference);
         let metadata = metadata.clone();
-        tokio::task::spawn_blocking(move || cache.write_image_metadata(&reference, &metadata))
-            .await
-            .map_err(std::io::Error::other)?
+        let mut paths = self.metadata_paths(&metadata)?;
+        paths.push(path.clone());
+        let leases = self.lease_paths_async(paths).await?;
+        let gate = StorageLease::exclusive_async(path.with_extension("publication")).await?;
+        tokio::task::spawn_blocking(move || {
+            let _protection = (leases, gate);
+            cache.write_image_metadata_file(&path, &metadata)
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Install archived metadata without replacing an equivalent local entry. Recheck under
@@ -715,69 +810,27 @@ impl GlobalCache {
         reference: &Reference,
         archived_bytes: Vec<u8>,
     ) -> ImageResult<()> {
-        let cache = self.clone();
-        let reference = reference.clone();
-        tokio::task::spawn_blocking(move || {
-            cache.install_image_metadata_if_compatible(&reference, &archived_bytes)
+        let (metadata, archived_bytes) = tokio::task::spawn_blocking(move || {
+            crate::snapshot::manifest::reject_duplicate_json_keys(&archived_bytes)
+                .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+            let metadata: CachedImageMetadata = serde_json::from_slice(&archived_bytes)
+                .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+            Ok::<_, ImageError>((metadata, archived_bytes))
         })
         .await
-        .map_err(std::io::Error::other)?
-    }
-
-    fn install_image_metadata_if_compatible(
-        &self,
-        reference: &Reference,
-        archived_bytes: &[u8],
-    ) -> ImageResult<()> {
-        use std::io::Write;
-
-        crate::snapshot::manifest::reject_duplicate_json_keys(archived_bytes)
-            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
-        let metadata: CachedImageMetadata = serde_json::from_slice(archived_bytes)
-            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+        .map_err(std::io::Error::other)??;
         let path = self.image_metadata_path(reference);
         let mut paths = self.metadata_paths(&metadata)?;
         paths.push(path.clone());
-        let _leases = self.lease_paths(paths)?;
-        let _gate =
-            crate::storage_lease::StorageLease::exclusive(&path.with_extension("publication"))?;
-
-        match std::fs::symlink_metadata(&path) {
-            Ok(existing) if existing.file_type().is_file() => {
-                let existing_bytes = std::fs::read(&path)?;
-                if image_metadata_json_equivalent(archived_bytes, &existing_bytes) {
-                    return Ok(());
-                }
-                return Err(ImageError::Cache {
-                    path,
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "cache target already exists with different content",
-                    ),
-                });
-            }
-            Ok(_) => {
-                return Err(ImageError::Cache {
-                    path,
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "cache target is not a regular file",
-                    ),
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(ImageError::Cache { path, source }),
-        }
-
-        // The gate also covers the existing writer's .json.part path. Preserve the archive's
-        // bytes on first install, then publish only after the complete file is durable.
-        let temporary_path = path.with_extension("json.part");
-        let mut temporary = std::fs::File::create(&temporary_path)?;
-        temporary.write_all(archived_bytes)?;
-        temporary.sync_all()?;
-        std::fs::rename(temporary_path, path)?;
-        sync_directory(&self.manifests_dir)?;
-        Ok(())
+        let leases = self.lease_paths_async(paths).await?;
+        let gate = StorageLease::exclusive_async(path.with_extension("publication")).await?;
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _protection = (leases, gate);
+            cache.install_image_metadata_file(&path, &archived_bytes)
+        })
+        .await
+        .map_err(std::io::Error::other)?
     }
 
     /// Delete cached metadata for an image reference.
@@ -812,6 +865,65 @@ impl GlobalCache {
     pub fn tar_path(&self, digest: &Digest) -> PathBuf {
         self.layers_dir
             .join(format!("{}.tar.gz", digest.to_path_safe()))
+    }
+
+    /// Write metadata while the caller holds its publication gate and artifact pins.
+    fn write_image_metadata_file(
+        &self,
+        path: &Path,
+        metadata: &CachedImageMetadata,
+    ) -> ImageResult<()> {
+        let temporary_path = path.with_extension("json.part");
+        let mut temporary = std::fs::File::create(&temporary_path)?;
+        serde_json::to_writer(&mut temporary, metadata)
+            .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
+        temporary.flush()?;
+        temporary.sync_all()?;
+        std::fs::rename(&temporary_path, path)?;
+        sync_directory(&self.manifests_dir)
+    }
+
+    /// Install compatible archived metadata under the caller's publication protection.
+    fn install_image_metadata_file(&self, path: &Path, archived_bytes: &[u8]) -> ImageResult<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(existing) if existing.file_type().is_file() => {
+                let existing_bytes = std::fs::read(path)?;
+                if image_metadata_json_equivalent(archived_bytes, &existing_bytes) {
+                    return Ok(());
+                }
+                return Err(ImageError::Cache {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "cache target already exists with different content",
+                    ),
+                });
+            }
+            Ok(_) => {
+                return Err(ImageError::Cache {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "cache target is not a regular file",
+                    ),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(ImageError::Cache {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+
+        // The gate covers the shared .json.part path until the complete file is durable.
+        let temporary_path = path.with_extension("json.part");
+        let mut temporary = std::fs::File::create(&temporary_path)?;
+        temporary.write_all(archived_bytes)?;
+        temporary.sync_all()?;
+        std::fs::rename(temporary_path, path)?;
+        sync_directory(&self.manifests_dir)
     }
 }
 
@@ -973,6 +1085,145 @@ mod tests {
                 .contains("cache target already exists with different content")
         );
         assert_eq!(std::fs::read(path).unwrap(), retagged_bytes);
+    }
+
+    #[test]
+    fn async_metadata_read_wait_does_not_occupy_the_blocking_pool() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(directory.path()).unwrap().operation();
+        let reference: Reference = "example.com/test:latest".parse().unwrap();
+        let metadata = CachedImageMetadata {
+            manifest_digest: digest('a').to_string(),
+            config_digest: digest('a').to_string(),
+            raw_manifest_json: "{}".into(),
+            raw_config_json: "{}".into(),
+            config: ImageConfig::default(),
+            layers: Vec::new(),
+        };
+        cache.write_image_metadata(&reference, &metadata).unwrap();
+        let publication = cache
+            .image_metadata_path(&reference)
+            .with_extension("publication");
+        let held = crate::storage_lease::StorageLease::exclusive(&publication).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
+            let read_cache = cache.clone();
+            let read_reference = reference.clone();
+            let reader =
+                tokio::spawn(
+                    async move { read_cache.read_image_metadata_async(&read_reference).await },
+                );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+            let marker = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::task::spawn_blocking(|| 42),
+            )
+            .await
+            .expect("a metadata waiter must not monopolize the only blocking thread")
+            .unwrap();
+            assert_eq!(marker, 42);
+
+            drop(held);
+            let resolved = tokio::time::timeout(std::time::Duration::from_secs(1), reader)
+                .await
+                .expect("the metadata read should resume after publication")
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.manifest_digest, metadata.manifest_digest);
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metadata_admission_reuses_its_pin_while_an_entry_writer_waits() {
+        for synchronous in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let cache = GlobalCache::new(directory.path()).unwrap();
+            let reference: Reference = "example.com/test:latest".parse().unwrap();
+            let metadata = CachedImageMetadata {
+                manifest_digest: digest('a').to_string(),
+                config_digest: digest('a').to_string(),
+                raw_manifest_json: "{}".into(),
+                raw_config_json: "{}".into(),
+                config: ImageConfig::default(),
+                layers: Vec::new(),
+            };
+            cache.write_image_metadata(&reference, &metadata).unwrap();
+            let path = cache.image_metadata_path(&reference);
+            let publication = StorageLease::exclusive(&path.with_extension("publication")).unwrap();
+            let scope = cache.operation();
+            let read_scope = scope.clone();
+            let read_reference = reference.clone();
+            let reader = tokio::spawn(async move {
+                if synchronous {
+                    tokio::task::spawn_blocking(move || {
+                        read_scope.read_image_metadata(&read_reference)
+                    })
+                    .await
+                    .unwrap()
+                } else {
+                    read_scope.read_image_metadata_async(&read_reference).await
+                }
+            });
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while StorageLease::try_exclusive(&path).unwrap().is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "reader did not pin metadata"
+                );
+                tokio::task::yield_now().await;
+            }
+            let writer_path = path.clone();
+            let writer =
+                tokio::spawn(async move { StorageLease::exclusive_async(writer_path).await });
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+            drop(publication);
+            let read = tokio::time::timeout(std::time::Duration::from_secs(1), reader)
+                .await
+                .expect("metadata admission must reuse its already-held pin")
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(read.manifest_digest, metadata.manifest_digest);
+            assert!(
+                !writer.is_finished(),
+                "the operation scope must retain the metadata pin"
+            );
+
+            let repeat_scope = scope.clone();
+            let repeated = tokio::time::timeout(std::time::Duration::from_secs(1), async move {
+                if synchronous {
+                    tokio::task::spawn_blocking(move || {
+                        repeat_scope.read_image_metadata(&reference)
+                    })
+                    .await
+                    .unwrap()
+                } else {
+                    repeat_scope.read_image_metadata_async(&reference).await
+                }
+            })
+            .await
+            .expect("a repeated read must reuse the scope's retained pin")
+            .unwrap()
+            .unwrap();
+            assert_eq!(repeated.manifest_digest, metadata.manifest_digest);
+
+            drop(scope);
+            let lease = tokio::time::timeout(std::time::Duration::from_secs(1), writer)
+                .await
+                .expect("the writer should proceed after the scope is released")
+                .unwrap()
+                .unwrap();
+            drop(lease);
+        }
     }
 
     #[test]

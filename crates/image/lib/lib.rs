@@ -17,6 +17,7 @@
 )]
 
 mod archive;
+mod async_gate;
 mod cache;
 pub mod checkpoint;
 mod config;

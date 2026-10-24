@@ -198,6 +198,28 @@ async def test_stdin_modes_and_take_stdin_contract(sandbox_factory):
 
 
 @pytest.mark.asyncio
+async def test_empty_stdin_write_keeps_stdin_open(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-stdin-empty")
+
+    piped = await sandbox.exec_stream("cat", stdin=Stdin.pipe())
+    sink = piped.take_stdin()
+    assert sink is not None
+
+    await sink.write(b"aaaaa")
+    await sink.write(b"")
+    await sink.write(b"bbbbb")
+    await sink.close()
+
+    await sink.write(b"")
+    with pytest.raises(MicrosandboxError, match="stdin closed"):
+        await sink.write(b"after EOF")
+
+    output = await piped.collect()
+    assert output.success is True
+    assert output.stdout_text == "aaaaabbbbb"
+
+
+@pytest.mark.asyncio
 async def test_rlimits_reject_raw_dicts(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-rlimit-types")
 

@@ -1178,7 +1178,10 @@ export interface NapiOutboundProxyBuilder {
 }
 
 export interface NapiHttpConnectProxyBuilder {
-  readonly __httpConnectProxy?: never;
+  credentials(
+    username: string,
+    password: { kind: "env"; var: string },
+  ): this;
 }
 
 export interface NapiSocks4ProxyBuilder {

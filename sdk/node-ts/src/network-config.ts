@@ -105,6 +105,10 @@ export type OutboundProxy =
   | {
       readonly protocol: "http_connect";
       readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
     }
   | {
       readonly protocol: "socks4";

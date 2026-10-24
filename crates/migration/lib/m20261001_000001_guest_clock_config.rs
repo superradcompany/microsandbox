@@ -99,7 +99,12 @@ mod tests {
 
     async fn database(config: &str, active: Option<&str>) -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        let count = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == Migration.name())
+            .unwrap()
+            + 1;
+        Migrator::up(&db, Some(count as u32)).await.unwrap();
         db.execute_raw(Statement::from_sql_and_values(
             DatabaseBackend::Sqlite,
             "INSERT INTO sandbox (name, config, active_config, status, ephemeral) VALUES ('clock-fixture', ?, ?, 'Stopped', 0)",
@@ -183,7 +188,7 @@ mod tests {
                 assert_eq!(after.2.len() + 1, before.2.len());
                 assert!(!after.2.iter().any(|id| id == Migration.name()));
 
-                Migrator::up(&db, None).await.unwrap();
+                Migrator::up(&db, Some(1)).await.unwrap();
                 assert_eq!(saved_state(&db).await, before);
             }
         }

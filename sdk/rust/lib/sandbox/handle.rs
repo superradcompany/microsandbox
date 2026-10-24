@@ -115,6 +115,7 @@ impl SandboxHandle {
                 db_id: model.id,
                 status: model.status,
                 config_json: model.config,
+                caller_config_overrides_json: model.caller_config_overrides,
                 active_config_json: model.active_config,
                 created_at: model.created_at.map(|dt| dt.and_utc()),
                 updated_at: model.updated_at.map(|dt| dt.and_utc()),
@@ -295,9 +296,10 @@ impl SandboxHandle {
     /// raw JSON, or [`cloud`](Self::cloud) to access the typed cloud state.
     pub fn config(&self) -> MicrosandboxResult<SandboxConfig> {
         match &self.inner {
-            SandboxHandleInner::Local(s) => {
-                Ok(serde_json::from_str::<SandboxConfig>(&s.config_json)?)
-            }
+            SandboxHandleInner::Local(s) => SandboxConfig::from_stored(
+                &s.config_json,
+                s.caller_config_overrides_json.as_deref(),
+            ),
             SandboxHandleInner::Cloud(_) => Err(MicrosandboxError::local_only(
                 Operation::SandboxHandleConfig,
             )),
@@ -605,7 +607,10 @@ impl SandboxHandle {
                 // handshake so concurrent name reuse cannot silently rebind
                 // this receiver to the replacement.
                 self.refresh().await?;
-                let config = serde_json::from_str::<SandboxConfig>(&local.config_json)?;
+                let config = SandboxConfig::from_stored(
+                    &local.config_json,
+                    local.caller_config_overrides_json.as_deref(),
+                )?;
 
                 Ok(Sandbox::from_local(
                     self.backend.clone(),
@@ -1173,8 +1178,8 @@ mod tests {
         let canonical: crate::sandbox::ForkBuilder = source.fork("child");
         let legacy: crate::sandbox::BranchBuilder = source.branch("child");
         assert_eq!(
-            serde_json::to_value(canonical.inner.config.into_config()).unwrap(),
-            serde_json::to_value(legacy.inner.config.into_config()).unwrap(),
+            serde_json::to_value(canonical.config.inner.config.into_config()).unwrap(),
+            serde_json::to_value(legacy.config.inner.config.into_config()).unwrap(),
         );
         let _: crate::sandbox::ForkManyBuilder = source.branch_many(["a", "b"]);
         let _: crate::sandbox::BranchManyBuilder = source.fork_many(["a", "b"]);

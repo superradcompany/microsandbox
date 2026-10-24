@@ -142,11 +142,6 @@ impl HeartbeatReader {
             return HeartbeatDecision::PendingBoot(status);
         }
 
-        // Active exec sessions are never idle.
-        if status.active_exec_sessions > 0 {
-            return HeartbeatDecision::Active(status);
-        }
-
         match (idle_timeout, status.idle_for) {
             (Some(idle_timeout), Some(idle_for)) if idle_for >= idle_timeout => {
                 HeartbeatDecision::Idle(status)
@@ -246,29 +241,6 @@ mod tests {
     }
 
     #[test]
-    fn running_exec_prevents_idle_despite_stale_activity_sequence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(HEARTBEAT_FILE);
-        let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path());
-
-        write_heartbeat_file(&path, heartbeat(1, 1, 1));
-        assert!(matches!(
-            reader.check_at(start, Some(Duration::from_secs(60))),
-            HeartbeatDecision::Active(_)
-        ));
-
-        write_heartbeat_file(&path, heartbeat(2, 1, 1));
-        assert!(matches!(
-            reader.check_at(
-                start + Duration::from_secs(120),
-                Some(Duration::from_secs(60))
-            ),
-            HeartbeatDecision::Active(_)
-        ));
-    }
-
-    #[test]
     fn no_exec_is_idle_when_activity_sequence_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
@@ -292,6 +264,34 @@ mod tests {
     }
 
     #[test]
+    fn detached_exec_does_not_prevent_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(HEARTBEAT_FILE);
+        let start = Instant::now();
+        let mut reader = HeartbeatReader::new_at(dir.path());
+
+        for (heartbeat_seq, now) in [(1, start), (2, start + Duration::from_secs(120))] {
+            write_heartbeat_file(&path, heartbeat(heartbeat_seq, 1, 1));
+
+            let decision = reader.check_at(now, Some(Duration::from_secs(60)));
+            if heartbeat_seq == 1 {
+                assert!(matches!(decision, HeartbeatDecision::Active(_)));
+            } else {
+                assert!(matches!(decision, HeartbeatDecision::Idle(_)));
+            }
+        }
+
+        write_heartbeat_file(&path, heartbeat(3, 2, 1));
+        assert!(matches!(
+            reader.check_at(
+                start + Duration::from_secs(121),
+                Some(Duration::from_secs(60))
+            ),
+            HeartbeatDecision::Active(_)
+        ));
+    }
+
+    #[test]
     fn no_idle_timeout_keeps_fresh_inactive_sandbox_active() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(HEARTBEAT_FILE);
@@ -307,32 +307,6 @@ mod tests {
         write_heartbeat_file(&path, heartbeat(2, 1, 0));
         assert!(matches!(
             reader.check_at(start + Duration::from_secs(120), None),
-            HeartbeatDecision::Active(_)
-        ));
-    }
-
-    #[test]
-    fn stale_heartbeat_with_running_exec_is_not_killed() {
-        // The original bug: a busy sandbox whose heartbeat goes stale (the file
-        // stops advancing) while exec sessions are active was killed. It must NOT
-        // be — a busy agent is a healthy agent.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(HEARTBEAT_FILE);
-        let start = Instant::now();
-        let mut reader = HeartbeatReader::new_at(dir.path());
-
-        write_heartbeat_file(&path, heartbeat(1, 1, 1));
-        assert!(matches!(
-            reader.check_at(start, Some(Duration::from_secs(60))),
-            HeartbeatDecision::Active(_)
-        ));
-
-        // No new heartbeat for a long time, but an exec session is still open.
-        assert!(matches!(
-            reader.check_at(
-                start + Duration::from_secs(3600),
-                Some(Duration::from_secs(60))
-            ),
             HeartbeatDecision::Active(_)
         ));
     }

@@ -46,7 +46,7 @@ For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's rea
 ```
 </CodeGroup>
 
-A managed proxy replaces per-sandbox proxy settings, including SOCKS credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
+A managed proxy replaces per-sandbox proxy settings, including SOCKS and HTTP CONNECT credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
 
 Use CLI and SDK releases that support the selected proxy protocol. Older releases reject the HTTP CONNECT protocol as unknown.
 

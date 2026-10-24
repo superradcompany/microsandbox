@@ -4,6 +4,30 @@
 //! [`LocalBackend::create_sandbox`] is the single entry point; the trait
 //! impl's `create`/`create_detached` and the pull-progress shims on
 //! [`Sandbox`] and `SandboxBuilder` all dispatch here.
+//!
+//! # OCI image protection
+//!
+//! File leases and saved database ownership overlap; there must be no unprotected handoff:
+//!
+//! 1. The creator retains shared leases on cached image files while resolving and preparing them.
+//! 2. The `Starting` sandbox row and its image dependency commit in one transaction, before
+//!    the runtime is spawned. The creator still holds its leases during this commit.
+//! 3. Creation releases its operation leases when it finishes. The saved image dependency
+//!    continues to protect the backing files, including while the sandbox is stopped.
+//!
+//! Each concurrent creator retains its own leases. One creator finishing cannot release
+//! another's protection, even when readers within one process share an underlying file handle.
+//! OS file locks coordinate separate processes; prune skips leased files and rechecks saved
+//! dependencies before deletion. Database ownership is a durable record, not a database lock
+//! held for the sandbox's lifetime. The runtime need not retain these creation-time leases.
+//!
+//! # Crashes and cancellation
+//!
+//! Before the ownership transaction commits, no runtime has started; the transaction either
+//! commits or rolls back atomically. After commit, a creator or runtime panic, cancellation,
+//! or process exit does not by itself remove the saved image dependency. Releasing file
+//! leases therefore does not expose the backing to prune. Interrupted creation can leave
+//! a stale record retaining unused files until normal sandbox cleanup removes the dependency.
 
 #[cfg(all(test, unix))]
 mod archive_tests;
@@ -260,7 +284,7 @@ impl LocalBackend {
                 config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly,
                 config.snapshot_base.as_deref(),
                 &config.restore_resources,
-                config.restore_boot_overrides,
+                config.caller_config_overrides.as_deref(),
             ))
             .await?;
 
@@ -1042,26 +1066,58 @@ impl LocalBackend {
         // Construction needs the original boot geometry, but future starts/modifications need
         // the captured requested sizes. Replace only values that still match construction:
         // a concurrent explicit desired edit must survive this readiness publication.
-        sandbox_entity::Entity::update_many()
-            .col_expr(
-                sandbox_entity::Column::Config,
-                Expr::cust_with_values(
-                    "json_set(json_remove(config, '$.checkpoint_restore'), \
-                     '$.resources.cpus', CASE WHEN json_extract(config, '$.resources.cpus') = ? \
-                     THEN ? ELSE json_extract(config, '$.resources.cpus') END, \
-                     '$.resources.memory_mib', CASE WHEN json_extract(config, '$.resources.memory_mib') = ? \
-                     THEN ? ELSE json_extract(config, '$.resources.memory_mib') END)",
-                    [
-                        u32::from(construction.spec.resources.cpus),
-                        u32::from(restored.spec.resources.cpus),
-                        construction.spec.resources.memory_mib,
-                        restored.spec.resources.memory_mib,
-                    ],
-                ),
-            )
-            .filter(sandbox_entity::Column::Id.eq(sandbox_id))
-            .exec(db)
-            .await?;
+        db.transaction(|txn| async move {
+            let before = microsandbox_db::catalog::sandbox_query(&txn)
+                .await?
+                .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                .one(&txn)
+                .await?;
+
+            sandbox_entity::Entity::update_many()
+                .col_expr(
+                    sandbox_entity::Column::Config,
+                    Expr::cust_with_values(
+                        "json_set(json_remove(config, '$.checkpoint_restore'), \
+                         '$.resources.cpus', CASE WHEN json_extract(config, '$.resources.cpus') = ? \
+                         THEN ? ELSE json_extract(config, '$.resources.cpus') END, \
+                         '$.resources.memory_mib', CASE WHEN json_extract(config, '$.resources.memory_mib') = ? \
+                         THEN ? ELSE json_extract(config, '$.resources.memory_mib') END)",
+                        [
+                            u32::from(construction.spec.resources.cpus),
+                            u32::from(restored.spec.resources.cpus),
+                            construction.spec.resources.memory_mib,
+                            restored.spec.resources.memory_mib,
+                        ],
+                    ),
+                )
+                .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                .exec(&txn)
+                .await?;
+
+            if let Some(before) = before
+                && microsandbox_db::catalog::has_column(&txn, "sandbox", "caller_config_overrides").await?
+            {
+                let intent = SandboxConfig::from_stored(&before.config, before.caller_config_overrides.as_deref())?;
+                if let Some(after) = microsandbox_db::catalog::sandbox_query(&txn)
+                    .await?
+                    .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                    .one(&txn)
+                    .await?
+                {
+                    sandbox_entity::Entity::update_many()
+                        .col_expr(
+                            sandbox_entity::Column::CallerConfigOverrides,
+                            Expr::value(intent.caller_config_overrides_json(&after.config)?),
+                        )
+                        .filter(sandbox_entity::Column::Id.eq(sandbox_id))
+                        .exec(&txn)
+                        .await?;
+                }
+            }
+
+            Ok::<_, crate::MicrosandboxError>((txn, ()))
+        })
+        .await?;
         Ok(())
     }
 
@@ -1154,7 +1210,7 @@ impl LocalBackend {
             // Resource reporting is part of readiness, not an unbounded wait after it.
             let restored = tokio::time::timeout_at(
                 startup_deadline,
-                crate::sandbox::restore_requested_resources(self, &mut config),
+                self.restore_requested_resources(&mut config),
             )
             .await
             .unwrap_or_else(|_| {
@@ -1953,16 +2009,19 @@ impl LocalBackend {
         status: SandboxStatus,
     ) -> MicrosandboxResult<i32> {
         let config_json = serde_json::to_string(config)?;
+        let caller_config_overrides_json = config.caller_config_overrides_json(&config_json)?;
         let labels = config.spec.labels.clone();
 
         db.transaction(|txn| {
             let config_json = config_json.clone();
+            let caller_config_overrides_json = caller_config_overrides_json.clone();
             let labels = labels.clone();
             async move {
                 let now = chrono::Utc::now().naive_utc();
                 let model = sandbox_entity::ActiveModel {
                     name: Set(config.spec.name.clone()),
                     config: Set(config_json),
+                    caller_config_overrides: Set(caller_config_overrides_json.clone()),
                     status: Set(status),
                     ephemeral: Set(config.spec.lifecycle.ephemeral),
                     created_at: Set(Some(now)),
@@ -3086,6 +3145,10 @@ mod tests {
             checkpoint_root: "blake3:pending".into(),
             checkpoint_id: "pending".into(),
         });
+        let mut options = crate::SandboxConfigPatch::new();
+        options.spec.runtime.workdir = Some(None);
+        options.spec.runtime.cmd = Some(Vec::new());
+        config.caller_config_overrides = Some(Box::new(options));
         let id = LocalBackend::insert_sandbox_record(pools.write(), &config)
             .await
             .unwrap();
@@ -3119,7 +3182,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let completed: SandboxConfig = serde_json::from_str(&model.config).unwrap();
+        let completed =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())
+                .unwrap();
+        let options = completed.caller_config_overrides.as_ref().unwrap();
+        assert_eq!(options.spec.runtime.workdir, Some(None));
+        assert_eq!(options.spec.runtime.cmd, Some(Vec::new()));
+        assert!(options.spec.init.is_none());
         assert!(completed.checkpoint_restore.is_none());
         assert_eq!(completed.spec.name, "pending");
         assert_eq!(completed.spec.resources.cpus, 2);

@@ -1080,6 +1080,18 @@ func TestFFIWireShape_SOCKS5Credentials(t *testing.T) {
 	}
 }
 
+func TestFFIWireShape_HTTPConnectCredentials(t *testing.T) {
+	got := marshalCreateOptions(t,
+		WithImage("alpine"),
+		WithProxy(HTTPConnectProxy("127.0.0.1:3128").Credentials("sandbox", SecretSourceEnv("HTTP_CONNECT_PASSWORD"))),
+	)
+	proxy := mustField(t, got, "proxy").(map[string]any)
+	passwordSource, ok := proxy["password_source"].(map[string]any)
+	if proxy["protocol"] != "http_connect" || proxy["username"] != "sandbox" || !ok || passwordSource["kind"] != "env" || passwordSource["var"] != "HTTP_CONNECT_PASSWORD" {
+		t.Fatalf("HTTP CONNECT proxy credentials = %#v", proxy)
+	}
+}
+
 // The Rust side relies on serde(default), so zero-valued Go scalar fields must
 // not reach the wire. Explicit optional values use pointers when zero is valid
 // on the wire for validation.

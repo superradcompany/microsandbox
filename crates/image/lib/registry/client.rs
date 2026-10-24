@@ -1,6 +1,15 @@
 //! OCI registry client.
 //!
 //! Wraps `oci-client` with platform resolution, caching, and progress reporting.
+//!
+//! # Protection from concurrent prune
+//!
+//! Pulls protect their cache entries while running, but [`PullResult`] and
+//! [`CachedImageMetadata`] do not own leases. To retain protection after a call returns,
+//! create a [`GlobalCache::operation`] scope and pass its clone to [`Registry::new`] or
+//! the cached-pull methods. Keep the scope alive through durable catalog publication.
+//! A registry built with an ordinary cache only retains its internal pull scope until
+//! the pull finishes; keeping that registry or its result alive does not pin the artifacts.
 
 use std::{
     collections::HashMap,
@@ -22,12 +31,13 @@ use tokio::{
 use crate::{
     cache::{
         self, CachedImageMetadata, CachedLayerMetadata, GlobalCache, VmdkWriteMode,
-        lock::{lock_exclusive, open_lock_file},
+        lock::CacheLockGuard,
     },
     config::ImageConfig,
     digest::Digest,
     erofs,
     error::{ImageError, ImageResult},
+    flat,
     layer::Layer,
     platform::Platform,
     progress::{self, PullProgress, PullProgressHandle, PullProgressSender},
@@ -148,6 +158,9 @@ impl Registry {
     }
 
     /// Resolve a pull directly from the on-disk cache without building a registry client.
+    ///
+    /// Pass a [`GlobalCache::operation`] scope and retain it until the caller publishes
+    /// durable ownership. The returned values do not retain prune protection themselves.
     pub fn pull_cached(
         cache: &GlobalCache,
         reference: &oci_client::Reference,
@@ -158,6 +171,8 @@ impl Registry {
     }
 
     /// Resolve a cached image without blocking the async executor on a deletion lease.
+    ///
+    /// Like [`Self::pull_cached`], protection after return requires a retained operation scope.
     pub async fn pull_cached_async(
         cache: &GlobalCache,
         reference: &oci_client::Reference,
@@ -176,6 +191,8 @@ impl Registry {
     /// Snapshot restores use this before contacting a registry because the
     /// snapshot already records the immutable base image digest, while cached
     /// metadata may still be keyed by the mutable tag that produced it.
+    /// Pass a retained [`GlobalCache::operation`] scope to protect the matched artifacts
+    /// through publication; the returned values do not hold leases.
     pub async fn pull_cached_by_manifest_digest(
         cache: &GlobalCache,
         manifest_digest: &Digest,
@@ -269,6 +286,9 @@ impl Registry {
     }
 
     /// Pull an image. Downloads blobs and materializes EROFS layers concurrently.
+    ///
+    /// To keep the result protected from prune after return, construct this registry with
+    /// a [`GlobalCache::operation`] scope and retain that scope through durable publication.
     pub async fn pull(
         &self,
         reference: &oci_client::Reference,
@@ -303,19 +323,52 @@ impl Registry {
         let platform = self.platform.clone();
         let manifest_digest = manifest_digest.clone();
         let layer_diff_ids = layer_diff_ids.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let _leases = cache.lease_paths(
+
+        // Cache hits retain the same layer protection as materialization misses.
+        let leases = cache
+            .lease_paths_async(
                 layer_diff_ids
                     .iter()
                     .map(|id| cache.layer_erofs_path(id))
                     .collect(),
-            )?;
-            crate::flat::materialize_flat_rootfs(
+            )
+            .await?;
+
+        if !force {
+            let read_cache = cache.clone();
+            let read_manifest = manifest_digest.clone();
+            let read_layers = layer_diff_ids.clone();
+            let read_platform = platform.clone();
+
+            if let Some(reference) = tokio::task::spawn_blocking(move || {
+                flat::read_current_flat_ref(
+                    &read_cache,
+                    &read_manifest,
+                    &read_layers,
+                    &read_platform,
+                )
+            })
+            .await
+            .map_err(|error| ImageError::Io(io::Error::other(error)))??
+            {
+                return Ok(reference);
+            }
+        }
+
+        let (derivation_digest, derivation_bytes) =
+            flat::flat_derivation_digest(&manifest_digest, &layer_diff_ids, &platform);
+        let materializer_guard =
+            CacheLockGuard::acquire_async(&cache.flat_lock_path(&derivation_digest)).await?;
+        tokio::task::spawn_blocking(move || {
+            let _materializer_guard = materializer_guard;
+            let _leases = leases;
+            flat::materialize_flat_rootfs_locked(
                 &cache,
                 &manifest_digest,
                 &layer_diff_ids,
-                &platform,
                 force,
+                derivation_digest,
+                derivation_bytes,
             )
         })
         .await
@@ -395,6 +448,8 @@ impl Registry {
     ///
     /// Creates a progress channel internally and returns both the receiver
     /// handle and the spawned pull task.
+    /// As with [`Self::pull`], retain a caller-owned operation scope through publication
+    /// if the returned result must remain protected after the task finishes.
     pub fn pull_with_progress(
         &self,
         reference: &oci_client::Reference,
@@ -413,6 +468,8 @@ impl Registry {
     /// Use [`progress_channel()`](crate::progress_channel) to create the
     /// channel, keep the [`PullProgressHandle`] receiver, and pass the
     /// [`PullProgressSender`] here.
+    /// Protection beyond task completion requires the operation scope described in
+    /// [`Self::pull`]; the task result does not own leases.
     pub fn pull_with_sender(
         &self,
         reference: &oci_client::Reference,
@@ -486,16 +543,10 @@ impl Registry {
         let ref_str: Arc<str> = reference.to_string().into();
         let oci_ref = reference;
         let image_lock_path = self.cache.image_lock_path(reference);
-        let image_lock_file = open_lock_file(&image_lock_path)?;
-        let image_lock_file = tokio::task::spawn_blocking(move || {
-            lock_exclusive(&image_lock_file)?;
-            Ok::<_, ImageError>(image_lock_file)
-        })
-        .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
+        let image_lock_guard = CacheLockGuard::acquire_async(&image_lock_path).await?;
         // Lock files are intentionally never deleted — stable inodes prevent
         // TOCTOU races where two processes flock different inodes at the same path.
-        let _image_lock_guard = image_lock_file;
+        let _image_lock_guard = image_lock_guard;
 
         // Step 1: Early cache check using persisted image metadata.
         if let Some(cached) =
@@ -1002,18 +1053,9 @@ impl Registry {
                     }
 
                     // Acquire per-layer flock to coordinate with concurrent pulls.
-                    let lock_file = open_lock_file(&lock_path)
-                        .map_err(|e| LayerPipelineFailure { error: e })?;
-                    let lock_file = tokio::task::spawn_blocking(move || {
-                        lock_exclusive(&lock_file)?;
-                        Ok::<_, ImageError>(lock_file)
-                    })
-                    .await
-                    .map_err(|e| LayerPipelineFailure {
-                        error: ImageError::Io(io::Error::other(e)),
-                    })?
-                    .map_err(|e| LayerPipelineFailure { error: e })?;
-                    let materializer_guard = lock_file;
+                    let materializer_guard = CacheLockGuard::acquire_async(&lock_path)
+                        .await
+                        .map_err(|error| LayerPipelineFailure { error })?;
 
                     // Re-check after lock — another process may have materialized it.
                     if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
@@ -1197,14 +1239,7 @@ impl Registry {
 
         // Acquire flock for fsmeta/VMDK generation.
         let fsmeta_lock_path = self.cache.fsmeta_erofs_lock_path(manifest_digest);
-        let fsmeta_lock_file = open_lock_file(&fsmeta_lock_path)?;
-        let fsmeta_lock_file = tokio::task::spawn_blocking(move || {
-            lock_exclusive(&fsmeta_lock_file)?;
-            Ok::<_, ImageError>(fsmeta_lock_file)
-        })
-        .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))??;
-        let materializer_guard = Arc::new(fsmeta_lock_file);
+        let materializer_guard = Arc::new(CacheLockGuard::acquire_async(&fsmeta_lock_path).await?);
 
         // Re-check after lock acquisition.
         if cache::is_valid_erofs_artifact_async(&fsmeta_path).await
@@ -1331,22 +1366,14 @@ impl Registry {
         progress: Option<&PullProgressSender>,
     ) -> ImageResult<()> {
         let cache = self.cache.clone();
-        let manifest_digest = manifest_digest.clone();
-        let diff_ids = validated_diff_ids.to_vec();
-        let progress = progress.cloned();
-
-        // The worker owns the cache operation pins and the materializer lock, even if
-        // the awaiting pull is cancelled while the descriptor is being repaired.
-        tokio::task::spawn_blocking(move || {
-            cache.write_vmdk(
-                &manifest_digest,
-                &diff_ids,
+        cache
+            .write_vmdk_async(
+                manifest_digest,
+                validated_diff_ids,
                 VmdkWriteMode::KeepExisting,
-                progress.as_ref(),
+                progress.cloned(),
             )
-        })
-        .await
-        .map_err(|e| ImageError::Io(io::Error::other(e)))?
+            .await
     }
 
     // NOTE: materialize_flat_image was removed — replaced by fsmeta + VMDK generation
@@ -1674,7 +1701,7 @@ fn resolve_cached_pull_result_for_platform(
         return Ok(None);
     }
     if options.materialization.includes_flat()
-        && crate::flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
+        && flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
             .is_none()
     {
         return Ok(None);
@@ -1828,7 +1855,7 @@ async fn resolve_cached_metadata_pull_result_async(
         return Ok(None);
     }
     if materialization.includes_flat()
-        && crate::flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
+        && flat::read_current_flat_ref(cache, &manifest_digest, &cached_diff_ids, platform)?
             .is_none()
     {
         return Ok(None);

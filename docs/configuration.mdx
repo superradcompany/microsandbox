@@ -252,7 +252,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
-| `outbound_proxy` | `null` | Default outbound SOCKS4/SOCKS5 proxy for local sandboxes. Uses the existing proxy object with `protocol`, `address` (`IP:port`), and optional authentication. See [managed proxy configuration](/enterprise/corporate-networking#route-sandbox-traffic). |
+| `outbound_proxy` | `null` | Default outbound HTTP CONNECT/SOCKS4/SOCKS5 proxy for local sandboxes. Uses the existing proxy object with `protocol`, `address` (`IP:port`), and optional authentication. See [managed proxy configuration](/enterprise/corporate-networking#route-sandbox-traffic). |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
@@ -270,7 +270,24 @@ For local `workdir`, omission inherits the lower layer and explicit `null` clear
 
 An ordinary `outbound_proxy` default can be overridden per sandbox. A managed value takes precedence over CLI/SDK proxy options; managed `null` clears them.
 
-The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`; SOCKS5 accepts `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`. Passwords are resolved at sandbox startup.
+The whole proxy object is replaced, including credentials. SOCKS4 accepts an optional `user_id`. SOCKS5 and HTTP CONNECT accept `credentials` containing `username` and `password: { "kind": "env", "var": "PROXY_PASSWORD" }`, for example:
+
+```json
+{
+  "sandbox_defaults": {
+    "outbound_proxy": {
+      "protocol": "http_connect",
+      "address": "127.0.0.1:3128",
+      "credentials": {
+        "username": "sandbox",
+        "password": { "kind": "env", "var": "PROXY_PASSWORD" }
+      }
+    }
+  }
+}
+```
+
+Only an environment `password` source is supported, and the variable name is stored instead of the password. HTTP CONNECT also accepts an empty `username` for token-only authentication; SOCKS5 requires 1–255 byte usernames. Passwords are resolved at sandbox startup.
 
 Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
 

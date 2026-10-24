@@ -307,6 +307,9 @@ impl Image {
     }
 
     /// Remove cached image data that is not used by any sandbox or indexed snapshot.
+    ///
+    /// If a later cleanup batch fails, the error message includes removal counts from
+    /// completed batches. The failing batch may have made additional progress.
     pub async fn prune() -> MicrosandboxResult<ImagePruneReport> {
         let backend = crate::backend::default_backend();
         let local = backend
@@ -474,28 +477,6 @@ impl Image {
             config: config_detail,
             layers,
         })
-    }
-
-    /// Remove an image from the database and clean up orphaned layers on disk.
-    ///
-    /// Referenced images require `force` to untag, while their backing remains available to
-    /// sandboxes and snapshots. Active storage operations always return
-    /// [`MicrosandboxError::ImageInUse`], including with `force`.
-    pub async fn remove_local(
-        local: &LocalBackend,
-        reference: &str,
-        force: bool,
-    ) -> MicrosandboxResult<()> {
-        cleanup::remove(local, reference, force).await
-    }
-
-    /// Remove cached image data that is not used by any sandbox or indexed snapshot.
-    ///
-    /// Pruning removes unused image references, then removes manifests and layers
-    /// that become unreachable. Images used by existing sandboxes or snapshots
-    /// are preserved.
-    pub async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport> {
-        cleanup::prune(local).await
     }
 
     /// Load images from a local archive into an explicit local backend's cache.

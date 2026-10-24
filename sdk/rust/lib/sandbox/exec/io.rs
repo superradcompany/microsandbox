@@ -17,7 +17,7 @@ use super::ExecEvent;
 //--------------------------------------------------------------------------------------------------
 
 /// Per-execution stdin capacity; caller data stays outside the SDK while waiting.
-pub(super) struct InputWindow {
+pub(crate) struct InputWindow {
     /// Remaining stdin payload allowance advertised by the guest.
     available: Semaphore,
     /// Maximum payload bytes in each stdin message.
@@ -61,7 +61,7 @@ pub(crate) struct EventReceiver {
 //--------------------------------------------------------------------------------------------------
 
 impl InputWindow {
-    pub(super) fn new(bytes: u32, chunk_size: usize) -> Arc<Self> {
+    pub(crate) fn new(bytes: u32, chunk_size: usize) -> Arc<Self> {
         Arc::new(Self {
             available: Semaphore::new(bytes as usize),
             chunk_size,
@@ -72,7 +72,7 @@ impl InputWindow {
     }
 
     /// Send caller data in chunks, reserving capacity until each frame is committed.
-    pub(super) async fn send(
+    pub(crate) async fn send(
         &self,
         client: &AgentClient,
         id: u32,
@@ -113,7 +113,7 @@ impl InputWindow {
         })
     }
 
-    pub(super) fn acknowledge(&self, consumed: u64) -> bool {
+    pub(crate) fn acknowledge(&self, consumed: u64) -> bool {
         let mut offsets = self.offsets.lock().unwrap();
         if consumed < offsets.consumed || consumed > offsets.sent {
             return false;
@@ -124,11 +124,11 @@ impl InputWindow {
         true
     }
 
-    pub(super) fn mark_started(&self) {
+    pub(crate) fn mark_started(&self) {
         self.started.send_replace(true);
     }
 
-    pub(super) async fn wait_started(&self) -> MicrosandboxResult<()> {
+    pub(crate) async fn wait_started(&self) -> MicrosandboxResult<()> {
         let mut started = self.started.subscribe();
         let mut closed = self.closed.subscribe();
         tokio::select! {
@@ -137,7 +137,7 @@ impl InputWindow {
         }
     }
 
-    pub(super) fn close(&self) {
+    pub(crate) fn close(&self) {
         self.available.close();
         self.closed.send_replace(true);
     }
