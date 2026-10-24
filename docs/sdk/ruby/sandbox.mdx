@@ -719,14 +719,12 @@ sandbox.restart(force: false, timeout: nil, detached: false) # => Sandbox
 
 Restart this exact sandbox. Defaults to graceful shutdown, the SDK's ten-second timeout, and attached local start. A created, stopped, or crashed sandbox starts directly; a starting sandbox is observed until it settles. Set `force: true` to kill, `timeout:` in seconds to change how long shutdown can take, or `detached: true` for a local background start.
 
-On microsandbox cloud, graceful restart is supported, but timeout expiry cannot escalate to force kill. `force: true` is local-only, and `detached:` affects only local process ownership.
-
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Use forced termination; defaults to false and is local-only.</div>
+    <div className="msb-param-desc">Use forced termination; defaults to false.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>
@@ -1823,7 +1821,7 @@ Restart this exact sandbox with the same state and option semantics as `Sandbox#
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>force</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Use forced termination; defaults to false and is local-only.</div>
+    <div className="msb-param-desc">Use forced termination; defaults to false.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>timeout</code><span className="msb-type">Numeric | nil</span></div>

@@ -27,8 +27,8 @@ use crate::sandbox::exec::{ExecHandle, ExecOptions, ExecOutput};
 use crate::sandbox::fs::{FsEntry, FsMetadata, FsReadStream, FsWriteSink};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    DEFAULT_STOP_TIMEOUT, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
-    SandboxStatus,
+    DEFAULT_STOP_TIMEOUT, RestartOptions, Sandbox, SandboxConfig, SandboxHandle,
+    SandboxListBuilder, SandboxPage, SandboxStatus,
 };
 
 // Keep the pre-split path `crate::backend::sandbox::cloud_status_to_sandbox_status`
@@ -307,6 +307,21 @@ pub trait SandboxBackend: Send + Sync {
         _identity: SandboxIdentity,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         self.kill(backend, name)
+    }
+
+    /// Restart the exact persisted sandbox identified by `identity`.
+    ///
+    /// The default stops the sandbox and starts it again.
+    fn restart_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+        options: RestartOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        Box::pin(crate::sandbox::restart_by_stop_and_start(
+            backend, name, identity, options,
+        ))
     }
 
     /// Trigger a graceful drain on a sandbox by name.

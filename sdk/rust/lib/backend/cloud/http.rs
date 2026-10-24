@@ -36,6 +36,9 @@ const CLOUD_READY_WAIT_TIMEOUT_SECS: u64 = 90;
 /// before reqwest's ordinary 30-second client timeout applies.
 const CLOUD_READY_HTTP_TIMEOUT: Duration = Duration::from_secs(95);
 
+/// Extra time a restart request waits beyond its shutdown timeout.
+const CLOUD_RESTART_HTTP_ALLOWANCE: Duration = Duration::from_secs(4 * 60);
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -67,6 +70,12 @@ struct CloudSandboxListQuery<'a> {
     limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CloudSandboxRestartQuery {
+    force: bool,
+    timeout: u64,
 }
 
 #[derive(Serialize)]
@@ -212,6 +221,53 @@ impl CloudBackend {
             .await
             .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/start", e))?;
         decode_json(resp, "POST /v1/sandboxes/:id/start").await
+    }
+
+    /// `POST /v1/sandboxes/:id/restart`.
+    pub(in crate::backend) async fn restart_sandbox_by_id(
+        &self,
+        id: &str,
+        force: bool,
+        timeout_secs: u64,
+    ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
+        let url = format!("{}/v1/sandboxes/{}/restart", self.url, urlencoding(id));
+        let query = CloudSandboxRestartQuery {
+            force,
+            timeout: timeout_secs,
+        };
+        let http_timeout =
+            Duration::from_secs(timeout_secs).saturating_add(CLOUD_RESTART_HTTP_ALLOWANCE);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .query(&query)
+            .timeout(http_timeout)
+            .send()
+            .await
+            .map_err(|e| cloud_io_error("POST /v1/sandboxes/:id/restart", e))?;
+        if resp.status() != reqwest::StatusCode::NOT_FOUND {
+            return decode_json(resp, "POST /v1/sandboxes/:id/restart").await;
+        }
+
+        // A missing sandbox carries an error code; a bare 404 is an API
+        // without this route.
+        let body_text = resp.text().await.unwrap_or_default();
+        let typed: Option<CloudErrorBody> = serde_json::from_str(&body_text).ok();
+        if cloud_error_code(typed.as_ref()).is_none() {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxRestart,
+                UnsupportedReason::NotAvailable(
+                    "this Microsandbox Cloud API does not support restart yet".into(),
+                ),
+            ));
+        }
+        Err(cloud_http_error(
+            404,
+            typed.as_ref(),
+            &body_text,
+            "POST /v1/sandboxes/:id/restart",
+        ))
     }
 
     /// `POST /v1/sandboxes/by-name/:name/stop`.

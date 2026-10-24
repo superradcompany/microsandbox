@@ -16,8 +16,9 @@ use crate::error::{Operation, UnsupportedReason};
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
-    RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle, SandboxListBuilder,
-    SandboxPage, SandboxStatus,
+    RestartOptions, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle,
+    SandboxListBuilder, SandboxPage, SandboxStatus, get_identified_handle,
+    restart_by_stop_and_start,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
@@ -113,6 +114,44 @@ impl CloudBackend {
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
         builder.finish_cloud(self.config_sources())
+    }
+
+    async fn restart_running_sandbox(
+        &self,
+        backend: Arc<dyn Backend>,
+        name: &str,
+        identity: SandboxIdentity,
+        options: RestartOptions,
+    ) -> MicrosandboxResult<Sandbox> {
+        // A zero budget must not dispatch shutdown, matching a timed stop.
+        if options.timeout.is_zero() {
+            return Err(stop_timed_out(name, &identity, options.timeout));
+        }
+
+        // The route takes whole seconds; round up so shutdown never gets less
+        // time than the caller asked for.
+        let timeout_secs = options
+            .timeout
+            .as_secs()
+            .saturating_add(u64::from(options.timeout.subsec_nanos() > 0));
+        let id = cloud_identity(identity.clone())?;
+        let cloud = self
+            .restart_sandbox_by_id(&id, options.force, timeout_secs)
+            .await
+            .map_err(|error| match error {
+                // Only a graceful shutdown reports a timeout.
+                MicrosandboxError::CloudHttp {
+                    code: Some(ref code),
+                    ..
+                } if code == "restart_stop_timed_out" => {
+                    stop_timed_out(name, &identity, options.timeout)
+                }
+                error => error,
+            })?;
+        ensure_cloud_sandbox_ready(&cloud)?;
+
+        let config = sandbox_config_from_cloud(&cloud);
+        Ok(Sandbox::from_cloud(backend, cloud, config))
     }
 }
 
@@ -289,6 +328,54 @@ impl SandboxBackend for CloudBackend {
                 Operation::SandboxKill,
                 UnsupportedReason::UseInstead(Operation::SandboxStop),
             ))
+        })
+    }
+
+    fn restart_identified<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        name: &'a str,
+        identity: SandboxIdentity,
+        options: RestartOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
+        // Cloud start is always detached, so `options.detached` changes nothing.
+        Box::pin(async move {
+            // The route's answer when the sandbox left Running after it was read.
+            let mut not_running = None;
+            loop {
+                let current = get_identified_handle(&backend, name, &identity).await?;
+                match current.status_snapshot() {
+                    SandboxStatus::Running => {
+                        if let Some(error) = not_running.take() {
+                            return Err(error);
+                        }
+                        match self
+                            .restart_running_sandbox(
+                                backend.clone(),
+                                name,
+                                identity.clone(),
+                                options,
+                            )
+                            .await
+                        {
+                            Err(error) if is_cloud_code(&error, "sandbox_not_running") => {
+                                not_running = Some(error);
+                            }
+                            result => return result,
+                        }
+                    }
+                    SandboxStatus::Created | SandboxStatus::Stopped | SandboxStatus::Crashed => {
+                        return current.start().await;
+                    }
+                    SandboxStatus::Starting => {
+                        not_running = None;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    SandboxStatus::Draining | SandboxStatus::Paused => {
+                        return restart_by_stop_and_start(backend, name, identity, options).await;
+                    }
+                }
+            }
         })
     }
 
@@ -487,6 +574,18 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+fn stop_timed_out(name: &str, identity: &SandboxIdentity, timeout: Duration) -> MicrosandboxError {
+    MicrosandboxError::StopTimeout {
+        name: name.to_string(),
+        identity: format!("{identity:?}"),
+        timeout,
+    }
+}
+
+fn is_cloud_code(error: &MicrosandboxError, code: &str) -> bool {
+    matches!(error, MicrosandboxError::CloudHttp { code: Some(actual), .. } if actual == code)
+}
 
 fn cloud_identity(identity: SandboxIdentity) -> MicrosandboxResult<String> {
     match identity {
@@ -1067,6 +1166,351 @@ mod tests {
                 assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn running_cloud_restart_sends_force_and_timeout() {
+        let cases = [
+            (
+                RestartOptions::default(),
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+            ),
+            (
+                RestartOptions {
+                    force: true,
+                    timeout: Duration::from_millis(2500),
+                    detached: true,
+                },
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=true&timeout=3 HTTP/1.1",
+            ),
+        ];
+
+        for (options, expected_restart) in cases {
+            let server = ScriptedCloud::start(vec![
+                (200, cloud_response_json(CloudSandboxStatus::Running)),
+                (200, cloud_response_json(CloudSandboxStatus::Running)),
+            ])
+            .await;
+            let handle = server.handle(CloudSandboxStatus::Running);
+
+            let sandbox = handle.restart_with(options).await.unwrap();
+
+            assert_eq!(sandbox.name(), "agent-1");
+            assert_eq!(
+                server.finish().await,
+                [
+                    "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                    expected_restart,
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stopped_cloud_restart_starts_directly() {
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Stopped)),
+            (200, cloud_response_json(CloudSandboxStatus::Stopped)),
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+        ])
+        .await;
+        let handle = server.handle(CloudSandboxStatus::Stopped);
+
+        let sandbox = handle
+            .restart_with(RestartOptions {
+                force: true,
+                ..RestartOptions::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(sandbox.name(), "agent-1");
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "GET /v1/sandboxes/00000000-0000-0000-0000-000000000002 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/start?wait_for=running&wait_timeout=90 HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_cloud_restart_waits_then_restarts() {
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Starting)),
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+        ])
+        .await;
+        let handle = server.handle(CloudSandboxStatus::Starting);
+
+        handle.restart().await.unwrap();
+
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_failures_carry_the_server_message() {
+        let boot_failed = r#"{"error":{"code":"restart_boot_failed","message":"the restart failed and the sandbox was stopped"}}"#;
+        let unconfirmed = r#"{"error":{"code":"orchestrator_unreachable","message":"could not confirm the restart; check the sandbox status before retrying"}}"#;
+
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (409, boot_failed.to_string()),
+        ])
+        .await;
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+            ]
+        );
+
+        assert!(
+            matches!(
+                &error,
+                MicrosandboxError::CloudHttp {
+                    status: 409,
+                    code: Some(code),
+                    message,
+                } if code == "restart_boot_failed"
+                    && message.contains("the sandbox was stopped")
+            ),
+            "{error:?}"
+        );
+
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (503, unconfirmed.to_string()),
+        ])
+        .await;
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+            ]
+        );
+
+        assert!(
+            matches!(
+                &error,
+                MicrosandboxError::Runtime(message)
+                    if message.contains("could not confirm the restart")
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_refuses_a_replaced_name_before_restarting() {
+        let server = ScriptedCloud::start(vec![(
+            200,
+            cloud_response_json(CloudSandboxStatus::Running),
+        )])
+        .await;
+        let mut stale = cloud_response(CloudSandboxStatus::Running);
+        stale.id = "00000000-0000-0000-0000-000000000009".into();
+        let handle = SandboxHandle::from_cloud(server.backend.clone(), stale).unwrap();
+
+        let error = handle.restart().await.err().expect("restart must fail");
+
+        assert!(
+            matches!(
+                &error,
+                MicrosandboxError::SandboxReplaced {
+                    name,
+                    expected,
+                    actual,
+                } if name == "agent-1"
+                    && expected == "cloud:00000000-0000-0000-0000-000000000009"
+                    && actual == "cloud:00000000-0000-0000-0000-000000000002"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            server.finish().await,
+            ["GET /v1/sandboxes/by-name/agent-1 HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_with_zero_timeout_does_not_dispatch() {
+        let server = ScriptedCloud::start(vec![(
+            200,
+            cloud_response_json(CloudSandboxStatus::Running),
+        )])
+        .await;
+
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart_with(RestartOptions {
+                timeout: Duration::ZERO,
+                ..RestartOptions::default()
+            })
+            .await
+            .err()
+            .expect("restart must fail");
+
+        assert!(
+            matches!(error, MicrosandboxError::StopTimeout { ref name, .. } if name == "agent-1"),
+            "{error:?}"
+        );
+        assert_eq!(
+            server.finish().await,
+            ["GET /v1/sandboxes/by-name/agent-1 HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_stop_timeout_is_the_local_stop_timeout() {
+        let timed_out = r#"{"error":{"code":"restart_stop_timed_out","message":"the sandbox did not stop within the timeout and was not restarted"}}"#;
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (409, timed_out.to_string()),
+        ])
+        .await;
+
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+
+        assert!(
+            matches!(
+                error,
+                MicrosandboxError::StopTimeout { ref name, timeout, .. }
+                    if name == "agent-1" && timeout == Duration::from_secs(10)
+            ),
+            "{error:?}"
+        );
+        assert_eq!(server.finish().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_starts_after_concurrent_stop() {
+        let not_running = r#"{"error":{"code":"sandbox_not_running","message":"cannot restart sandbox in 'stopped' state"}}"#;
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (409, not_running.to_string()),
+            (200, cloud_response_json(CloudSandboxStatus::Stopped)),
+            (200, cloud_response_json(CloudSandboxStatus::Stopped)),
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+        ])
+        .await;
+
+        server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "GET /v1/sandboxes/00000000-0000-0000-0000-000000000002 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/start?wait_for=running&wait_timeout=90 HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_reports_not_running_once_for_a_sandbox_still_running() {
+        let not_running =
+            r#"{"error":{"code":"sandbox_not_running","message":"sandbox is not running"}}"#;
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (409, not_running.to_string()),
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+        ])
+        .await;
+
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+
+        assert!(is_cloud_code(&error, "sandbox_not_running"), "{error:?}");
+        assert_eq!(
+            server.finish().await,
+            [
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+                "POST /v1/sandboxes/00000000-0000-0000-0000-000000000002/restart?force=false&timeout=10 HTTP/1.1",
+                "GET /v1/sandboxes/by-name/agent-1 HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_restart_without_api_support_is_unsupported() {
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (404, String::new()),
+        ])
+        .await;
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+        assert!(
+            matches!(
+                error,
+                MicrosandboxError::Unsupported {
+                    op: Operation::SandboxRestart,
+                    reason: UnsupportedReason::NotAvailable(_),
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(server.finish().await.len(), 2);
+
+        let missing = r#"{"error":{"code":"sandbox_not_found","message":"sandbox not found"}}"#;
+        let server = ScriptedCloud::start(vec![
+            (200, cloud_response_json(CloudSandboxStatus::Running)),
+            (404, missing.to_string()),
+        ])
+        .await;
+        let error = server
+            .handle(CloudSandboxStatus::Running)
+            .restart()
+            .await
+            .err()
+            .expect("restart must fail");
+        assert!(
+            matches!(error, MicrosandboxError::SandboxNotFound(_)),
+            "{error:?}"
+        );
+        assert_eq!(server.finish().await.len(), 2);
     }
 
     #[tokio::test]
@@ -1948,6 +2392,79 @@ mod tests {
                 reason: UnsupportedReason::ConfigField(field),
             } if field == expected
         ));
+    }
+
+    struct ScriptedCloud {
+        backend: Arc<dyn Backend>,
+        server: tokio::task::JoinHandle<(Vec<String>, tokio::net::TcpListener)>,
+    }
+
+    impl ScriptedCloud {
+        async fn start(responses: Vec<(u16, String)>) -> Self {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for (status, body) in responses {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).await.unwrap();
+                    let mut content_length = 0;
+                    loop {
+                        let mut line = String::new();
+                        assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                    let mut request_body = vec![0; content_length];
+                    reader.read_exact(&mut request_body).await.unwrap();
+
+                    let response = format!(
+                        "HTTP/1.1 {status} Scripted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    reader
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .unwrap();
+                    requests.push(request_line.trim_end().to_string());
+                }
+                (requests, listener)
+            });
+            let backend: Arc<dyn Backend> =
+                Arc::new(test_support::cloud_backend(&url, "test-key").unwrap());
+
+            Self { backend, server }
+        }
+
+        fn handle(&self, status: CloudSandboxStatus) -> SandboxHandle {
+            SandboxHandle::from_cloud(self.backend.clone(), cloud_response(status)).unwrap()
+        }
+
+        async fn finish(self) -> Vec<String> {
+            let (requests, listener) = self.server.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err(),
+                "unexpected extra request after {requests:?}"
+            );
+            requests
+        }
+    }
+
+    fn cloud_response_json(status: CloudSandboxStatus) -> String {
+        serde_json::to_string(&cloud_response(status)).unwrap()
     }
 
     /// Minimal response fixture for create-readiness assertions.

@@ -25,6 +25,9 @@ mod exit;
 pub(crate) mod flat_rootfs;
 pub mod fs;
 mod handle;
+#[cfg(feature = "cloud")]
+pub(crate) use handle::get_identified_handle;
+pub(crate) use handle::restart_by_stop_and_start;
 pub(crate) mod identity;
 pub mod init;
 pub mod jobs;
