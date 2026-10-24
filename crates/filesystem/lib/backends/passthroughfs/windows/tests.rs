@@ -790,6 +790,44 @@ fn host_rename_of_cached_hard_link_repairs_during_listing() {
 }
 
 #[test]
+fn host_directory_rename_moves_cached_descendants() {
+    // `dir/nested/file.txt` cached, then `dir` renamed on the host.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("dir/nested")).unwrap();
+    std::fs::write(temp.path.join("dir/nested/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    let nested = fs.lookup(context(), dir.inode, c"nested").unwrap();
+    let file = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("dir"), temp.path.join("moved")).unwrap();
+
+    let moved = fs.lookup(context(), ROOT_INODE, c"moved").unwrap();
+    assert_eq!(moved.inode, dir.inode);
+    // Cached descendants, used directly (no new lookup on them).
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    let (handle, _) = fs.open(context(), file.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, file.inode, handle), b"abc");
+    fs.release(context(), file.inode, 0, handle, false, false, None)
+        .unwrap();
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(nested.inode)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"file.txt".to_vec()), "{names:?}");
+    // Lookups under the new name return the cached inodes.
+    let nested_again = fs.lookup(context(), moved.inode, c"nested").unwrap();
+    assert_eq!(nested_again.inode, nested.inode);
+    let file_again = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+    assert_eq!(file_again.inode, file.inode);
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"dir"), LINUX_ENOENT);
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();

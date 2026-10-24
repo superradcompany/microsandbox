@@ -257,6 +257,34 @@ impl PassthroughFs {
             inodes.by_path.remove(&canonical);
         }
         *data.path.write().unwrap() = path.to_path_buf();
+        Self::follow_host_rename_descendants(inodes, &canonical, path);
+    }
+
+    /// A directory renamed on the host takes its cached descendants along:
+    /// aliases under `old` move under `new`, and so do canonical paths, as
+    /// `rename_inode_path` does for guest-side renames. Live entries already
+    /// cached under `new` are kept.
+    fn follow_host_rename_descendants(inodes: &mut InodeTable, old: &Path, new: &Path) {
+        let moved = inodes
+            .by_path
+            .range(old.to_path_buf()..)
+            .take_while(|(p, _)| p.starts_with(old))
+            .filter(|(p, _)| p.as_path() != old)
+            .map(|(p, d)| (p.clone(), d.clone()))
+            .collect::<Vec<_>>();
+        for (path, data) in moved {
+            inodes.by_path.remove(&path);
+            let target = new.join(path.strip_prefix(old).expect("selected descendant"));
+            inodes.by_path.entry(target).or_insert(data);
+        }
+        for data in inodes.by_inode.values() {
+            let canonical = data.path();
+            if canonical != old
+                && let Ok(rest) = canonical.strip_prefix(old)
+            {
+                *data.path.write().unwrap() = new.join(rest);
+            }
+        }
     }
 
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {
