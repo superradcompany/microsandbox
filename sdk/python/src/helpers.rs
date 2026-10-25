@@ -1047,6 +1047,7 @@ pub(crate) fn parse_mount_patches(
 
     let mut builder = MountPatchBuilder::default();
     for (guest, mount) in entries {
+        reject_named_volume_settings(&guest, &mount)?;
         builder = apply_mount(builder, guest, &mount)?;
     }
 
@@ -1054,6 +1055,27 @@ pub(crate) fn parse_mount_patches(
         Some(error) => Err(crate::error::to_py_err(error)),
         None => Ok(builder.mounts),
     }
+}
+
+/// Refuse named-volume creation settings in `modify()`. Modify never provisions volumes,
+/// and the shared builder drops these settings for existing volumes, so they would be lost.
+fn reject_named_volume_settings(guest: &str, mount: &Bound<'_, PyDict>) -> PyResult<()> {
+    if extract_opt::<String>(mount, "named")?.is_none() {
+        return Ok(());
+    }
+
+    let mode = extract_opt::<String>(mount, "named_mode")?;
+    let kind = extract_opt::<String>(mount, "named_kind")?;
+    let configures = mode.as_deref() == Some("create")
+        || kind.as_deref() == Some("disk")
+        || extract_opt::<u32>(mount, "size_mib")?.is_some()
+        || extract_opt::<u32>(mount, "quota_mib")?.is_some();
+    if configures {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "mount {guest:?}: modify does not create or configure named volumes; create the volume first"
+        )));
+    }
+    Ok(())
 }
 
 /// Copy a fork's `Mapping[str, MountConfig]` into one owned dict per guest path.

@@ -745,6 +745,42 @@ mod tests {
     }
 
     #[test]
+    fn modify_mounts_refuse_named_volume_settings() {
+        for (size_mib, quota_mib) in [(Some(64), None), (None, Some(64))] {
+            let error = with_sdk_types(|py| {
+                let mounts = PyDict::new(py);
+                mounts.set_item(
+                    "/data",
+                    PyVolume::named(
+                        py,
+                        "data".into(),
+                        None,
+                        None,
+                        size_mib,
+                        quota_mib,
+                        false,
+                        false,
+                        false,
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?,
+                )?;
+                Ok(parse_mount_patches(Some(mounts.as_any()), true).unwrap_err())
+            });
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("modify does not create or configure named volumes"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn plain_dicts_are_not_accepted_as_modify_mounts() {
         with_sdk_types(|py| {
             let mounts = PyDict::new(py);
