@@ -364,7 +364,12 @@ impl TcpProxy {
         // server→guest direction. When domain rules already peeked, `initial_buf`
         // is reused and this is cheap; with no secrets it is skipped entirely
         // (`is_tls` only matters for deciding whether to build the handler).
-        let enforce_http_authority = network_policy.has_domain_rules();
+        // Only a flow that reached a hostname rule has an authority to keep
+        // honest. A flow an address or group rule admitted outright is not
+        // HTTP by assumption: a line protocol whose verbs resemble a request
+        // line (NATS `CONNECT`/`SUB`/`HPUB`) must not be withheld or blocked
+        // because a domain rule exists elsewhere in the policy.
+        let enforce_http_authority = hostname_policy_deferred;
         let want_headers = enforce_http_authority
             || secrets.has_plain_http_candidates()
             || secrets.has_host_scoped_secrets();
@@ -2399,6 +2404,44 @@ mod tests {
         .unwrap();
 
         handle.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn line_protocol_on_address_rule_skips_unrelated_domain_authority() {
+        let (addr, sink) = spawn_sink().await;
+        let policy = Arc::new(NetworkPolicy {
+            default_egress: Action::Deny,
+            default_ingress: Action::Allow,
+            rules: vec![
+                Rule {
+                    direction: crate::policy::Direction::Egress,
+                    destination: Destination::Cidr("127.0.0.1/32".parse().unwrap()),
+                    protocols: vec![Protocol::Tcp],
+                    ports: vec![PortRange::single(addr.port())],
+                    action: Action::Allow,
+                },
+                allow_https("unused.example"),
+            ],
+        });
+        let chunks: Vec<Vec<u8>> = vec![
+            b"CONNECT {\"verbose\":false}\r\nPING\r\n".to_vec(),
+            b"SUB > 1\r\n".to_vec(),
+            b"PUB foo 2\r\nhi\r\n".to_vec(),
+            b"HPUB a.b _INBOX.x.2 22 24\r\nNATS/1.0\r\nA: b\r\n\r\nhi\r\n".to_vec(),
+        ];
+        let want = chunks.concat();
+
+        let wire = relay_chunks_through_proxy_with_policy(
+            chunks,
+            Arc::new(SharedState::new(4)),
+            policy,
+            SecretsConfig::default(),
+            sink,
+            addr,
+        )
+        .await;
+
+        assert_eq!(wire, want);
     }
 
     #[tokio::test]
