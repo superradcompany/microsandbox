@@ -239,7 +239,7 @@ impl LocalBackend {
         disk_only: bool,
         base: Option<&str>,
         choices: &crate::sandbox::restore_resources::RestoreResources,
-        boot_overrides: crate::sandbox::RestoreBootOverrides,
+        caller_overrides: Option<&crate::SandboxConfigPatch>,
     ) -> MicrosandboxResult<ArchiveChildMaterialization> {
         let total_started = Instant::now();
         tokio::fs::create_dir_all(child_stage).await?;
@@ -393,15 +393,16 @@ impl LocalBackend {
             ));
         }
 
-        boot_overrides.validate_scope(
-            manifest.scope,
-            if disk_only {
-                crate::sandbox::config::SnapshotRestoreMode::DiskOnly
-            } else {
-                crate::sandbox::config::SnapshotRestoreMode::Full
-            },
-        )?;
-
+        if let Some(caller_overrides) = caller_overrides {
+            caller_overrides.validate_for_restore(
+                manifest.scope,
+                if disk_only {
+                    crate::sandbox::config::SnapshotRestoreMode::DiskOnly
+                } else {
+                    crate::sandbox::config::SnapshotRestoreMode::Full
+                },
+            )?;
+        }
         delta::resolve(self, &inventory, child_stage, cache_stage.path(), base).await?;
 
         if let SnapshotState::Checkpoint(state) = &manifest.state {
@@ -4040,11 +4041,8 @@ async fn install_staged_cache(
             .map(|layer| layer.diff_id.parse())
             .collect::<Result<Vec<microsandbox_image::Digest>, _>>()
             .map_err(|e| MicrosandboxError::Custom(format!("invalid cached layer diff_id: {e}")))?;
-        // Keep the imported cache paths pinned while the blocking rewrite completes.
-        let rewrite_cache = cache.clone();
-        tokio::task::spawn_blocking(move || rewrite_cache.rewrite_vmdk(&pinned_digest, &diff_ids))
-            .await
-            .map_err(|e| MicrosandboxError::Custom(format!("VMDK rewrite task failed: {e}")))??;
+        // Keep the imported cache paths pinned while the rewrite completes.
+        cache.rewrite_vmdk_async(&pinned_digest, &diff_ids).await?;
     }
     // The archive may describe an image already installed under this reference. Publish under
     // the image-cache gate, preserving equivalent local bytes and rejecting a concurrent retag.
@@ -6108,7 +6106,12 @@ mod tests {
                 false,
                 None,
                 &Default::default(),
-                crate::sandbox::RestoreBootOverrides { security: true },
+                Some(
+                    &crate::SandboxConfigPatch::new().spec(
+                        microsandbox_types::SandboxSpecPatch::new()
+                            .security_profile(microsandbox_types::SecurityProfile::Restricted),
+                    ),
+                ),
             )
             .await
             .err()
@@ -6135,7 +6138,12 @@ mod tests {
                 true,
                 None,
                 &Default::default(),
-                crate::sandbox::RestoreBootOverrides { security: true },
+                Some(
+                    &crate::SandboxConfigPatch::new().spec(
+                        microsandbox_types::SandboxSpecPatch::new()
+                            .security_profile(microsandbox_types::SecurityProfile::Restricted),
+                    ),
+                ),
             )
             .await
             .unwrap();

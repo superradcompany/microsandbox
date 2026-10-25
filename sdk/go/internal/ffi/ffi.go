@@ -1794,6 +1794,9 @@ type CreateOptions struct {
 	MaxDurationSecs      uint64               `json:"max_duration_secs,omitempty"`
 	IdleTimeoutSecs      uint64               `json:"idle_timeout_secs,omitempty"`
 	RegistryAuth         *RegistryAuthOptions `json:"registry_auth,omitempty"`
+	// RegistryAnonymous pulls without credentials. Mutually exclusive with
+	// RegistryAuth; libraries that predate it reject the request.
+	RegistryAnonymous bool `json:"registry_anonymous,omitempty"`
 	// RegistryInsecure pulls over plain HTTP instead of HTTPS.
 	RegistryInsecure bool `json:"registry_insecure,omitempty"`
 	// RegistryCACerts holds PEM-encoded CA root certificate bundles trusted

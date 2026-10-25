@@ -491,6 +491,29 @@ describe("SandboxBuilder.build", () => {
     });
   });
 
+  it("renders HTTP CONNECT credentials in canonical form", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxy((p) =>
+        p
+          .httpConnect("127.0.0.1:3128")
+          .credentials("sandbox", SecretSource.env("HTTP_CONNECT_PASSWORD")),
+      )
+      .build();
+
+    expect(cfg.network?.outboundProxy).toEqual({
+      protocol: "http_connect",
+      address: "127.0.0.1:3128",
+      credentials: {
+        username: "sandbox",
+        password: {
+          kind: "env",
+          var: "HTTP_CONNECT_PASSWORD",
+        },
+      },
+    });
+  });
+
   it("renders a SOCKS4 proxy with an optional user ID", async () => {
     const cfg = await Sandbox.builder("x")
       .image("alpine")

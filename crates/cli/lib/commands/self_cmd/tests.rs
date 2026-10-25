@@ -277,6 +277,23 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
 
+    // Remove saved caller overrides before rolling back the older schema changes.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    let columns = db
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "PRAGMA table_info(sandbox)",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !columns
+            .iter()
+            .any(|row| row.try_get_by_index::<String>(1).unwrap() == "caller_config_overrides"),
+        "caller overrides should be removed after rollback"
+    );
+
     // With no clock policies to preserve, rollback removes the catalog compatibility marker.
     rollback_schema(db.inner(), 1).await.unwrap();
 

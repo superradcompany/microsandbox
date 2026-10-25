@@ -577,6 +577,12 @@ sb = Microsandbox::Sandbox.create(
 ```
 </CodeGroup>
 
+An attached exec session or an unexpired job attachment keeps the sandbox active.
+A detached job can keep running, but its existence alone does not reset the idle
+timeout. New activity from a job still does; after restore, inherited process
+output is not captured and therefore does not reset the timer. Set
+`max_duration` when a detached service must have a fixed lifetime.
+
 ## Lifecycle states
 
 Use these states to display status or decide what to do next.

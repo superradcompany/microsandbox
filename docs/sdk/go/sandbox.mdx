@@ -1647,7 +1647,7 @@ Stop the sandbox after this much wall-clock time without exec activity. Zero mea
 func WithRegistryAuth(auth RegistryAuth) SandboxOption
 ```
 
-Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth).
+Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth). Explicit auth replaces credentials microsandbox would otherwise look up in the OS keyring, registry configuration and Docker's credential store.
 
 <p className="msb-label">Parameters</p>
 
@@ -1657,6 +1657,14 @@ Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#r
     <div className="msb-param-desc">Registry credentials.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryAnonymous()</span>
+
+```go
+func WithRegistryAnonymous() SandboxOption
+```
+
+Pull a public image without credentials, even when stale credentials for its registry are stored on the host. Replaces an earlier `WithRegistryAuth` option.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
 
@@ -3301,14 +3309,17 @@ Sandbox-wide in-guest security profile.
 
 ### RegistryAuth
 
-<p className="msb-backref">Used by <a href="#withregistryauth">WithRegistryAuth()</a></p>
+#### <span className="msb-hn">Username</span>
 
-Credentials for a private OCI registry.
+`string`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Username | `string` | Registry username |
-| Password | `string` | Registry password |
+Registry username.
+
+#### <span className="msb-hn">Password</span>
+
+`string`
+
+Registry password.
 
 ### InitConfig
 

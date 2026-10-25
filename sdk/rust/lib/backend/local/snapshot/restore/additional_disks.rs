@@ -163,6 +163,14 @@ pub(crate) fn apply_additional_disks(config: &mut crate::SandboxConfig, mounts: 
             .retain(|existing| existing.guest() != guest);
         config.spec.mounts.push(mount);
     }
+
+    // Fork callers can supply only some destinations. Save the completed list
+    // after captured volumes are materialized so rebuilding retains them too.
+    if let Some(overrides) = &mut config.caller_config_overrides
+        && overrides.spec.mounts.is_some()
+    {
+        overrides.spec.mounts = Some(config.spec.mounts.clone());
+    }
 }
 
 pub(super) fn stage_additional_disk(

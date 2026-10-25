@@ -16,16 +16,17 @@ use microsandbox_runtime::checkpoint::LocalBranchState;
 use microsandbox_runtime::control::ControlRequest;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
+use microsandbox_types::GuestFlush;
 
 use crate::backend::Backend;
-#[cfg(feature = "local")]
-use crate::backend::LocalBackend;
 use crate::backend::sandbox::SandboxIdentity;
+#[cfg(feature = "local")]
+use crate::backend::{ControlSession, LocalBackend};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
-use super::{SandboxConfig, SandboxStatus, modify};
+use super::SandboxStatus;
+use super::{Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -39,25 +40,25 @@ static LAST_MEMORY_SWEEP: Mutex<Option<Instant>> = Mutex::new(None);
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Prepare a direct local fork with explicit child resource bindings.
+/// Configure a new local sandbox that starts from a running or paused sandbox's state.
 pub struct ForkBuilder {
-    guest_flush: microsandbox_types::GuestFlush,
-    backend: Arc<dyn Backend>,
-    source: String,
-    identity: SandboxIdentity,
-    pub(crate) inner: SandboxBuilder,
-    record_integrity: bool,
+    pub(super) config: ForkConfig,
 }
 
-/// Capture once and create independently owned children concurrently, returning input-order results.
+/// Configure several children that share one capture of the source sandbox.
 pub struct ForkManyBuilder {
-    guest_flush: microsandbox_types::GuestFlush,
+    pub(super) config: ForkConfig,
+    names: Vec<String>,
+}
+
+/// Settings and preparation shared by single-child and batch forks.
+pub(super) struct ForkConfig {
+    guest_flush: GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
     identity: SandboxIdentity,
-    pub(crate) inner: SandboxBuilder,
+    pub(super) inner: SandboxBuilder,
     record_integrity: bool,
-    names: Vec<String>,
 }
 
 /// Result for one requested child. Other children are not rolled back on startup failure.
@@ -149,6 +150,45 @@ impl SandboxHandle {
     }
 }
 
+impl ForkConfig {
+    fn new(
+        backend: Arc<dyn Backend>,
+        source: &str,
+        identity: SandboxIdentity,
+        name: String,
+    ) -> Self {
+        let mut inner = SandboxBuilder::new(name);
+        // A fork inherits its active environment; the creation builder's empty env is not a clear.
+        inner.config.spec.clear_env_mut();
+
+        Self {
+            backend,
+            source: source.into(),
+            identity,
+            inner,
+            record_integrity: false,
+            guest_flush: GuestFlush::Auto,
+        }
+    }
+
+    /// Resolve host paths and validate the child settings before starting a capture.
+    fn prepare(&mut self) -> MicrosandboxResult<SandboxConfig> {
+        #[cfg(feature = "local")]
+        self.inner.capture_host_paths(self.backend.as_ref())?;
+
+        let caller_config_overrides = std::mem::take(&mut self.inner.config);
+        let mut child_config = caller_config_overrides.clone().into_config();
+        child_config.caller_config_overrides = Some(Box::new(caller_config_overrides));
+
+        SandboxBuilder::validate_vsock_routes(&child_config)?;
+        if let Some(error) = self.inner.build_error.take() {
+            return Err(error);
+        }
+
+        Ok(child_config)
+    }
+}
+
 impl ForkManyBuilder {
     /// Deprecated spelling for starting live forks.
     #[deprecated(note = "use fork instead")]
@@ -157,55 +197,36 @@ impl ForkManyBuilder {
     }
 
     fn new(inner: ForkBuilder, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let ForkBuilder {
-            guest_flush,
-            backend,
-            source,
-            identity,
-            inner,
-            record_integrity,
-        } = inner;
         Self {
-            guest_flush,
-            backend,
-            source,
-            identity,
-            inner,
-            record_integrity,
+            config: inner.config,
             names: names.into_iter().map(Into::into).collect(),
         }
     }
 
     /// Select optional guest writeback for the single shared capture.
-    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
-        self.guest_flush = policy;
+    pub fn guest_flush(mut self, policy: GuestFlush) -> Self {
+        self.config.guest_flush = policy;
         self
     }
 
     /// Apply disk content integrity to the single shared capture.
     pub fn record_integrity(mut self) -> Self {
-        self.record_integrity = true;
+        self.config.record_integrity = true;
         self
     }
 
     /// Validate the batch, capture once, and return one startup outcome per name.
     /// Validation/capture failures fail the batch; later child failures do not recapture.
     pub async fn fork(mut self) -> MicrosandboxResult<Vec<ForkOutcome>> {
-        #[cfg(feature = "local")]
-        self.inner.capture_host_paths(self.backend.as_ref())?;
-        let options = self.inner.config.into_config();
-        SandboxBuilder::validate_vsock_routes(&options)?;
-        if let Some(error) = self.inner.build_error.take() {
-            return Err(error);
-        }
+        let child_config = self.config.prepare()?;
         super::branch_batch::branch_many(
-            self.backend,
-            &self.source,
-            self.identity,
-            options,
-            self.record_integrity,
+            self.config.backend,
+            &self.config.source,
+            self.config.identity,
+            child_config,
+            self.config.record_integrity,
             self.names,
-            self.guest_flush,
+            self.config.guest_flush,
         )
         .await
     }
@@ -236,49 +257,33 @@ impl ForkBuilder {
         identity: SandboxIdentity,
         name: String,
     ) -> Self {
-        let mut inner = SandboxBuilder::new(name);
-        inner.config.spec.mounts = Some(Vec::new());
-        inner.config.spec.network.ports = Some(Vec::new());
-        inner.config.spec.vsock = Default::default();
-        inner.config.spec.runtime.user = None;
         Self {
-            backend,
-            source: source.into(),
-            identity,
-            inner,
-            record_integrity: false,
-            guest_flush: microsandbox_types::GuestFlush::Auto,
+            config: ForkConfig::new(backend, source, identity, name),
         }
     }
 
     /// Require or skip optional guest writeback before this capture. Auto retains dirty RAM.
-    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
-        self.guest_flush = policy;
+    pub fn guest_flush(mut self, policy: GuestFlush) -> Self {
+        self.config.guest_flush = policy;
         self
     }
 
     /// Record disk content integrity for the captured layers. Off by default; RAM is not hashed.
     pub fn record_integrity(mut self) -> Self {
-        self.record_integrity = true;
+        self.config.record_integrity = true;
         self
     }
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
     pub async fn fork(mut self) -> MicrosandboxResult<Sandbox> {
-        #[cfg(feature = "local")]
-        self.inner.capture_host_paths(self.backend.as_ref())?;
-        let options = self.inner.config.into_config();
-        SandboxBuilder::validate_vsock_routes(&options)?;
-        if let Some(error) = self.inner.build_error.take() {
-            return Err(error);
-        }
+        let child_config = self.config.prepare()?;
         branch(
-            self.backend,
-            &self.source,
-            self.identity,
-            options,
-            self.record_integrity,
-            self.guest_flush,
+            self.config.backend,
+            &self.config.source,
+            self.config.identity,
+            child_config,
+            self.config.record_integrity,
+            self.config.guest_flush,
         )
         .await
     }
@@ -291,9 +296,11 @@ impl ForkBuilder {
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
     )> {
-        self.inner.capture_host_paths(self.backend.as_ref())?;
+        self.config
+            .inner
+            .capture_host_paths(self.config.backend.as_ref())?;
         let (handle, sender) = crate::progress::channel();
-        self.inner.config.creation_progress = Some(sender.downgrade());
+        self.config.inner.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(async move {
             let result = self.fork().await;
             drop(sender);
@@ -314,7 +321,7 @@ async fn branch(
     _identity: SandboxIdentity,
     _options: super::SandboxConfig,
     _record_integrity: bool,
-    _guest_flush: microsandbox_types::GuestFlush,
+    _guest_flush: GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
         "direct forking requires a local backend".into(),
@@ -328,7 +335,7 @@ async fn branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
-    guest_flush: microsandbox_types::GuestFlush,
+    guest_flush: GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     let config = prepare_branch(
         backend.clone(),
@@ -353,7 +360,7 @@ pub(super) async fn prepare_branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
-    guest_flush: microsandbox_types::GuestFlush,
+    guest_flush: GuestFlush,
 ) -> MicrosandboxResult<SandboxConfig> {
     let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
@@ -401,6 +408,9 @@ pub(super) async fn prepare_branch(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
+
+    config.caller_config_overrides = options.caller_config_overrides.clone();
+
     // Owned declarations contain no source host path. Retain them as the required inventory
     // until capture proves that every one has independent child backing; clear external mounts.
     config
@@ -427,7 +437,7 @@ pub(super) async fn prepare_branch(
     }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
-    let session = modify::control_session_for_run(local, source, run).await?;
+    let session = local.control_session_for_run(source, run).await?;
     let capabilities = session.capabilities();
     if !capabilities.branch_create {
         return Err(MicrosandboxError::Runtime(
@@ -448,7 +458,7 @@ pub(super) async fn prepare_branch(
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
-        guest_flush: modify::capture_flush_policy(Some(capabilities), guest_flush, false)?,
+        guest_flush: ControlSession::capture_flush_policy(Some(capabilities), guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -517,20 +527,21 @@ pub(crate) async fn capture_child(
         backing: None,
     };
     #[cfg(not(target_os = "linux"))]
-    let response = modify::control_session_for_run(local, &source.name, source.run)
+    let response = local
+        .control_session_for_run(&source.name, source.run)
         .await?
         .request(&CreateBranch(request))
         .await
         .map_err(MicrosandboxError::ControlClient)?;
     #[cfg(target_os = "linux")]
-    let response = modify::control_request_for_run_with_memory(
-        local,
-        &source.name,
-        source.run,
-        format!("{}\n", serde_json::to_string(&request)?),
-        memory.as_ref(),
-    )
-    .await?;
+    let response = local
+        .control_request_for_run_with_memory(
+            &source.name,
+            source.run,
+            format!("{}\n", serde_json::to_string(&request)?),
+            memory.as_ref(),
+        )
+        .await?;
     local.validate_control_run(&source.name, source.run).await?;
     lineage.validate_source(local, &source.name).await?;
     let closure = child.join(".branch-restore");
@@ -740,12 +751,54 @@ mod tests {
     }
 
     #[test]
+    fn forked_bindings_survive_persistence_and_rebuild() {
+        for explicit_mount in [false, true] {
+            let mut fork = fork();
+            if explicit_mount {
+                fork = fork.volume("/extra", |v| v.tmpfs());
+            }
+            let mut child = fork.config.prepare().unwrap();
+            child.spec.image = microsandbox_types::RootfsSource::oci("alpine");
+            child
+                .spec
+                .env
+                .push(microsandbox_types::EnvVar::new("CAPTURED", "value"));
+            let captured = SandboxBuilder::new("source")
+                .volume("/data", |v| v.tmpfs())
+                .config
+                .into_config();
+            crate::snapshot::apply_additional_disks(&mut child, captured.spec.mounts);
+            let json = serde_json::to_string(&child).unwrap();
+            let overrides = child.caller_config_overrides_json(&json).unwrap();
+            let loaded = SandboxConfig::from_stored(&json, overrides.as_deref()).unwrap();
+            let rebuilt = SandboxBuilder::from(loaded).finish(None, None).unwrap();
+
+            assert_eq!(rebuilt.spec.env, child.spec.env);
+            let mut guests: Vec<_> = rebuilt
+                .spec
+                .mounts
+                .iter()
+                .map(|mount| mount.guest())
+                .collect();
+            guests.sort_unstable();
+            assert_eq!(
+                guests,
+                if explicit_mount {
+                    vec!["/data", "/extra"]
+                } else {
+                    vec!["/data"]
+                }
+            );
+        }
+    }
+
+    #[test]
     fn fork_and_fork_many_accept_a_host_disk_volume() {
         let disk = |v: crate::sandbox::MountBuilder| v.disk("/images/seed.img");
         let single = fork().volume("/data", disk);
-        assert_disk_mount(&single.inner.config.clone().into_config());
+        assert_disk_mount(&single.config.inner.config.clone().into_config());
         let many = ForkManyBuilder::new(fork(), ["a", "b"]).volume("/data", disk);
-        assert_disk_mount(&many.inner.config.clone().into_config());
+        assert_disk_mount(&many.config.inner.config.clone().into_config());
     }
 
     #[test]
@@ -753,6 +806,6 @@ mod tests {
         let builder = fork()
             .volume("/data", |v| v.bind("/host/data"))
             .volume("/data", |v| v.disk("/images/seed.img"));
-        assert_disk_mount(&builder.inner.config.clone().into_config());
+        assert_disk_mount(&builder.config.inner.config.clone().into_config());
     }
 }

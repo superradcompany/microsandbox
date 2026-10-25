@@ -99,9 +99,10 @@ Common flags:
 | `--net-rule` | Add a network policy rule |
 | `--net-nat64-prefix` | Add a NAT64 `/96` prefix for network policy classification |
 | `--net-strict[=BOOL]` | Enabled by default; use `--net-strict=false` to opt out. Require hostname-based network allows to use inspectable request authority. Non-intercepted HTTPS fails closed when only a hostname rule allows it |
-| `--proxy` | Route eligible outbound traffic through a `socks4://IP:PORT` or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
+| `--proxy` | Route eligible outbound traffic through an `http://IP:PORT`, `socks4://IP:PORT`, or `socks5://IP:PORT` proxy. Local-only. See [Proxies](#outbound-proxy) |
 | `--socks4-user-id` | Optional SOCKS4 user ID. Requires a `socks4://` proxy |
 | `--socks5-username`, `--socks5-password-env` | SOCKS5 username and the host environment variable containing its password. Both flags are required together |
+| `--http-connect-username`, `--http-connect-password-env` | HTTP CONNECT username and the host environment variable containing its password. Both flags are required together and require an `http://` proxy |
 | `--secret` | Configure `NAME[:OPTIONS]@HOST[,HOST...]`; options control substitution and placeholder passthrough |
 | `--secret-violation-action` | Set `block`, `block-and-log`, or `block-and-terminate` for blocked placeholders |
 | `--tmpfs` | Mount an in-memory filesystem |
@@ -205,6 +206,9 @@ Use `--proxy` with `msb run` or `msb create` to configure one HTTP CONNECT, SOCK
 <CodeGroup>
 ```bash Shell
 msb run alpine --proxy http://127.0.0.1:3128
+msb run alpine --proxy http://127.0.0.1:3128 \
+  --http-connect-username sandbox \
+  --http-connect-password-env HTTP_CONNECT_PASSWORD
 msb run alpine --proxy socks4://127.0.0.1:1080
 msb run alpine --proxy socks4://127.0.0.1:1080 \
   --socks4-user-id sandbox
@@ -216,7 +220,7 @@ msb run alpine --proxy socks5://127.0.0.1:1080 \
 ```
 </CodeGroup>
 
-HTTP CONNECT and SOCKS4 support TCP; SOCKS5 also supports non-DNS UDP. HTTP CONNECT does not support authentication. SOCKS5 authentication requires both flags and reads the password from the host environment at startup. Proxy URLs cannot contain credentials, paths, queries, or fragments. See [Proxies](/networking/outbound-proxy).
+HTTP CONNECT and SOCKS4 support TCP; SOCKS5 also supports non-DNS UDP. HTTP CONNECT and SOCKS5 authentication each require both flags and read the password from the host environment at startup. Pass `--http-connect-username ""` when the proxy authenticates with a token and no username. Proxy URLs cannot contain credentials, paths, queries, or fragments. See [Proxies](/networking/outbound-proxy).
 
 ### Network rule syntax
 

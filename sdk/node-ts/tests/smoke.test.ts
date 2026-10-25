@@ -89,6 +89,25 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(code).toBe(7);
   });
 
+  it("keeps stdin open across an empty write", async () => {
+    const handle = await sb.execStreamWith("cat", (exec) => exec.stdinPipe());
+    const stdin = await handle.takeStdin();
+    expect(stdin).not.toBeNull();
+
+    await stdin!.write("aaaaa");
+    await stdin!.write("");
+    await stdin!.write(new Uint8Array());
+    await stdin!.write("bbbbb");
+    await stdin!.close();
+
+    await stdin!.write("");
+    await expect(stdin!.write("after EOF")).rejects.toThrow(/stdin closed/);
+
+    const out = await handle.collect();
+    expect(out.success).toBe(true);
+    expect(out.stdout()).toBe("aaaaabbbbb");
+  });
+
   it("resizes a TTY while recv() is pending", async () => {
     const handle = await sb.execStreamWith("sh", (exec) =>
       exec

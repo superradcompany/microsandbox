@@ -65,8 +65,7 @@ impl SandboxConfig {
             ));
         }
 
-        self.restore_boot_overrides
-            .validate_scope(manifest.scope, self.snapshot_restore_mode)?;
+        self.validate_restore_options(manifest.scope, self.snapshot_restore_mode)?;
 
         self.spec.image = RootfsSource::oci(manifest.image.reference.clone());
         if self.spec.runtime.user.is_none() {

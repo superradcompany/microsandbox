@@ -1,12 +1,12 @@
 //! Recoverable image unlink intents. Hard links retain the exact admitted inode, so recovery
 //! cannot unlink a new publication at the same name after an interrupted cleanup.
 
-use std::fs::File;
+use std::fs::{DirEntry, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use microsandbox_image::{
-    GlobalCache, Reference,
+    CachedImageMetadata, GlobalCache, Reference,
     storage_lease::{StorageLease, same_file},
 };
 use microsandbox_utils::process_lock;
@@ -14,7 +14,10 @@ use sea_orm::EntityTrait;
 
 use crate::MicrosandboxResult;
 use crate::backend::LocalBackend;
-use crate::db::entity::{image_ref, layer, manifest, snapshot};
+use crate::db::{
+    DbReadConnection,
+    entity::{image_ref, layer, manifest, snapshot},
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -32,7 +35,241 @@ pub(super) struct Journal {
 //--------------------------------------------------------------------------------------------------
 
 impl Journal {
+    /// Recover abandoned unlink intents while preserving current owners and replacements.
+    pub(super) async fn recover(local: &LocalBackend) -> MicrosandboxResult<()> {
+        let cache = GlobalCache::new(&local.cache_dir())?;
+        let root = local.cache_dir();
+        let directory = root.join(".image-deletions");
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "image deletion journal directory is not a real directory",
+                )
+                .into());
+            }
+        }
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            if let Some(journal) = Self::open_abandoned(&root, &directory, &entry?)? {
+                journal.recover_files(local, &cache).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Admit only abandoned directories while coordinating with live creation and disposal.
+    fn open_abandoned(
+        root: &Path,
+        directory: &Path,
+        entry: &DirEntry,
+    ) -> MicrosandboxResult<Option<Self>> {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let preparing = name.starts_with(".prepare-");
+        if (!preparing && !name.starts_with("delete-")) || !entry.file_type()?.is_dir() {
+            return Ok(None);
+        }
+
+        let coordination = coordinate(directory)?;
+        let lock = match process_lock::open_existing_lock_file(&entry.path().join("active.lock")) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Creation and disposal hold the parent coordinator. With it held, a
+                // missing active lock cannot be a live creator waiting to install it.
+                discard_directory(&entry.path())?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !process_lock::try_lock_exclusive(&lock)? {
+            return Ok(None);
+        }
+        drop(coordination);
+
+        if preparing {
+            // The catalog transaction cannot commit until this directory is published.
+            // A crashed preparation owns only extra hard links, never the source entries.
+            let _coordination = coordinate(directory)?;
+            discard_directory(&entry.path())?;
+            drop(lock);
+            sync_dir(directory)?;
+            return Ok(None);
+        }
+
+        let record = match std::fs::read(entry.path().join("files.json")) {
+            Ok(record) => record,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let _coordination = coordinate(directory)?;
+                discard_directory(&entry.path())?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let files: Vec<PathBuf> = serde_json::from_slice(&record)?;
+        for relative in &files {
+            validate_relative(relative)?;
+        }
+
+        Ok(Some(Self {
+            path: entry.path(),
+            root: root.to_path_buf(),
+            files,
+            _lock: lock,
+        }))
+    }
+
+    /// Recover entries independently; a busy entry keeps the journal for a later pass.
+    async fn recover_files(
+        self,
+        local: &LocalBackend,
+        cache: &GlobalCache,
+    ) -> MicrosandboxResult<()> {
+        let pools = local.db().await?;
+        let mut busy = false;
+        for (index, relative) in self.files.iter().enumerate() {
+            if !self
+                .recover_file(pools.read(), cache, index, relative)
+                .await?
+            {
+                busy = true;
+            }
+        }
+
+        if !busy {
+            let directory = self.path.parent().unwrap();
+            let _coordination = coordinate(directory)?;
+            discard_directory(&self.path)?;
+            sync_dir(directory)?;
+        }
+        drop(self._lock);
+        Ok(())
+    }
+
+    /// Hold one exclusive claim through ownership revalidation and exact-inode unlink.
+    async fn recover_file(
+        &self,
+        db: &DbReadConnection,
+        cache: &GlobalCache,
+        index: usize,
+        relative: &Path,
+    ) -> MicrosandboxResult<bool> {
+        let path = self.root.join(relative);
+        let pinned = self.path.join(index.to_string());
+        let Some(_lease) = StorageLease::try_exclusive(&path)? else {
+            return Ok(false);
+        };
+
+        let owned = Self::file_is_owned(db, cache, relative, &path, &pinned).await?;
+        if !owned {
+            match same_file(&path, &pinned) {
+                Ok(true) => {
+                    std::fs::remove_file(&path)?;
+                    sync_dir(path.parent().unwrap())?;
+                }
+                Ok(false) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        remove_if_present(&pinned)?;
+        Ok(true)
+    }
+
+    /// Query owners only after entry admission, never from an earlier catalog snapshot.
+    async fn file_is_owned(
+        db: &DbReadConnection,
+        cache: &GlobalCache,
+        relative: &Path,
+        path: &Path,
+        pinned: &Path,
+    ) -> MicrosandboxResult<bool> {
+        let owned = match relative
+            .components()
+            .next()
+            .and_then(|part| part.as_os_str().to_str())
+        {
+            Some("manifests") => Self::metadata_is_owned(db, cache, path, pinned).await?,
+            Some("layers") => layer::Entity::find().all(db).await?.into_iter().any(|row| {
+                row.diff_id
+                    .parse()
+                    .ok()
+                    .is_some_and(|digest| cache.layer_erofs_path(&digest) == path)
+            }),
+            _ => manifest::Entity::find()
+                .all(db)
+                .await?
+                .into_iter()
+                .any(|row| {
+                    row.digest.parse().ok().is_some_and(|digest| {
+                        cache.fsmeta_erofs_path(&digest) == path || cache.vmdk_path(&digest) == path
+                    })
+                }),
+        };
+
+        Ok(owned)
+    }
+
+    /// Metadata can be retained by its reference name or by the pinned generation's digest.
+    async fn metadata_is_owned(
+        db: &DbReadConnection,
+        cache: &GlobalCache,
+        path: &Path,
+        pinned: &Path,
+    ) -> MicrosandboxResult<bool> {
+        let named = image_ref::Entity::find()
+            .all(db)
+            .await?
+            .into_iter()
+            .any(|row| {
+                row.reference
+                    .parse::<Reference>()
+                    .ok()
+                    .is_some_and(|reference| cache.image_metadata_path(&reference) == path)
+            });
+        let snapshots = snapshot::Entity::find().all(db).await?;
+        let snapshot_named = snapshots.iter().any(|row| {
+            row.image_ref
+                .parse::<Reference>()
+                .ok()
+                .is_some_and(|reference| cache.image_metadata_path(&reference) == path)
+        });
+        let bytes = match std::fs::read(pinned) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = serde_json::from_slice::<CachedImageMetadata>(&bytes).ok();
+        let mut retained_generation = metadata.as_ref().is_some_and(|metadata| {
+            snapshots
+                .iter()
+                .any(|row| row.image_manifest_digest == metadata.manifest_digest)
+        });
+        if !retained_generation && let Some(metadata) = metadata {
+            let roots = microsandbox_db::catalog::rootfs_query(db)
+                .await?
+                .all(db)
+                .await?;
+            let manifests = manifest::Entity::find().all(db).await?;
+            retained_generation = manifests.iter().any(|manifest| {
+                manifest.digest == metadata.manifest_digest
+                    && roots
+                        .iter()
+                        .any(|root| root.manifest_id == Some(manifest.id))
+            });
+        }
+        Ok(named || snapshot_named || retained_generation)
+    }
+
     /// Call with exclusive entry leases held, before committing removal of catalog ownership.
+    /// Preparation waits on journal coordination and fsyncs; never hold the catalog writer here.
     pub(super) fn prepare(root: &Path, files: &[PathBuf]) -> MicrosandboxResult<Option<Self>> {
         if files.is_empty() {
             return Ok(None);
@@ -99,12 +336,16 @@ impl Journal {
         }))
     }
 
-    /// Remove only admitted generations; keep the journal on any I/O failure for retry.
-    /// The caller either owns all entry leases or invokes recovery's per-entry revalidation.
-    pub(super) fn finish(self) -> MicrosandboxResult<Vec<(PathBuf, u64)>> {
+    /// Remove only generations approved after catalog revalidation, retaining the journal
+    /// on any I/O failure. Preparation can journal a superset; recovery still rechecks owners.
+    pub(super) fn finish(self, approved: &[PathBuf]) -> MicrosandboxResult<Vec<(PathBuf, u64)>> {
         let mut removed = Vec::new();
         for (index, relative) in self.files.iter().enumerate() {
             let path = self.root.join(relative);
+            if !approved.contains(&path) {
+                continue;
+            }
+
             let pinned = self.path.join(index.to_string());
             match same_file(&path, &pinned) {
                 Ok(true) => {
@@ -136,182 +377,6 @@ impl Journal {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
-
-pub(super) async fn recover(local: &LocalBackend) -> MicrosandboxResult<()> {
-    let cache = GlobalCache::new(&local.cache_dir())?;
-    let root = local.cache_dir();
-    let directory = root.join(".image-deletions");
-    match std::fs::symlink_metadata(&directory) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-        Ok(_) => {
-            return Err(std::io::Error::other(
-                "image deletion journal directory is not a real directory",
-            )
-            .into());
-        }
-    }
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let preparing = name.starts_with(".prepare-");
-        if (!preparing && !name.starts_with("delete-")) || !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let coordination = coordinate(&directory)?;
-        let lock = match process_lock::open_existing_lock_file(&entry.path().join("active.lock")) {
-            Ok(lock) => lock,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // Creation and disposal hold the parent coordinator. With it held, a
-                // missing active lock cannot be a live creator waiting to install it.
-                discard_directory(&entry.path())?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if !process_lock::try_lock_exclusive(&lock)? {
-            continue;
-        }
-        drop(coordination);
-        if preparing {
-            // The catalog transaction cannot commit until this directory is published.
-            // A crashed preparation owns only extra hard links, never the source entries.
-            let _coordination = coordinate(&directory)?;
-            discard_directory(&entry.path())?;
-            drop(lock);
-            sync_dir(&directory)?;
-            continue;
-        }
-        let record = match std::fs::read(entry.path().join("files.json")) {
-            Ok(record) => record,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let _coordination = coordinate(&directory)?;
-                discard_directory(&entry.path())?;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let files: Vec<PathBuf> = serde_json::from_slice(&record)?;
-        for relative in &files {
-            validate_relative(relative)?;
-        }
-        // Publication owns shared entry leases through its transaction. Once exclusive leases
-        // are held, this catalog snapshot cannot be invalidated by a participating publisher.
-        let db = local.db().await?.read();
-        let mut busy = false;
-        // Recover each independent entry with a fresh ownership query while holding its
-        // exclusive lease. A previous generation may have journaled arbitrarily many files.
-        for (index, relative) in files.iter().enumerate() {
-            let path = root.join(relative);
-            let pinned = entry.path().join(index.to_string());
-            let Some(_lease) = StorageLease::try_exclusive(&path)? else {
-                busy = true;
-                continue;
-            };
-            // Requery after admission so a publisher cannot race the ownership decision.
-            let owned = match relative
-                .components()
-                .next()
-                .and_then(|part| part.as_os_str().to_str())
-            {
-                Some("manifests") => {
-                    let named = image_ref::Entity::find()
-                        .all(db)
-                        .await?
-                        .into_iter()
-                        .any(|row| {
-                            row.reference
-                                .parse::<Reference>()
-                                .ok()
-                                .is_some_and(|reference| {
-                                    cache.image_metadata_path(&reference) == path
-                                })
-                        });
-                    let snapshots = snapshot::Entity::find().all(db).await?;
-                    let snapshot_named = snapshots.iter().any(|row| {
-                        row.image_ref
-                            .parse::<Reference>()
-                            .ok()
-                            .is_some_and(|reference| cache.image_metadata_path(&reference) == path)
-                    });
-                    let bytes = match std::fs::read(&pinned) {
-                        Ok(bytes) => bytes,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-                        Err(error) => return Err(error.into()),
-                    };
-                    let metadata =
-                        serde_json::from_slice::<microsandbox_image::CachedImageMetadata>(&bytes)
-                            .ok();
-                    let mut retained_generation = metadata.as_ref().is_some_and(|metadata| {
-                        snapshots
-                            .iter()
-                            .any(|row| row.image_manifest_digest == metadata.manifest_digest)
-                    });
-                    if !retained_generation && let Some(metadata) = metadata {
-                        let roots = microsandbox_db::catalog::rootfs_query(db)
-                            .await?
-                            .all(db)
-                            .await?;
-                        let manifests = manifest::Entity::find().all(db).await?;
-                        retained_generation = manifests.iter().any(|manifest| {
-                            manifest.digest == metadata.manifest_digest
-                                && roots
-                                    .iter()
-                                    .any(|root| root.manifest_id == Some(manifest.id))
-                        });
-                    }
-                    named || snapshot_named || retained_generation
-                }
-                Some("layers") => layer::Entity::find().all(db).await?.into_iter().any(|row| {
-                    row.diff_id
-                        .parse()
-                        .ok()
-                        .is_some_and(|digest| cache.layer_erofs_path(&digest) == path)
-                }),
-                _ => manifest::Entity::find()
-                    .all(db)
-                    .await?
-                    .into_iter()
-                    .any(|row| {
-                        row.digest.parse().ok().is_some_and(|digest| {
-                            cache.fsmeta_erofs_path(&digest) == path
-                                || cache.vmdk_path(&digest) == path
-                        })
-                    }),
-            };
-            if !owned {
-                match same_file(&path, &pinned) {
-                    Ok(true) => {
-                        std::fs::remove_file(&path)?;
-                        sync_dir(path.parent().unwrap())?;
-                    }
-                    Ok(false) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            match std::fs::remove_file(&pinned) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if !busy {
-            let _coordination = coordinate(&directory)?;
-            discard_directory(&entry.path())?;
-            sync_dir(&directory)?;
-        }
-        drop(lock);
-    }
-    Ok(())
-}
 
 /// Serializes only journal creation/disposal, never image work or catalog transactions.
 fn coordinate(directory: &Path) -> std::io::Result<File> {

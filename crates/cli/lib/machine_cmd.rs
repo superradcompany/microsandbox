@@ -358,7 +358,6 @@ pub fn run(args: MachineArgs) -> ! {
         file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
-        #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
         bootstrap: launch.bootstrap,

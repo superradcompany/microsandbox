@@ -60,6 +60,7 @@ type SandboxConfig struct {
 	MaxDuration        time.Duration
 	IdleTimeout        time.Duration
 	RegistryAuth       *RegistryAuth
+	registryAnonymous  bool
 	// RegistryInsecure pulls the image over plain HTTP instead of HTTPS.
 	RegistryInsecure bool
 	// RegistryCACerts holds PEM-encoded CA root certificates trusted when
@@ -909,6 +910,16 @@ func WithRegistryAuth(auth RegistryAuth) SandboxOption {
 	return func(o *SandboxConfig) {
 		a := auth
 		o.RegistryAuth = &a
+		o.registryAnonymous = false
+	}
+}
+
+// WithRegistryAnonymous pulls without credentials, even when the OS keyring,
+// registry configuration or Docker's credential store has some for the registry.
+func WithRegistryAnonymous() SandboxOption {
+	return func(o *SandboxConfig) {
+		o.RegistryAuth = nil
+		o.registryAnonymous = true
 	}
 }
 
@@ -1143,13 +1154,13 @@ func SOCKS5Proxy(address string) *OutboundProxy {
 }
 
 // HTTPConnectProxy configures an HTTP proxy that opens outbound TCP tunnels
-// with CONNECT at address.
+// with CONNECT at address. Add Credentials for HTTP Basic authentication.
 func HTTPConnectProxy(address string) *OutboundProxy {
 	return &OutboundProxy{protocol: "http_connect", address: address}
 }
 
-// Credentials returns a copy configured with SOCKS5 username authentication
-// and a host-side password source.
+// Credentials returns a copy configured with SOCKS5 or HTTP CONNECT username
+// authentication and a host-side password source.
 func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy {
 	if p == nil {
 		return nil

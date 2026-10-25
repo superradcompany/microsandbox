@@ -1148,6 +1148,11 @@ struct SandboxCreateOpts {
     idle_timeout_secs: Option<u64>,
     /// Registry credentials for pulling private images.
     registry_auth: Option<RegistryAuthOpts>,
+    /// Pull without credentials, skipping the OS keyring, the registry config
+    /// and Docker's credential store. A top-level field, so libraries that
+    /// predate it reject the request instead of pulling with ambient auth.
+    #[serde(default)]
+    registry_anonymous: bool,
     /// Pull the image over plain HTTP instead of HTTPS (registry override).
     #[serde(default)]
     registry_insecure: bool,
@@ -1319,9 +1324,28 @@ enum FfiNamedMode {
     EnsureExists,
 }
 
-// ---------------------------------------------------------------------------
-// Sandbox create — helpers
-// ---------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------------------
+// Functions: Helpers
+//--------------------------------------------------------------------------------------------------
+
+/// The explicit registry auth a create request asks for, if any. Without it
+/// the SDK resolves ambient credentials (keyring, config, Docker).
+fn requested_registry_auth(
+    auth: Option<RegistryAuthOpts>,
+    anonymous: bool,
+) -> Result<Option<RegistryAuth>, FfiError> {
+    match (auth, anonymous) {
+        (Some(_), true) => Err(FfiError::invalid_argument(
+            "registry_anonymous and registry_auth are mutually exclusive",
+        )),
+        (Some(auth), false) => Ok(Some(RegistryAuth::Basic {
+            username: auth.username,
+            password: auth.password,
+        })),
+        (None, true) => Ok(Some(RegistryAuth::Anonymous)),
+        (None, false) => Ok(None),
+    }
+}
 
 /// Parse the shared policy vocabulary without applying DNS, TLS, or bootstrap options.
 fn parse_custom_network_policy(
@@ -1362,6 +1386,89 @@ fn parse_custom_network_policy(
         default_egress,
         default_ingress,
         rules,
+    })
+}
+
+/// Convert the FFI proxy credentials into the durable Rust credentials.
+///
+/// Rejects credentials on protocols that do not accept them, a partial
+/// username/password-source pair, and a password source the runtime cannot
+/// resolve.
+fn proxy_credentials(
+    proxy: &OutboundProxyOpts,
+) -> Result<Option<(String, microsandbox::sandbox::SecretSource)>, FfiError> {
+    let credentials_supported = proxy.protocol == "socks5" || proxy.protocol == "http_connect";
+    if !credentials_supported && (proxy.username.is_some() || proxy.password_source.is_some()) {
+        return Err(FfiError::invalid_argument(
+            "credentials are only supported for SOCKS5 and HTTP CONNECT proxies",
+        ));
+    }
+
+    let Some(username) = &proxy.username else {
+        if proxy.password_source.is_some() {
+            return Err(FfiError::invalid_argument(
+                "proxy username and password source must be provided together",
+            ));
+        }
+        return Ok(None);
+    };
+    let Some(source) = &proxy.password_source else {
+        return Err(FfiError::invalid_argument(
+            "proxy username and password source must be provided together",
+        ));
+    };
+    if source.kind != "env" {
+        return Err(FfiError::invalid_argument(format!(
+            "unsupported proxy password source {:?}; only env is supported",
+            source.kind
+        )));
+    }
+    let Some(var) = source.var.as_deref().filter(|var| !var.is_empty()) else {
+        return Err(FfiError::invalid_argument(
+            "proxy password source requires a non-empty host environment variable name",
+        ));
+    };
+
+    Ok(Some((
+        username.clone(),
+        microsandbox::sandbox::SecretSource::env(var),
+    )))
+}
+
+/// Apply the single outbound proxy carried by the create payload.
+fn apply_outbound_proxy(
+    builder: microsandbox::sandbox::SandboxBuilder,
+    proxy: OutboundProxyOpts,
+) -> Result<microsandbox::sandbox::SandboxBuilder, FfiError> {
+    let credentials = proxy_credentials(&proxy)?;
+
+    Ok(match proxy.protocol.as_str() {
+        "http_connect" => builder.proxy(move |p| {
+            let proxy_builder = p.http_connect(proxy.address);
+            match credentials {
+                Some((username, password)) => proxy_builder.credentials(username, password),
+                None => proxy_builder,
+            }
+        }),
+        "socks4" => builder.proxy(move |p| {
+            let proxy_builder = p.socks4(proxy.address);
+            match proxy.user_id {
+                Some(user_id) => proxy_builder.user_id(user_id),
+                None => proxy_builder,
+            }
+        }),
+        "socks5" => builder.proxy(move |p| {
+            let proxy_builder = p.socks5(proxy.address);
+            match credentials {
+                Some((username, password)) => proxy_builder.credentials(username, password),
+                None => proxy_builder,
+            }
+        }),
+        protocol => {
+            return Err(FfiError::invalid_argument(format!(
+                "unsupported outbound proxy protocol {protocol:?}"
+            )));
+        }
     })
 }
 
@@ -2519,16 +2626,14 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             // `registry` overwrites insecure and ca_certs wholesale, so all
             // three overrides have to be applied in one call.
-            let registry_auth = opts.registry_auth;
+            let registry_auth =
+                requested_registry_auth(opts.registry_auth, opts.registry_anonymous)?;
             let registry_insecure = opts.registry_insecure;
             let registry_ca_certs = opts.registry_ca_certs;
             if registry_auth.is_some() || registry_insecure || !registry_ca_certs.is_empty() {
                 builder = builder.registry(|mut r| {
                     if let Some(auth) = registry_auth {
-                        r = r.auth(RegistryAuth::Basic {
-                            username: auth.username,
-                            password: auth.password,
-                        });
+                        r = r.auth(auth);
                     }
                     if registry_insecure {
                         r = r.insecure();
@@ -2572,54 +2677,7 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = apply_network(builder, net)?;
             }
             if let Some(proxy) = opts.proxy {
-                if proxy.protocol != "socks5"
-                    && (proxy.username.is_some() || proxy.password_source.is_some())
-                {
-                    return Err(FfiError::invalid_argument(
-                        "credentials are only supported for SOCKS5 proxies",
-                    ));
-                }
-                if let Some(source) = &proxy.password_source
-                    && source.kind != "env"
-                {
-                    return Err(FfiError::invalid_argument(format!(
-                        "unsupported SOCKS5 password source {:?}; only env is supported",
-                        source.kind
-                    )));
-                }
-                builder = match proxy.protocol.as_str() {
-                    "http_connect" => builder.proxy(move |p| p.http_connect(proxy.address)),
-                    "socks4" => builder.proxy(move |p| {
-                        let proxy_builder = p.socks4(proxy.address);
-                        match proxy.user_id {
-                            Some(user_id) => proxy_builder.user_id(user_id),
-                            None => proxy_builder,
-                        }
-                    }),
-                    "socks5" => builder.proxy(move |p| {
-                        let proxy_builder = p.socks5(proxy.address);
-                        match (proxy.username, proxy.password_source) {
-                            (Some(username), Some(password)) if password.kind == "env" => {
-                                proxy_builder.credentials(
-                                    username,
-                                    microsandbox::sandbox::SecretSource::env(
-                                        password.var.unwrap_or_default(),
-                                    ),
-                                )
-                            }
-                            (None, None) => proxy_builder,
-                            _ => proxy_builder.credentials(
-                                String::new(),
-                                microsandbox::sandbox::SecretSource::env(String::new()),
-                            ),
-                        }
-                    }),
-                    protocol => {
-                        return Err(FfiError::invalid_argument(format!(
-                            "unsupported outbound proxy protocol {protocol:?}"
-                        )));
-                    }
-                };
+                builder = apply_outbound_proxy(builder, proxy)?;
             }
             // Secrets.
             for s in &opts.secrets {
@@ -7892,6 +7950,161 @@ mod tests {
 
     use super::*;
 
+    fn outbound_proxy(value: serde_json::Value) -> super::OutboundProxyOpts {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_connect_proxy_credentials_reach_the_sandbox_config() {
+        let proxy = outbound_proxy(serde_json::json!({
+            "protocol": "http_connect",
+            "address": "127.0.0.1:3128",
+            "username": "sandbox",
+            "password_source": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"},
+        }));
+        let builder = microsandbox::Sandbox::builder("proxy-credentials").image("alpine");
+        let Ok(builder) = super::apply_outbound_proxy(builder, proxy) else {
+            panic!("apply_outbound_proxy rejected valid HTTP CONNECT credentials");
+        };
+
+        let config = builder.build().await.unwrap();
+        let proxy = serde_json::to_value(config.spec.network.outbound_proxy).unwrap();
+
+        assert_eq!(
+            proxy,
+            serde_json::json!({
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "sandbox",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"},
+                },
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn socks5_proxy_credentials_reach_the_sandbox_config() {
+        let proxy = outbound_proxy(serde_json::json!({
+            "protocol": "socks5",
+            "address": "127.0.0.1:1080",
+            "username": "sandbox",
+            "password_source": {"kind": "env", "var": "SOCKS5_PASSWORD"},
+        }));
+        let builder = microsandbox::Sandbox::builder("proxy-credentials").image("alpine");
+        let Ok(builder) = super::apply_outbound_proxy(builder, proxy) else {
+            panic!("apply_outbound_proxy rejected valid SOCKS5 credentials");
+        };
+
+        let config = builder.build().await.unwrap();
+        let proxy = serde_json::to_value(config.spec.network.outbound_proxy).unwrap();
+
+        assert_eq!(
+            proxy,
+            serde_json::json!({
+                "protocol": "socks5",
+                "address": "127.0.0.1:1080",
+                "credentials": {
+                    "username": "sandbox",
+                    "password": {"kind": "env", "var": "SOCKS5_PASSWORD"},
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn http_connect_proxy_rejects_a_username_without_a_password_source() {
+        // `buildFFIOutboundProxy` in the Go SDK cannot produce this payload, so the
+        // guard is only reachable from a hand-built or older/foreign payload.
+        let proxy = outbound_proxy(serde_json::json!({
+            "protocol": "http_connect",
+            "address": "127.0.0.1:3128",
+            "username": "sandbox",
+        }));
+        let builder = microsandbox::Sandbox::builder("proxy-partial").image("alpine");
+
+        let error = match super::apply_outbound_proxy(builder, proxy) {
+            Ok(_) => panic!("partial HTTP CONNECT credentials were accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, super::error_kind::INVALID_ARGUMENT);
+        assert_eq!(
+            error.message,
+            "proxy username and password source must be provided together"
+        );
+    }
+
+    #[test]
+    fn http_connect_proxy_rejects_a_password_source_without_a_username() {
+        let proxy = outbound_proxy(serde_json::json!({
+            "protocol": "http_connect",
+            "address": "127.0.0.1:3128",
+            "password_source": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"},
+        }));
+        let builder = microsandbox::Sandbox::builder("proxy-partial").image("alpine");
+
+        let error = match super::apply_outbound_proxy(builder, proxy) {
+            Ok(_) => panic!("partial HTTP CONNECT credentials were accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, super::error_kind::INVALID_ARGUMENT);
+        assert_eq!(
+            error.message,
+            "proxy username and password source must be provided together"
+        );
+    }
+
+    #[test]
+    fn proxy_password_source_requires_a_usable_environment_variable() {
+        for password_source in [
+            serde_json::json!({"kind": "env"}),
+            serde_json::json!({"kind": "env", "var": ""}),
+        ] {
+            let proxy = outbound_proxy(serde_json::json!({
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "username": "sandbox",
+                "password_source": password_source,
+            }));
+            let builder = microsandbox::Sandbox::builder("proxy-password").image("alpine");
+
+            let error = match super::apply_outbound_proxy(builder, proxy) {
+                Ok(_) => panic!("unusable password source was accepted"),
+                Err(error) => error,
+            };
+
+            assert_eq!(error.kind, super::error_kind::INVALID_ARGUMENT);
+            assert_eq!(
+                error.message,
+                "proxy password source requires a non-empty host environment variable name"
+            );
+        }
+    }
+
+    #[test]
+    fn socks4_proxy_rejects_credentials() {
+        let proxy = outbound_proxy(serde_json::json!({
+            "protocol": "socks4",
+            "address": "127.0.0.1:1080",
+            "username": "sandbox",
+            "password_source": {"kind": "env", "var": "SOCKS5_PASSWORD"},
+        }));
+        let builder = microsandbox::Sandbox::builder("proxy-socks4").image("alpine");
+
+        let error = match super::apply_outbound_proxy(builder, proxy) {
+            Ok(_) => panic!("SOCKS4 credentials were accepted"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, super::error_kind::INVALID_ARGUMENT);
+        assert_eq!(
+            error.message,
+            "credentials are only supported for SOCKS5 and HTTP CONNECT proxies"
+        );
+    }
+
     #[tokio::test]
     async fn bounded_stop_zero_does_not_poll_identity_lookup() {
         let polled = std::sync::atomic::AtomicBool::new(false);
@@ -8006,6 +8219,33 @@ mod tests {
             serde_json::from_str(r#"{"image":"python:3.12","oci_upper_size_mib":0}"#).unwrap();
 
         assert_eq!(opts.oci_upper_size_mib, Some(0));
+    }
+
+    #[test]
+    fn sandbox_create_opts_requests_anonymous_registry_auth() {
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"ghcr.io/org/public","registry_anonymous":true}"#)
+                .unwrap();
+        assert!(matches!(
+            requested_registry_auth(opts.registry_auth, opts.registry_anonymous),
+            Ok(Some(RegistryAuth::Anonymous))
+        ));
+
+        let opts: SandboxCreateOpts =
+            serde_json::from_str(r#"{"image":"ghcr.io/org/public"}"#).unwrap();
+        assert!(matches!(
+            requested_registry_auth(opts.registry_auth, opts.registry_anonymous),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn anonymous_and_basic_registry_auth_are_exclusive() {
+        let opts: SandboxCreateOpts = serde_json::from_str(
+            r#"{"image":"ghcr.io/org/private","registry_anonymous":true,"registry_auth":{"username":"u","password":"p"}}"#,
+        )
+        .unwrap();
+        assert!(requested_registry_auth(opts.registry_auth, opts.registry_anonymous).is_err());
     }
 
     #[test]

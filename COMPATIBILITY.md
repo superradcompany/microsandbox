@@ -260,6 +260,10 @@ Windows abandoned-lease recovery checks whether the process has exited, not mere
 
 Downgrade operation ownership uses the existing `db/self-downgrade/msb.db.migration.lock` path and OS lock protocol, but competing commands fail immediately instead of waiting through another command's download or confirmation prompt. Ownership lasts through staging, execution and journal retirement, separately from the catalog migration lock. Exiting releases ownership without deleting the lock file or bypassing an incomplete recovery journal; an older command's lock still excludes a newer contender.
 
+Caller overrides are saved in the optional `sandbox.caller_config_overrides` column. A digest ties them to the resolved config; changes from older writers invalidate them. Older rows have no saved overrides. Rollback drops only this column, preserving resolved and active configs. Restore resources and registry credentials are excluded; snapshot and runtime formats are unchanged. Inline secret values are saved in both the resolved config and caller overrides; source-backed secrets retain their references.
+
+Rebuilds now preserve explicit settings and clears. Use builder setters, `overlay()`, or modification APIs: saved overrides can overwrite direct edits to a resolved `SandboxConfig`.
+
 ## 7. Home and Runtime Path Layout
 
 Directory names under `MSB_HOME` and the runtime directory are durable locators used by binaries from different releases. This includes the database, cache, sandboxes, volumes, snapshots, logs, secrets, TLS material, SSH state, sockets, locks, journals, and configuration files.

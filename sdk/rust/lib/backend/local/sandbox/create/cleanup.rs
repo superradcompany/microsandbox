@@ -313,12 +313,13 @@ mod tests {
     #[tokio::test]
     async fn owned_format_failure_cleans_unpublished_directory_before_returning() {
         let mut fixture = OwnedFixture::new("owned-format-failure").await;
-        fixture.config.spec.mounts.push(
-            MountBuilder::new("/too-small")
-                .owned_with(|volume| volume.disk().size(1_u32))
-                .build()
-                .unwrap(),
-        );
+        fixture.config = SandboxBuilder::from(fixture.config)
+            .volume("/too-small", |mount| {
+                mount.owned_with(|volume| volume.disk().size(1_u32))
+            })
+            .build()
+            .await
+            .unwrap();
         let error = fixture
             .backend
             .create_sandbox(

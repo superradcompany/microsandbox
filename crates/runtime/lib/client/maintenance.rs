@@ -36,6 +36,8 @@ use sea_orm::{
 use sea_orm::{DbBackend, Statement};
 
 use crate::ipc::SandboxSocketPaths;
+#[cfg(unix)]
+use crate::launch::BOOTSTRAP_ROOTFS_DIR;
 use crate::{RuntimeError, RuntimeResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -215,6 +217,12 @@ pub async fn run_startup_maintenance(db: &DbWriteConnection, sandboxes_dir: &Pat
             tracing::warn!(error = %err, "sandbox lifecycle maintenance sweep failed");
         }
     }
+}
+
+/// Remove a stopped sandbox's owned bootstrap rootfs, including after a forced exit.
+#[cfg(unix)]
+pub fn remove_bootstrap_trampoline(sandbox_dir: &Path) -> std::io::Result<()> {
+    remove_dir_if_exists(&sandbox_dir.join(BOOTSTRAP_ROOTFS_DIR))
 }
 
 /// Run one bounded maintenance sweep: reconcile stale active sandboxes, then
@@ -813,6 +821,8 @@ async fn reconcile_stale_active(
             SandboxStatus::Starting | SandboxStatus::Draining
         ) {
             socket_paths.remove_artifacts()?;
+            #[cfg(unix)]
+            remove_bootstrap_trampoline(&sandboxes_dir.join(&sandbox.name))?;
             let now = chrono::Utc::now().naive_utc();
             let (terminal_status, _) = stale_runtime_terminal_state(sandbox.status);
             let result = terminal_sandbox_update(db)
@@ -843,6 +853,8 @@ async fn reconcile_stale_active(
     // this before the terminal transition so a failure leaves the row in the
     // active maintenance query and therefore retryable.
     socket_paths.remove_artifacts()?;
+    #[cfg(unix)]
+    remove_bootstrap_trampoline(&sandboxes_dir.join(&sandbox.name))?;
 
     let now = chrono::Utc::now().naive_utc();
     let (terminal_status, reason) = stale_runtime_terminal_state(sandbox.status);
@@ -1388,7 +1400,30 @@ mod tests {
         let dead = insert_sandbox(&db, "dead", SandboxStatus::Running, false).await;
         insert_run(&db, dead, Some(DEAD_PID), run_entity::RunStatus::Running).await;
         #[cfg(unix)]
+        let dead_trampoline = dir.path().join("dead").join(BOOTSTRAP_ROOTFS_DIR);
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(dead_trampoline.join("rootfs/newroot")).unwrap();
+            std::fs::create_dir_all(dir.path().join("dead/runtime/scripts")).unwrap();
+        }
+        #[cfg(unix)]
         let dead_sockets = seed_socket_artifacts(dir.path(), &run_dir, "dead");
+
+        // An active VM's trampoline must survive the sweep.
+        #[cfg(unix)]
+        let live = insert_sandbox(&db, "live", SandboxStatus::Running, false).await;
+        #[cfg(unix)]
+        insert_run(
+            &db,
+            live,
+            Some(std::process::id() as i32),
+            run_entity::RunStatus::Running,
+        )
+        .await;
+        #[cfg(unix)]
+        let live_trampoline = dir.path().join("live").join(BOOTSTRAP_ROOTFS_DIR);
+        #[cfg(unix)]
+        std::fs::create_dir_all(live_trampoline.join("rootfs/newroot")).unwrap();
 
         // A booting sandbox whose runtime died before readiness should also become Crashed.
         let starting = insert_sandbox(&db, "starting", SandboxStatus::Starting, false).await;
@@ -1446,6 +1481,10 @@ mod tests {
         assert!(!dir.path().join("eph").exists());
         #[cfg(unix)]
         {
+            assert!(!dead_trampoline.exists());
+            assert!(dir.path().join("dead/runtime/scripts").is_dir());
+            assert_eq!(status_of(&db, live).await, Some(SandboxStatus::Running));
+            assert!(live_trampoline.join("rootfs/newroot").is_dir());
             assert_socket_artifacts_absent(dir.path(), &dead_sockets, "dead");
             assert_socket_artifacts_absent(dir.path(), &draining_sockets, "draining");
             assert_socket_artifacts_absent(dir.path(), &draining_no_run_sockets, "draining-no-run");
@@ -1457,6 +1496,10 @@ mod tests {
         let (dir, db) = test_db().await;
         let run_dir = dir.path().join("run");
         let id = insert_sandbox(&db, "abandoned", SandboxStatus::Starting, false).await;
+        #[cfg(unix)]
+        let trampoline = dir.path().join("abandoned").join(BOOTSTRAP_ROOTFS_DIR);
+        #[cfg(unix)]
+        std::fs::create_dir_all(trampoline.join("rootfs/newroot")).unwrap();
         let model = lifecycle_sandboxes()
             .filter(sandbox_entity::Column::Id.eq(id))
             .into_model::<LifecycleSandbox>()
@@ -1473,6 +1516,8 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Starting));
+        #[cfg(unix)]
+        assert!(trampoline.exists());
         drop(creator);
         #[cfg(unix)]
         {
@@ -1489,6 +1534,7 @@ mod tests {
                     .unwrap()
             );
             assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Starting));
+            assert!(trampoline.exists());
             assert!(
                 socket.exists(),
                 "maintenance must preserve the live legacy endpoint"
@@ -1503,6 +1549,8 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(status_of(&db, id).await, Some(SandboxStatus::Crashed));
+        #[cfg(unix)]
+        assert!(!trampoline.exists());
     }
 
     #[cfg(unix)]

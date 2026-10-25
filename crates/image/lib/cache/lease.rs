@@ -1,7 +1,7 @@
 //! Operation-scoped protection spanning file access and catalog publication.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::storage_lease::StorageLease;
@@ -29,6 +29,31 @@ impl GlobalCache {
         }
     }
 
+    /// Transfer a lease already admitted under a publication gate into the operation scope.
+    /// The key must be canonical; callers without a scope retain their own lease instead.
+    pub(crate) fn retain_lease(&self, key: PathBuf, lease: StorageLease) -> ImageResult<()> {
+        if let Some(operation) = &self.operation {
+            let mut retained = operation
+                .lock()
+                .map_err(|_| std::io::Error::other("cache lease scope poisoned"))?;
+            retained.entry(key).or_insert(lease);
+        }
+
+        Ok(())
+    }
+
+    /// Reuse a canonical entry already owned by this operation without waiting behind a writer.
+    pub(crate) fn retained_lease(&self, key: &Path) -> ImageResult<Option<StorageLease>> {
+        let Some(operation) = &self.operation else {
+            return Ok(None);
+        };
+        let retained = operation
+            .lock()
+            .map_err(|_| std::io::Error::other("cache lease scope poisoned"))?;
+
+        Ok(retained.get(key).cloned())
+    }
+
     /// Protect entries in stable path order. The returned leases cover this call's reader;
     /// an operation scope additionally retains them through its caller's publication.
     pub fn lease_paths(&self, mut paths: Vec<PathBuf>) -> ImageResult<Vec<StorageLease>> {
@@ -38,36 +63,51 @@ impl GlobalCache {
             .collect::<std::io::Result<_>>()?;
         paths.sort();
         paths.dedup();
-        if let Some(operation) = &self.operation {
-            let mut retained = operation
-                .lock()
-                .map_err(|_| std::io::Error::other("cache lease scope poisoned"))?;
-            // Reopening a flock creates another open file description. Share the existing
-            // guard instead, including across calls and aliases of the cache directory.
-            return paths
-                .into_iter()
-                .map(|path| {
-                    if let Some(lease) = retained.get(&path) {
-                        return Ok(lease.clone());
-                    }
-                    let lease = StorageLease::shared(&path)?;
-                    retained.insert(path, lease.clone());
-                    Ok(lease)
-                })
-                .collect();
+        let mut leases = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(lease) = self.retained_lease(&path)? {
+                leases.push(lease);
+                continue;
+            }
+
+            // Waiting never holds the scope mutex. The shared pool deduplicates
+            // descriptors if another caller admits this key concurrently.
+            let lease = StorageLease::shared_keyed(&path)?;
+            self.retain_lease(path, lease.clone())?;
+            leases.push(lease);
         }
-        paths
-            .iter()
-            .map(|path| StorageLease::shared(path).map_err(Into::into))
-            .collect()
+
+        Ok(leases)
     }
 
     /// Async counterpart of [`Self::lease_paths`].
-    pub async fn lease_paths_async(&self, paths: Vec<PathBuf>) -> ImageResult<Vec<StorageLease>> {
-        let cache = self.clone();
-        tokio::task::spawn_blocking(move || cache.lease_paths(paths))
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?
+    pub async fn lease_paths_async(
+        &self,
+        mut paths: Vec<PathBuf>,
+    ) -> ImageResult<Vec<StorageLease>> {
+        paths = tokio::task::spawn_blocking(move || {
+            paths
+                .iter()
+                .map(|path| StorageLease::key(path))
+                .collect::<std::io::Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
+        paths.sort();
+        paths.dedup();
+
+        let mut leases = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(lease) = self.retained_lease(&path)? {
+                leases.push(lease);
+                continue;
+            }
+
+            let lease = StorageLease::shared_async_keyed(path.clone()).await?;
+            self.retain_lease(path, lease.clone())?;
+            leases.push(lease);
+        }
+        Ok(leases)
     }
 
     /// All independently reclaimable entries belonging to this immutable manifest.
@@ -104,6 +144,48 @@ mod tests {
                 size_bytes: Some(1),
             }],
         }
+    }
+
+    #[test]
+    fn blocked_sync_acquisition_does_not_block_async_scope_access() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(home.path()).unwrap().operation();
+        let busy = cache.layer_erofs_path(&metadata('a').manifest_digest.parse().unwrap());
+        let available = cache.layer_erofs_path(&metadata('b').manifest_digest.parse().unwrap());
+        let held = StorageLease::try_exclusive(&busy).unwrap().unwrap();
+        let sync_cache = cache.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let sync_reader = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            sync_cache.lease_paths(vec![busy]).unwrap()
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let (finished, result) = std::sync::mpsc::channel();
+        let async_reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let leases = runtime
+                .block_on(cache.lease_paths_async(vec![available]))
+                .unwrap();
+            finished.send(()).unwrap();
+            leases
+        });
+        let completed_before_release = result
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+
+        // Always release and join before asserting, including on the pre-fix failure path.
+        drop(held);
+        drop(sync_reader.join().unwrap());
+        drop(async_reader.join().unwrap());
+        assert!(
+            completed_before_release,
+            "an unrelated async lease must not wait for the busy key"
+        );
     }
 
     #[test]
@@ -229,5 +311,123 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn async_lease_wait_does_not_occupy_the_blocking_pool() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(home.path()).unwrap().operation();
+        let path = cache.layer_erofs_path(&metadata('a').manifest_digest.parse().unwrap());
+        let held = StorageLease::try_exclusive(&path).unwrap().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
+            let waiter_cache = cache.clone();
+            let waiter_path = path.clone();
+            let waiter =
+                tokio::spawn(
+                    async move { waiter_cache.lease_paths_async(vec![waiter_path]).await },
+                );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+            let marker = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::task::spawn_blocking(|| 42),
+            )
+            .await
+            .expect("a lease waiter must not monopolize the only blocking thread")
+            .unwrap();
+            assert_eq!(marker, 42);
+
+            drop(held);
+            let _lease = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("the waiter should acquire the released lease")
+                .unwrap()
+                .unwrap();
+            assert_eq!(cache.operation.as_ref().unwrap().lock().unwrap().len(), 1);
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_operations_share_lease_descriptors() {
+        const CHILD: &str = "MSB_TEST_SHARED_LEASE_FD_LIMIT";
+        if std::env::var_os(CHILD).is_none() {
+            use std::os::unix::process::CommandExt;
+
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "cache::lease::tests::concurrent_operations_share_lease_descriptors",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1");
+            // SAFETY: the callback only changes the child descriptor limit before exec.
+            unsafe {
+                child.pre_exec(|| {
+                    let mut limit = std::mem::zeroed::<libc::rlimit>();
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    limit.rlim_cur = limit.rlim_max.min(64);
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "shared lease child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let cache = GlobalCache::new(home.path()).unwrap();
+        let paths = (0_u32..24)
+            .map(|index| {
+                let digest: Digest = format!("sha256:{index:064x}").parse().unwrap();
+                cache.layer_erofs_path(&digest)
+            })
+            .collect::<Vec<_>>();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let operations = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..512 {
+                let operation = cache.operation();
+                let paths = paths.clone();
+                tasks.spawn(async move {
+                    operation.lease_paths_async(paths).await.unwrap();
+                    operation
+                });
+            }
+            let mut operations = Vec::with_capacity(512);
+            while let Some(operation) = tasks.join_next().await {
+                operations.push(operation.unwrap());
+            }
+            operations
+        });
+
+        for path in &paths {
+            assert!(StorageLease::try_exclusive(path).unwrap().is_none());
+        }
+        drop(operations);
+        for path in &paths {
+            assert!(StorageLease::try_exclusive(path).unwrap().is_some());
+        }
     }
 }

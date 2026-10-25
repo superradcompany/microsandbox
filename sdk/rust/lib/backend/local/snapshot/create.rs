@@ -901,14 +901,11 @@ async fn capture_full_snapshot(
     let root_disk = snapshot_root_disk(sandbox_config.spec.image.oci_root_disk(), source_sandbox)?;
 
     let checkpoint_id = format!("checkpoint_{:032x}", rand::random::<u128>());
-    let outcome = crate::sandbox::control_checkpoint_create(
-        local,
-        source_sandbox,
-        checkpoint_id.clone(),
-        record_integrity,
-        guest_flush,
-    )
-    .await?;
+    let outcome = local
+        .require_control_session(source_sandbox)
+        .await?
+        .create_checkpoint(checkpoint_id.clone(), record_integrity, guest_flush)
+        .await?;
     let checkpoint = outcome.checkpoint;
     let fs_state_limit = local.config().fs_state_limit();
     let validated = (|| {
@@ -1433,9 +1430,11 @@ async fn capture_disk_source(
         })?;
     }
     let id = format!("disk_{:032x}", rand::random::<u128>());
-    let captured =
-        crate::sandbox::control_disk_checkpoint_create(local, source, id.clone(), guest_flush)
-            .await?;
+    let captured = local
+        .require_control_session(source)
+        .await?
+        .create_disk_checkpoint(id.clone(), guest_flush)
+        .await?;
     let expected_path = sandbox_dir.join("runtime").join("checkpoints").join(&id);
     let expected_device = match root_disk {
         SnapshotRootDisk::Flat => "vda",
@@ -3076,6 +3075,7 @@ mod tests {
             name: "source".into(),
             config: serde_json::to_string(&staged).unwrap(),
             active_config: Some(serde_json::to_string(&running).unwrap()),
+            caller_config_overrides: None,
             status: SandboxStatus::Running,
             network_slot: None,
             ephemeral: false,

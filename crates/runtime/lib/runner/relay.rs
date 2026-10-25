@@ -17,6 +17,7 @@ use std::io::IoSlice;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -223,6 +224,19 @@ struct ClientState {
     /// Runtime-to-SDK arena producer after this client accepts local-shm-v1.
     #[cfg(unix)]
     local_outbound: Option<SharedArenaProducer>,
+}
+
+/// Host-side execution ownership used by the idle monitor.
+#[derive(Default)]
+pub(crate) struct RelayIdleState {
+    clients: Arc<Mutex<HashMap<u32, ClientState>>>,
+    managed_connections: StdMutex<HashSet<[u8; 16]>>,
+}
+
+/// Removes a managed connection's identity when its job stream ends.
+pub(crate) struct ManagedConnectionGuard {
+    idle_state: Arc<RelayIdleState>,
+    token: [u8; 16],
 }
 
 /// One primary-lane write, optionally acknowledged after physical ring admission.
@@ -480,6 +494,7 @@ struct GuestFrameMerger {
 /// for client connections on a Unix domain socket. Frames are routed between
 /// clients and the guest agent without decoding.
 pub struct AgentRelay {
+    idle_state: Arc<RelayIdleState>,
     restored_input: RestoreInput,
     /// Shared ring buffers + wake pipes for console backend communication.
     shared: Arc<ConsoleSharedState>,
@@ -551,6 +566,35 @@ struct RestoreActivationRecord<'a> {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl RelayIdleState {
+    /// Register a runtime-owned agent connection before it sends an exec request.
+    pub(crate) fn register_managed_connection(
+        self: &Arc<Self>,
+        token: [u8; 16],
+    ) -> ManagedConnectionGuard {
+        self.managed_connections.lock().unwrap().insert(token);
+
+        ManagedConnectionGuard {
+            idle_state: Arc::clone(self),
+            token,
+        }
+    }
+
+    /// Return whether a caller-owned exec is still connected to the relay.
+    pub(crate) async fn has_attached_exec_sessions(&self) -> bool {
+        let clients = self.clients.lock().await;
+        let managed = self.managed_connections.lock().unwrap();
+
+        clients.values().any(|client| {
+            !client.active_sessions.is_empty()
+                && client
+                    .exec_control
+                    .as_ref()
+                    .is_none_or(|connection| !managed.contains(&connection.token()))
+        })
+    }
+}
 
 impl ControlWrite {
     pub(crate) fn clock_sync() -> RuntimeResult<Self> {
@@ -1223,6 +1267,7 @@ impl AgentRelay {
         tracing::info!("agent relay listening on {}", agent_sock_path.display());
 
         Ok(Self {
+            idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
             restored_input: RestoreInput::default(),
@@ -1254,6 +1299,7 @@ impl AgentRelay {
         bulk_shared: Option<Arc<ConsoleSharedState>>,
     ) -> Self {
         Self {
+            idle_state: Arc::new(RelayIdleState::default()),
             shared,
             bulk_shared,
             restored_input: RestoreInput::default(),
@@ -1285,6 +1331,11 @@ impl AgentRelay {
             self.endpoint.display()
         );
         Ok(())
+    }
+
+    /// Share live client ownership with the host idle monitor and job manager.
+    pub(crate) fn idle_state(&self) -> Arc<RelayIdleState> {
+        Arc::clone(&self.idle_state)
     }
 
     /// Select how the relay manages the guest wall clock.
@@ -1937,7 +1988,7 @@ impl AgentRelay {
             .ok_or_else(|| RuntimeError::Custom("agent relay: endpoint not published".into()))?;
 
         // Shared state: map from client slot index to client state.
-        let clients: Arc<Mutex<HashMap<u32, ClientState>>> = Arc::new(Mutex::new(HashMap::new()));
+        let clients = Arc::clone(&self.idle_state.clients);
 
         // Bounded channel for client reader tasks to send frames to the ring writer.
         // Backpressure prevents unbounded memory growth from client floods.
@@ -2342,6 +2393,16 @@ impl AgentRelay {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Drop for ManagedConnectionGuard {
+    fn drop(&mut self) {
+        self.idle_state
+            .managed_connections
+            .lock()
+            .unwrap()
+            .remove(&self.token);
+    }
+}
 
 impl Drop for AgentRelay {
     fn drop(&mut self) {
@@ -5640,6 +5701,49 @@ mod tests {
 
     use super::exec_admission::ExecutionTracker;
     use super::*;
+
+    #[tokio::test]
+    async fn idle_state_tracks_caller_connections_separately_from_managed_jobs() {
+        let idle = Arc::new(RelayIdleState::default());
+        let (agent_tx, _agent_rx) = ControlWriter::new();
+        let direct = agent_tx.exec_controls.connect(1, 100);
+        let managed = agent_tx.exec_controls.connect(101, 200);
+        let managed_token = managed.token();
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (disconnect_tx, _disconnect_rx) = watch::channel(false);
+
+        let client = |connection: Option<ExecControlConnection>, id| ClientState {
+            exec_control: connection,
+            execution_tracker: Arc::new(ExecutionTracker::default()),
+            incarnation: None,
+            active_sessions: HashSet::from([id]),
+            active_bulk: Arc::new(StdMutex::new(HashMap::new())),
+            completed_bulk_ids: None,
+            write_tx: write_tx.clone(),
+            write_budget: Arc::new(Semaphore::new(CLIENT_OUTPUT_PER_CLIENT_BYTE_CAPACITY)),
+            disconnect_tx: disconnect_tx.clone(),
+            #[cfg(unix)]
+            local_outbound: None,
+        };
+
+        let managed_guard = idle.register_managed_connection(managed_token);
+        let mut clients = idle.clients.lock().await;
+        clients.insert(0, client(Some(direct), 1));
+        clients.insert(1, client(Some(managed), 101));
+        drop(clients);
+
+        assert!(idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.remove(&0);
+        assert!(!idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.insert(2, client(None, 201));
+        assert!(idle.has_attached_exec_sessions().await);
+
+        idle.clients.lock().await.remove(&2);
+        drop(managed_guard);
+        assert!(idle.has_attached_exec_sessions().await);
+    }
 
     /// Reports the relay reader's consumed byte count every time its read goes pending, so a test
     /// can interrupt a partly read frame at a known position without sleeping on a guess.

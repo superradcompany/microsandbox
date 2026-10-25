@@ -197,7 +197,8 @@ impl LocalBackend {
             }
         }
 
-        let mut config: SandboxConfig = serde_json::from_str::<SandboxConfig>(&model.config)?;
+        let mut config =
+            SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
@@ -208,6 +209,12 @@ impl LocalBackend {
             Duration::from_secs(5),
         )
         .await?;
+
+        #[cfg(unix)]
+        microsandbox_runtime::maintenance::remove_bootstrap_trampoline(
+            &self.sandboxes_dir().join(name),
+        )?;
+
         // A failed or interrupted first restore is not a stopped ordinary VM. In particular,
         // its sealed base may be hard-linked to a snapshot and must never become a boot disk.
         Self::validate_completed_restore(&config)?;
@@ -407,6 +414,18 @@ impl LocalBackend {
             })??;
         }
         if all_dead {
+            #[cfg(unix)]
+            {
+                let _ownership = crate::runtime::acquire_sandbox_lifecycle_guard(
+                    &self.config().run_dir(),
+                    name,
+                    Duration::from_secs(5),
+                )
+                .await?;
+                microsandbox_runtime::maintenance::remove_bootstrap_trampoline(
+                    &self.sandboxes_dir().join(name),
+                )?;
+            }
             let db = self.db().await?.write();
             if let Err(e) = Self::update_sandbox_status(db, model.id, SandboxStatus::Stopped).await
             {

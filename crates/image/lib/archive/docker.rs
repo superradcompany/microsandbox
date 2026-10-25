@@ -319,6 +319,11 @@ fn raw_config_platform(raw_config_json: &str) -> (Option<String>, Option<String>
 }
 
 /// Load a Docker image archive into the microsandbox image cache.
+///
+/// Leases protect the import itself, not the returned [`LoadedImage`] values. For a
+/// prune-safe handoff to durable catalog ownership, use [`load_archive_with`] to publish
+/// each image before its leases are released, or [`load_archive_into`] with a retained
+/// [`GlobalCache::operation`] scope.
 pub async fn load_archive(
     cache_dir: &Path,
     input: &Path,
@@ -329,6 +334,9 @@ pub async fn load_archive(
 }
 
 /// Import using a caller-owned operation scope, retained through catalog publication.
+///
+/// Pass a [`GlobalCache::operation`] scope and keep it alive through durable publication.
+/// If `cache` is not scoped, the temporary import scope is released when this call returns.
 pub async fn load_archive_into(
     cache: &GlobalCache,
     input: &Path,

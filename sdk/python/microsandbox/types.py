@@ -1657,10 +1657,14 @@ class OutboundProxy:
     def __post_init__(self) -> None:
         if self.protocol != "socks4" and self.user_id is not None:
             raise ValueError("user_id is only supported for SOCKS4 proxies")
-        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if self.protocol == "socks4" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         if (self.username is None) != (self.password is None):
-            raise ValueError("SOCKS5 username and password must be provided together")
+            if self.protocol == "socks5":
+                raise ValueError("SOCKS5 username and password must be provided together")
+            raise ValueError(
+                "HTTP CONNECT username and password must be provided together"
+            )
 
     @classmethod
     def http_connect(cls, address: str) -> OutboundProxy:
@@ -1678,9 +1682,16 @@ class OutboundProxy:
         return cls(protocol="socks5", address=address)
 
     def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
-        """Set username authentication and a host-side password source."""
-        if self.protocol != "socks5":
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        """Set username authentication and a host-side password source.
+
+        Supported for SOCKS5 and HTTP CONNECT proxies. HTTP CONNECT permits an
+        empty username for token-only authentication. The values are stored as
+        given: the backend validates them when the sandbox configuration is
+        built, where an HTTP CONNECT username containing ``:`` or control
+        characters is rejected.
+        """
+        if self.protocol == "socks4":
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         return OutboundProxy(
             protocol=self.protocol,
             address=self.address,

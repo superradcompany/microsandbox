@@ -69,6 +69,9 @@ pub struct Model {
     pub name: String,
     /// Desired sandbox configuration used for the next start.
     pub config: String,
+    /// JSON containing the caller's explicit settings and a fingerprint of `config`.
+    /// Older sandbox records may not have this value.
+    pub caller_config_overrides: Option<String>,
     /// Configuration actually used by the currently running VM, when active.
     pub active_config: Option<String>,
     pub status: SandboxStatus,

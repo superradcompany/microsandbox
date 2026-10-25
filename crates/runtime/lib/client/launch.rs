@@ -46,6 +46,9 @@ pub const LIFECYCLE_LOCK_FD: i32 = 99;
 /// Control byte sent by the owner to stop parent-watch monitoring without stopping the sandbox.
 pub const PARENT_WATCH_DETACH: u8 = 1;
 
+/// Host-only bootstrap rootfs directory beneath a sandbox's persisted directory.
+pub const BOOTSTRAP_ROOTFS_DIR: &str = ".bootstrap-rootfs";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
