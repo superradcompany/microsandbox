@@ -2625,13 +2625,7 @@ fn resolve_mount_patch(
     current: &[VolumeMount],
     patch: &SandboxModificationPatch,
 ) -> Result<(Vec<VolumeMount>, Vec<MountDelta>), String> {
-    let mut mounts = current.to_vec();
-    // Older releases saved guest paths as given, such as `/data/`; match them canonically.
-    for mount in &mut mounts {
-        if let Ok(guest) = canonical_guest_mount_path(mount.guest()) {
-            *guest_of(mount) = guest;
-        }
-    }
+    let mut mounts = with_canonical_guests(current);
     let mut deltas = Vec::new();
     let mut requested_guests = Vec::new();
 
@@ -2731,6 +2725,18 @@ fn resolve_mount_patch(
     }
 
     Ok((mounts, deltas))
+}
+
+/// Copy `mounts` with canonical guest paths. Older releases saved them as given, such as
+/// `/data/`; paths that cannot be canonicalized are kept for validation to report.
+fn with_canonical_guests(mounts: &[VolumeMount]) -> Vec<VolumeMount> {
+    let mut mounts = mounts.to_vec();
+    for mount in &mut mounts {
+        if let Ok(guest) = canonical_guest_mount_path(mount.guest()) {
+            *guest_of(mount) = guest;
+        }
+    }
+    mounts
 }
 
 /// Whether `create` only asks for the volume to exist, with no settings of its own. The CLI
@@ -3201,7 +3207,11 @@ fn changed_bind_mounts(
     let Ok((mounts, _)) = resolve_mount_patch(current, patch) else {
         return Vec::new();
     };
-    let current_forms: Vec<_> = current.iter().map(mount_json).collect();
+    // Resolved mounts carry canonical guest paths, so compare them with the same form.
+    let current_forms: Vec<_> = with_canonical_guests(current)
+        .iter()
+        .map(mount_json)
+        .collect();
 
     let mut changed = Vec::new();
     for mount in mounts {
@@ -6563,6 +6573,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(mount_guests(&rebuilt), vec!["/opt/new"]);
+    }
+
+    #[test]
+    fn saved_binds_with_non_canonical_guest_paths_are_not_reported_as_changed() {
+        let mut saved = bind_mount("/data", "/host/data", false);
+        *guest_of(&mut saved) = "/data/".to_string();
+        let unrelated = SandboxModificationPatch {
+            env: vec![EnvVar::new("MODE", "test")],
+            ..SandboxModificationPatch::default()
+        };
+        let added = SandboxModificationPatch {
+            mounts: vec![bind_mount("/new", "/host/new", false)],
+            ..SandboxModificationPatch::default()
+        };
+
+        let unrelated_changes = changed_bind_mounts(std::slice::from_ref(&saved), &unrelated);
+        let added_changes = changed_bind_mounts(std::slice::from_ref(&saved), &added);
+
+        assert!(unrelated_changes.is_empty(), "{unrelated_changes:?}");
+        assert_eq!(
+            added_changes
+                .iter()
+                .map(VolumeMount::guest)
+                .collect::<Vec<_>>(),
+            vec!["/new"]
+        );
     }
 
     #[test]
