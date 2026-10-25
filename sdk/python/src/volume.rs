@@ -598,8 +598,8 @@ mod tests {
     /// `microsandbox/__init__.py` would require.
     fn with_sdk_types<R>(f: impl FnOnce(Python<'_>) -> PyResult<R>) -> R {
         static INIT: Once = Once::new();
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
+        Python::initialize();
+        Python::attach(|py| {
             INIT.call_once(|| {
                 let package = PyModule::new(py, "microsandbox").unwrap();
                 let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/microsandbox");
