@@ -1259,7 +1259,7 @@ impl SshSession {
         let handle = crate::sandbox::exec::agent::exec_stream_with_pty_size(
             self.settings.sandbox.backend().as_ref(),
             self.settings.sandbox.name(),
-            self.settings.sandbox.config(),
+            &self.settings.sandbox.config(),
             cmd,
             opts,
             rows,

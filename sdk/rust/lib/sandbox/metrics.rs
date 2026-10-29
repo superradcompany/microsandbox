@@ -122,7 +122,7 @@ impl Sandbox {
     pub async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics> {
         self.backend()
             .sandboxes()
-            .metrics(self.backend().clone(), self.name(), self.config())
+            .metrics(self.backend().clone(), self.name(), &self.config())
             .await
     }
 
@@ -135,7 +135,7 @@ impl Sandbox {
         self.backend().sandboxes().metrics_stream(
             self.backend().clone(),
             self.name().to_string(),
-            self.config().clone(),
+            (*self.config()).clone(),
             interval,
         )
     }

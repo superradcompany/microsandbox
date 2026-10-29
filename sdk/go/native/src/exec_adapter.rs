@@ -19,13 +19,8 @@ pub unsafe extern "C" fn msb_sandbox_shell_path(
     run_c(cancel_id, buf, buf_len, || {
         let sandbox = get(handle)?;
         Ok(Box::pin(async move {
-            let shell = sandbox
-                .config()
-                .spec
-                .runtime
-                .shell
-                .as_deref()
-                .unwrap_or("/bin/sh");
+            let config = sandbox.config();
+            let shell = config.spec.runtime.shell.as_deref().unwrap_or("/bin/sh");
             Ok(serde_json::json!({"shell": shell}).to_string())
         }))
     })

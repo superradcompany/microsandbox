@@ -21,7 +21,7 @@ When a change takes effect depends on the setting:
 | CPU and memory | Live, within the boot-time `max_*` ceilings | The VM and workload keep running |
 | Labels | Live | Host-side metadata; guest processes do not change |
 | Existing secret material or removal | Live | Adding a secret or changing its placeholder needs a restart |
-| Environment and workdir | Future execs | Processes that are already running keep their current values |
+| Environment and workdir | Live, for new commands | Running processes, PID 1 and its services, and the startup command keep their values |
 | `max_cpus` and `max_memory` | Restart or next start | These ceilings are fixed when the VM boots |
 | Root disk size | Live, restart or next start | Managed and flat ext4 roots grow only; tmpfs changes on boot |
 | Published TCP/UDP ports | Restart or next start | Add, update, or explicitly remove individual host endpoints |
@@ -289,7 +289,7 @@ See [Labels](/sandboxes/labels) for naming and cardinality guidance.
 
 ### Set command defaults
 
-Environment and workdir updates require no restart, but they affect only commands started after the patch:
+On a running sandbox, environment and workdir changes apply live to commands started after the patch:
 
 <CodeGroup>
 ```bash CLI
@@ -330,7 +330,13 @@ out, err := sb.Exec(ctx, "printenv", []string{"MODE"})
 ```
 </CodeGroup>
 
-Processes that were already running keep their original environment and working directory.
+New `msb exec` and `msb ssh` sessions and new SDK commands use the new values. Removing a variable with `--env-rm` works the same way.
+
+With the `next_start` policy the change is saved, and new commands keep the current values until the sandbox starts again. With `--restart` the sandbox restarts, so every process gets the new values, including PID 1 and the startup command.
+
+The workdir must be an absolute path. When the change reaches a running sandbox now (live or with `--restart`), modify also checks that the directory exists in the guest before it saves the change.
+
+<Note>Processes that are already running, PID 1 and the services it starts, and the startup command keep their old values until the sandbox restarts. A sandbox object that connected before another process changed the values, such as a running `msb ssh serve`, keeps using the old ones until it connects again. Sandboxes started by v0.6.3 or earlier can't apply these changes live, and sandboxes started by an older runtime can't remove a variable live; use `--restart` or `--next-start`.</Note>
 
 <span id="secrets" />
 

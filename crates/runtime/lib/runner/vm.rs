@@ -1985,8 +1985,7 @@ fn build_vm(
             Ok::<_, RuntimeError>(prepared)
         })
         .transpose()?;
-    let mut bootstrap = vm.bootstrap.clone();
-    bootstrap.init_failure_ack = true;
+    let mut bootstrap = guest_bootstrap(&vm.bootstrap);
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));
@@ -2736,7 +2735,7 @@ fn build_vm(
 
         bootstrap.network = Some(network.guest_bootstrap_network());
         bootstrap.host_alias = Some(network.guest_host_alias().to_string());
-        bootstrap.default_env.extend(network.guest_secret_env());
+        add_secret_env(&mut bootstrap, network.guest_secret_env());
 
         builder = builder.net(move |mut n| {
             n = n.mac(guest_mac);
@@ -2874,6 +2873,30 @@ fn build_vm(
         restored_agent,
         owned_directory_checkpoints,
     ))
+}
+
+/// The bootstrap sent to agentd, before the network adds its secret placeholders.
+///
+/// It always names the placeholders, as an empty list until any are added, so
+/// agentd can tell this runtime from an older one that added them unnamed.
+fn guest_bootstrap(launch: &GuestBootstrap) -> GuestBootstrap {
+    let mut bootstrap = launch.clone();
+    bootstrap.init_failure_ack = true;
+    bootstrap.secret_env_keys.get_or_insert_with(Vec::new);
+    bootstrap
+}
+
+/// Add secret placeholders to the guest's default environment, naming each one.
+#[cfg(feature = "net")]
+fn add_secret_env(
+    bootstrap: &mut GuestBootstrap,
+    secret_env: Vec<microsandbox_protocol::bootstrap::BootstrapEnvVar>,
+) {
+    bootstrap
+        .secret_env_keys
+        .get_or_insert_with(Vec::new)
+        .extend(secret_env.iter().map(|variable| variable.key.clone()));
+    bootstrap.default_env.extend(secret_env);
 }
 
 fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> {
@@ -3922,12 +3945,10 @@ mod custom_backend_tests;
 #[cfg(test)]
 mod tests {
     use super::VmConfig;
-    #[cfg(feature = "net")]
-    use super::to_krun_network_rate_limiters;
     use super::{
         AGENT_BULK_QUEUE_SIZE, AGENT_CONTROL_QUEUE_SIZE, AgentTransportProfile, ConsoleSharedState,
         HostPermissions, StatVirtualization, agent_kernel_cmdline, agent_primary_queue_size,
-        append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame,
+        append_block_root_env, bind_rootfs_backend, encode_bootstrap_frame, guest_bootstrap,
         guest_shutdown_flush_timeout, guest_shutdown_flush_timeout_with_override, parse_mount_spec,
         prepend_scripts_path, request_guest_shutdown, request_guest_shutdown_with_timeout,
         thp_kernel_cmdline, validate_disk_format,
@@ -3943,6 +3964,8 @@ mod tests {
         DiskMountSpec, UpperLayerSpec, UpperSpec, prepare_runtime_restore_namespace,
         recover_owned_disk_layers, validate_disk_mount_layers, validate_upper_layers,
     };
+    #[cfg(feature = "net")]
+    use super::{add_secret_env, to_krun_network_rate_limiters};
 
     use microsandbox_filesystem::{Context, DynFileSystem, FsOptions};
     use microsandbox_protocol::{bootstrap::GuestBootstrap, codec, message::MessageType};
@@ -4853,6 +4876,39 @@ mod tests {
         assert_eq!(message.v, microsandbox_protocol::message::PROTOCOL_VERSION);
         assert_eq!(message.payload::<GuestBootstrap>().unwrap(), bootstrap);
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn test_guest_bootstrap_always_names_secret_placeholders() {
+        let bootstrap = guest_bootstrap(&GuestBootstrap::default());
+
+        assert!(bootstrap.init_failure_ack);
+        assert_eq!(bootstrap.secret_env_keys, Some(Vec::new()));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn test_secret_placeholders_are_named_as_they_are_added() {
+        use microsandbox_protocol::bootstrap::BootstrapEnvVar;
+
+        let mut bootstrap = guest_bootstrap(&GuestBootstrap {
+            default_env: vec![BootstrapEnvVar {
+                key: "MODE".to_string(),
+                value: "dev".to_string(),
+            }],
+            ..GuestBootstrap::default()
+        });
+        add_secret_env(
+            &mut bootstrap,
+            vec![BootstrapEnvVar {
+                key: "API_KEY".to_string(),
+                value: "$MSB_API_KEY".to_string(),
+            }],
+        );
+
+        assert_eq!(bootstrap.secret_env_keys, Some(vec!["API_KEY".to_string()]));
+        let keys: Vec<_> = bootstrap.default_env.iter().map(|var| &var.key).collect();
+        assert_eq!(keys, ["MODE", "API_KEY"]);
     }
 
     #[test]

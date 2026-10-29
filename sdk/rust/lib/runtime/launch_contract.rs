@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
 
-use crate::runtime::launch_input::{legacy_env, unsupported};
+use crate::runtime::launch_input::{legacy_cwd, legacy_env, unsupported};
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig, config::GlobalConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -421,6 +421,13 @@ impl LaunchContract {
     pub(crate) fn legacy_env(self) -> bool {
         self.patch < 10
     }
+    /// Check a workdir the way this contract's launch encoder will.
+    pub(crate) fn validate_workdir(self, workdir: &str) -> MicrosandboxResult<()> {
+        if self.machine || !self.legacy_env() {
+            return Ok(());
+        }
+        legacy_cwd(workdir)
+    }
     /// Whether network settings use a resolved envelope.
     pub(crate) fn resolved_network(self) -> bool {
         self.patch >= 17
@@ -671,6 +678,20 @@ pub(crate) async fn validate_runtime_config(
     validate_guest_clock(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
+}
+
+/// Check a workdir against the installed runtime's launch contract, as create's
+/// [`validate_runtime_config`] does, without checking the rest of the config.
+pub(crate) async fn validate_runtime_workdir(
+    workdir: &str,
+    global: &GlobalConfig,
+) -> MicrosandboxResult<()> {
+    let runtime = match crate::setup::resolve_runtime(global) {
+        Ok(runtime) => runtime,
+        Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    resolve(&runtime.msb_path).await?.validate_workdir(workdir)
 }
 
 pub(crate) async fn resolve(path: &Path) -> MicrosandboxResult<LaunchContract> {
@@ -1082,6 +1103,36 @@ mod tests {
         }
         .validate_launch_intent(&config)
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workdir_check_matches_the_launch_encoder() {
+        let mut config = crate::test_support::fixtures::decode(include_str!(
+            "../db/fixtures/config-0.6.18.json"
+        ))
+        .unwrap();
+        let mut legacy_checked = false;
+        for (patch, machine) in (0..=18).map(|patch| (patch, false)).chain([(18, true)]) {
+            let contract = LaunchContract { patch, machine };
+            config.spec.runtime.workdir = Some("/app".into());
+            if contract.validate_launch_intent(&config).is_err() {
+                continue;
+            }
+            for workdir in ["/app", "/caf\u{e9}", "/a\"b", "/a\tb"] {
+                config.spec.runtime.workdir = Some(workdir.into());
+                assert_eq!(
+                    contract.validate_workdir(workdir).is_ok(),
+                    contract.validate_launch_intent(&config).is_ok(),
+                    "patch {patch}, machine {machine}, {workdir:?}"
+                );
+                if !machine && patch < 10 && workdir != "/app" {
+                    assert!(contract.validate_workdir(workdir).is_err());
+                    legacy_checked = true;
+                }
+            }
+        }
+        assert!(legacy_checked);
     }
 
     #[cfg(feature = "net")]

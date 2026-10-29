@@ -14,6 +14,8 @@ use crate::transport::{BulkTransportReady, LocalTransportReady, RelayLeaseReady}
 /// Version 1 was an unreleased development contract that charged stdin to control. Its captured
 /// debt cannot be reinterpreted by this contract; full restore rejects that development state.
 pub const WORKLOAD_TRANSPORT_BARRIER_VERSION: u8 = 2;
+/// Exec requests may set [`ExecRequest::replace_default_env`](crate::exec::ExecRequest::replace_default_env).
+pub const REPLACE_DEFAULT_ENV_VERSION: u8 = 1;
 /// Maximum outstanding command/control wire bytes, including frame headers.
 pub const WORKLOAD_TRANSPORT_CONTROL_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum outstanding command/control frames, excluding retained workload payloads.
@@ -79,6 +81,13 @@ pub struct Ready {
     /// pause require the supported contract instead of assuming frame safety.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload_transport_barrier_version: Option<u8>,
+
+    /// [`REPLACE_DEFAULT_ENV_VERSION`] when agentd honours
+    /// [`ExecRequest::replace_default_env`](crate::exec::ExecRequest::replace_default_env).
+    /// Older agents omit it and ignore that field, so a host relies on it only
+    /// when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace_default_env_version: Option<u8>,
 
     /// Runtime-authorized sandbox execution policy, absent on released older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,6 +430,7 @@ mod tests {
             relay_lease: None,
             local_transport: None,
             workload_transport_barrier_version: None,
+            replace_default_env_version: None,
         };
         let mut legacy_bytes = Vec::new();
         ciborium::into_writer(&legacy, &mut legacy_bytes).unwrap();
@@ -433,6 +443,7 @@ mod tests {
         assert!(decoded.relay_lease.is_none());
         assert!(decoded.local_transport.is_none());
         assert!(decoded.workload_transport_barrier_version.is_none());
+        assert!(decoded.replace_default_env_version.is_none());
         assert!(decoded.exec_limits.is_none());
 
         let advertised = Ready {
@@ -446,6 +457,26 @@ mod tests {
         assert_eq!(
             legacy_decoded, legacy,
             "older clients must ignore the new policy field"
+        );
+    }
+
+    #[test]
+    fn replace_default_env_capability_is_additive() {
+        let current = Ready {
+            boot_time_ns: 11,
+            replace_default_env_version: Some(super::REPLACE_DEFAULT_ENV_VERSION),
+            ..Ready::default()
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&current, &mut bytes).unwrap();
+
+        // A host from before the field decodes the frame and ignores it.
+        let legacy: LegacyReady = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(legacy.boot_time_ns, 11);
+        let decoded: Ready = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(
+            decoded.replace_default_env_version,
+            Some(super::REPLACE_DEFAULT_ENV_VERSION)
         );
     }
 

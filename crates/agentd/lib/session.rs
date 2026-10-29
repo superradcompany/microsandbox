@@ -686,9 +686,13 @@ impl ExecSession {
     ///
     /// If `req.tty` is true, uses a PTY. Otherwise, uses piped stdin/stdout/stderr.
     /// A background task is spawned to read output and send events via `tx`.
+    /// The child does not inherit the variables named in `removed_env`; the
+    /// request's own entries and `HOME` are set afterwards.
+    #[allow(clippy::too_many_arguments)] // Forwards every launch input to the selected spawn mode.
     pub(crate) fn spawn(
         id: u32,
         req: &ExecRequest,
+        removed_env: &[String],
         tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
@@ -700,6 +704,7 @@ impl ExecSession {
             Self::spawn_pty(
                 id,
                 req,
+                removed_env,
                 tx,
                 default_user,
                 security_profile,
@@ -711,6 +716,7 @@ impl ExecSession {
             Self::spawn_pipe(
                 id,
                 req,
+                removed_env,
                 tx,
                 default_user,
                 security_profile,
@@ -1003,6 +1009,7 @@ impl ExecSession {
     fn spawn_pty(
         id: u32,
         req: &ExecRequest,
+        removed_env: &[String],
         tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
@@ -1046,7 +1053,11 @@ impl ExecSession {
             .chain(iter::once(ptr::null()))
             .collect();
 
-        // Pre-parse environment variables into CStrings.
+        // Pre-build the inherited variables to drop, then the ones to set.
+        let c_removed_env: Vec<CString> = removed_env
+            .iter()
+            .filter_map(|key| CString::new(key.as_str()).ok())
+            .collect();
         let c_env: Vec<(CString, CString)> = req
             .env
             .iter()
@@ -1132,7 +1143,12 @@ impl ExecSession {
                 }
             }
 
-            // Set environment variables using pre-built CStrings.
+            // Drop and set environment variables using pre-built CStrings.
+            for key in &c_removed_env {
+                unsafe {
+                    libc::unsetenv(key.as_ptr());
+                }
+            }
             for (key, val) in &c_env {
                 unsafe {
                     libc::setenv(key.as_ptr(), val.as_ptr(), 1);
@@ -1257,6 +1273,7 @@ impl ExecSession {
     fn spawn_pipe(
         id: u32,
         req: &ExecRequest,
+        removed_env: &[String],
         tx: SessionOutputSender,
         default_user: Option<&str>,
         security_profile: SecurityProfile,
@@ -1271,6 +1288,9 @@ impl ExecSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        for key in removed_env {
+            cmd.env_remove(key);
+        }
         for var in &req.env {
             if let Some((key, val)) = var.split_once('=') {
                 cmd.env(key, val);
@@ -1834,7 +1854,8 @@ fn default_home_dir(
     Ok(resolve_user_spec(DEFAULT_USER_SPEC)?.home_dir)
 }
 
-fn env_contains_key(env: &[String], key: &str) -> bool {
+/// Whether `env`, a list of `KEY=VALUE` entries, sets `key`.
+pub(crate) fn env_contains_key(env: &[String], key: &str) -> bool {
     env.iter().any(|entry| {
         entry
             .split_once('=')
@@ -2270,10 +2291,20 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
-        let session = ExecSession::spawn(17, &req, tx, None, SecurityProfile::Default, None, None)
-            .expect("spawn background descendant session");
+        let session = ExecSession::spawn(
+            17,
+            &req,
+            &[],
+            tx,
+            None,
+            SecurityProfile::Default,
+            None,
+            None,
+        )
+        .expect("spawn background descendant session");
         let leader_pid = session.pid() as i32;
         let mut stdout = Vec::new();
         time::timeout(Duration::from_secs(10), async {
@@ -2414,10 +2445,12 @@ mod tests {
                     rows: 24,
                     cols: 80,
                     rlimits: Vec::new(),
+                    replace_default_env: false,
                 };
                 ExecSession::spawn(
                     100 + offset,
                     &req,
+                    &[],
                     tx,
                     None,
                     SecurityProfile::Default,
@@ -2511,9 +2544,19 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
-        let _session = ExecSession::spawn(id, &req, tx, None, SecurityProfile::Default, None, None)
-            .expect("spawn session on replacement runtime");
+        let _session = ExecSession::spawn(
+            id,
+            &req,
+            &[],
+            tx,
+            None,
+            SecurityProfile::Default,
+            None,
+            None,
+        )
+        .expect("spawn session on replacement runtime");
 
         let actual = time::timeout(Duration::from_secs(5), async {
             loop {
@@ -2692,8 +2735,9 @@ mod tests {
                             hard: 0,
                         },
                     ],
+                    replace_default_env: false,
                 };
-                let session = ExecSession::spawn(7, &req, tx, None, profile, None, None)
+                let session = ExecSession::spawn(7, &req, &[], tx, None, profile, None, None)
                     .expect("spawn non-root command with raised memlock and nofile=0");
                 let result = time::timeout(Duration::from_secs(10), async {
                     let mut output = Vec::new();
@@ -2731,6 +2775,86 @@ mod tests {
         );
     }
 
+    /// Run `/usr/bin/env` and return its output.
+    async fn spawned_env(tty: bool, env: Vec<String>, removed_env: &[String]) -> String {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req = ExecRequest {
+            cmd: "/usr/bin/env".to_string(),
+            args: Vec::new(),
+            env,
+            cwd: None,
+            user: None,
+            tty,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            replace_default_env: true,
+        };
+        let session = ExecSession::spawn(
+            7,
+            &req,
+            removed_env,
+            tx,
+            None,
+            SecurityProfile::Default,
+            None,
+            None,
+        )
+        .expect("spawn env session");
+        let result = time::timeout(Duration::from_secs(10), async {
+            let mut output = Vec::new();
+            while let Some(envelope) = rx.recv().await {
+                match envelope.output {
+                    SessionOutput::Exited(code) => return (code, output),
+                    SessionOutput::Stdout(data) | SessionOutput::Stderr(data) => {
+                        output.extend(data)
+                    }
+                    SessionOutput::Raw(_) | SessionOutput::Bulk(_) => {}
+                }
+            }
+            panic!("session closed without an exit status");
+        })
+        .await;
+        if result.is_err() {
+            let _ = session.send_signal(libc::SIGKILL);
+        }
+        let (code, output) = result.expect("env session timed out");
+        let output = String::from_utf8_lossy(&output).replace('\r', "");
+        assert_eq!(code, 0, "{output}");
+        output
+    }
+
+    #[tokio::test]
+    async fn test_spawn_drops_removed_env_and_keeps_request_env() {
+        // The test process always has PATH, so the child inherits it unless dropped.
+        assert!(std::env::var_os("PATH").is_some());
+        for tty in [false, true] {
+            let kept = spawned_env(tty, vec!["KEPT=1".to_string()], &[]).await;
+            assert!(kept.lines().any(|line| line.starts_with("PATH=")), "{kept}");
+
+            let dropped = spawned_env(
+                tty,
+                vec!["KEPT=1".to_string()],
+                &["PATH".to_string(), "KEPT".to_string()],
+            )
+            .await;
+            assert!(
+                !dropped.lines().any(|line| line.starts_with("PATH=")),
+                "tty={tty}: {dropped}"
+            );
+            // Request entries are set after the drop, so they win.
+            assert!(
+                dropped.lines().any(|line| line == "KEPT=1"),
+                "tty={tty}: {dropped}"
+            );
+            // HOME is set per exec after the drop when the request has none.
+            assert!(
+                dropped.lines().any(|line| line.starts_with("HOME=")),
+                "tty={tty}: {dropped}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn stdin_acknowledgements_require_runtime_policy() {
         for tty in [false, true] {
@@ -2742,9 +2866,17 @@ mod tests {
                     "tty": tty,
                 }))
                 .unwrap();
-                let mut session =
-                    ExecSession::spawn(19, &req, tx, None, SecurityProfile::Default, None, policy)
-                        .expect("spawn stdin credit session");
+                let mut session = ExecSession::spawn(
+                    19,
+                    &req,
+                    &[],
+                    tx,
+                    None,
+                    SecurityProfile::Default,
+                    None,
+                    policy,
+                )
+                .expect("spawn stdin credit session");
                 assert_eq!(session.take_stdin_ack(), None);
                 session.enqueue_stdin(b"hello\n".to_vec(), None).unwrap();
                 assert_eq!(session.take_stdin_ack(), policy.map(|_| 6));
@@ -2813,10 +2945,12 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
-        let session = ExecSession::spawn(7, &req, tx, None, SecurityProfile::Default, None, None)
-            .expect("spawn pty session");
+        let session =
+            ExecSession::spawn(7, &req, &[], tx, None, SecurityProfile::Default, None, None)
+                .expect("spawn pty session");
         let mut stdout = Vec::new();
         let mut exit = None;
 
@@ -2877,6 +3011,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
         let resolved = resolve_requested_user(&req, Some("0:0")).expect("resolve requested user");
@@ -2895,6 +3030,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
         let uid = unsafe { libc::getuid() };
@@ -2918,6 +3054,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
         let resolved = resolve_requested_user(&req, None).expect("resolve absent user");
@@ -2942,6 +3079,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -2971,6 +3109,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let root = resolve_user_spec(DEFAULT_USER_SPEC).expect("resolve implicit root");
 
@@ -2995,6 +3134,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let user = ResolvedUser {
             uid: 1000,
@@ -3023,6 +3163,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
 
         // Use the process-wide manager because other tests may have already
@@ -3032,6 +3173,7 @@ mod tests {
         let err = ExecSession::spawn_pipe(
             9,
             &req,
+            &[],
             tx,
             None,
             SecurityProfile::Default,

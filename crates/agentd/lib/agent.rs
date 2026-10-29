@@ -62,7 +62,7 @@ use crate::session::{
 };
 use crate::tcp::TcpSession;
 use crate::workload::{WorkloadLatch, WorkloadLatchError};
-use crate::{clock, fs, handoff, heartbeat, serial};
+use crate::{clock, fs, handoff, heartbeat, serial, tls};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -555,6 +555,7 @@ pub async fn run(
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+            replace_default_env_version: config.replace_default_env_version(),
             exec_limits: config.exec_limits,
         },
     )
@@ -2862,6 +2863,7 @@ async fn handle_message_with_charge(
             if req.cwd.is_none() {
                 req.cwd = config.default_cwd().map(str::to_string);
             }
+            let removed_env = take_removed_default_env(config, &mut req);
             prepend_scripts_to_path(&mut req);
             if workload.is_frozen() {
                 encode_exec_failed(
@@ -2897,6 +2899,7 @@ async fn handle_message_with_charge(
             match ExecSession::spawn(
                 msg.id,
                 &req,
+                &removed_env,
                 session_tx.clone(),
                 config.user.as_deref(),
                 config.security_profile,
@@ -3894,11 +3897,27 @@ fn errno_name(code: i32) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Boot defaults the child of `req` must not inherit. An agentd that does not
+/// advertise the capability clears the flag, since the host sets it unchecked.
+fn take_removed_default_env(config: &AgentdConfig, req: &mut ExecRequest) -> Vec<String> {
+    if config.replace_default_env_version().is_none() {
+        req.replace_default_env = false;
+    }
+    if !req.replace_default_env {
+        return Vec::new();
+    }
+    config.omitted_default_env(&req.env, tls::installed_env_keys(), |key| env::var_os(key))
+}
+
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
     // Entries apply in order, so the child sees the request's last PATH.
     if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
+    } else if req.replace_default_env {
+        // The request's defaults have no PATH, so the boot one is not inherited
+        // either: start from the default guest PATH, as boot does without one.
+        req.env.push(format!("PATH={}", scripts_path(None)));
     } else {
         let inherited = env::var("PATH").ok();
         req.env
@@ -4371,6 +4390,7 @@ mod tests {
             security_profile: Default::default(),
             default_cwd: None,
             default_env: Vec::new(),
+            secret_env_keys: None,
         };
         let heartbeat = heartbeat::HeartbeatControl::default();
         let mut workload = crate::workload::tests::fake_latch();
@@ -4497,6 +4517,7 @@ mod tests {
             security_profile: Default::default(),
             default_cwd: None,
             default_env: Vec::new(),
+            secret_env_keys: None,
         };
         let heartbeat = heartbeat::HeartbeatControl::default();
         let mut workload = crate::workload::tests::fake_latch();
@@ -4735,6 +4756,7 @@ mod tests {
                 security_profile: Default::default(),
                 default_cwd: None,
                 default_env: Vec::new(),
+                secret_env_keys: None,
             };
             let mut workload = crate::workload::tests::fake_latch();
             let heartbeat = heartbeat::HeartbeatControl::default();
@@ -5766,6 +5788,7 @@ mod tests {
             security_profile: Default::default(),
             default_cwd: None,
             default_env: Vec::new(),
+            secret_env_keys: None,
         };
         let mut workload = crate::workload::tests::fake_latch();
         let owner = [0x51; CLIENT_INCARNATION_SIZE];
@@ -5917,6 +5940,7 @@ mod tests {
                 security_profile: Default::default(),
                 default_cwd: None,
                 default_env: Vec::new(),
+                secret_env_keys: None,
             };
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
@@ -5938,10 +5962,12 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 rlimits: vec![],
+                replace_default_env: false,
             };
             let session = ExecSession::spawn(
                 1,
                 &request,
+                &[],
                 sender.clone(),
                 None,
                 crate::config::SecurityProfile::Default,
@@ -6126,6 +6152,7 @@ mod tests {
                 security_profile: Default::default(),
                 default_cwd: None,
                 default_env: Vec::new(),
+                secret_env_keys: None,
             };
             let request = ExecRequest {
                 cmd: "/bin/sh".into(),
@@ -6137,6 +6164,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 rlimits: vec![],
+                replace_default_env: false,
             };
             let mut encoded = Vec::new();
             handle_message(
@@ -6218,10 +6246,12 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 rlimits: vec![],
+                replace_default_env: false,
             };
             let session = ExecSession::spawn(
                 id,
                 &request("echo before; sleep 0.3; echo inherited; exit 23"),
+                &[],
                 sender.with_incarnation(Some(old_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
@@ -6258,6 +6288,7 @@ mod tests {
             let fresh = ExecSession::spawn(
                 id,
                 &request("echo fresh; sleep 0.8; exit 24"),
+                &[],
                 sender.with_incarnation(Some(new_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
@@ -6528,6 +6559,49 @@ mod tests {
     }
 
     #[test]
+    fn unnamed_secret_placeholders_make_agentd_ignore_default_env_replacement() {
+        let request = || ExecRequest {
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec![],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+            replace_default_env: true,
+        };
+        let config = |secret_env_keys| AgentdConfig {
+            exec_limits: None,
+            user: None,
+            security_profile: Default::default(),
+            default_cwd: None,
+            default_env: vec![microsandbox_protocol::bootstrap::BootstrapEnvVar {
+                key: "API_KEY".into(),
+                value: "$MSB_API_KEY".into(),
+            }],
+            secret_env_keys,
+        };
+
+        // An older runtime appended the placeholder without naming it.
+        let older = config(None);
+        assert_eq!(older.replace_default_env_version(), None);
+        let mut req = request();
+        assert!(take_removed_default_env(&older, &mut req).is_empty());
+        assert!(!req.replace_default_env);
+
+        let current = config(Some(vec!["API_KEY".into()]));
+        assert_eq!(
+            current.replace_default_env_version(),
+            Some(microsandbox_protocol::core::REPLACE_DEFAULT_ENV_VERSION)
+        );
+        let mut req = request();
+        take_removed_default_env(&current, &mut req);
+        assert!(req.replace_default_env);
+    }
+
+    #[test]
     fn scripts_dir_goes_on_the_last_path_entry() {
         let mut req = ExecRequest {
             cmd: "/bin/true".into(),
@@ -6539,6 +6613,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: vec![],
+            replace_default_env: false,
         };
         prepend_scripts_to_path(&mut req);
         assert_eq!(

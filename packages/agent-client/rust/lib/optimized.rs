@@ -1764,6 +1764,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let (id, _rx) = client
             .stream(MessageType::ExecRequest, &request)
@@ -1980,6 +1981,7 @@ mod tests {
             rows: 24,
             cols: 80,
             rlimits: Vec::new(),
+            replace_default_env: false,
         };
         let (_id, mut rx) = client
             .stream(MessageType::ExecRequest, &request)

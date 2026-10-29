@@ -62,6 +62,19 @@ impl SandboxConfig {
         }
         Ok(config)
     }
+
+    /// The config a connected sandbox holds: the running copy, carrying the saved
+    /// config's caller overrides so a rebuild from it keeps the caller's choices,
+    /// or the saved config when no running copy is given.
+    pub(crate) fn running_or_saved(active: Option<Self>, saved: Self) -> Self {
+        match active {
+            Some(mut active) => {
+                active.caller_config_overrides = saved.caller_config_overrides;
+                active
+            }
+            None => saved,
+        }
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

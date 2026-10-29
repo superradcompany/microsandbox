@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZero;
 use std::path::PathBuf;
+use std::sync::{Arc, PoisonError, RwLock};
 
 #[cfg(feature = "net")]
 use microsandbox_network::config::NetworkConfig;
@@ -319,9 +320,43 @@ pub struct SandboxConfig {
     pub(crate) init_workload_arg_count: usize,
 }
 
+/// The config a live [`Sandbox`](super::Sandbox) builds requests from, shared by its clones.
+/// Readers take a snapshot; the sandbox's own `modify` replaces it with what the VM now uses.
+#[derive(Clone)]
+pub(crate) struct SharedSandboxConfig {
+    config: Arc<RwLock<Arc<SandboxConfig>>>,
+    /// Held by one `modify` apply at a time, from reading the saved config to replacing
+    /// `config`, so a slower apply cannot store a config older than one stored after it.
+    modify: Arc<tokio::sync::Mutex<()>>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl SharedSandboxConfig {
+    pub(crate) fn new(config: SandboxConfig) -> Self {
+        Self {
+            config: Arc::new(RwLock::new(Arc::new(config))),
+            modify: Arc::default(),
+        }
+    }
+
+    /// Current config. Later replacements do not change a snapshot already taken.
+    pub(crate) fn load(&self) -> Arc<SandboxConfig> {
+        // The lock only guards an `Arc` swap, so a poisoned lock still holds a whole value.
+        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(crate) fn store(&self, config: SandboxConfig) {
+        *self.config.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(config);
+    }
+
+    /// Wait until no other `modify` apply of this sandbox or its clones is running.
+    pub(crate) async fn lock_modify(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.modify).lock_owned().await
+    }
+}
 
 impl SandboxConfigPatch {
     /// Convert ordinary backend defaults; host deployment policy is applied during local creation.

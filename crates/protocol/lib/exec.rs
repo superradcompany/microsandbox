@@ -58,6 +58,17 @@ pub struct ExecRequest {
     /// POSIX resource limits to apply to the spawned process via `setrlimit()`.
     #[serde(default)]
     pub rlimits: Vec<ExecRlimit>,
+
+    /// Whether `env` lists every sandbox default environment variable the
+    /// command should see; agentd then removes boot defaults whose keys `env`
+    /// omits.
+    ///
+    /// Secret placeholders, the variables agentd sets itself (TLS bundle paths,
+    /// `HOME`) and `PATH` with its scripts directory are kept. Only agents that
+    /// advertise [`Ready::replace_default_env_version`](crate::core::Ready::replace_default_env_version)
+    /// honour it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace_default_env: bool,
 }
 
 /// A POSIX resource limit to apply to a spawned process.
@@ -304,7 +315,81 @@ impl FromStr for ExecRlimit {
 
 #[cfg(test)]
 mod tests {
-    use super::ExecRlimit;
+    use serde::{Deserialize, Serialize};
+
+    use super::{ExecRequest, ExecRlimit};
+
+    /// `ExecRequest` as agents before `replace_default_env` decode it.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct LegacyExecRequest {
+        cmd: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default)]
+        tty: bool,
+        rows: u16,
+        cols: u16,
+        #[serde(default)]
+        rlimits: Vec<ExecRlimit>,
+    }
+
+    fn request(replace_default_env: bool) -> ExecRequest {
+        ExecRequest {
+            cmd: "/bin/sh".into(),
+            args: vec!["-c".into(), "env".into()],
+            env: vec!["MODE=prod".into()],
+            cwd: Some("/app".into()),
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            replace_default_env,
+        }
+    }
+
+    fn cbor(value: &impl Serialize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn exec_request_without_replace_default_env_is_byte_compatible() {
+        let current = request(false);
+        let legacy = LegacyExecRequest {
+            cmd: current.cmd.clone(),
+            args: current.args.clone(),
+            env: current.env.clone(),
+            cwd: current.cwd.clone(),
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+        };
+
+        assert_eq!(cbor(&current), cbor(&legacy));
+        let decoded: ExecRequest = ciborium::from_reader(cbor(&legacy).as_slice()).unwrap();
+        assert!(!decoded.replace_default_env);
+    }
+
+    #[test]
+    fn older_agents_decode_and_ignore_replace_default_env() {
+        let bytes = cbor(&request(true));
+
+        let legacy: LegacyExecRequest = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(legacy.env, vec!["MODE=prod"]);
+        assert_eq!(legacy.cwd.as_deref(), Some("/app"));
+        let decoded: ExecRequest = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert!(decoded.replace_default_env);
+    }
 
     #[test]
     fn test_exec_rlimit_from_str_uses_soft_for_hard_when_omitted() {

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{Sandbox, SandboxConfig};
+use super::{Sandbox, SandboxConfig, config::SharedSandboxConfig};
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -41,7 +41,7 @@ impl Sandbox {
             backend,
             inner: Arc::new(crate::backend::SandboxInner::Cloud(state)),
             name,
-            config,
+            config: SharedSandboxConfig::new(config),
         }
     }
 }

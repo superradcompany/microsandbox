@@ -154,7 +154,7 @@ In scripted tests, one OpenCode 1.18.32 process kept a separate working director
 JetBrains supports `env` only inside an agent entry; there is no global `env`. Keep shared settings in the sandbox so there is nothing to copy:
 
 - OpenCode settings go in the sandbox's `~/.config/opencode/opencode.json`.
-- Environment variables go on the sandbox: pass `-e KEY=value` to `msb create`. To change one on a running sandbox, run `msb modify jetbrains-agent -e KEY=value --restart` to apply it now, or use `--next-start` to save it for the next start.
+- Environment variables go on the sandbox: pass `-e KEY=value` to `msb create`. To change one on a running sandbox, run `msb modify jetbrains-agent -e KEY=value`: commands started afterwards see it, but an agent the IDE already started keeps its old environment until the IDE starts it again. Use `--next-start` instead to save the change for the next start.
 
 ## What the sandbox protects
 

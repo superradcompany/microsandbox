@@ -139,7 +139,8 @@ async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
     let result: anyhow::Result<i32> = async {
-        let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+        let (cmd, cmd_args) =
+            common::resolve_command(&sandbox.config(), args.command, interactive)?;
         match cmd {
             Some(cmd) => exec_in_sandbox(&sandbox, &cmd, cmd_args, interactive, &exec_opts).await,
             None => Ok(0),
@@ -264,7 +265,7 @@ async fn run_new(
         return handle_exit(result?);
     }
 
-    let (cmd, cmd_args) = common::resolve_command(sandbox.config(), args.command, interactive)?;
+    let (cmd, cmd_args) = common::resolve_command(&sandbox.config(), args.command, interactive)?;
     let (cmd, cmd_args) = match (cmd, cmd_args) {
         (Some(cmd), args) => (cmd, args),
         (None, _) => {

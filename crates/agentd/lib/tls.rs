@@ -13,6 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{env, fs};
 
 use crate::AgentdResult;
@@ -53,6 +54,17 @@ const CA_TRUST_DIR_MODE: u32 = 0o755;
 /// renamed over the bundle.
 const BUNDLE_TMP_SUFFIX: &str = ".msb-tmp";
 
+/// Variables [`install_ca_cert`] points at the guest trust store.
+const TLS_ENV_KEYS: &[&str] = &[
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+];
+
+/// Whether [`install_ca_cert`] set [`TLS_ENV_KEYS`] in agentd's environment.
+static TLS_ENV_INSTALLED: AtomicBool = AtomicBool::new(false);
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -90,9 +102,21 @@ pub fn install_ca_cert() -> AgentdResult<()> {
             microsandbox_protocol::GUEST_TLS_CA_PATH,
         );
     }
+    TLS_ENV_INSTALLED.store(true, Ordering::Release);
 
     eprintln!("tls: CA cert installed, bundle={bundle_path}");
     Ok(())
+}
+
+/// Variables TLS setup set in agentd's environment; empty while interception is
+/// off. Every exec keeps them, even when a boot default it removes held the same
+/// value.
+pub(crate) fn installed_env_keys() -> &'static [&'static str] {
+    if TLS_ENV_INSTALLED.load(Ordering::Acquire) {
+        TLS_ENV_KEYS
+    } else {
+        &[]
+    }
 }
 
 /// Installs the host's extra trusted CAs into the guest trust store so

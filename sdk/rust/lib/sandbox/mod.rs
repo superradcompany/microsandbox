@@ -53,6 +53,7 @@ pub(crate) mod terminal;
 mod types;
 #[cfg(feature = "local")]
 pub(crate) mod upper;
+mod workdir;
 
 use std::{collections::BTreeMap, process::ExitStatus, sync::Arc};
 
@@ -131,6 +132,7 @@ pub(crate) use reap::reap_leaked_runtime_process;
 pub(crate) use types::validate_named_disk_mount_options;
 #[cfg(any(feature = "local", feature = "cloud"))]
 pub(crate) use types::validate_volume_mounts;
+pub(crate) use workdir::{validate_guest_workdir, validate_workdir};
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -273,7 +275,7 @@ pub struct Sandbox {
     backend: Arc<dyn crate::backend::Backend>,
     inner: Arc<crate::backend::SandboxInner>,
     name: String,
-    config: SandboxConfig,
+    config: config::SharedSandboxConfig,
 }
 
 /// Result of observing a sandbox in a terminal non-running state.
@@ -560,7 +562,7 @@ impl Sandbox {
             backend,
             inner: Arc::new(crate::backend::SandboxInner::Local(local)),
             name: config.spec.name.clone(),
-            config,
+            config: config::SharedSandboxConfig::new(config),
         }
     }
 }
@@ -676,20 +678,28 @@ impl Sandbox {
         Ok(handle)
     }
 
-    /// The full configuration this sandbox was created with (image, cpus,
-    /// memory, env, mounts, etc.).
-    pub fn config(&self) -> &SandboxConfig {
-        &self.config
+    /// The configuration this sandbox builds exec, shell, attach, and SSH
+    /// requests from (image, cpus, memory, env, mounts, etc.): the one its
+    /// running VM uses, as of create, start, or [`connect`](SandboxHandle::connect).
+    ///
+    /// A successful [`modify`](Self::modify) through this sandbox or a clone
+    /// replaces it with what the VM now uses (the saved config if stopped).
+    /// Next-start changes are not included, and changes made elsewhere (another
+    /// process, a [`SandboxHandle`]) are seen only after a new connect.
+    /// [`SandboxHandle::config`] returns the saved config. Returns a snapshot.
+    pub fn config(&self) -> Arc<SandboxConfig> {
+        self.config.load()
     }
 
     /// Start planning a sandbox modification.
     ///
     /// The returned builder owns the canonical SDK patch and dry-run
-    /// classification logic. It does not apply changes until later modify
-    /// phases wire the same plan model into persistence and runtime control.
+    /// classification logic. A successful apply also updates
+    /// [`config`](Self::config) for this sandbox and its clones.
     #[cfg(feature = "local")]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+            .refreshing(self.identity(), self.config.clone())
     }
 
     /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.
@@ -1128,7 +1138,7 @@ impl Sandbox {
     fn is_local_ephemeral(&self) -> bool {
         #[cfg(feature = "local")]
         {
-            self.local().is_some() && self.config.spec.lifecycle.ephemeral
+            self.local().is_some() && self.config().spec.lifecycle.ephemeral
         }
         #[cfg(not(feature = "local"))]
         {
@@ -1137,9 +1147,10 @@ impl Sandbox {
     }
 
     fn resolve_default_command(&self) -> MicrosandboxResult<microsandbox_types::ResolvedCommand> {
+        let config = self.config();
         microsandbox_types::resolve_default_command(
-            self.config.spec.runtime.entrypoint.as_deref(),
-            self.config.spec.runtime.cmd.as_deref(),
+            config.spec.runtime.entrypoint.as_deref(),
+            config.spec.runtime.cmd.as_deref(),
             None,
         )
         .map_err(Into::into)
@@ -1173,7 +1184,7 @@ impl Sandbox {
             .exec_stream(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 command.program,
                 opts,
             )
@@ -1202,7 +1213,7 @@ impl Sandbox {
             .exec(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 command.program,
                 opts,
             )
@@ -1228,7 +1239,7 @@ impl Sandbox {
             .exec_stream(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 opts,
             )
@@ -1251,7 +1262,7 @@ impl Sandbox {
             .exec_stream(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 opts,
             )
@@ -1277,7 +1288,7 @@ impl Sandbox {
             .exec(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 opts,
             )
@@ -1300,7 +1311,7 @@ impl Sandbox {
             .exec(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 opts,
             )
@@ -1315,8 +1326,8 @@ impl Sandbox {
     /// - `sandbox.shell("echo hello")`
     /// - `sandbox.shell("ENV=val cmd | other_cmd")`
     pub async fn shell(&self, script: impl Into<String>) -> MicrosandboxResult<ExecOutput> {
-        let shell = self
-            .config
+        let config = self.config();
+        let shell = config
             .spec
             .runtime
             .shell
@@ -1329,7 +1340,7 @@ impl Sandbox {
         };
         self.backend
             .sandboxes()
-            .exec(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .exec(self.backend.clone(), &self.name, &config, shell, opts)
             .await
     }
 
@@ -1339,8 +1350,8 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
-        let shell = self
-            .config
+        let config = self.config();
+        let shell = config
             .spec
             .runtime
             .shell
@@ -1351,7 +1362,7 @@ impl Sandbox {
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
         self.backend
             .sandboxes()
-            .exec(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .exec(self.backend.clone(), &self.name, &config, shell, opts)
             .await
     }
 
@@ -1360,8 +1371,8 @@ impl Sandbox {
     /// Like [`shell`](Self::shell) but returns a streaming [`ExecHandle`]
     /// instead of waiting for completion.
     pub async fn shell_stream(&self, script: impl Into<String>) -> MicrosandboxResult<ExecHandle> {
-        let shell = self
-            .config
+        let config = self.config();
+        let shell = config
             .spec
             .runtime
             .shell
@@ -1374,7 +1385,7 @@ impl Sandbox {
         };
         self.backend
             .sandboxes()
-            .exec_stream(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .exec_stream(self.backend.clone(), &self.name, &config, shell, opts)
             .await
     }
 
@@ -1384,8 +1395,8 @@ impl Sandbox {
         script: impl Into<String>,
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
-        let shell = self
-            .config
+        let config = self.config();
+        let shell = config
             .spec
             .runtime
             .shell
@@ -1396,7 +1407,7 @@ impl Sandbox {
         opts.args.splice(0..0, ["-c".to_string(), script.into()]);
         self.backend
             .sandboxes()
-            .exec_stream(self.backend.clone(), &self.name, &self.config, shell, opts)
+            .exec_stream(self.backend.clone(), &self.name, &config, shell, opts)
             .await
     }
 }
@@ -1426,7 +1437,7 @@ impl Sandbox {
             .attach(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 command.program,
                 builder,
             )
@@ -1452,7 +1463,7 @@ impl Sandbox {
             .attach(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 builder,
             )
@@ -1475,7 +1486,7 @@ impl Sandbox {
             .attach(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &self.config(),
                 cmd.into(),
                 builder,
             )
@@ -1486,8 +1497,8 @@ impl Sandbox {
     ///
     /// Uses the sandbox's configured shell (default: `/bin/sh`).
     pub async fn attach_shell(&self) -> MicrosandboxResult<i32> {
-        let shell = self
-            .config
+        let config = self.config();
+        let shell = config
             .spec
             .runtime
             .shell
@@ -1499,7 +1510,7 @@ impl Sandbox {
             .attach(
                 self.backend.clone(),
                 &self.name,
-                &self.config,
+                &config,
                 shell,
                 AttachOptionsBuilder::default(),
             )
@@ -1526,8 +1537,12 @@ pub(crate) fn create_spawn_mode(config: &SandboxConfig, requested: SpawnMode) ->
 }
 
 /// Build an `ExecRequest` by merging sandbox config with caller-provided overrides.
+///
+/// Whether the request asks agentd to drop boot env defaults that `config` no
+/// longer has depends on `backend` (see [`replaces_default_env`](exec::replaces_default_env)).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_exec_request(
+    backend: &dyn crate::backend::Backend,
     config: &SandboxConfig,
     cmd: String,
     args: Vec<String>,
@@ -1571,6 +1586,7 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
+        replace_default_env: exec::replaces_default_env(backend),
     }
 }
 
