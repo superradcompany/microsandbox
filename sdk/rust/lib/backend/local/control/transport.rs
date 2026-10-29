@@ -34,7 +34,8 @@ impl LocalBackend {
         request: String,
         _memory: Option<&std::fs::File>,
     ) -> MicrosandboxResult<ControlResponse> {
-        let candidates = crate::runtime::sandbox_agent_socket_path_candidates_for(self, name)
+        let candidates = self
+            .agent_socket_paths(name)
             .into_iter()
             .map(|path| microsandbox_runtime::control::control_socket_path_for(&path));
         #[cfg(unix)]

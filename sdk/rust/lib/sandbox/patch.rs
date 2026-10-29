@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
-use crate::backend::local::creation;
+use crate::backend::local::creation::CreationStorage;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -737,7 +737,7 @@ pub(crate) async fn apply_patches(
     validate_bind_patches(patches)?;
 
     let root =
-        creation::spawn_blocking(move || RootedPatchFs::open(&target_dir, follow_root_symlinks))
+        tokio::task::spawn_blocking(move || RootedPatchFs::open(&target_dir, follow_root_symlinks))
             .await
             .map_err(|err| {
                 crate::MicrosandboxError::PatchFailed(format!("bind-root open task failed: {err}"))
@@ -750,7 +750,7 @@ pub(crate) async fn apply_patches(
     for patch in patches {
         let root = Arc::clone(&root);
         let patch = patch.clone();
-        creation::spawn_blocking(move || apply_one_to_bind(&root, &patch))
+        tokio::task::spawn_blocking(move || apply_one_to_bind(&root, &patch))
             .await
             .map_err(|err| {
                 crate::MicrosandboxError::PatchFailed(format!("bind-root patch task failed: {err}"))
@@ -777,9 +777,17 @@ pub(crate) async fn build_upper_tree(
 pub(crate) async fn build_flat_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
-    spool_path: &Path,
+    spool_path: &CreationStorage,
 ) -> MicrosandboxResult<FileTree> {
-    let mut tree = microsandbox_image::merge_erofs_layers(lower_erofs, spool_path)?;
+    let lower_erofs = lower_erofs.to_vec();
+    let spool_path = spool_path.clone();
+    let mut tree = tokio::task::spawn_blocking(move || {
+        microsandbox_image::merge_erofs_layers(&lower_erofs, &spool_path)
+    })
+    .await
+    .map_err(|error| {
+        crate::MicrosandboxError::PatchFailed(format!("flat patch tree task: {error}"))
+    })??;
     let mut no_lowers = LowerLayers {
         readers: Vec::new(),
         removed: Vec::new(),
@@ -3948,7 +3956,7 @@ mod tests {
                 },
             ],
             &[base_path, top_path],
-            &spool_path,
+            &crate::backend::local::creation::CreationStorage::for_test(&spool_path),
         )
         .await
         .unwrap();

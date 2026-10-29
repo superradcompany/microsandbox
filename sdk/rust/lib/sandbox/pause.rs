@@ -300,8 +300,7 @@ mod tests {
             .await
             .unwrap();
         let id = seed_run(&bound, "same-name").await;
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&bound, "same-name").remove(0);
+        let agent = bound.agent_socket_paths("same-name").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -400,9 +399,7 @@ mod tests {
                 .await
                 .unwrap();
             let id = seed_run(&backend, "source").await;
-            let agent =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, "source")
-                    .remove(0);
+            let agent = backend.agent_socket_paths("source").remove(0);
             let path = microsandbox_runtime::control::control_socket_path_for(&agent);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -543,8 +540,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, "source").remove(0);
+        let agent = backend.agent_socket_paths("source").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();

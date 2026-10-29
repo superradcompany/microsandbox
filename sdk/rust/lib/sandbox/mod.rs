@@ -73,6 +73,8 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(feature = "local")]
 use microsandbox_image::progress_channel;
 
+#[cfg(feature = "local")]
+use crate::backend::local::creation::{CreationStorage, RemovalMode};
 use crate::{MicrosandboxResult, agent::AgentClient, backend::sandbox::SandboxIdentity};
 #[cfg(feature = "local")]
 use crate::{
@@ -1811,16 +1813,13 @@ pub(super) async fn remove_local_persisted_sandbox(
     // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
     // process after PID reuse, so it must not override successful lock acquisition.
     if crate::backend::local::creation::pending(pools.write(), expected_id).await? {
-        return crate::backend::local::creation::remove(
-            local_backend,
-            expected_id,
-            name,
-            crate::backend::local::creation::RemovalMode::Recovery,
-        )
-        .await;
+        return local_backend
+            .remove_incomplete_sandbox(expected_id, name, RemovalMode::Recovery)
+            .await;
     }
 
-    crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
+    let _storage = CreationStorage::acquire(local_backend, name)?;
+    local_backend.remove_socket_artifacts(name)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
         .exec(pools.write())

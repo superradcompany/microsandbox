@@ -15,6 +15,8 @@ use crate::{MicrosandboxError, MicrosandboxResult, backend::Backend};
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus};
 #[cfg(feature = "local")]
+use crate::backend::local::creation;
+#[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 
 //--------------------------------------------------------------------------------------------------
@@ -140,6 +142,9 @@ impl DiskCompactionBuilder {
                 "sandbox changed while acquiring disk ownership; retry compaction".into(),
             ));
         }
+
+        creation::require_complete(local.db().await?.read(), current.id, &self.name).await?;
+
         let runtime_dir = local.sandboxes_dir().join(&self.name).join("runtime");
         let current_config: SandboxConfig = serde_json::from_str(&current.config)?;
         crate::LocalBackend::validate_completed_restore(&current_config)?;
@@ -237,7 +242,49 @@ fn compaction_target(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "local")]
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
     use super::*;
+    #[cfg(feature = "local")]
+    use crate::backend::local::creation::CreationStorage;
+    #[cfg(feature = "local")]
+    use crate::sandbox::RootfsSource;
+
+    #[cfg(feature = "local")]
+    #[tokio::test]
+    async fn compaction_rejects_incomplete_creation() {
+        for status in ["Starting", "Stopped", "Crashed"] {
+            let temp = tempfile::tempdir().unwrap();
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(temp.path())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let mut config = SandboxConfig::default();
+            config.spec.name = "unfinished".into();
+            config.spec.image = RootfsSource::oci("alpine:3.21");
+            config.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            local.db().await.unwrap().write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name, config, status, ephemeral, creation_state) VALUES ('unfinished', ?, ?, 0, 'preparing')",
+                [serde_json::to_string(&config).unwrap().into(), status.into()],
+            )).await.unwrap();
+            // A cancelled creator can release its lifecycle lock while a worker retains this lock.
+            let _preparation = CreationStorage::acquire(&local, "unfinished").unwrap();
+
+            let error = DiskCompactionBuilder::new(local, "unfinished".into())
+                .apply()
+                .await
+                .expect_err("unfinished disks must not be compacted");
+
+            assert!(
+                error.to_string().contains("incomplete creation"),
+                "{status}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn compaction_selectors_and_limits_are_explicit() {

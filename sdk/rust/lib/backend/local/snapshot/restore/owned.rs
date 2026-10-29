@@ -7,7 +7,7 @@ use microsandbox_image::snapshot::{OwnedVolumeCapture, OwnedVolumeData};
 use microsandbox_runtime::checkpoint::RuntimeOwnedRootLayer;
 use microsandbox_types::VolumeMount;
 
-use crate::backend::local::creation;
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -18,7 +18,7 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 pub(crate) async fn materialize_owned_volumes(
     volumes: &[OwnedVolumeCapture],
     source: &Path,
-    child: &Path,
+    child: &CreationStorage,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<VolumeMount>> {
     microsandbox_image::snapshot::validate_owned_volumes(volumes)?;
@@ -37,28 +37,33 @@ pub(crate) async fn materialize_owned_volumes(
             )));
         }
     }
-    let staging_parent = child
-        .parent()
-        .ok_or_else(|| invalid("owned storage child has no parent"))?;
     for volume in volumes {
         let directory = child.join("owned-volumes").join(&volume.mount_id);
         match &volume.data {
             OwnedVolumeData::Disk { generation } => {
                 let source = source.to_path_buf();
-                let parent = staging_parent.to_path_buf();
+                let parent = child.to_path_buf();
                 let generation = generation.clone();
                 let mount_id = volume.mount_id.clone();
                 let readonly = volume.mount.options.readonly;
                 let pin = super::super::lease::pin_source(&source)?;
-                let staging = creation::spawn_blocking(move || {
-                    let _lease = pin;
-                    stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)
-                })
+                let journal = child.join("runtime/owned-disks").join(&volume.mount_id);
+                let staging = {
+                    let worker_storage = child.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _storage = worker_storage;
+
+                        let _lease = pin;
+                        std::fs::create_dir_all(&parent)?;
+                        let stage =
+                            stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)?;
+                        Ok::<_, MicrosandboxError>(stage)
+                    })
+                }
                 .await
                 .map_err(|error| invalid(&format!("owned disk restore worker: {error}")))??;
-                // The worker knows only its private synthetic sandbox. Both paths can be
-                // relocated without rewriting data or retaining its temporary host path.
-                let journal = child.join("runtime/owned-disks").join(&volume.mount_id);
+                // Publish in this poll while the caller still owns the child. There is no
+                // await between the directory and journal renames.
                 std::fs::create_dir_all(directory.parent().expect("owned parent"))?;
                 std::fs::create_dir_all(journal.parent().expect("journal parent"))?;
                 std::fs::rename(
@@ -70,17 +75,20 @@ pub(crate) async fn materialize_owned_volumes(
                         .path()
                         .join("runtime/owned-disks")
                         .join(&volume.mount_id),
-                    journal,
+                    &journal,
                 )?;
             }
             OwnedVolumeData::Directory { descriptor, files } => {
                 let source = source.join(volume.directory_path());
-                let parent = staging_parent.to_path_buf();
+                let parent = child.to_path_buf();
                 let descriptor = descriptor.clone();
                 let files = files.clone();
                 let pin = super::super::lease::pin_source(&source)?;
-                let staging =
-                    creation::spawn_blocking(move || -> MicrosandboxResult<tempfile::TempDir> {
+                let staging = {
+                    let worker_storage = child.clone();
+                    tokio::task::spawn_blocking(move || -> MicrosandboxResult<tempfile::TempDir> {
+                        let _storage = worker_storage;
+
                         let _lease = pin;
                         let snapshot =
                             microsandbox_filesystem::OwnedDirectorySnapshot::open_expected(
@@ -98,16 +106,16 @@ pub(crate) async fn materialize_owned_volumes(
                                 "owned namespace descriptor and payload inventory disagree",
                             ));
                         }
+                        std::fs::create_dir_all(&parent)?;
                         let staging = tempfile::Builder::new()
                             .prefix(".owned-directory-restore-")
                             .tempdir_in(parent)?;
                         snapshot.materialize(&source, &staging.path().join("data"))?;
                         Ok(staging)
                     })
-                    .await
-                    .map_err(|error| {
-                        invalid(&format!("owned directory restore worker: {error}"))
-                    })??;
+                }
+                .await
+                .map_err(|error| invalid(&format!("owned directory restore worker: {error}")))??;
                 // A cancelled copy knows only unique staging. Publish while this async poll
                 // still holds the caller's sandbox transition and lifecycle guards.
                 std::fs::create_dir_all(&directory)?;
@@ -234,6 +242,8 @@ fn invalid(message: &str) -> MicrosandboxError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::sandbox::MountBuilder;
     use microsandbox_image::checkpoint::{
@@ -290,15 +300,20 @@ mod tests {
 
     #[tokio::test]
     async fn owned_chain_restore_survives_child_rename_and_source_removal() {
-        let home = tempfile::tempdir().unwrap();
+        let home = Arc::new(tempfile::tempdir().unwrap());
+        let preparation = CreationStorage::temporary(home.clone());
         let source = home.path().join("snapshot");
         let volume = fixture(&source).await;
         let child = home.path().join("child-staging");
         let choices = crate::sandbox::restore_resources::RestoreResources::default();
-        let mounts =
-            materialize_owned_volumes(std::slice::from_ref(&volume), &source, &child, &choices)
-                .await
-                .unwrap();
+        let mounts = materialize_owned_volumes(
+            std::slice::from_ref(&volume),
+            &source,
+            &preparation.at(&child),
+            &choices,
+        )
+        .await
+        .unwrap();
         let final_child = home.path().join("child");
         std::fs::rename(&child, &final_child).unwrap();
         std::fs::remove_dir_all(&source).unwrap();
@@ -359,11 +374,23 @@ mod tests {
                     .unwrap();
             }
             let child = home.path().join("child");
-            let result =
-                materialize_owned_volumes(&[volume], &source, &child, &Default::default()).await;
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("sentinel"), b"existing").unwrap();
+            let result = materialize_owned_volumes(
+                &[volume],
+                &source,
+                &crate::backend::local::creation::CreationStorage::for_test(&child),
+                &Default::default(),
+            )
+            .await;
             if truncate {
                 assert!(result.is_err());
-                assert!(!child.exists(), "invalid backing was published");
+                assert!(
+                    !child.join("owned-volumes").exists(),
+                    "invalid backing was published"
+                );
+                assert!(!child.join("runtime/owned-disks").exists());
+                assert_eq!(std::fs::read(child.join("sentinel")).unwrap(), b"existing");
             } else {
                 result.unwrap();
             }
@@ -377,15 +404,23 @@ mod tests {
         let volume = fixture(&source).await;
         std::fs::write(source.join("layers/base.raw"), vec![99_u8; 1024 * 1024]).unwrap();
         let child = home.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::write(child.join("sentinel"), b"existing").unwrap();
         let choices = crate::sandbox::restore_resources::RestoreResources::default();
         assert!(
-            materialize_owned_volumes(&[volume], &source, &child, &choices)
-                .await
-                .is_err()
+            materialize_owned_volumes(
+                &[volume],
+                &source,
+                &crate::backend::local::creation::CreationStorage::for_test(&child),
+                &choices
+            )
+            .await
+            .is_err()
         );
         assert!(
-            !child.exists(),
+            !child.join("owned-volumes").exists() && !child.join("runtime/owned-disks").exists(),
             "a rejected disk must not publish backing or its journal"
         );
+        assert_eq!(std::fs::read(child.join("sentinel")).unwrap(), b"existing");
     }
 }

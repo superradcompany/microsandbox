@@ -118,6 +118,8 @@ mod tests {
     use microsandbox_migration::schema_metadata;
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
+    use crate::{backend::local::creation::CreationStorage, sandbox::identity::BranchSource};
+
     use super::*;
 
     async fn fixture() -> (tempfile::TempDir, LocalBackend) {
@@ -211,14 +213,14 @@ mod tests {
         let result = crate::sandbox::branch::capture_child(
             &backend,
             &mut child,
-            &crate::sandbox::identity::BranchSource {
+            &BranchSource {
                 guest_flush: None,
                 batch: None,
                 record_integrity: false,
                 name: "source".into(),
                 run: selected,
             },
-            &child_dir,
+            &CreationStorage::for_test(&child_dir),
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("changed runtime"));

@@ -16,6 +16,7 @@ use microsandbox_types::{VolumeMount, canonicalize_volume_mounts};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use crate::backend::LocalBackend;
+use crate::backend::local::creation;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::{RootDisk, SandboxConfig, SandboxStatus};
 use crate::{
@@ -345,6 +346,7 @@ async fn capture_installed(
     }
 
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    creation::require_complete(db, current.id, &source_sandbox).await?;
     LocalBackend::validate_completed_restore(&sandbox_config)?;
 
     // Only OCI-rooted sandboxes can be snapshotted today; non-OCI
@@ -685,8 +687,11 @@ pub(super) async fn create_snapshot_archive(
     {
         return Err(MicrosandboxError::SnapshotSandboxRunning(source_sandbox));
     }
+
     let sandbox_config: SandboxConfig = serde_json::from_str(&current.config)?;
+    creation::require_complete(db, current.id, &source_sandbox).await?;
     LocalBackend::validate_completed_restore(&sandbox_config)?;
+
     let manifest_digest = sandbox_config.manifest_digest.clone().ok_or_else(|| {
         MicrosandboxError::InvalidConfig(
             "only OCI-rooted sandboxes with a pinned image can be snapshotted".into(),
@@ -2151,12 +2156,71 @@ mod tests {
     use std::path::PathBuf;
 
     use microsandbox_types::DiskImageFormat;
-    use sea_orm::{ActiveModelTrait, ActiveValue::Set};
+    use sea_orm::{
+        ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DatabaseBackend, Statement,
+    };
 
     use super::*;
-    use crate::sandbox::SandboxBuilder;
+    use crate::{
+        backend::local::creation::CreationStorage,
+        sandbox::{RootfsSource, SandboxBuilder},
+    };
 
     const CAPTURE_BASE_ID: &str = "layer_00000000000000000000000000000001";
+
+    #[tokio::test]
+    async fn incomplete_creation_cannot_publish_disk_snapshots() {
+        for archive in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+                .build()
+                .await
+                .unwrap();
+            let mut config = SandboxConfig::default();
+            config.spec.name = "unfinished".into();
+            config.spec.image = RootfsSource::oci("alpine:3.21");
+            config.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            let db = local.db().await.unwrap();
+            db.write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name, config, status, ephemeral, creation_state) VALUES ('unfinished', ?, 'Starting', 0, 'preparing')",
+                [serde_json::to_string(&config).unwrap().into()],
+            )).await.unwrap();
+            let source = local.sandboxes_dir().join("unfinished");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("upper.ext4"), b"partially copied disk").unwrap();
+            let request = SnapshotConfig {
+                name: "captured".into(),
+                source_sandbox: "unfinished".into(),
+                group: None,
+                dest_dir: None,
+                labels: Vec::new(),
+                force: false,
+                record_integrity: false,
+                full: false,
+                guest_flush: Default::default(),
+            };
+            let out = temp.path().join("captured.msnap");
+
+            let result = if archive {
+                create_snapshot_archive(&local, request, &out, false)
+                    .await
+                    .map(|_| ())
+            } else {
+                create_snapshot(&local, request).await.map(|_| ())
+            };
+
+            let error = result.expect_err("an incomplete disk must never become a snapshot");
+            assert!(error.to_string().contains("incomplete creation"), "{error}");
+            assert!(!out.exists());
+            assert!(
+                super::super::store::list_indexed(&local)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 
     #[test]
     fn batch_staging_retains_owned_payloads_after_the_first_child_is_removed() {
@@ -3301,7 +3365,9 @@ mod tests {
                     let child = super::super::restore::materialize_file_snapshot_for_child(
                         &sources,
                         file.virtual_size,
-                        &temp.path().join(format!("child-{}", loaded.id())),
+                        &CreationStorage::for_test(
+                            &temp.path().join(format!("child-{}", loaded.id())),
+                        ),
                         &root_disk,
                     )
                     .await

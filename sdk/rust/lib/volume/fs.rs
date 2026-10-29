@@ -374,6 +374,7 @@ pub(crate) mod local {
         MicrosandboxError, MicrosandboxResult,
         backend::LocalBackend,
         sandbox::fs::{FsEntry, FsEntryKind, FsMetadata},
+        volume,
     };
 
     use super::{VolumeFsReadStream, VolumeFsWriteSink, rooted::RootedVolumeFs};
@@ -385,19 +386,14 @@ pub(crate) mod local {
         name: &str,
         operation: impl FnOnce(RootedVolumeFs) -> MicrosandboxResult<T> + Send + 'static,
     ) -> MicrosandboxResult<T> {
-        crate::volume::validate_volume_name(name)?;
+        volume::validate_volume_name(name)?;
         let pools = local.db().await?;
         if let Some(volume) = crate::db::entity::volume::Entity::find()
             .filter(crate::db::entity::volume::Column::Name.eq(name))
             .one(pools.read())
             .await?
         {
-            crate::backend::local::creation::require_volume_available(
-                pools.read(),
-                volume.id,
-                None,
-            )
-            .await?;
+            local.ensure_volume_available(volume.id, None).await?;
         }
 
         let root_path = local.volume_path(name);

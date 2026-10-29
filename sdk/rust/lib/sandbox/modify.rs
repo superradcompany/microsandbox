@@ -10,6 +10,8 @@ use microsandbox_types::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
+#[cfg(feature = "local")]
+use crate::backend::local::creation::{self, CreationStorage};
 use crate::backend::{Backend, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
@@ -347,6 +349,12 @@ impl SandboxModificationBuilder {
             .sandboxes()
             .get(self.backend.clone(), &self.name)
             .await?;
+
+        #[cfg(feature = "local")]
+        if let (Some(local), Some(state)) = (self.backend.as_local(), handle.local()) {
+            creation::require_complete(local.db().await?.read(), state.db_id, &self.name).await?;
+        }
+
         let status = handle.status_snapshot();
         let mut config = handle.config()?;
         // A failed restore can still own staged immutable lower layers. Do not let
@@ -1011,9 +1019,11 @@ async fn grow_root_disk_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
-    let sandbox_dir = local_backend.sandboxes_dir().join(name);
+    let sandbox_dir = CreationStorage::acquire(local_backend, name)?;
+    let worker_storage = sandbox_dir.clone();
     let runtime_dir = sandbox_dir.join("runtime");
     let handled = tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
         microsandbox_runtime::checkpoint::grow_stopped_root(
             &runtime_dir,
             u64::from(target_mib) * 1024 * 1024,
@@ -1036,12 +1046,13 @@ async fn grow_root_disk_now(
         RootfsSource::Oci(oci) if matches!(&oci.root_disk, Some(RootDisk::Flat { .. }))
     ) {
         return super::flat_rootfs::grow_private_flat_rootfs(
-            sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME),
+            &sandbox_dir.at(sandbox_dir.join(super::flat_rootfs::FLAT_ROOTFS_FILENAME)),
             target_mib,
         )
         .await;
     }
-    super::upper::grow_upper_to_mib(sandbox_dir.join("upper.ext4"), target_mib).await
+    super::upper::grow_upper_to_mib(&sandbox_dir.at(sandbox_dir.join("upper.ext4")), target_mib)
+        .await
 }
 
 /// Discover which live-control operations the running sandbox serves.
@@ -2830,7 +2841,7 @@ mod tests {
 
     #[cfg(unix)]
     use microsandbox_runtime::control::control_socket_path_for;
-    use sea_orm::ActiveModelTrait;
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseBackend, Statement};
     use tempfile::tempdir;
     #[cfg(unix)]
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2840,7 +2851,6 @@ mod tests {
     #[cfg(unix)]
     use crate::db::entity::run;
     #[cfg(unix)]
-    use crate::runtime::sandbox_agent_socket_path_candidates_for;
     use crate::size::SizeExt;
 
     #[test]
@@ -2909,8 +2919,7 @@ mod tests {
             .await
             .unwrap();
         seed_control_run_with_status(&local, "api", SandboxStatus::Starting).await;
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let agent = local.agent_socket_paths("api").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -2970,8 +2979,7 @@ mod tests {
             .await
             .unwrap();
         seed_control_run(&local, "api").await;
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let agent = local.agent_socket_paths("api").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -3035,8 +3043,7 @@ mod tests {
             .await
             .unwrap();
         seed_control_run(&local, "api").await;
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&local, "api").remove(0);
+        let agent = local.agent_socket_paths("api").remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -3124,8 +3131,7 @@ mod tests {
                 },
             ),
         ] {
-            let agent =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let agent = local.agent_socket_paths("worker").remove(0);
             let path = microsandbox_runtime::control::control_socket_path_for(&agent);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -3201,8 +3207,7 @@ mod tests {
         seed_control_run(&second, "worker").await;
         let mut servers = Vec::new();
         for (local, label, resume_ok) in [(&first, "first", true), (&second, "second", false)] {
-            let agent =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(local, "worker").remove(0);
+            let agent = local.agent_socket_paths("worker").remove(0);
             let path = microsandbox_runtime::control::control_socket_path_for(&agent);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             let listener = tokio::net::UnixListener::bind(path).unwrap();
@@ -3548,6 +3553,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modify_rejects_incomplete_creation_without_saving_changes() {
+        for creation_state in ["preparing", "prepared"] {
+            let temp = tempdir().unwrap();
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(temp.path())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let current = config(2, 1024);
+            let stored_before = serde_json::to_string(&current).unwrap();
+            let pools = local.db().await.unwrap();
+            pools.write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name, config, status, ephemeral, creation_state) VALUES ('api', ?, 'Stopped', 0, ?)",
+                [stored_before.clone().into(), creation_state.into()],
+            )).await.unwrap();
+
+            let error = SandboxModificationBuilder::new(local.clone(), "api")
+                .label("team", "new")
+                .apply()
+                .await
+                .expect_err("unfinished sandboxes must not accept modifications");
+
+            assert!(error.to_string().contains("incomplete creation"), "{error}");
+            let stored = sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq("api"))
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.config, stored_before);
+            assert!(
+                sandbox_label_entity::Entity::find()
+                    .all(pools.read())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn modify_rejects_invalid_env_and_saves_nothing() {
         let temp = tempdir().unwrap();
         let backend: Arc<dyn Backend> = Arc::new(
@@ -3836,7 +3884,7 @@ mod tests {
         .insert(local.db().await.unwrap().write())
         .await
         .unwrap();
-        let agent = sandbox_agent_socket_path_candidates_for(&local, &current.spec.name).remove(0);
+        let agent = local.agent_socket_paths(&current.spec.name).remove(0);
         let path = control_socket_path_for(&agent);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();

@@ -25,6 +25,7 @@ pub(crate) mod host_paths;
 mod metrics_lookup;
 mod sandbox;
 pub(crate) mod snapshot;
+pub(crate) mod volume;
 
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -555,7 +556,7 @@ impl Backend for LocalBackend {
         Box::pin(async move {
             let mut last_error = None;
 
-            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+            for sock_path in self.agent_socket_paths(name) {
                 if !agent_endpoint_may_exist(&sock_path) {
                     continue;
                 }

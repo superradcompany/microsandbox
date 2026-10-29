@@ -80,7 +80,18 @@ mod tests {
         db.execute_unprepared("PRAGMA foreign_keys=ON")
             .await
             .unwrap();
-        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(
+            &db,
+            Some(
+                (Migrator::migrations()
+                    .iter()
+                    .position(|m| m.name() == Migration.name())
+                    .unwrap()
+                    + 1) as u32,
+            ),
+        )
+        .await
+        .unwrap();
         db.execute_unprepared(
             "INSERT INTO sandbox (id, name, config, status, ephemeral) VALUES (1, 'incomplete', '{}', 'Crashed', 0);
              UPDATE sandbox SET creation_state='preparing' WHERE id=1;
@@ -148,9 +159,17 @@ mod tests {
         db.execute_unprepared("PRAGMA foreign_keys=ON")
             .await
             .unwrap();
-        Migrator::up(&db, Some((Migrator::migrations().len() - 1) as u32))
-            .await
-            .unwrap();
+        Migrator::up(
+            &db,
+            Some(
+                Migrator::migrations()
+                    .iter()
+                    .position(|m| m.name() == Migration.name())
+                    .unwrap() as u32,
+            ),
+        )
+        .await
+        .unwrap();
         db.execute_unprepared(
             "INSERT INTO sandbox (id, name, config, status, ephemeral) VALUES (1, 'existing', '{}', 'Running', 0);
              INSERT INTO volume (id, name, kind) VALUES (1, 'shared', 'directory');"

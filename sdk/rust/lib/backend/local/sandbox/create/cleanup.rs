@@ -6,11 +6,11 @@ use std::time::Duration;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use tokio::sync::Mutex;
 
-use super::{ChildStageGuard, SandboxTransitionGuard};
+use super::SandboxTransitionGuard;
 use crate::backend::Backend;
+use crate::backend::local::volume::EnsuredNamedVolumes;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::runtime::ProcessHandle;
-use crate::runtime::spawn::EnsuredNamedVolumes;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -41,9 +41,8 @@ impl CreationCleanup {
         name: String,
         transition: SandboxTransitionGuard,
         volumes: Arc<EnsuredNamedVolumes>,
-        child_stage: Option<&mut ChildStageGuard>,
     ) -> Self {
-        let cleanup = Self {
+        Self {
             state: Some(CleanupState {
                 backend,
                 name,
@@ -52,14 +51,7 @@ impl CreationCleanup {
                 process: None,
                 publication_started: false,
             }),
-        };
-        // Transfer before the next await, not just on a returned error: cancellation
-        // while publication commits must not let a synchronous stage destructor bypass
-        // this cleanup's final writer-side catalog and runtime-ownership checks.
-        if let Some(stage) = child_stage {
-            stage.disarm();
         }
-        cleanup
     }
 
     /// A cancelled commit may have published successfully; cleanup must consult its journal first.
@@ -127,7 +119,6 @@ impl CleanupState {
             Duration::from_secs(10),
         )
         .await?;
-        let pools = local.db().await?;
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(&self.name))
             // Queue behind any cancelled insert/commit on the single writer connection.
@@ -141,7 +132,7 @@ impl CleanupState {
                 .rollback_failed_startup_guarded(pools.write(), model.id, &self.volumes, &guard)
                 .await?;
         } else {
-            crate::runtime::rollback_created_named_volumes(local, &self.volumes).await;
+            local.rollback_created_named_volumes(&self.volumes).await?;
         }
 
         // Rollback can retain a recoverable stopped row, or remove the row when
@@ -199,6 +190,7 @@ mod tests {
 
     use super::*;
     use crate::backend::local::LocalBackend;
+    use crate::backend::local::creation::CreationStorage;
     use crate::db::entity::run as run_entity;
     use crate::sandbox::{MountBuilder, SandboxBuilder, SandboxConfig, SandboxStatus};
 
@@ -228,20 +220,12 @@ mod tests {
                     .await
                     .unwrap(),
             );
-            let shared = SandboxBuilder::new("shared-volume-owner")
-                .image(rootfs.clone())
-                .volume("/shared", |mount| {
-                    mount.named_with("shared", |volume| volume.ensure_exists())
-                })
-                .build()
-                .await
-                .unwrap();
-            // Publish a preexisting named volume, then release its creation locks.
-            drop(
-                crate::runtime::ensure_named_volumes(&backend, &shared)
-                    .await
-                    .unwrap(),
-            );
+            crate::volume::create_local(
+                backend.clone(),
+                crate::volume::Volume::builder("shared").directory().build(),
+            )
+            .await
+            .unwrap();
             let neighbor = backend.sandboxes_dir().join("neighbor");
             std::fs::create_dir_all(&neighbor).unwrap();
             let preserved = vec![
@@ -274,13 +258,6 @@ mod tests {
         }
 
         async fn arm(&self) -> CreationCleanup {
-            self.arm_with_stage(None).await
-        }
-
-        async fn arm_with_stage(
-            &self,
-            child_stage: Option<&mut ChildStageGuard>,
-        ) -> CreationCleanup {
             let transition = LocalBackend::acquire_sandbox_transition_guard(
                 &self.backend.config().run_dir(),
                 &self.config.spec.name,
@@ -295,20 +272,56 @@ mod tests {
             )
             .await
             .unwrap();
+            // These tests also cover legacy cleanup after creation has completed.
+            // New named volumes must first belong to a reserved creation.
+            let reservation = if self
+                .config
+                .spec
+                .mounts
+                .iter()
+                .any(|mount| mount.named_create().is_some())
+            {
+                Some(
+                    LocalBackend::insert_sandbox_record_impl(
+                        self.backend.db().await.unwrap().write(),
+                        &self.config,
+                        SandboxStatus::Starting,
+                        true,
+                    )
+                    .await
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
             let volumes = Arc::new(
-                crate::runtime::ensure_named_volumes(&self.backend, &self.config)
+                self.backend
+                    .ensure_named_volumes(
+                        &CreationStorage::for_test(
+                            &self.backend.sandboxes_dir().join(&self.config.spec.name),
+                        ),
+                        &self.config,
+                    )
                     .await
                     .unwrap(),
             );
+            if let Some(id) = reservation {
+                crate::backend::local::creation::complete(
+                    self.backend.db().await.unwrap().write(),
+                    id,
+                    SandboxStatus::Starting,
+                )
+                .await
+                .unwrap();
+            }
             let cleanup = CreationCleanup::new(
                 self.backend.clone(),
                 self.config.spec.name.clone(),
                 transition,
                 volumes,
-                child_stage,
             );
             crate::runtime::owned_volumes::prepare(
-                &self.sandbox_dir,
+                &CreationStorage::for_test(&self.sandbox_dir),
                 &self.config.spec.mounts,
                 false,
             )
@@ -412,10 +425,13 @@ mod tests {
             );
             let mut cleanup = fixture.arm().await;
             let pools = fixture.backend.db().await.unwrap();
-            let id =
-                LocalBackend::insert_starting_sandbox_record(pools.write(), &fixture.config, None)
-                    .await
-                    .unwrap();
+            let id = sandbox_entity::Entity::find()
+                .filter(sandbox_entity::Column::Name.eq(&fixture.config.spec.name))
+                .one(pools.write())
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
             if direct_rollback {
                 fixture
                     .backend
@@ -471,13 +487,21 @@ mod tests {
                 }
                 let mut cleanup = fixture.arm().await;
                 let pools = fixture.backend.db().await.unwrap();
-                let id = LocalBackend::insert_starting_sandbox_record(
-                    pools.write(),
-                    &fixture.config,
-                    None,
-                )
-                .await
-                .unwrap();
+                let id = match sandbox_entity::Entity::find()
+                    .filter(sandbox_entity::Column::Name.eq(&fixture.config.spec.name))
+                    .one(pools.write())
+                    .await
+                    .unwrap()
+                {
+                    Some(row) => row.id,
+                    None => LocalBackend::insert_starting_sandbox_record(
+                        pools.write(),
+                        &fixture.config,
+                        None,
+                    )
+                    .await
+                    .unwrap(),
+                };
                 if let Some(operation) = refused_operation {
                     pools.write().execute_unprepared(&format!(
                         "CREATE TRIGGER retain_sandbox BEFORE {operation} ON sandbox BEGIN SELECT RAISE(ABORT, 'retained'); END;",
@@ -521,9 +545,9 @@ mod tests {
             .spec
             .mounts
             .retain(|mount| !matches!(mount, microsandbox_types::VolumeMount::Owned { .. }));
-        let mut stage = ChildStageGuard::new(fixture.sandbox_dir.clone());
-        let mut cleanup = fixture.arm_with_stage(Some(&mut stage)).await;
-        assert!(!stage.armed, "staging belongs to the catalog-aware cleanup");
+
+        let mut cleanup = fixture.arm().await;
+
         let error = finish_test_failure(&mut cleanup).await;
         assert_eq!(error.to_string(), "startup failed");
         assert!(!fixture.sandbox_dir.exists());
@@ -606,9 +630,9 @@ mod tests {
                         !matches!(mount, microsandbox_types::VolumeMount::Owned { .. })
                     });
                 }
-                let mut stage = ChildStageGuard::new(fixture.sandbox_dir.clone());
-                let cleanup = fixture.arm_with_stage(Some(&mut stage)).await;
-                assert!(!stage.armed, "staging belongs to the catalog-aware cleanup");
+
+                let cleanup = fixture.arm().await;
+
                 let pools = fixture.backend.db().await.unwrap();
                 // In the missing-row case, the insert never obtains the writer connection.
                 // In the committed case, hold its result at the caller boundary instead.
@@ -621,8 +645,7 @@ mod tests {
                 let backend = fixture.backend.clone();
                 let config = fixture.config.clone();
                 let launcher = tokio::spawn(async move {
-                    // These are the two guards the create future owns at its insert await.
-                    let _stage = stage;
+                    // Retain catalog-aware cleanup across the pending insert.
                     let _cleanup = cleanup;
                     let pools = backend.db().await.unwrap();
                     if committed {
@@ -732,7 +755,11 @@ mod tests {
         .unwrap()
         .unwrap();
         let volumes = Arc::new(
-            crate::runtime::ensure_named_volumes(&backend, &config)
+            backend
+                .ensure_named_volumes(
+                    &CreationStorage::for_test(&backend.sandboxes_dir().join(&config.spec.name)),
+                    &config,
+                )
                 .await
                 .unwrap(),
         );
@@ -741,7 +768,6 @@ mod tests {
             config.spec.name.clone(),
             transition,
             volumes,
-            None,
         );
         let id = LocalBackend::insert_starting_sandbox_record(pools.write(), &config, None)
             .await

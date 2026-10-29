@@ -19,6 +19,8 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 use microsandbox_types::GuestFlush;
 
 use crate::backend::Backend;
+#[cfg(feature = "local")]
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::sandbox::SandboxIdentity;
 #[cfg(feature = "local")]
 use crate::backend::{ControlSession, LocalBackend};
@@ -475,7 +477,7 @@ pub(crate) async fn capture_child(
     local: &LocalBackend,
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
-    child: &Path,
+    child: &CreationStorage,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
         let closure = child.join(".branch-restore");
@@ -504,7 +506,18 @@ pub(crate) async fn capture_child(
         &local.cache_dir().join("memory"),
         &id,
     )?;
-    std::fs::write(child.join(".branch-reservation"), &id)?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let reservation_id = id.clone();
+    let worker_storage = child.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::write(reservation_path, reservation_id)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("branch reservation: {error}")))??;
+
     #[cfg(not(target_os = "linux"))]
     let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
@@ -581,14 +594,25 @@ pub(crate) async fn capture_child(
     // and readiness do not need to exclude later source lifecycle operations.
     drop(lineage);
     drop(_transition);
-    std::fs::remove_file(child.join(".branch-reservation"))?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let worker_storage = child.clone();
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::remove_file(reservation_path)
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("branch reservation cleanup: {error}"))
+    })??;
+
     adopt_capture(config, child, closure, &state, pin).await
 }
 
 #[cfg(feature = "local")]
 async fn adopt_capture(
     config: &mut SandboxConfig,
-    child: &Path,
+    child: &CreationStorage,
     closure: std::path::PathBuf,
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,

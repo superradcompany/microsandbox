@@ -73,7 +73,8 @@ impl LocalBackend {
             .control_sessions
             .database()
             .map_err(MicrosandboxError::ControlClient)?;
-        let endpoints = crate::runtime::sandbox_agent_socket_path_candidates_for(self, name)
+        let endpoints = self
+            .agent_socket_paths(name)
             .iter()
             .map(|path| microsandbox_runtime::control::control_socket_path_for(path))
             .collect::<Vec<_>>();

@@ -29,11 +29,8 @@
 //! leases therefore does not expose the backing to prune. Interrupted creation can leave
 //! a stale record retaining unused files until normal sandbox cleanup removes the dependency.
 
-#[cfg(all(test, unix))]
-mod archive_tests;
 mod cleanup;
-#[cfg(test)]
-mod recovery_tests;
+mod restore;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -56,7 +53,9 @@ use tokio::sync::Mutex;
 use super::LocalBackend;
 use crate::agent::AgentClient;
 use crate::backend::Backend;
-use crate::backend::local::creation;
+use crate::backend::local::creation::{self, CreationStorage};
+use crate::backend::local::sandbox::create::restore::RestoreStaging;
+use crate::backend::local::volume::EnsuredNamedVolumes;
 use crate::config::RegistryOptions;
 use crate::db::entity::{
     run as run_entity, sandbox as sandbox_entity, sandbox_label as sandbox_label_entity,
@@ -64,10 +63,7 @@ use crate::db::entity::{
 };
 use crate::runtime::handle::StartupProcess;
 use crate::runtime::launch_contract;
-use crate::runtime::spawn::EnsuredNamedVolumes;
-use crate::runtime::{
-    ProcessHandle, SpawnMode, ensure_named_volumes, rollback_created_named_volumes, spawn_sandbox,
-};
+use crate::runtime::{ProcessHandle, SpawnMode};
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
     SandboxStatus, apply_patches, build_flat_tree, build_upper_tree, config::SnapshotRestoreMode,
@@ -107,44 +103,6 @@ struct ResolvedOciImage {
 /// Windows, including when a lifecycle caller exits unexpectedly.
 pub(crate) struct SandboxTransitionGuard {
     _file: File,
-}
-
-/// Removes direct archive staging unless creation reaches durable sandbox state.
-struct ChildStageGuard {
-    path: PathBuf,
-    armed: bool,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-impl ChildStageGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-//--------------------------------------------------------------------------------------------------
-// Trait Implementations
-//--------------------------------------------------------------------------------------------------
-
-impl Drop for ChildStageGuard {
-    fn drop(&mut self) {
-        if self.armed
-            && let Err(error) = remove_dir_if_exists(&self.path)
-        {
-            tracing::warn!(
-                error = %error,
-                path = %self.path.display(),
-                "failed to remove direct archive child staging"
-            );
-        }
-    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -279,47 +237,58 @@ impl LocalBackend {
         let installed_file_virtual_size = config.snapshot_root_virtual_size.take();
 
         let archive_stage = if let Some(archive) = config.snapshot_archive_source.clone() {
-            tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
-            let stage = tempfile::Builder::new()
-                .prefix(".archive-restore-")
-                .tempdir_in(self.sandboxes_dir())?;
+            let stage = RestoreStaging::reserve(backend.clone(), self, &config).await?;
 
-            let materialized = Box::pin(self.materialize_archive_for_child(
-                &archive,
-                stage.path(),
-                config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly,
-                config.snapshot_base.as_deref(),
-                &config.restore_resources,
-                config.caller_config_overrides.as_deref(),
-            ))
-            .await?;
+            let admitted = async {
+                let materialized = Box::pin(self.materialize_archive_for_child(
+                    &archive,
+                    &stage.storage,
+                    config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly,
+                    config.snapshot_base.as_deref(),
+                    &config.restore_resources,
+                    config.caller_config_overrides.as_deref(),
+                ))
+                .await?;
 
-            let admitted = config
-                .restore_resources
-                .archive_manifest
-                .as_ref()
-                .ok_or_else(|| {
-                    MicrosandboxError::SnapshotIntegrity("archive metadata was not admitted".into())
-                })?;
+                let admitted = config
+                    .restore_resources
+                    .archive_manifest
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MicrosandboxError::SnapshotIntegrity(
+                            "archive metadata was not admitted".into(),
+                        )
+                    })?;
 
-            if admitted.digest()? != materialized.manifest.digest()? {
-                return Err(MicrosandboxError::SnapshotIntegrity(
-                    "snapshot archive changed after configuration was built".into(),
-                ));
+                if admitted.digest()? != materialized.manifest.digest()? {
+                    return Err(MicrosandboxError::SnapshotIntegrity(
+                        "snapshot archive changed after configuration was built".into(),
+                    ));
+                }
+
+                image_operations.push(self.apply_materialized_archive(
+                    &mut config,
+                    stage.path(),
+                    materialized,
+                )?);
+
+                validate_volume_mounts(&mut config.spec.mounts)?;
+                // Extracted checkpoint paths may introduce additional runtime requirements.
+                launch_contract::validate_runtime_config(&config, self.config()).await?;
+
+                config.snapshot_archive_source = None;
+                config.snapshot_base = None;
+
+                Ok::<_, MicrosandboxError>(())
             }
+            .await;
 
-            image_operations.push(self.apply_materialized_archive(
-                &mut config,
-                stage.path(),
-                materialized,
-            )?);
-
-            validate_volume_mounts(&mut config.spec.mounts)?;
-            // Extracted checkpoint paths may introduce additional runtime requirements.
-            launch_contract::validate_runtime_config(&config, self.config()).await?;
-
-            config.snapshot_archive_source = None;
-            config.snapshot_base = None;
+            if let Err(error) = admitted {
+                return Err(match stage.discard(self).await {
+                    Ok(()) => error,
+                    Err(cleanup) => MicrosandboxError::Runtime(format!("{error}; {cleanup}")),
+                });
+            }
 
             Some(stage)
         } else {
@@ -339,6 +308,8 @@ impl LocalBackend {
             self.remove_interrupted_create_for_replacement(db, &config)
                 .await?;
         }
+
+        let preparation = CreationStorage::acquire(self, &config.spec.name)?;
         Self::prepare_create_target(db, &config, &sandbox_dir, &self.config().run_dir()).await?;
         // Hold the existing lifecycle lock across reservation, capture and spawn. Recheck
         // under the lock so two creates cannot both own the same child staging directory.
@@ -348,11 +319,7 @@ impl LocalBackend {
             std::time::Duration::from_secs(5),
         )
         .await?;
-        let mut reserved_config = config.clone();
-        reserved_config.replace_existing = false;
-        Self::prepare_create_target(db, &reserved_config, &sandbox_dir, &self.config().run_dir())
-            .await?;
-        let preparation = creation::lock_preparation(self, &config.spec.name)?;
+        Self::check_create_target(db, &config.spec.name, &sandbox_dir).await?;
 
         // Persist ownership before any deterministic sandbox path is created. An interrupted
         // insert can leave a row, but never untracked storage.
@@ -364,28 +331,45 @@ impl LocalBackend {
         )
         .await?;
 
-        let mut child_stage_guard = None;
         // Preparation errors are handled only after awaited filesystem work has finished.
-        let prepared = creation::preparing(
-            preparation,
+        let prepared = {
+            let preparation = &preparation;
             Box::pin(async {
                 if let Some(stage) = archive_stage {
                     relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
-                    // Keep rename and guard installation in one poll: cancellation must never
-                    // leave published child storage without an owner.
-                    std::fs::rename(stage.path(), &sandbox_dir)?;
-                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+                    let destination = sandbox_dir.clone();
+                    let destination = preparation.at(destination);
+                    let source = stage.storage.clone();
+                    tokio::task::spawn_blocking(move || {
+                        std::fs::rename(source.path(), destination.path())
+                    })
+                    .await
+                    .map_err(|error| MicrosandboxError::Runtime(error.to_string()))??;
+                    stage.discard(self).await?;
                 }
+
                 let _branch_pin = if let Some(source) = config.branch_source.take() {
-                    std::fs::create_dir(&sandbox_dir)?;
-                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+                    let directory = sandbox_dir.clone();
+                    let worker_storage = preparation.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _storage = worker_storage;
+                        std::fs::create_dir(directory)
+                    })
+                    .await
+                    .map_err(|error| MicrosandboxError::Runtime(error.to_string()))??;
+
                     let pin = crate::sandbox::branch::capture_child(
-                        self, &mut config, &source, &sandbox_dir,
-                    ).await?;
+                        self,
+                        &mut config,
+                        &source,
+                        preparation,
+                    )
+                    .await?;
 
                     // Capture resolves automatic nesting to its actual execution mode. Recheck
                     // managed policy before publishing or launching the child, as for archives.
-                    config = SandboxBuilder::from(config).finish(Some(&self.config), None)?;
+                    config =
+                        SandboxBuilder::from(config.clone()).finish(Some(&self.config), None)?;
                     launch_contract::validate_runtime_config(&config, self.config()).await?;
 
                     Some(pin)
@@ -397,13 +381,12 @@ impl LocalBackend {
                 // closure is retained only through eager construction; the disk layers and fresh writable
                 // head remain under the ordinary sandbox directory and root-disk journal.
                 if let Some(source) = installed_checkpoint_restore {
-                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
                     let root_layout = snapshot_root_layout_from_config(&config)?;
                     match config.snapshot_restore_mode {
                         SnapshotRestoreMode::Full => {
                             let materialized = crate::snapshot::materialize_checkpoint_for_child(
                                 &source,
-                                &sandbox_dir,
+                                preparation,
                                 &root_layout,
                                 &config.restore_resources,
                                 self.config().fs_state_limit(),
@@ -420,8 +403,10 @@ impl LocalBackend {
                         SnapshotRestoreMode::DiskOnly => {
                             let materialized =
                                 crate::snapshot::materialize_checkpoint_disk_for_child(
-                                    &source,
-                                    &sandbox_dir,
+                                    &source.closure,
+                                    &source.checkpoint_root,
+                                    &source.checkpoint_id,
+                                    preparation,
                                     &root_layout,
                                     &config.restore_resources,
                                     self.config().fs_state_limit(),
@@ -456,7 +441,6 @@ impl LocalBackend {
                 }
 
                 if !installed_file_sources.is_empty() {
-                    child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
                     let virtual_size = installed_file_virtual_size.ok_or_else(|| {
                         MicrosandboxError::SnapshotIntegrity(
                             "file snapshot is missing its root-disk capacity".into(),
@@ -466,7 +450,7 @@ impl LocalBackend {
                     let materialized = crate::snapshot::materialize_file_snapshot_for_child(
                         &installed_file_sources,
                         virtual_size,
-                        &sandbox_dir,
+                        preparation,
                         &root_layout,
                     )
                     .await?;
@@ -476,7 +460,7 @@ impl LocalBackend {
                     let mounts = crate::snapshot::materialize_owned_volumes(
                         &owned,
                         &source,
-                        &sandbox_dir,
+                        preparation,
                         &config.restore_resources,
                     )
                     .await?;
@@ -657,7 +641,15 @@ impl LocalBackend {
 
                     // Flat patches modify a complete private tree. Managed patches remain a compact
                     // OverlayFS upper and therefore retain their existing fast path.
-                    std::fs::create_dir_all(&sandbox_dir)?;
+                    let directory = sandbox_dir.clone();
+                    let worker_storage = preparation.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _storage = worker_storage;
+                        std::fs::create_dir_all(directory)
+                    })
+                    .await
+                    .map_err(|error| MicrosandboxError::Runtime(error.to_string()))??;
+
                     let flat_patch_spool = sandbox_dir.join(".flat-patch.spool");
                     let flat_tree = if !config.spec.patches.is_empty()
                         && matches!(root_disk, RootDisk::Flat { .. })
@@ -668,14 +660,20 @@ impl LocalBackend {
                             build_flat_tree(
                                 &config.spec.patches,
                                 &layer_erofs_paths,
-                                &flat_patch_spool,
+                                &preparation.at(&flat_patch_spool),
                             ),
                         )
                         .await
                         {
                             Ok(tree) => Some(tree),
                             Err(error) => {
-                                let _ = std::fs::remove_file(&flat_patch_spool);
+                                let spool = flat_patch_spool.clone();
+                                let worker_storage = preparation.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    let _storage = worker_storage;
+                                    std::fs::remove_file(spool)
+                                })
+                                .await;
                                 return Err(error);
                             }
                         }
@@ -711,12 +709,20 @@ impl LocalBackend {
                             _ => unreachable!("flat patch tree requires a flat root"),
                         };
                         let materialized = crate::sandbox::flat_rootfs::create_patched_flat_rootfs(
-                            writable_disk_path.clone(),
+                            &preparation.at(writable_disk_path.clone()),
                             flat_tree,
                             requested_mib,
                         )
                         .await;
-                        let _ = std::fs::remove_file(&flat_patch_spool);
+
+                        let spool = flat_patch_spool.clone();
+                        let worker_storage = preparation.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _storage = worker_storage;
+                            std::fs::remove_file(spool)
+                        })
+                        .await;
+
                         let target_mib = materialized?;
                         if let RootfsSource::Oci(oci) = &mut config.spec.image
                             && let Some(RootDisk::Flat { size_mib, .. }) = &mut oci.root_disk
@@ -729,7 +735,8 @@ impl LocalBackend {
                             "flat_root_clone",
                             crate::sandbox::flat_rootfs::create_private_flat_rootfs(
                                 base,
-                                sandbox_dir.join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME),
+                                &preparation.at(sandbox_dir
+                                    .join(crate::sandbox::flat_rootfs::FLAT_ROOTFS_FILENAME)),
                                 target_mib,
                                 clone,
                             ),
@@ -751,9 +758,14 @@ impl LocalBackend {
                         // That combination is rejected before this directory exists.
                         if snap_upper != writable_disk_path {
                             let dst = writable_disk_path.clone();
-                            creation::spawn_blocking(move || {
-                                microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
-                            })
+                            {
+                                let worker_storage = preparation.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let _storage = worker_storage;
+
+                                    microsandbox_utils::copy::fast_copy(&snap_upper, &dst)
+                                })
+                            }
                             .await
                             .map_err(|e| {
                                 MicrosandboxError::Custom(format!("snapshot copy task: {e}"))
@@ -769,7 +781,7 @@ impl LocalBackend {
                                         &timing_name,
                                         "writable_disk_create",
                                         Self::create_upper_ext4(
-                                            &upper_path,
+                                            &preparation.at(&upper_path),
                                             upper_size_mib,
                                             upper_tree,
                                         ),
@@ -836,7 +848,7 @@ impl LocalBackend {
                 }
 
                 crate::runtime::owned_volumes::prepare(
-                    &sandbox_dir,
+                    preparation,
                     &config.spec.mounts,
                     config.snapshot_parent.is_some() || config.checkpoint_restore.is_some(),
                 )
@@ -844,28 +856,31 @@ impl LocalBackend {
 
                 // Track newly provisioned named volumes under the reserved sandbox so
                 // interruption cannot leave their ownership ambiguous.
-                timing::measure(
+                let volumes = timing::measure(
                     &timing_name,
                     "named_volumes",
-                    ensure_named_volumes(self, &config),
+                    self.ensure_named_volumes(preparation, &config),
                 )
-                .await
-                .map(|volumes| (volumes, _branch_pin))
-            }),
-        )
-        .await;
+                .await?;
+                self.prepare_sandbox_launch(&config, preparation).await?;
+                Ok::<_, MicrosandboxError>((volumes, _branch_pin))
+            })
+            .await
+        };
+
+        drop(preparation);
         let (created_named_volumes, _branch_pin) = match prepared {
             Ok((volumes, pin)) => (Arc::new(volumes), pin),
             Err(error) => {
                 // Both guards are still held and no runtime has been published. Retain the
                 // recovery row if cleanup fails; otherwise remove it after all files are gone.
-                if let Err(cleanup) = creation::remove(
-                    self,
-                    sandbox_id,
-                    &config.spec.name,
-                    creation::RemovalMode::PreparationFailed,
-                )
-                .await
+                if let Err(cleanup) = self
+                    .remove_incomplete_sandbox(
+                        sandbox_id,
+                        &config.spec.name,
+                        creation::RemovalMode::PreparationFailed,
+                    )
+                    .await
                 {
                     return Err(MicrosandboxError::Runtime(format!("{error}; {cleanup}")));
                 }
@@ -880,7 +895,6 @@ impl LocalBackend {
             config.spec.name.clone(),
             _transition_guard,
             created_named_volumes.clone(),
-            child_stage_guard.as_mut(),
         );
 
         // Persist the fully prepared config before launch. The recovery row remains armed
@@ -912,12 +926,9 @@ impl LocalBackend {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
-        let preparation = creation::lock_preparation(self, &config.spec.name)?;
-        let created = creation::preparing(
-            preparation,
-            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard))),
-        )
-        .await;
+        let created =
+            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard)))
+                .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
@@ -953,12 +964,32 @@ impl LocalBackend {
             return Err(creation_cleanup.finish_failure(err).await);
         }
 
-        if let (Some(_reference), Some(manifest_digest)) = (
-            pinned_reference.as_deref(),
-            pinned_manifest_digest.as_deref(),
-        ) && let Err(err) =
-            Self::persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await
-        {
+        let validated = async {
+            if let (Some(_reference), Some(manifest_digest)) = (
+                pinned_reference.as_deref(),
+                pinned_manifest_digest.as_deref(),
+            ) {
+                Self::persist_oci_manifest_pin(write_db, sandbox_id, manifest_digest).await?;
+            }
+
+            // Accept a workdir only after proving it is a directory in the ready guest.
+            if let Some(workdir) = &sandbox.config().spec.runtime.workdir {
+                let metadata = sandbox.fs().stat(workdir).await.map_err(|cause| {
+                    // A fast-exiting startup command can close the transport during stat.
+                    MicrosandboxError::InvalidConfig(format!(
+                        "could not validate workdir in guest {workdir:?}: {cause}"
+                    ))
+                })?;
+                if metadata.kind != FsEntryKind::Directory {
+                    return Err(MicrosandboxError::InvalidConfig(format!(
+                        "workdir is not a directory in guest: {workdir}"
+                    )));
+                }
+            }
+            Ok::<_, MicrosandboxError>(())
+        }
+        .await;
+        if let Err(error) = validated {
             sandbox.terminate_creation_owner().await;
             // A bounded termination attempt can expire before runtime ownership ends.
             // Keep the original failure, but never remove storage without the lifecycle lock.
@@ -969,49 +1000,8 @@ impl LocalBackend {
                 &created_named_volumes,
             )
             .await
-            .map_err(|cleanup| MicrosandboxError::Runtime(format!("{err}; {cleanup}")))?;
-            return Err(creation_cleanup.finish_failure(err).await);
-        }
-
-        // Validate that the configured workdir exists inside the guest and is a
-        // directory before returning a ready sandbox. Shell/exec calls inherit this
-        // cwd, so accepting a regular file here leads to later, murkier failures.
-        if let Some(ref workdir) = sandbox.config().spec.runtime.workdir {
-            match sandbox.fs().stat(workdir).await {
-                Ok(metadata) if metadata.kind == FsEntryKind::Directory => {}
-                Ok(_) => {
-                    let error = MicrosandboxError::InvalidConfig(format!(
-                        "workdir is not a directory in guest: {workdir}"
-                    ));
-                    sandbox.terminate_creation_owner().await;
-                    self.rollback_failed_startup(
-                        write_db,
-                        sandbox_id,
-                        sandbox.name(),
-                        &created_named_volumes,
-                    )
-                    .await
-                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_failure(error).await);
-                }
-                Err(cause) => {
-                    // A fast-exiting startup command can close the transport during stat.
-                    // Preserve that cause instead of claiming the directory is missing.
-                    let error = MicrosandboxError::InvalidConfig(format!(
-                        "could not validate workdir in guest {workdir:?}: {cause}"
-                    ));
-                    sandbox.terminate_creation_owner().await;
-                    self.rollback_failed_startup(
-                        write_db,
-                        sandbox_id,
-                        sandbox.name(),
-                        &created_named_volumes,
-                    )
-                    .await
-                    .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
-                    return Err(creation_cleanup.finish_failure(error).await);
-                }
-            }
+            .map_err(|cleanup| MicrosandboxError::Runtime(format!("{error}; {cleanup}")))?;
+            return Err(creation_cleanup.finish_failure(error).await);
         }
 
         if let Some(closure) = restore_closure {
@@ -1107,8 +1097,7 @@ impl LocalBackend {
                             "incomplete sandbox lost its catalog owner".into(),
                         )
                     })?;
-                creation::remove(
-                    self,
+                self.remove_incomplete_sandbox(
                     sandbox_id,
                     &model.name,
                     creation::RemovalMode::Creator,
@@ -1127,7 +1116,8 @@ impl LocalBackend {
             )
             .await?;
         } else {
-            rollback_created_named_volumes(self, created_named_volumes).await;
+            self.rollback_created_named_volumes(created_named_volumes)
+                .await?;
             Self::delete_sandbox_record(write_db, sandbox_id).await?;
         }
         Ok(())
@@ -1220,7 +1210,7 @@ impl LocalBackend {
         let (handle, agent_sock_path) = timing::measure(
             &config.spec.name,
             "process_launch",
-            spawn_sandbox(self, &config, sandbox_id, mode, lifecycle_guard),
+            self.launch_sandbox(&config, sandbox_id, mode, lifecycle_guard),
         )
         .await?;
         let mut startup_process = StartupProcess::new(handle);
@@ -1745,7 +1735,7 @@ impl LocalBackend {
     /// Validate sandbox-name-derived runtime paths for this backend.
     pub(crate) fn validate_sandbox_name_for_runtime(&self, name: &str) -> MicrosandboxResult<()> {
         validate_sandbox_name(name)?;
-        crate::runtime::resolve_sandbox_agent_socket_path_for(self, name).map(|_| ())
+        self.resolve_agent_socket_path(name).map(|_| ())
     }
 
     /// Validate rootfs configuration that depends on host filesystem state.
@@ -1798,6 +1788,10 @@ impl LocalBackend {
             .filter(sandbox_entity::Column::Name.eq(name))
             .one(pools.read())
             .await?;
+        if let Some(model) = &existing {
+            creation::require_complete(pools.read(), model.id, name).await?;
+        }
+
         if existing.is_some() || sandbox_dir.exists() {
             return Err(MicrosandboxError::SandboxAlreadyExists(format!(
                 "sandbox '{name}' already exists; remove it, start the stopped sandbox, or recreate with .replace()"
@@ -2148,7 +2142,8 @@ impl LocalBackend {
             std::time::Duration::from_secs(5),
         )
         .await?;
-        creation::remove(self, model.id, &model.name, creation::RemovalMode::Recovery).await
+        self.remove_incomplete_sandbox(model.id, &model.name, creation::RemovalMode::Recovery)
+            .await
     }
 
     /// Insert a provisional local create record that remains non-connectable until ready.
@@ -2300,19 +2295,19 @@ impl LocalBackend {
 
     /// Create a sparse ext4 image for the writable overlay upper layer.
     async fn create_upper_ext4(
-        path: &std::path::Path,
+        path: &CreationStorage,
         size_mib: u32,
         tree: Option<tree::FileTree>,
     ) -> MicrosandboxResult<()> {
-        let _ = std::fs::remove_file(path);
         let ext4_options = ext4::Ext4FormatOptions {
             size_bytes: u64::from(size_mib) * 1024 * 1024,
             ..Default::default()
         };
         let overlay_tree = Self::build_overlay_upper_tree(tree);
-        let path = path.to_path_buf();
+        let path = path.clone();
 
-        creation::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
+            let _ = std::fs::remove_file(&path);
             ext4::format_ext4_with_tree(&path, &ext4_options, overlay_tree)
         })
         .await
@@ -2422,13 +2417,14 @@ fn sandbox_transition_lock_path(run_dir: &Path, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
+    use std::future::{Future, poll_fn};
     use std::process::Command;
+    use std::task::Poll;
     use std::{
         fs,
         path::PathBuf,
         sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use microsandbox_db::entity::{run as run_entity, sandbox_rootfs as sandbox_rootfs_entity};
@@ -2439,14 +2435,80 @@ mod tests {
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
-    use super::{ChildStageGuard, sandbox_entity, sandbox_label_entity};
+    use super::{sandbox_entity, sandbox_label_entity};
+    use crate::backend::local::creation::{self, CreationStorage};
     use crate::backend::{Backend, LocalBackend};
+    use crate::db::entity::{sandbox, volume};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
         HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, PullPolicy,
-        RootfsSource, SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
+        RootfsSource, SandboxBuilder, SandboxConfig, SandboxListBuilder, SandboxStatus,
+        StatVirtualization, VolumeMount,
     };
     use crate::snapshot::SnapshotReference;
+
+    //--------------------------------------------------------------------------------------------------
+    // Types
+    //--------------------------------------------------------------------------------------------------
+
+    struct RecoveryFixture {
+        _home: tempfile::TempDir,
+        local: Arc<LocalBackend>,
+        config: SandboxConfig,
+        id: i32,
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Methods
+    //--------------------------------------------------------------------------------------------------
+
+    impl RecoveryFixture {
+        async fn new() -> Self {
+            #[cfg(unix)]
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            #[cfg(not(unix))]
+            let home = tempfile::tempdir().unwrap();
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(home.path())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+
+            let rootfs = home.path().join("rootfs");
+            std::fs::create_dir_all(&rootfs).unwrap();
+
+            let config = SandboxBuilder::new("recoverable")
+                .image(rootfs.canonicalize().unwrap())
+                .ephemeral(true)
+                .volume("/data", |mount| {
+                    mount.named_with("new", |volume| volume.ensure_exists())
+                })
+                .build()
+                .await
+                .unwrap();
+
+            let id = LocalBackend::insert_sandbox_record_impl(
+                local.db().await.unwrap().write(),
+                &config,
+                SandboxStatus::Starting,
+                true,
+            )
+            .await
+            .unwrap();
+
+            Self {
+                _home: home,
+                local,
+                config,
+                id,
+            }
+        }
+    }
+
+    //--------------------------------------------------------------------------------------------------
+    // Tests
+    //--------------------------------------------------------------------------------------------------
 
     #[tokio::test]
     async fn starting_sandbox_owns_image_before_runtime_launch() {
@@ -2745,18 +2807,6 @@ esac
     }
 
     #[test]
-    fn archive_child_stage_guard_removes_uncommitted_storage() {
-        let directory = tempdir().unwrap();
-        let stage = directory.path().join("child");
-        fs::create_dir_all(&stage).unwrap();
-        fs::write(stage.join("partial.raw"), b"partial").unwrap();
-
-        drop(ChildStageGuard::new(stage.clone()));
-
-        assert!(!stage.exists());
-    }
-
-    #[test]
     fn readiness_deadline_reports_timeout_not_only_missing_socket() {
         let error = super::relay_readiness_timeout(
             "slow-restore",
@@ -2849,7 +2899,7 @@ esac
 
     async fn exercise_failed_startup_rollback(with_created_volume: bool, status: SandboxStatus) {
         use crate::db::entity::volume as volume_entity;
-        use crate::runtime::ensure_named_volumes;
+
         use crate::sandbox::SandboxBuilder;
 
         let directory = tempdir().unwrap();
@@ -2886,11 +2936,24 @@ esac
         )
         .unwrap()
         .unwrap();
-        let created = ensure_named_volumes(&local, &config).await.unwrap();
-        let sandbox_id = LocalBackend::insert_starting_sandbox_record(write_db, &config, None)
+        let sandbox_id = LocalBackend::insert_sandbox_record_impl(
+            write_db,
+            &config,
+            SandboxStatus::Starting,
+            true,
+        )
+        .await
+        .unwrap();
+        let created = local
+            .ensure_named_volumes(
+                &crate::backend::local::creation::CreationStorage::for_test(
+                    &local.sandboxes_dir().join(&config.spec.name),
+                ),
+                &config,
+            )
             .await
             .unwrap();
-        LocalBackend::update_sandbox_status(write_db, sandbox_id, status)
+        crate::backend::local::creation::complete(write_db, sandbox_id, status)
             .await
             .unwrap();
         let active_run = run_entity::Entity::insert(run_entity::ActiveModel {
@@ -3056,19 +3119,6 @@ esac
         // and created-volume paths must keep this live state until the owner releases it.
         exercise_failed_startup_rollback(false, SandboxStatus::Running).await;
         exercise_failed_startup_rollback(true, SandboxStatus::Running).await;
-    }
-
-    #[test]
-    fn archive_child_stage_guard_preserves_committed_storage() {
-        let directory = tempdir().unwrap();
-        let stage = directory.path().join("child");
-        fs::create_dir_all(&stage).unwrap();
-        let mut guard = ChildStageGuard::new(stage.clone());
-
-        guard.disarm();
-        drop(guard);
-
-        assert!(stage.exists());
     }
 
     fn test_config(name: impl Into<String>) -> SandboxConfig {
@@ -4068,6 +4118,482 @@ esac
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_child() {
+        let Some(home) = std::env::var_os("MSB_CREATION_TEST_HOME") else {
+            return;
+        };
+
+        let home = PathBuf::from(home);
+        let phase = std::env::var("MSB_CREATION_TEST_PHASE").unwrap();
+        let local = Arc::new(
+            crate::test_support::local_backend_builder(&home)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let rootfs = home.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let rootfs = rootfs.canonicalize().unwrap();
+
+        crate::volume::create_local(
+            local.clone(),
+            crate::volume::Volume::builder("shared").directory().build(),
+        )
+        .await
+        .unwrap();
+        std::fs::write(local.volume_path("shared").join("sentinel"), b"shared data").unwrap();
+
+        let config = SandboxBuilder::new("interrupted")
+            .image(rootfs)
+            .volume("/shared", |m| m.named("shared"))
+            .volume("/new", |m| m.named_with("new", |v| v.ensure_exists()))
+            .build()
+            .await
+            .unwrap();
+        let pools = local.db().await.unwrap();
+        let _transition = LocalBackend::acquire_sandbox_transition_guard(
+            &local.config().run_dir(),
+            "interrupted",
+        )
+        .await
+        .unwrap();
+        let _runtime = crate::runtime::acquire_sandbox_lifecycle_guard(
+            &local.config().run_dir(),
+            "interrupted",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let preparation = CreationStorage::acquire(&local, "interrupted").unwrap();
+        let id = LocalBackend::insert_sandbox_record_impl(
+            pools.write(),
+            &config,
+            SandboxStatus::Starting,
+            true,
+        )
+        .await
+        .unwrap();
+        if phase == "before-storage" {
+            std::process::exit(73);
+        }
+
+        let _volumes = local
+            .ensure_named_volumes(
+                &crate::backend::local::creation::CreationStorage::for_test(
+                    &local.sandboxes_dir().join(&config.spec.name),
+                ),
+                &config,
+            )
+            .await
+            .unwrap();
+        let directory = local.sandboxes_dir().join("interrupted");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("upper.ext4"), b"partial disk").unwrap();
+        if phase == "after-volumes" {
+            let error = local
+                .remove_incomplete_sandbox(id, "interrupted", creation::RemovalMode::Recovery)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("preparation is still finishing"));
+            assert!(directory.exists());
+            assert!(local.volume_path("new").exists());
+        }
+
+        drop(preparation);
+
+        if phase == "delete-error" {
+            let path = local.volume_path("new");
+            std::fs::remove_dir_all(&path).unwrap();
+            std::fs::write(path, b"not a directory").unwrap();
+            assert!(
+                local
+                    .remove_incomplete_sandbox(id, "interrupted", creation::RemovalMode::Creator)
+                    .await
+                    .is_err()
+            );
+        } else if phase == "after-unlink" {
+            pools.write().execute_unprepared(
+                "CREATE TRIGGER interrupt_delete BEFORE DELETE ON sandbox BEGIN SELECT RAISE(ABORT, 'interrupted final commit'); END;",
+            ).await.unwrap();
+            assert!(
+                local
+                    .remove_incomplete_sandbox(id, "interrupted", creation::RemovalMode::Creator)
+                    .await
+                    .is_err()
+            );
+            assert!(!directory.exists());
+            assert!(!local.volume_path("new").exists());
+        }
+        std::process::exit(73);
+    }
+
+    #[tokio::test]
+    async fn interrupted_creates_refuse_start_and_remain_removable_after_reopen() {
+        for phase in [
+            "before-storage",
+            "after-volumes",
+            "delete-error",
+            "after-unlink",
+        ] {
+            #[cfg(unix)]
+            let home = tempfile::tempdir_in("/tmp").unwrap();
+            #[cfg(not(unix))]
+            let home = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "backend::local::sandbox::create::tests::crash_child",
+                    "--nocapture",
+                ])
+                .env("MSB_CREATION_TEST_HOME", home.path())
+                .env("MSB_CREATION_TEST_PHASE", phase)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(73),
+                "{phase}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(home.path())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let pools = local.db().await.unwrap();
+            let rows = sandbox::Entity::find().all(pools.read()).await.unwrap();
+            assert_eq!(rows.len(), 1, "{phase}: the recovery owner must survive");
+            assert!(creation::pending(pools.read(), rows[0].id).await.unwrap());
+            assert_eq!(
+                volume::Entity::find()
+                    .all(pools.read())
+                    .await
+                    .unwrap()
+                    .len(),
+                if phase == "before-storage" { 1 } else { 2 }
+            );
+            let error = local
+                .start_sandbox(local.clone(), "interrupted", None, SpawnMode::Detached)
+                .await
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("incomplete creation"),
+                "{phase}: {error}"
+            );
+
+            let error = LocalBackend::check_create_target(
+                pools,
+                "interrupted",
+                &local.sandboxes_dir().join("interrupted"),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("incomplete creation"), "{error}");
+            assert!(
+                !error.to_string().contains("start the stopped sandbox"),
+                "{error}"
+            );
+
+            if phase != "before-storage" {
+                let error = crate::volume::get_local(local.clone(), "new")
+                    .await
+                    .err()
+                    .unwrap();
+                assert!(error.to_string().contains("incomplete sandbox"), "{error}");
+                let error = crate::volume::fs::VolumeFs::with_backend(local.clone(), "new")
+                    .write("unexpected", b"must not adopt provisional storage")
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("incomplete sandbox"), "{error}");
+            }
+
+            if phase == "after-unlink" {
+                pools
+                    .write()
+                    .execute_unprepared("DROP TRIGGER interrupt_delete")
+                    .await
+                    .unwrap();
+            } else if phase == "delete-error" {
+                // Repair the deliberate filesystem obstruction, not any catalog state.
+                std::fs::remove_file(local.volume_path("new")).unwrap();
+            }
+            local
+                .remove_sandbox(local.clone(), "interrupted", None)
+                .await
+                .unwrap();
+            assert!(
+                sandbox::Entity::find()
+                    .all(pools.read())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!local.sandboxes_dir().join("interrupted").exists());
+            assert!(!local.volume_path("new").exists());
+            assert_eq!(
+                std::fs::read(local.volume_path("shared").join("sentinel")).unwrap(),
+                b"shared data"
+            );
+            assert_eq!(
+                volume::Entity::find()
+                    .all(pools.read())
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_preparation_remains_fenced_until_its_worker_finishes() {
+        // Queue the real formatter behind one blocked worker. Cancellation is deterministic
+        // without adding a test hook to the production storage path.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let fixture = RecoveryFixture::new().await;
+            let directory = fixture.local.sandboxes_dir().join("recoverable");
+            std::fs::create_dir_all(&directory).unwrap();
+            let transition = LocalBackend::acquire_sandbox_transition_guard(
+                &fixture.local.config().run_dir(),
+                "recoverable",
+            )
+            .await
+            .unwrap();
+            let lifecycle = crate::runtime::acquire_sandbox_lifecycle_guard(
+                &fixture.local.config().run_dir(),
+                "recoverable",
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            let guard = CreationStorage::acquire(&fixture.local, "recoverable").unwrap();
+            let (release, released) = std::sync::mpsc::channel();
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                // Dropping release also unblocks the thread if an assertion fails.
+                let _ = released.recv();
+            });
+            started_rx.await.unwrap();
+
+            let config = crate::volume::Volume::builder("formatting")
+                .disk()
+                .size(128)
+                .build();
+            let destination = directory.join("formatting");
+            let resource = guard.at(&destination);
+            let mut provision = Box::pin(crate::volume::provision_volume_path(&config, &resource));
+            let first_poll = poll_fn(|cx| Poll::Ready(provision.as_mut().poll(cx))).await;
+            assert!(first_poll.is_pending());
+            drop(provision);
+            drop(resource);
+            drop(guard);
+
+            assert!(
+                CreationStorage::acquire(&fixture.local, "recoverable").is_err(),
+                "the queued volume formatter must retain preparation ownership"
+            );
+            let error = fixture
+                .local
+                .remove_incomplete_sandbox(
+                    fixture.id,
+                    "recoverable",
+                    creation::RemovalMode::Recovery,
+                )
+                .await
+                .unwrap_err();
+            drop(lifecycle);
+            drop(transition);
+            assert!(
+                error.to_string().contains("preparation is still finishing"),
+                "{error}"
+            );
+            assert!(directory.exists());
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(guard) = CreationStorage::acquire(&fixture.local, "recoverable") {
+                        drop(guard);
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::metadata(destination.join("disk.raw"))
+                    .unwrap()
+                    .len(),
+                128 * 1024 * 1024
+            );
+
+            // The creator process is still alive; only unfinished work blocks recovery.
+            fixture
+                .local
+                .remove_sandbox(fixture.local.clone(), "recoverable", None)
+                .await
+                .unwrap();
+            assert!(!directory.exists());
+            assert!(
+                sandbox::Entity::find_by_id(fixture.id)
+                    .one(fixture.local.db().await.unwrap().read())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn prepared_config_preserves_labels_and_caller_overrides() {
+        let mut fixture = RecoveryFixture::new().await;
+        let mut overrides = crate::SandboxConfigPatch::new();
+        overrides.spec.runtime.cmd = Some(Vec::new());
+        fixture.config.caller_config_overrides = Some(Box::new(overrides));
+
+        // This is the same late merge used by snapshot and archive restores.
+        let mut image = microsandbox_image::ImageConfig::default();
+        image.labels.insert("tier".into(), "web".into());
+        fixture.config.merge_image_defaults(&image);
+        fixture
+            .local
+            .prepare_reserved_sandbox(
+                fixture.local.db().await.unwrap().write(),
+                fixture.id,
+                &fixture.config,
+            )
+            .await
+            .unwrap();
+
+        let (rows, _) = fixture
+            .local
+            .list_sandbox_handle_state(&SandboxListBuilder::default().label("tier", "web"))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let saved = SandboxConfig::from_stored(
+            &rows[0].0.config,
+            rows[0].0.caller_config_overrides.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            saved
+                .caller_config_overrides
+                .as_ref()
+                .unwrap()
+                .spec
+                .runtime
+                .cmd,
+            Some(Vec::new()),
+        );
+        assert_eq!(
+            saved.spec.labels.get("tier").map(String::as_str),
+            Some("web")
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_and_recovery_retirement_commit_together() {
+        let fixture = RecoveryFixture::new().await;
+        let pools = fixture.local.db().await.unwrap();
+        fixture
+            .local
+            .prepare_reserved_sandbox(pools.write(), fixture.id, &fixture.config)
+            .await
+            .unwrap();
+        let transition = LocalBackend::acquire_sandbox_transition_guard(
+            &fixture.local.config().run_dir(),
+            "recoverable",
+        )
+        .await
+        .unwrap();
+        let volumes = Arc::new(
+            fixture
+                .local
+                .ensure_named_volumes(
+                    &crate::backend::local::creation::CreationStorage::for_test(
+                        &fixture
+                            .local
+                            .sandboxes_dir()
+                            .join(&fixture.config.spec.name),
+                    ),
+                    &fixture.config,
+                )
+                .await
+                .unwrap(),
+        );
+        let mut cleanup = super::cleanup::CreationCleanup::new(
+            fixture.local.clone(),
+            "recoverable".into(),
+            transition,
+            volumes,
+        );
+        cleanup.begin_publication();
+        pools.write().execute_unprepared(
+            "CREATE TRIGGER refuse_publication BEFORE UPDATE OF pending_creation_sandbox_id ON volume WHEN OLD.pending_creation_sandbox_id IS NOT NULL AND NEW.pending_creation_sandbox_id IS NULL BEGIN SELECT RAISE(ABORT, 'test publication failure'); END;",
+        ).await.unwrap();
+        assert!(
+            creation::complete(pools.write(), fixture.id, SandboxStatus::Running)
+                .await
+                .is_err()
+        );
+
+        let row = sandbox::Entity::find_by_id(fixture.id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, SandboxStatus::Starting);
+        assert!(!row.ephemeral);
+        assert!(creation::pending(pools.read(), fixture.id).await.unwrap());
+        assert!(
+            crate::volume::get_local(fixture.local.clone(), "new")
+                .await
+                .is_err()
+        );
+
+        pools
+            .write()
+            .execute_unprepared("DROP TRIGGER refuse_publication")
+            .await
+            .unwrap();
+        creation::complete(pools.write(), fixture.id, SandboxStatus::Running)
+            .await
+            .unwrap();
+        // Model cancellation after SQLite commits but before the caller observes success.
+        cleanup
+            .finish_failure(crate::MicrosandboxError::Runtime(
+                "cancelled publication".into(),
+            ))
+            .await;
+        let row = sandbox::Entity::find_by_id(fixture.id)
+            .one(pools.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, SandboxStatus::Running);
+        assert!(row.ephemeral);
+        assert!(!creation::pending(pools.read(), fixture.id).await.unwrap());
+        assert!(
+            crate::volume::get_local(fixture.local.clone(), "new")
+                .await
+                .is_ok()
         );
     }
 }
