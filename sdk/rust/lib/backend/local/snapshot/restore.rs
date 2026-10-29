@@ -625,14 +625,14 @@ mod tests {
                 assert_eq!(result.len(), sources.len() + 1);
                 assert_eq!(result[0].path, child.join(base_name));
                 assert_eq!(std::fs::read(&result[0].path).unwrap(), original[0]);
-                for ((source, bytes), owned) in sources.iter().zip(original).zip(&result) {
+                for ((source, bytes), _owned) in sources.iter().zip(original).zip(&result) {
                     assert_eq!(std::fs::read(&source.path).unwrap(), bytes);
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::MetadataExt;
                         assert_eq!(
                             std::fs::metadata(&source.path).unwrap().ino(),
-                            std::fs::metadata(&owned.path).unwrap().ino()
+                            std::fs::metadata(&_owned.path).unwrap().ino()
                         );
                     }
                 }

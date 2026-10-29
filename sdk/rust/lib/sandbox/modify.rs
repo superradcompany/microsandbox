@@ -2850,7 +2850,6 @@ mod tests {
     use crate::backend::LocalBackend;
     #[cfg(unix)]
     use crate::db::entity::run;
-    #[cfg(unix)]
     use crate::size::SizeExt;
 
     #[test]
