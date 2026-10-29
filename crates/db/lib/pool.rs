@@ -96,15 +96,93 @@ pub(crate) async fn build_pool(
         .foreign_keys(true)
         .synchronous(SqliteSynchronous::Normal);
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(max_connections)
-        .acquire_timeout(connect_timeout)
-        .connect_with(connect_options)
-        .await?;
+    // Concurrent first opens can return BUSY while enabling WAL, even with SQLite's
+    // busy timeout. Retry the entire connection setup within the caller's deadline.
+    let pool = tokio::time::timeout(
+        connect_timeout,
+        crate::retry::retry_on_busy(|| {
+            SqlitePoolOptions::new()
+                .max_connections(max_connections)
+                .acquire_timeout(connect_timeout)
+                .connect_with(connect_options.clone())
+        }),
+    )
+    .await
+    .map_err(|_| sqlx::Error::PoolTimedOut)??;
 
     harden_database_files(&db_path).map_err(sqlx::Error::Io)?;
 
     Ok(SqlxSqliteConnector::from_sqlx_sqlite_pool(pool))
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    use sqlx::{ConnectOptions, Executor};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn catalog_open_retries_busy_setup_within_connect_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let path = crate::private_storage::prepare_database_file(&root.path().join("msb.db"), true)
+            .unwrap();
+        let mut owner = SqliteConnectOptions::new()
+            .filename(&path)
+            .journal_mode(SqliteJournalMode::Delete)
+            .connect()
+            .await
+            .unwrap();
+        owner
+            .execute(
+                "CREATE TABLE retained(value); INSERT INTO retained VALUES (42); BEGIN EXCLUSIVE",
+            )
+            .await
+            .unwrap();
+
+        let error = build_pool(
+            &path,
+            1,
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, sqlx::Error::PoolTimedOut), "{error}");
+
+        let opening = build_pool(
+            &path,
+            1,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            false,
+        );
+        tokio::pin!(opening);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut opening)
+                .await
+                .is_err(),
+            "opening should wait while the existing catalog is locked"
+        );
+
+        owner.execute("COMMIT").await.unwrap();
+        let pool = opening.await.unwrap();
+
+        let row = pool
+            .query_one_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT value FROM retained",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 42);
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

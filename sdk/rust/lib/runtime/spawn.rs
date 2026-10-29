@@ -15,8 +15,6 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
