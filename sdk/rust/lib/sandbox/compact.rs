@@ -15,7 +15,7 @@ use crate::{MicrosandboxError, MicrosandboxResult, backend::Backend};
 #[cfg(feature = "local")]
 use super::{SandboxConfig, SandboxStatus};
 #[cfg(feature = "local")]
-use crate::backend::local::creation;
+use crate::backend::local::creation::{self, CreationStorage};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 
@@ -145,7 +145,8 @@ impl DiskCompactionBuilder {
 
         creation::require_complete(local.db().await?.read(), current.id, &self.name).await?;
 
-        let runtime_dir = local.sandboxes_dir().join(&self.name).join("runtime");
+        let storage = CreationStorage::acquire(local, &self.name)?;
+        let runtime_dir = storage.join("runtime");
         let current_config: SandboxConfig = serde_json::from_str(&current.config)?;
         crate::LocalBackend::validate_completed_restore(&current_config)?;
         // The configuration can change before ownership is acquired. Classify the root from
@@ -155,6 +156,8 @@ impl DiskCompactionBuilder {
             // Dropping an SDK future does not cancel spawn_blocking. Keep disk ownership in the
             // worker until it finishes, even when its caller disconnects or cancels the await.
             let _guard = _guard;
+            let _storage = storage;
+
             microsandbox_runtime::checkpoint::compact_stopped_disks(
                 &runtime_dir,
                 &current_config.spec.mounts,
@@ -247,9 +250,81 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "local")]
-    use crate::backend::local::creation::CreationStorage;
-    #[cfg(feature = "local")]
     use crate::sandbox::RootfsSource;
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn compaction_keeps_storage_exclusive_until_worker_finishes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let local = Arc::new(
+                crate::test_support::local_backend_builder(temp.path())
+                    .build().await.unwrap(),
+            );
+            let mut config = SandboxConfig::default();
+            config.spec.name = "complete".into();
+            config.spec.image = RootfsSource::oci("alpine:3.21");
+            config.manifest_digest = Some(format!("sha256:{}", "1".repeat(64)));
+            local.db().await.unwrap().write().execute_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                "INSERT INTO sandbox (name, config, status, ephemeral) VALUES ('complete', ?, 'Stopped', 0)",
+                [serde_json::to_string(&config).unwrap().into()],
+            )).await.unwrap();
+            let compaction = DiskCompactionBuilder::new(local.clone(), "complete".into());
+
+            let resizing = CreationStorage::acquire(&local, "complete").unwrap();
+            let error = compaction.clone().apply().await
+                .expect_err("compaction must exclude an active resize");
+            assert!(error.to_string().contains("retry"), "{error}");
+            drop(resizing);
+
+            // Queue compaction behind an occupied blocking worker so cancellation is deterministic.
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, blocked) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                let _ = blocked.recv();
+            });
+            ready.await.unwrap();
+            let pending = tokio::spawn(compaction.clone().apply());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match CreationStorage::acquire(&local, "complete") {
+                        Ok(guard) => drop(guard),
+                        Err(error) => {
+                            assert!(error.to_string().contains("retry"), "{error}");
+                            break;
+                        }
+                    }
+                    assert!(!pending.is_finished(), "compaction ended before reserving storage");
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("compaction must reserve storage before queueing disk work");
+
+            pending.abort();
+            assert!(pending.await.unwrap_err().is_cancelled());
+            assert!(CreationStorage::acquire(&local, "complete").is_err(),
+                "the queued worker must retain storage after its caller is cancelled");
+
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(guard) = CreationStorage::acquire(&local, "complete") {
+                        drop(guard);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("finished compaction must release storage");
+            compaction.apply().await.unwrap();
+        });
+    }
 
     #[cfg(feature = "local")]
     #[tokio::test]
