@@ -14,6 +14,8 @@ mod agent;
 mod http;
 pub(in crate::backend) mod sandbox;
 mod snapshot;
+#[cfg(test)]
+mod stop_tests;
 mod volume;
 mod ws_io;
 
