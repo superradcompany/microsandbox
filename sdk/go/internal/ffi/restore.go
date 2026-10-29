@@ -27,6 +27,7 @@ type RestoreOptions struct {
 	AllowMissingResources       bool                 `json:"allow_missing_resources,omitempty"`
 	Volumes                     map[string]MountSpec `json:"volumes,omitempty"`
 	CapturedVolumes             []string             `json:"captured_volumes,omitempty"`
+	OwnedBases                  map[string]string    `json:"owned_bases,omitempty"`
 	Ports                       []PortBindingOptions `json:"ports,omitempty"`
 	TCPAcceptQueueSize          *uint32              `json:"tcp_accept_queue_size,omitempty"`
 	MaxInboundTCPConnections    *uint                `json:"max_inbound_tcp_connections,omitempty"`

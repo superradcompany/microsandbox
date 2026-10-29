@@ -8,6 +8,7 @@ mod compact;
 mod layer_selection;
 mod manifest;
 mod qcow;
+mod receipts;
 mod resolver;
 mod store;
 
@@ -18,7 +19,8 @@ mod store;
 pub(crate) use compact::open_writable_chain;
 pub use compact::{
     CompactLayer, CompactMaterialization, compact_layer_capacity, layer_capacities,
-    materialize_compact_prefix, materialize_raw_prefix, validate_compact_chain,
+    materialize_compact_prefix, materialize_compact_prefix_over_base, materialize_raw_prefix,
+    validate_compact_chain,
 };
 pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectionError};
 pub use manifest::{
@@ -30,6 +32,7 @@ pub use qcow::{
     create_qcow2_overlay, qcow2_backing_basename, relocate_qcow2_backing, relocated_qcow2_header,
     validate_standalone_qcow2,
 };
+pub use receipts::{IntegrityReceipts, ReceiptKind, ReceiptUse};
 pub use resolver::{CheckpointClosure, CheckpointObjectReadTiming};
 pub use store::{
     AdmittedObject, CaptureObjectBatch, CaptureObjectBatchStats, LocalObjectStore, ObjectId,

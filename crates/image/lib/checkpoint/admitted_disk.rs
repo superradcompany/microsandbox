@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::sparse_file_integrity;
+use super::{ReceiptKind, ReceiptUse};
 use crate::error::{ImageError, ImageResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -46,11 +46,16 @@ struct FileStamp {
 //--------------------------------------------------------------------------------------------------
 
 impl AdmittedDiskLayers {
-    pub(super) fn admit(&mut self, path: &Path, expected: &str) -> ImageResult<()> {
+    pub(super) fn admit(
+        &mut self,
+        path: &Path,
+        expected: &str,
+        receipts: ReceiptUse<'_>,
+    ) -> ImageResult<()> {
         // Always verify, even when the resulting receipt will not fit in the cache. Retaining
         // the largest physical files usually keeps the expensive base disk rather than tiny
         // overlays; uncached layers simply take the caller's normal fresh-hash path.
-        let layer = AdmittedDiskLayer::admit(path, expected)?;
+        let layer = AdmittedDiskLayer::admit(path, expected, receipts)?;
         if self.layers.len() < MAX_ADMITTED_DISK_FILES {
             self.layers.push(layer);
         } else if let Some((index, smallest)) = self
@@ -82,10 +87,11 @@ impl AdmittedDiskLayers {
 }
 
 impl AdmittedDiskLayer {
-    fn admit(path: &Path, expected: &str) -> ImageResult<Self> {
+    fn admit(path: &Path, expected: &str, receipts: ReceiptUse<'_>) -> ImageResult<Self> {
         let file = open_regular(path)?;
         let stamp = FileStamp::read(&file)?;
-        let integrity = sparse_file_integrity(path)?;
+        // A host receipt counts only for the exact identity it recorded; anything else hashes.
+        let integrity = receipts.sparse_file_integrity(path, ReceiptKind::SealedLayer)?;
         if integrity.root != expected {
             return Err(ImageError::DigestMismatch {
                 digest: path.display().to_string(),
@@ -198,6 +204,7 @@ fn file_identity(_file: &File, _metadata: &Metadata) -> io::Result<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::sparse_file_integrity;
 
     #[test]
     fn admission_reuses_a_hardlink_but_not_a_copy_or_replacement() {
@@ -208,7 +215,7 @@ mod tests {
         std::fs::write(&source, b"sealed disk").unwrap();
         let root = sparse_file_integrity(&source).unwrap().root;
         let mut admitted = AdmittedDiskLayers::default();
-        admitted.admit(&source, &root).unwrap();
+        admitted.admit(&source, &root, ReceiptUse::Ignore).unwrap();
         std::fs::hard_link(&source, &linked).unwrap();
         std::fs::copy(&source, &copied).unwrap();
         assert_eq!(admitted.reuse_for(&linked).unwrap(), Some(root.as_str()));
@@ -226,7 +233,11 @@ mod tests {
         std::fs::write(&source, b"original").unwrap();
         let root = sparse_file_integrity(&source).unwrap().root;
         std::fs::write(&source, b"modified").unwrap();
-        assert!(AdmittedDiskLayers::default().admit(&source, &root).is_err());
+        assert!(
+            AdmittedDiskLayers::default()
+                .admit(&source, &root, ReceiptUse::Ignore)
+                .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -242,7 +253,7 @@ mod tests {
         std::fs::copy(&source, &copy).unwrap();
         let root = sparse_file_integrity(&source).unwrap().root;
         let mut admitted = AdmittedDiskLayers::default();
-        admitted.admit(&source, &root).unwrap();
+        admitted.admit(&source, &root, ReceiptUse::Ignore).unwrap();
         std::fs::write(&source, b"modified").unwrap();
         let writer = OpenOptions::new().write(true).open(&source).unwrap();
         writer
@@ -264,7 +275,7 @@ mod tests {
             let path = dir.path().join(format!("layer-{length}"));
             std::fs::write(&path, vec![0x55; length]).unwrap();
             let root = sparse_file_integrity(&path).unwrap().root;
-            admitted.admit(&path, &root).unwrap();
+            admitted.admit(&path, &root, ReceiptUse::Ignore).unwrap();
             assert!(admitted.layers.len() <= MAX_ADMITTED_DISK_FILES);
             paths.push((path, root));
         }
@@ -278,7 +289,7 @@ mod tests {
         // pass full admission. A full cache is never permission to skip verification.
         let (smallest, root) = &paths[0];
         std::fs::write(smallest, b"X").unwrap();
-        assert!(admitted.admit(smallest, root).is_err());
+        assert!(admitted.admit(smallest, root, ReceiptUse::Ignore).is_err());
         assert_eq!(admitted.layers.len(), MAX_ADMITTED_DISK_FILES);
     }
 }

@@ -172,6 +172,7 @@ mod tests {
                         integrity_root: Some(format!("blake3:{}", "b".repeat(64))),
                     },
                 ],
+                external_base: None,
             },
         };
         volume

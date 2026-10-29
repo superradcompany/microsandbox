@@ -8,8 +8,8 @@ pub(crate) use owned::materialize_owned_volumes;
 
 use std::path::{Path, PathBuf};
 
-use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
-use microsandbox_image::snapshot::SnapshotRootDisk;
+use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId, ReceiptUse};
+use microsandbox_image::snapshot::{LAYERS_DIRECTORY, SnapshotRootDisk};
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 
 use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason};
@@ -62,9 +62,18 @@ pub(crate) async fn materialize_checkpoint_for_child(
     let source_path = source.closure.clone();
     let destination_for_copy = closure_destination.clone();
     let pin = super::lease::pin_source(&source_path)?;
+    let receipts = choices.integrity_receipts.clone();
     tokio::task::spawn_blocking(move || {
         let _lease = pin;
-        stage_checkpoint_closure(&source_path, &destination_for_copy)
+        stage_checkpoint_closure(&source_path, &destination_for_copy)?;
+        // Linked layers are the snapshot's own sealed inodes: their receipts follow the links.
+        if let Some(receipts) = receipts {
+            receipts.carry_tree(
+                &source_path.join(LAYERS_DIRECTORY),
+                &destination_for_copy.join(LAYERS_DIRECTORY),
+            );
+        }
+        Ok::<_, std::io::Error>(())
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("checkpoint child copy task: {error}")))??;
@@ -94,9 +103,13 @@ pub(crate) async fn materialize_checkpoint_disk_for_child(
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(&source.checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let source_closure =
-        CheckpointClosure::open_portable(&source.closure, Some(&expected), fs_state_limit)
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let source_closure = CheckpointClosure::open_portable_with_receipts(
+        &source.closure,
+        Some(&expected),
+        fs_state_limit,
+        ReceiptUse::trusting(choices.integrity_receipts.as_ref()),
+    )
+    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&source_closure, &source.checkpoint_id)?;
     validate_root_disk_closure(&source_closure, root_disk, true)?;
     tokio::fs::create_dir_all(child_stage).await?;
@@ -126,9 +139,13 @@ pub(crate) async fn materialize_checkpoint_child_state(
 ) -> MicrosandboxResult<CheckpointChildMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let child_closure =
-        CheckpointClosure::open(closure_destination, Some(&expected), fs_state_limit)
-            .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let child_closure = CheckpointClosure::open_with_receipts(
+        closure_destination,
+        Some(&expected),
+        fs_state_limit,
+        ReceiptUse::trusting(choices.integrity_receipts.as_ref()),
+    )
+    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, false)?;
     let upper_layers =
@@ -169,8 +186,13 @@ pub(crate) async fn materialize_checkpoint_child_disk_state(
 ) -> MicrosandboxResult<CheckpointDiskMaterialization> {
     let expected = ObjectId::new(checkpoint_root)
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-    let child_closure = CheckpointClosure::open_portable(closure, Some(&expected), fs_state_limit)
-        .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    let child_closure = CheckpointClosure::open_portable_with_receipts(
+        closure,
+        Some(&expected),
+        fs_state_limit,
+        ReceiptUse::trusting(choices.integrity_receipts.as_ref()),
+    )
+    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
     validate_checkpoint_identity(&child_closure, checkpoint_id)?;
     validate_root_disk_closure(&child_closure, root_disk, true)?;
     let upper_layers =
@@ -530,8 +552,8 @@ fn checkpoint_layer_target(
 mod tests {
     use microsandbox_image::checkpoint::{
         CaptureIntent, CheckpointManifest, ContentRef, DiskGenerationManifest, DiskLayerRef,
-        LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent, MemoryManifest,
-        sparse_file_integrity,
+        IntegrityReceipts, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
+        MemoryManifest, ReceiptKind, sparse_file_integrity,
     };
 
     use super::*;
@@ -641,11 +663,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn child_owns_restore_closure_and_a_private_writable_head() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
-        let store = LocalObjectStore::open(&source).unwrap();
+    /// An installed checkpoint closure with one sealed raw root layer, and the restore naming it.
+    fn installed_checkpoint(source: &Path) -> (CheckpointRestoreConfig, ObjectId, PathBuf) {
+        let store = LocalObjectStore::open(source).unwrap();
         let memory_bytes = b"restored-memory";
         let memory_object = store.put_bytes(memory_bytes).unwrap();
         let memory = MemoryManifest {
@@ -693,6 +713,7 @@ mod tests {
             }],
             head: "layer_base".into(),
             pause_generation: 7,
+            external_base: None,
         };
         let disk_id = store
             .put_bytes(&disk.to_canonical_bytes().unwrap())
@@ -728,10 +749,18 @@ mod tests {
             unavailable_disks: Default::default(),
             local_branch: false,
             forked: false,
-            closure: source.clone(),
+            closure: source.to_path_buf(),
             checkpoint_root: checkpoint_root.to_string(),
             checkpoint_id: checkpoint.checkpoint_id,
         };
+        (restore, checkpoint_root, source_layer)
+    }
+
+    #[tokio::test]
+    async fn child_owns_restore_closure_and_a_private_writable_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let (restore, checkpoint_root, _) = installed_checkpoint(&source);
         let child = temp.path().join("child");
         let disk_child = temp.path().join("disk-child");
 
@@ -785,5 +814,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.checkpoint().checkpoint_id, "checkpoint_test");
+    }
+
+    /// Point the sealed-layer receipt recorded for `path` at another root, leaving `path` alone.
+    #[cfg(unix)]
+    fn plant_sealed_root(receipts: &IntegrityReceipts, path: &Path, root: &str) {
+        let canonical = std::fs::canonicalize(path).unwrap();
+        for entry in std::fs::read_dir(receipts.root()).unwrap() {
+            let entry = entry.unwrap().path();
+            let mut receipt: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&entry).unwrap()).unwrap();
+            if receipt["identity"]["sealed_layer"]["path"] == canonical.to_str().unwrap() {
+                receipt["integrity_root"] = root.into();
+                std::fs::write(&entry, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                return;
+            }
+        }
+        panic!("no sealed receipt recorded for {}", path.display());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_restore_trusts_the_receipts_its_snapshot_was_installed_with() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let (restore, _, source_layer) = installed_checkpoint(&source);
+        let receipts = IntegrityReceipts::new(temp.path().join("cache/integrity"));
+        // Installation records what its admission reads.
+        let installed_root = receipts
+            .record_sparse_file_integrity(&source_layer, ReceiptKind::SealedLayer)
+            .unwrap()
+            .root;
+        let choices = crate::sandbox::restore_resources::RestoreResources {
+            integrity_receipts: Some(receipts.clone()),
+            ..Default::default()
+        };
+        let planted = format!("blake3:{}", "0".repeat(64));
+
+        // The receipt follows the layer's link into the child and is believed there: a planted
+        // root refuses the restore, which proves no byte of the layer was read.
+        plant_sealed_root(&receipts, &source_layer, &planted);
+        let refused = materialize_checkpoint_for_child(
+            &restore,
+            &temp.path().join("refused"),
+            &SnapshotRootDisk::Flat,
+            &choices,
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(MicrosandboxError::SnapshotIntegrity(_))
+        ));
+
+        plant_sealed_root(&receipts, &source_layer, &installed_root);
+        let materialized = materialize_checkpoint_for_child(
+            &restore,
+            &temp.path().join("child"),
+            &SnapshotRootDisk::Flat,
+            &choices,
+            crate::test_support::DEFAULT_FS_STATE_LIMIT,
+        )
+        .await
+        .unwrap();
+        // The child's own closure name now carries a receipt for the runtime's boot admission.
+        let child_layer = materialized.restore.closure.join("layers/layer_base.raw");
+        plant_sealed_root(&receipts, &child_layer, &planted);
+        assert!(
+            CheckpointClosure::open_with_receipts(
+                &materialized.restore.closure,
+                None,
+                crate::test_support::DEFAULT_FS_STATE_LIMIT,
+                ReceiptUse::Trust(&receipts),
+            )
+            .is_err()
+        );
     }
 }

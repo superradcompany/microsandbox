@@ -28,6 +28,23 @@ pub struct DiskLayerRef {
     pub integrity_root: Option<String>,
 }
 
+/// Immutable caller-managed image that a generation's oldest layer reads through.
+///
+/// The base is not a member of the closure. Captures, snapshots and archives record only this
+/// identity; every restore must be supplied a file that matches it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalDiskBase {
+    /// Physical format; only `raw` is supported.
+    pub format: String,
+    /// Guest-visible size, equal to every layer's virtual size.
+    pub virtual_size: u64,
+    /// Exact physical file length.
+    pub file_size: u64,
+    /// Sparse BLAKE3 root of the exact base file, as recorded for sealed layers.
+    pub integrity_root: String,
+}
+
 /// Immutable sealed disk generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +67,9 @@ pub struct DiskGenerationManifest {
     pub head: String,
     /// VM-wide pause boundary at which the writable head was sealed.
     pub pause_generation: u64,
+    /// Immutable base the oldest layer reads through, held by reference and never captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_base: Option<ExternalDiskBase>,
 }
 
 impl ObjectId {
@@ -143,6 +163,28 @@ impl DiskGenerationManifest {
                 _ => return manifest_error("disk layer closure is not a valid oldest-first chain"),
             }
         }
+        if let Some(base) = &self.external_base {
+            if base.format != "raw"
+                || base.virtual_size == 0
+                || !base.virtual_size.is_multiple_of(512)
+                || base.file_size != base.virtual_size
+            {
+                return manifest_error("external disk base must be a sector-aligned raw image");
+            }
+            validate_blake3_root(&base.integrity_root)?;
+            if self.layers[0].format != "qcow2" {
+                return manifest_error(
+                    "a disk over an external base must start with a qcow2 layer",
+                );
+            }
+            if self
+                .layers
+                .iter()
+                .any(|layer| layer.virtual_size != base.virtual_size)
+            {
+                return manifest_error("disk layers and their external base differ in size");
+            }
+        }
         Ok(())
     }
 }
@@ -226,4 +268,73 @@ fn manifest_error<T>(message: impl Into<String>) -> SnapshotManifestResult<T> {
 }
 fn manifest_error_value(message: impl Into<String>) -> SnapshotManifestError {
     SnapshotManifestError::ManifestParse(format!("checkpoint manifest: {}", message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn root(digit: char) -> String {
+        format!("blake3:{}", digit.to_string().repeat(64))
+    }
+
+    fn generation(format: &str, external_base: Option<ExternalDiskBase>) -> DiskGenerationManifest {
+        DiskGenerationManifest {
+            schema: "microsandbox.disk-generation/1".into(),
+            volume_id: "vol_a".into(),
+            device_id: "data_0123abcd".into(),
+            generation: 1,
+            layers: vec![DiskLayerRef {
+                layer_id: "layer_a".into(),
+                format: format.into(),
+                virtual_size: MIB,
+                file_size: 4096,
+                predecessor: None,
+                integrity_root: Some(root('a')),
+            }],
+            head: "layer_a".into(),
+            pause_generation: 1,
+            external_base,
+        }
+    }
+
+    fn base() -> ExternalDiskBase {
+        ExternalDiskBase {
+            format: "raw".into(),
+            virtual_size: MIB,
+            file_size: MIB,
+            integrity_root: root('b'),
+        }
+    }
+
+    #[test]
+    fn external_base_needs_a_qcow2_first_layer_of_its_size() {
+        generation("qcow2", Some(base())).validate().unwrap();
+        assert!(generation("raw", Some(base())).validate().is_err());
+        let mut wrong_size = base();
+        wrong_size.virtual_size = 2 * MIB;
+        wrong_size.file_size = 2 * MIB;
+        assert!(generation("qcow2", Some(wrong_size)).validate().is_err());
+        let mut qcow2_base = base();
+        qcow2_base.format = "qcow2".into();
+        assert!(generation("qcow2", Some(qcow2_base)).validate().is_err());
+        let mut sparse_length = base();
+        sparse_length.file_size = 4096;
+        assert!(generation("qcow2", Some(sparse_length)).validate().is_err());
+        let mut bad_root = base();
+        bad_root.integrity_root = "sha256:00".into();
+        assert!(generation("qcow2", Some(bad_root)).validate().is_err());
+    }
+
+    #[test]
+    fn generations_without_a_base_keep_their_encoding() {
+        let plain = serde_json::to_value(generation("raw", None)).unwrap();
+        assert!(plain.get("external_base").is_none());
+        let based = serde_json::to_value(generation("qcow2", Some(base()))).unwrap();
+        assert_eq!(based["external_base"]["format"], "raw");
+        let decoded: DiskGenerationManifest = serde_json::from_value(based).unwrap();
+        assert_eq!(decoded.external_base, Some(base()));
+    }
 }

@@ -295,6 +295,7 @@ mod tests {
                 &self.sandbox_dir,
                 &self.config.spec.mounts,
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -475,6 +476,7 @@ mod tests {
             crate::runtime::owned_volumes::validate(
                 &fixture.sandbox_dir,
                 &fixture.config.spec.mounts,
+                None,
             )
             .unwrap();
             fixture.assert_preserved();
@@ -651,6 +653,7 @@ mod tests {
                 crate::runtime::owned_volumes::validate(
                     &fixture.sandbox_dir,
                     &fixture.config.spec.mounts,
+                    None,
                 )
                 .unwrap();
             } else {

@@ -264,6 +264,7 @@ mod tests {
             head: layers.last().unwrap().layer_id.clone(),
             layers,
             pause_generation: 1,
+            external_base: None,
         }
     }
 

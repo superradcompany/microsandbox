@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::Utc;
-use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
+use microsandbox_image::checkpoint::{CheckpointClosure, IntegrityReceipts, ObjectId, ReceiptUse};
 use microsandbox_image::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
-    ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture, SnapshotConsistency,
-    SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope, SnapshotState, layer_path,
+    ImageRef, LAYERS_DIRECTORY, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
+    SnapshotConsistency, SnapshotFormat, SnapshotId, SnapshotRootDisk, SnapshotScope,
+    SnapshotState, layer_path,
 };
 use microsandbox_types::{VolumeMount, canonicalize_volume_mounts};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -42,6 +43,8 @@ struct CapturedFullSnapshot {
     labels: BTreeMap<String, String>,
     fs_state_limit: usize,
     source_recovery: Option<SnapshotSourceRecoveryError>,
+    /// Receipts recorded for the installed layers, so a restore of this snapshot trusts them.
+    integrity_receipts: Option<IntegrityReceipts>,
 }
 
 /// A complete operation-owned artifact, not yet a durable group member.
@@ -182,6 +185,15 @@ async fn publish_snapshot_group(
         .parent()
         .expect("group staging has a parent")
         .to_path_buf();
+    // Canonical before publication renames the member; its installed layers' receipts follow it.
+    let receipts = local.integrity_receipts();
+    let staged_layers = std::fs::canonicalize(
+        captured
+            .path()
+            .join(CHECKPOINT_DIRECTORY)
+            .join(LAYERS_DIRECTORY),
+    )
+    .ok();
     let published = async {
     lineage.validate_source(local, source_sandbox).await?;
     // Ancestry belongs to the immutable descriptor, not to the group head or export base.
@@ -211,6 +223,9 @@ async fn publish_snapshot_group(
             || format!("msb-{:08x}", rand::random::<u32>()),
         ).await?;
         captured.path = group_dir.join(captured.id().as_str());
+        if let Some(staged) = &staged_layers {
+            receipts.carry_tree(staged, &captured.path().join(CHECKPOINT_DIRECTORY).join(LAYERS_DIRECTORY));
+        }
         super::publication::complete(&publication_db, captured.path(), captured.digest(), captured.manifest()).await?;
         captured.lease = Some(super::lease::reader_async(captured.path.clone()).await?);
         lineage.commit(captured.id()).await?;
@@ -526,13 +541,18 @@ async fn stage_full_snapshot(
         }
         let materialize_us = materialize_started.elapsed().as_micros();
         let closure_verify_started = Instant::now();
-        CheckpointClosure::open(
+        // This admission reads every installed layer; recording it lets a restore trust them.
+        CheckpointClosure::open_with_receipts(
             &checkpoint_destination,
             Some(&captured.checkpoint_root),
             captured.fs_state_limit,
+            ReceiptUse::recording(captured.integrity_receipts.as_ref()),
         )
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
         let closure_verify_us = closure_verify_started.elapsed().as_micros();
+        // Canonical before promotion renames the staging directory away.
+        let staged_layers =
+            std::fs::canonicalize(checkpoint_destination.join(LAYERS_DIRECTORY)).ok();
         let metadata_started = Instant::now();
         super::metadata::write(&staging_dir, &captured.labels).await?;
         let descriptor = captured
@@ -551,6 +571,12 @@ async fn stage_full_snapshot(
 
         let promote_started = Instant::now();
         promote_snapshot_directory(&staging_dir, dest_dir, force).await?;
+        if let (Some(receipts), Some(staged)) = (&captured.integrity_receipts, staged_layers) {
+            receipts.carry_tree(
+                &staged,
+                &dest_dir.join(CHECKPOINT_DIRECTORY).join(LAYERS_DIRECTORY),
+            );
+        }
         let promote_us = promote_started.elapsed().as_micros();
         tracing::info!(
             target: "microsandbox_checkpoint_timing",
@@ -1013,6 +1039,7 @@ async fn capture_full_snapshot(
             manifest,
             labels: labels.into_iter().collect(),
             fs_state_limit,
+            integrity_receipts: Some(local.integrity_receipts()),
         })
     })();
     validated.map_err(|error| capture_validation_failure(error, outcome.recovery_error.as_deref()))
@@ -2230,6 +2257,7 @@ mod tests {
             }],
             head: CAPTURE_BASE_ID.into(),
             pause_generation: 1,
+            external_base: None,
         };
         disk.validate().unwrap();
         microsandbox_runtime::control::DiskCheckpointControlState {
@@ -2251,6 +2279,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         };
 
         let result =
@@ -2440,6 +2469,7 @@ mod tests {
             manifest,
             labels: BTreeMap::new(),
             fs_state_limit: crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            integrity_receipts: None,
         }
     }
 
@@ -2723,6 +2753,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            base: None,
         };
         let mounts = vec![
             mount("/cache", OwnedVolumeStorage::Directory { quota_mib: None }),
@@ -2751,6 +2782,7 @@ mod tests {
         let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
             &sandbox.join("runtime"),
             &microsandbox_types::owned_volume_mount_id("/data"),
+            None,
         )
         .unwrap()
         .unwrap();
@@ -2814,6 +2846,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         })
         .collect()
     }
@@ -2965,6 +2998,7 @@ mod tests {
                 let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
                     &sandbox.join("runtime"),
                     &microsandbox_types::owned_volume_mount_id("/data"),
+                    None,
                 )
                 .unwrap()
                 .unwrap();

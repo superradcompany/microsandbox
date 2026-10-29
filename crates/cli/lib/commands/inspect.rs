@@ -291,6 +291,7 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                         options,
                         stat_virtualization,
                         host_permissions,
+                        base,
                     } => {
                         let flags = mount_flags_suffix(*options);
                         let detail = match storage {
@@ -308,7 +309,13 @@ pub async fn run(args: InspectArgs) -> anyhow::Result<()> {
                                 )
                             }
                             microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib } => {
-                                format!("ext4 disk ({capacity_mib} MiB)")
+                                match base {
+                                    Some(base) => format!(
+                                        "ext4 disk ({capacity_mib} MiB) over base {}",
+                                        base.display()
+                                    ),
+                                    None => format!("ext4 disk ({capacity_mib} MiB)"),
+                                }
                             }
                         };
                         println!("  {guest:<16}\u{2192} owned {detail}{flags}");

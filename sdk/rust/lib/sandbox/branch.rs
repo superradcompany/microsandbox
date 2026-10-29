@@ -16,7 +16,7 @@ use microsandbox_runtime::checkpoint::LocalBranchState;
 use microsandbox_runtime::control::ControlRequest;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
-use microsandbox_types::GuestFlush;
+use microsandbox_types::{GuestFlush, VolumeMount};
 
 use crate::backend::Backend;
 use crate::backend::sandbox::SandboxIdentity;
@@ -658,6 +658,21 @@ async fn adopt_capture(
             return Err(MicrosandboxError::SnapshotIntegrity(
                 "branch disk closure differs from root layout".into(),
             ));
+        }
+    }
+    // A fork on the same host reads through the parent's bases unless the caller chose others.
+    for mount in &config.spec.mounts {
+        if let VolumeMount::Owned {
+            guest,
+            base: Some(base),
+            ..
+        } = mount
+        {
+            config
+                .restore_resources
+                .owned_bases
+                .entry(guest.clone())
+                .or_insert_with(|| base.clone());
         }
     }
     let mut mounts = crate::snapshot::materialize_owned_volumes(

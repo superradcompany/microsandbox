@@ -43,6 +43,7 @@ use std::{
 };
 
 use microsandbox_db::pool::DbPools;
+use microsandbox_image::checkpoint::IntegrityReceipts;
 use microsandbox_migration::schema_metadata;
 use microsandbox_migration::{Migrator, MigratorTrait};
 use microsandbox_types::DeploymentProfile;
@@ -243,6 +244,14 @@ impl LocalBackend {
     /// Resolved cache directory.
     pub fn cache_dir(&self) -> PathBuf {
         self.config().cache_dir()
+    }
+
+    /// Host-local integrity receipts for immutable disk inputs, beside the memory cache.
+    pub(crate) fn integrity_receipts(&self) -> IntegrityReceipts {
+        IntegrityReceipts::new(
+            self.cache_dir()
+                .join(microsandbox_runtime::checkpoint::INTEGRITY_RECEIPTS_DIRECTORY),
+        )
     }
 
     /// Resolved logs directory.

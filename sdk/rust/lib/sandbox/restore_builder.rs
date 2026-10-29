@@ -276,6 +276,24 @@ macro_rules! resource_methods {
                 self
             }
 
+            /// Supply the external base of an owned disk that was captured over one.
+            ///
+            /// Required for every such disk. The base is never copied or written; it is checked
+            /// against the identity recorded at capture before the child is staged.
+            pub fn owned_base(
+                mut self,
+                guest: impl Into<String>,
+                base: impl Into<std::path::PathBuf>,
+            ) -> Self {
+                self.$($inner).+
+                    .config
+                    .restore_resources
+                    .get_or_insert_with(Default::default)
+                    .owned_bases
+                    .insert(guest.into(), base.into());
+                self
+            }
+
             /// Bind a host stream socket or local named pipe to a guest-to-host vsock port.
             pub fn vsock(mut self, path: impl AsRef<std::path::Path>, port: u32) -> Self {
                 self.$($inner).+ = self.$($inner).+.vsock(path, port);

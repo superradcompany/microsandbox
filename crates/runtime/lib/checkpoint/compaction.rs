@@ -127,14 +127,14 @@ pub fn compact_stopped_disks(
                 .unwrap_or(Disk::Fresh)
         } else {
             let (id, capacity) = &owned[guest];
-            match super::owned_disk::load_runtime_owned_disk_chain(runtime_dir, id)? {
+            match super::owned_disk::load_runtime_owned_disk_chain(runtime_dir, id, None)? {
                 Some(chain) => {
                     if chain.virtual_size != u64::from(*capacity) * 1024 * 1024 {
                         return Err(format!(
                             "owned disk {guest} differs from configured capacity"
                         ));
                     }
-                    Disk::Owned(RuntimeOwnedDisk::read(runtime_dir, id)?)
+                    Disk::Owned(RuntimeOwnedDisk::read(runtime_dir, id, None)?)
                 }
                 None => {
                     let path = runtime_dir
@@ -416,6 +416,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         }
     }
 
@@ -507,7 +508,7 @@ mod tests {
         );
         let id = microsandbox_types::owned_volume_mount_id("/data");
         assert_eq!(
-            load_runtime_owned_disk_chain(&runtime, &id)
+            load_runtime_owned_disk_chain(&runtime, &id, None)
                 .unwrap()
                 .unwrap()
                 .layers
@@ -595,8 +596,8 @@ mod tests {
         let directory = sandbox.join("runtime");
         let first_id = microsandbox_types::owned_volume_mount_id("/data");
         let second_id = microsandbox_types::owned_volume_mount_id("/logs");
-        let mut first = RuntimeOwnedDisk::read(&directory, &first_id).unwrap();
-        let mut second = RuntimeOwnedDisk::read(&directory, &second_id).unwrap();
+        let mut first = RuntimeOwnedDisk::read(&directory, &first_id, None).unwrap();
+        let mut second = RuntimeOwnedDisk::read(&directory, &second_id, None).unwrap();
         let old_first = first.layers();
         let old_second = second.layers();
         let executor = tokio::runtime::Builder::new_current_thread()
@@ -628,7 +629,7 @@ mod tests {
                 .all(|layer| layer.path.is_file())
         );
         assert_eq!(
-            load_runtime_owned_disk_chain(&directory, &first_id)
+            load_runtime_owned_disk_chain(&directory, &first_id, None)
                 .unwrap()
                 .unwrap()
                 .layers
@@ -636,7 +637,7 @@ mod tests {
             2
         );
         assert_eq!(
-            load_runtime_owned_disk_chain(&directory, &second_id)
+            load_runtime_owned_disk_chain(&directory, &second_id, None)
                 .unwrap()
                 .unwrap()
                 .layers

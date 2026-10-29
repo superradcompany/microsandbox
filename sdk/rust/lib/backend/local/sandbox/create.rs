@@ -250,6 +250,9 @@ impl LocalBackend {
         let mut pinned_reference: Option<String> = None;
 
         config.apply_runtime_defaults();
+        // Restore staging and owned-volume preparation consult this host's receipts before
+        // re-hashing an immutable base or sealed layer.
+        config.restore_resources.integrity_receipts = Some(self.integrity_receipts());
         validate_hostname(config.spec.runtime.hostname.as_deref())?;
         self.validate_sandbox_name_for_runtime(&config.spec.name)?;
         Self::validate_rootfs_source(&config.spec.image)?;
@@ -344,11 +347,32 @@ impl LocalBackend {
             .await?;
         let mut child_stage_guard = None;
         if let Some(stage) = archive_stage {
+            // Canonical before the rename moves the stage away; the closure's receipts follow it.
+            let staged_layers = config.checkpoint_restore.as_ref().and_then(|restore| {
+                std::fs::canonicalize(
+                    restore
+                        .closure
+                        .join(microsandbox_image::snapshot::LAYERS_DIRECTORY),
+                )
+                .ok()
+            });
             relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
             // Keep rename and guard installation in one poll: cancellation must never
             // leave published child storage without an owner.
             std::fs::rename(stage.path(), &sandbox_dir)?;
             child_stage_guard = Some(ChildStageGuard::new(sandbox_dir.clone()));
+            if let (Some(receipts), Some(staged), Some(restore)) = (
+                &config.restore_resources.integrity_receipts,
+                staged_layers,
+                &config.checkpoint_restore,
+            ) {
+                receipts.carry_tree(
+                    &staged,
+                    &restore
+                        .closure
+                        .join(microsandbox_image::snapshot::LAYERS_DIRECTORY),
+                );
+            }
         }
         let _branch_pin = if let Some(source) = config.branch_source.take() {
             tokio::fs::create_dir(&sandbox_dir).await?;
@@ -809,6 +833,7 @@ impl LocalBackend {
             &sandbox_dir,
             &config.spec.mounts,
             config.snapshot_parent.is_some() || config.checkpoint_restore.is_some(),
+            config.restore_resources.integrity_receipts.as_ref(),
         )
         .await
         {

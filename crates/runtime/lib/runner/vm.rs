@@ -24,6 +24,7 @@ use microsandbox_filesystem::{
     DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs,
     StatVirtualization,
 };
+use microsandbox_image::checkpoint::IntegrityReceipts;
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 #[cfg(feature = "net")]
 use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
@@ -773,7 +774,12 @@ fn run(
     crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
         |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
     )?;
-    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
+    let receipts = config
+        .vm
+        .memory_cache_dir
+        .as_deref()
+        .and_then(crate::checkpoint::integrity_receipts_beside);
+    recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks, receipts.as_ref())?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
     heartbeat::clear_stale(&config.runtime_dir)?;
     if config.vm.checkpoint_restore.is_some() {
@@ -1782,12 +1788,17 @@ fn validate_upper_layers(spec: &UpperSpec) -> RuntimeResult<Vec<UpperLayerSpec>>
 
 /// Resolve a journal before attachment or capture registration. Its nominal initial raw file
 /// may have been retired by restore or compaction, so it is not a fallback for an invalid chain.
-fn recover_owned_disk_layers(runtime_dir: &Path, disks: &mut [DiskMountSpec]) -> RuntimeResult<()> {
+fn recover_owned_disk_layers(
+    runtime_dir: &Path,
+    disks: &mut [DiskMountSpec],
+    receipts: Option<&IntegrityReceipts>,
+) -> RuntimeResult<()> {
     for disk in disks.iter_mut().filter(|disk| disk.lifecycle_owned) {
-        let chain = crate::checkpoint::load_runtime_owned_disk_chain(runtime_dir, &disk.id)
-            .map_err(|error| {
-                RuntimeError::Custom(format!("recover owned disk {}: {error}", disk.id))
-            })?;
+        let chain =
+            crate::checkpoint::load_runtime_owned_disk_chain(runtime_dir, &disk.id, receipts)
+                .map_err(|error| {
+                    RuntimeError::Custom(format!("recover owned disk {}: {error}", disk.id))
+                })?;
         let Some(chain) = chain else { continue };
         if chain.device_id != disk.id {
             return Err(RuntimeError::Custom(format!(
@@ -1974,6 +1985,10 @@ fn build_vm(
                     restore.closure.clone(),
                     &restore.checkpoint_root,
                     vm.fs_state_limit(),
+                    vm.memory_cache_dir
+                        .as_deref()
+                        .and_then(crate::checkpoint::integrity_receipts_beside)
+                        .as_ref(),
                 )
             }
             .map_err(|error| {
@@ -4063,10 +4078,11 @@ mod tests {
                     },
                 ],
                 readonly,
+                None,
             )
             .unwrap();
             let mut disks = vec![owned_disk_spec(&directory, readonly)];
-            recover_owned_disk_layers(&runtime, &mut disks).unwrap();
+            recover_owned_disk_layers(&runtime, &mut disks, None).unwrap();
             assert_eq!(disks[0].readonly, readonly);
             assert_eq!(disks[0].layers.len(), 2);
             assert_eq!(disks[0].layers[0].path, base);
@@ -4075,10 +4091,10 @@ mod tests {
             // Even an existing nominal image cannot replace a missing journal dependency.
             std::fs::write(&disks[0].host, vec![99; 1024 * 1024]).unwrap();
             std::fs::remove_file(&base).unwrap();
-            assert!(recover_owned_disk_layers(&runtime, &mut disks).is_err());
+            assert!(recover_owned_disk_layers(&runtime, &mut disks, None).is_err());
             let mut external = owned_disk_spec(&directory, readonly);
             external.lifecycle_owned = false;
-            recover_owned_disk_layers(&runtime, std::slice::from_mut(&mut external)).unwrap();
+            recover_owned_disk_layers(&runtime, std::slice::from_mut(&mut external), None).unwrap();
             assert!(external.layers.is_empty());
         }
     }

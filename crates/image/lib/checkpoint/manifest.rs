@@ -532,6 +532,7 @@ mod tests {
             }],
             head: "../outside".into(),
             pause_generation: 1,
+            external_base: None,
         };
 
         assert!(manifest.validate().is_err());
@@ -554,6 +555,7 @@ mod tests {
             }],
             head: "layer_test".into(),
             pause_generation: 1,
+            external_base: None,
         };
         let mut value = serde_json::to_value(manifest).unwrap();
         value.as_object_mut().unwrap().remove("device_id");

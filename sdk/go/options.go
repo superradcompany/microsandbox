@@ -1798,6 +1798,8 @@ type MountConfig struct {
 	NamedMode string
 	NamedKind string
 	Owned     string
+	// OwnedBase is the immutable raw image an owned disk starts from, held by reference.
+	OwnedBase string
 	QuotaMiB  uint32
 	Tmpfs     bool
 	Disk      string
@@ -1887,8 +1889,12 @@ type NamedVolumeOptions struct {
 // OwnedVolumeOptions configures storage allocated for one sandbox. It survives
 // stop/start and is removed with that sandbox. The default kind is a directory.
 type OwnedVolumeOptions struct {
-	Kind     VolumeKind
-	SizeMiB  uint32 // Required positive capacity for disk storage.
+	Kind VolumeKind
+	// BasePath starts a disk from an immutable raw ext4 image, held by reference: it is
+	// never written, copied or captured, and every restore must supply it again
+	// (RestoreConfig.OwnedBases). SizeMiB may then be zero, or must equal the image size.
+	BasePath string
+	SizeMiB  uint32 // Required positive capacity for disk storage without a BasePath.
 	QuotaMiB uint32 // Directory quota; zero leaves the quota unset.
 	Readonly bool
 	Noexec   bool
@@ -1992,7 +1998,7 @@ func (mountFactory) Owned(opts OwnedVolumeOptions) MountConfig {
 		kind = VolumeKindDir
 	}
 	return MountConfig{
-		kind: MountKindOwned, Owned: string(kind),
+		kind: MountKindOwned, Owned: string(kind), OwnedBase: opts.BasePath,
 		SizeMiB: opts.SizeMiB, QuotaMiB: opts.QuotaMiB,
 		Readonly: opts.Readonly, Noexec: opts.Noexec, Nosuid: opts.Nosuid, Nodev: opts.Nodev,
 		StatVirtualization: opts.StatVirtualization,

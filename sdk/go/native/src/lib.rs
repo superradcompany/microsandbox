@@ -1316,6 +1316,8 @@ struct MountSpec {
     /// Guest gid presented for host files with no per-file stat override.
     /// Must be set together with `override_uid`. Only valid for bind / named mounts.
     override_gid: Option<u32>,
+    /// Immutable raw image an owned disk starts from, held by reference.
+    owned_base: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2208,6 +2210,12 @@ fn volume_mount(
     let override_gid = m.override_gid;
     let raw_named_mode = m.named_mode.clone();
     let raw_named_kind = m.named_kind.clone();
+    let owned_base = m.owned_base.clone();
+    if owned_base.is_some() && m.owned.as_deref() != Some("disk") {
+        return Err(FfiError::invalid_argument(
+            "owned_base applies to owned disk mounts only",
+        ));
+    }
 
     if let Some(kind) = m.owned.as_deref() {
         // Reject mixed sources at the native boundary as well as in Go. The
@@ -2247,6 +2255,9 @@ fn volume_mount(
                 }
                 if let Some(quota) = quota_mib {
                     owned = owned.quota(quota);
+                }
+                if let Some(base) = &owned_base {
+                    owned = owned.base(base);
                 }
                 owned
             });
@@ -3572,6 +3583,13 @@ pub unsafe extern "C" fn msb_sandbox_pause(
             Ok(r#"{"ok":true}"#.into())
         }))
     })
+}
+
+/// Its presence advertises `owned_base` on owned disk mounts and `owned_bases` on restore.
+/// Older libraries ignore those JSON fields, so callers gate on this symbol.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_owned_disk_external_base() -> i32 {
+    1
 }
 
 /// Pause with an explicit flush policy. Its presence also advertises policy-aware JSON APIs.

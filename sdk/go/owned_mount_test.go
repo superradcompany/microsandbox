@@ -50,3 +50,33 @@ func TestOwnedMountValidationRejectsAmbiguousNativeRequests(t *testing.T) {
 		t.Fatalf("valid owned mounts rejected: %v", err)
 	}
 }
+
+func TestOwnedDiskBaseWireShapeAndValidation(t *testing.T) {
+	options := marshalCreateOptions(t, WithMounts(map[string]MountConfig{
+		"/data": Mount.Owned(OwnedVolumeOptions{Kind: VolumeKindDisk, BasePath: "/srv/bases/app.raw"}),
+	}))
+	disk := mustField(t, options, "volumes").(map[string]any)["/data"].(map[string]any)
+	if disk["owned"] != "disk" || disk["owned_base"] != "/srv/bases/app.raw" {
+		t.Fatalf("disk over base wire shape = %#v", disk)
+	}
+	if _, ok := disk["size_mib"]; ok {
+		t.Fatalf("a disk over a base takes its size from the base: %#v", disk)
+	}
+	for name, mount := range map[string]MountConfig{
+		"directory base": Mount.Owned(OwnedVolumeOptions{BasePath: "/srv/bases/app.raw"}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateOwnedMounts(map[string]MountConfig{"/data": mount}); err == nil {
+				t.Fatal("expected a base on directory storage to fail before the native library")
+			}
+		})
+	}
+	if err := validateOwnedMounts(map[string]MountConfig{
+		"/data": Mount.Owned(OwnedVolumeOptions{Kind: VolumeKindDisk, BasePath: "/srv/bases/app.raw"}),
+		"/sized": Mount.Owned(OwnedVolumeOptions{
+			Kind: VolumeKindDisk, BasePath: "/srv/bases/app.raw", SizeMiB: 256,
+		}),
+	}); err != nil {
+		t.Fatalf("valid owned disks over a base rejected: %v", err)
+	}
+}

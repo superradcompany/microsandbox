@@ -115,10 +115,13 @@ impl LocalBackend {
 
             let expected = microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-            let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
+            let closure = microsandbox_image::checkpoint::CheckpointClosure::open_with_receipts(
                 &restore.closure,
                 Some(&expected),
                 self.config().fs_state_limit(),
+                microsandbox_image::checkpoint::ReceiptUse::trusting(
+                    config.restore_resources.integrity_receipts.as_ref(),
+                ),
             )
             .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
 

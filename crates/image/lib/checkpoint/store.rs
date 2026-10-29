@@ -635,14 +635,18 @@ fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
 
 /// Compute a sparse-aware fixed-leaf Merkle root without reading unallocated holes.
 pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
+    sparse_open_file_integrity(&mut File::open(path)?)
+}
+
+/// Hash an already opened file, so a caller can bind the root to the inode it inspected.
+pub(super) fn sparse_open_file_integrity(file: &mut File) -> ImageResult<SparseFileIntegrity> {
     let started = std::time::Instant::now();
-    let mut file = File::open(path)?;
     let logical_size = file.metadata()?.len();
     let logical_leaves = logical_size.div_ceil(FILE_MERKLE_LEAF_SIZE as u64).max(1);
     let tree_leaves = logical_leaves.next_power_of_two();
     let tree_height = tree_leaves.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(&file)?;
+    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(file)?;
     let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaves);
     let mut accumulator = MerkleAccumulator::new(tree_height);
     let mut cursor = 0u64;

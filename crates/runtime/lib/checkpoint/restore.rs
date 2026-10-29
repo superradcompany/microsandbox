@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use microsandbox_image::checkpoint::{
-    CheckpointClosure, CheckpointGeometry, MemoryExtentContent, ObjectId, ResourceDescriptor,
-    ResourceTreatment,
+    CheckpointClosure, CheckpointGeometry, IntegrityReceipts, MemoryExtentContent, ObjectId,
+    ReceiptUse, ResourceDescriptor, ResourceTreatment,
 };
 use microsandbox_protocol::core::{
     Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WorkloadTransportCredit, WorkloadTransportPosition,
@@ -203,16 +203,23 @@ impl PreparedCheckpointRestore {
     }
 
     /// Resolve and decode every construction-time state envelope before building the VM.
+    /// Sealed disk layers still holding the identity a host receipt recorded are not re-read.
     pub(crate) fn open(
         root: PathBuf,
         expected_root: &str,
         fs_state_limit: usize,
+        receipts: Option<&IntegrityReceipts>,
     ) -> Result<Self, String> {
         let total_started = Instant::now();
         let expected = ObjectId::new(expected_root).map_err(|error| error.to_string())?;
         let closure_started = Instant::now();
-        let closure = CheckpointClosure::open(root, Some(&expected), fs_state_limit)
-            .map_err(|error| format!("validate checkpoint closure: {error}"))?;
+        let closure = CheckpointClosure::open_with_receipts(
+            root,
+            Some(&expected),
+            fs_state_limit,
+            ReceiptUse::trusting(receipts),
+        )
+        .map_err(|error| format!("validate checkpoint closure: {error}"))?;
         let closure_open_us = closure_started.elapsed().as_micros();
         let pause_generation = closure.checkpoint().pause_generation;
         let agent_started = Instant::now();

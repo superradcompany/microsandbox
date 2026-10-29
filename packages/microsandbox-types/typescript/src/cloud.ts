@@ -351,6 +351,10 @@ export type CloudVolumeMount = {
    * Directory host permission policy.
    */
   host_permissions: HostPermissions;
+  /**
+   * Immutable raw image a disk starts from, held by reference.
+   */
+  base?: string | null;
 } | {
   "type": "bind";
   /**

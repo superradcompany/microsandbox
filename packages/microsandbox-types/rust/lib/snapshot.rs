@@ -161,7 +161,7 @@ pub use external_mounts::EXTERNAL_MOUNTS_EXTENSION;
 pub use guest_clock::GUEST_CLOCK_EXTENSION;
 pub use manifest::*;
 pub use owned::{
-    OWNED_VOLUMES_EXTENSION, OwnedDirectoryPayload, OwnedMountSnapshot, OwnedVolumeCapture,
-    OwnedVolumeData, validate_owned_volumes,
+    DISK_EXTERNAL_BASE_EXTENSION, OWNED_VOLUMES_EXTENSION, OwnedDirectoryPayload,
+    OwnedMountSnapshot, OwnedVolumeCapture, OwnedVolumeData, validate_owned_volumes,
 };
 pub use restore_defaults::{RESTORE_DEFAULTS_EXTENSION, RestoreDefaults};

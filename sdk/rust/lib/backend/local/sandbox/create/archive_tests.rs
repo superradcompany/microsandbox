@@ -139,6 +139,7 @@ async fn checkpoint_archive(root: &Path) -> PathBuf {
         }],
         head: layer_id.into(),
         pause_generation: 1,
+        external_base: None,
     };
     let disk_id = store
         .put_bytes(&disk.to_canonical_bytes().unwrap())

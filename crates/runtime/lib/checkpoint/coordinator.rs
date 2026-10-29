@@ -378,8 +378,16 @@ impl CheckpointCoordinator {
         let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
-        let additional_disks =
-            RuntimeOwnedAdditionalDisk::open_all(&vm.disks, guest_bootstrap, runtime_dir)?;
+        let receipts = vm
+            .memory_cache_dir
+            .as_deref()
+            .and_then(super::integrity_receipts_beside);
+        let additional_disks = RuntimeOwnedAdditionalDisk::open_all(
+            &vm.disks,
+            guest_bootstrap,
+            runtime_dir,
+            receipts.as_ref(),
+        )?;
         let owned_mounts = vm
             .owned_volumes
             .iter()

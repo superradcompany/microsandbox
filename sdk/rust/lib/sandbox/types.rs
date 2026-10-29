@@ -71,7 +71,8 @@ pub struct MountBuilder {
 
 /// Internal kind for the mount builder.
 enum MountKind {
-    Owned(OwnedVolumeStorage),
+    /// Private storage, and the external base a disk starts from.
+    Owned(OwnedVolumeStorage, Option<PathBuf>),
     Bind(PathBuf),
     Named {
         name: String,
@@ -125,6 +126,7 @@ pub struct OwnedVolumeBuilder {
     disk: bool,
     capacity_mib: Option<u32>,
     quota_mib: Option<u32>,
+    base: Option<PathBuf>,
 }
 
 impl NamedVolumeBuilder {
@@ -236,7 +238,19 @@ impl OwnedVolumeBuilder {
         self
     }
 
-    fn build(self) -> crate::MicrosandboxResult<OwnedVolumeStorage> {
+    /// Start the disk from an immutable raw ext4 image, held by reference.
+    ///
+    /// The image is never written, copied or captured: writes go to private qcow2 layers from
+    /// the first boot, and snapshots record only the image's identity. Every restore must be
+    /// given the image again ([`owned_base`](crate::sandbox::RestoreBuilder::owned_base)). The
+    /// disk takes the image's size; a [`size`](Self::size), if set, must match it.
+    pub fn base(mut self, path: impl Into<PathBuf>) -> Self {
+        self.disk = true;
+        self.base = Some(path.into());
+        self
+    }
+
+    fn build(self) -> crate::MicrosandboxResult<(OwnedVolumeStorage, Option<PathBuf>)> {
         use crate::MicrosandboxError::InvalidConfig;
         if self.disk {
             if self.quota_mib.is_some() {
@@ -244,19 +258,47 @@ impl OwnedVolumeBuilder {
                     "owned disk volumes do not accept a directory quota".into(),
                 ));
             }
-            let capacity_mib = self.capacity_mib.filter(|n| *n > 0).ok_or_else(|| {
-                InvalidConfig("owned disk volumes require a positive size".into())
-            })?;
-            Ok(OwnedVolumeStorage::Disk { capacity_mib })
+            let base = self.base.map(std::path::absolute).transpose()?;
+            let capacity_mib = match &base {
+                Some(base) => {
+                    let bytes = std::fs::metadata(base)
+                        .map_err(|error| {
+                            InvalidConfig(format!("owned disk base {}: {error}", base.display()))
+                        })?
+                        .len();
+                    let capacity_mib = u32::try_from(bytes / (1024 * 1024))
+                        .ok()
+                        .filter(|mib| *mib > 0 && u64::from(*mib) * 1024 * 1024 == bytes)
+                        .ok_or_else(|| {
+                            InvalidConfig(format!(
+                                "owned disk base {} must be a whole number of MiB",
+                                base.display()
+                            ))
+                        })?;
+                    if self.capacity_mib.is_some_and(|size| size != capacity_mib) {
+                        return Err(InvalidConfig(
+                            "owned disk size must equal its base image's size".into(),
+                        ));
+                    }
+                    capacity_mib
+                }
+                None => self.capacity_mib.filter(|n| *n > 0).ok_or_else(|| {
+                    InvalidConfig("owned disk volumes require a positive size".into())
+                })?,
+            };
+            Ok((OwnedVolumeStorage::Disk { capacity_mib }, base))
         } else {
             if self.capacity_mib.is_some() {
                 return Err(InvalidConfig(
                     "owned directory volumes do not accept a disk size".into(),
                 ));
             }
-            Ok(OwnedVolumeStorage::Directory {
-                quota_mib: self.quota_mib,
-            })
+            Ok((
+                OwnedVolumeStorage::Directory {
+                    quota_mib: self.quota_mib,
+                },
+                None,
+            ))
         }
     }
 }
@@ -293,7 +335,9 @@ impl MountBuilder {
     /// directory change does not move the path.
     #[doc(hidden)]
     pub fn capture_local_host_paths(mut self) -> crate::MicrosandboxResult<Self> {
-        if let MountKind::Bind(path) | MountKind::Disk(path) = &mut self.mount {
+        if let MountKind::Bind(path) | MountKind::Disk(path) | MountKind::Owned(_, Some(path)) =
+            &mut self.mount
+        {
             *path = std::path::absolute(&*path)?;
         }
         Ok(self)
@@ -301,7 +345,7 @@ impl MountBuilder {
 
     /// Create an empty private directory, retained until this sandbox is removed.
     pub fn owned(mut self) -> Self {
-        self.mount = MountKind::Owned(OwnedVolumeStorage::Directory { quota_mib: None });
+        self.mount = MountKind::Owned(OwnedVolumeStorage::Directory { quota_mib: None }, None);
         self
     }
 
@@ -310,7 +354,7 @@ impl MountBuilder {
     /// `.owned_with(|v| v.disk().size(10.gib()))` creates an ext4 data disk.
     pub fn owned_with(mut self, f: impl FnOnce(OwnedVolumeBuilder) -> OwnedVolumeBuilder) -> Self {
         match f(OwnedVolumeBuilder::default()).build() {
-            Ok(storage) => self.mount = MountKind::Owned(storage),
+            Ok((storage, base)) => self.mount = MountKind::Owned(storage, base),
             Err(error) => {
                 self.error.get_or_insert(error);
             }
@@ -505,7 +549,7 @@ impl MountBuilder {
     pub(crate) fn build_restore(
         mut self,
     ) -> crate::MicrosandboxResult<Result<VolumeMount, String>> {
-        if matches!(self.mount, MountKind::Owned(_)) {
+        if matches!(self.mount, MountKind::Owned(..)) {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "owned volumes are restored from captured storage and cannot be supplied as restore overrides".into(),
             ));
@@ -560,9 +604,9 @@ impl MountBuilder {
             self.mount,
             MountKind::Bind(_)
                 | MountKind::Named { .. }
-                | MountKind::Owned(OwnedVolumeStorage::Directory { .. })
+                | MountKind::Owned(OwnedVolumeStorage::Directory { .. }, _)
         );
-        if self.follow_root_symlinks && matches!(self.mount, MountKind::Owned(_)) {
+        if self.follow_root_symlinks && matches!(self.mount, MountKind::Owned(..)) {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "owned volumes cannot follow host root symlinks".into(),
             ));
@@ -657,12 +701,13 @@ impl MountBuilder {
         validate_mount_ownership(&self.options, Some(stat_virtualization))?;
 
         let mount = match self.mount {
-            MountKind::Owned(storage) => VolumeMount::Owned {
+            MountKind::Owned(storage, base) => VolumeMount::Owned {
                 guest: self.guest,
                 storage,
                 options: self.options,
                 stat_virtualization,
                 host_permissions,
+                base,
             },
             MountKind::Bind(host) => {
                 // The spawn → VM wire format encodes mount specs as
@@ -1296,8 +1341,14 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
             options,
             stat_virtualization,
             host_permissions,
+            base,
         } => match storage {
             OwnedVolumeStorage::Directory { .. } => {
+                if base.is_some() {
+                    return Err(crate::MicrosandboxError::InvalidConfig(
+                        "only owned disk volumes can start from a base image".into(),
+                    ));
+                }
                 validate_virtiofs_policies(*stat_virtualization, *host_permissions, options)?
             }
             OwnedVolumeStorage::Disk { capacity_mib } => {
@@ -1305,6 +1356,14 @@ fn validate_volume_mount(mount: &VolumeMount) -> crate::MicrosandboxResult<()> {
                     return Err(crate::MicrosandboxError::InvalidConfig(
                         "owned disk volumes require a positive size".into(),
                     ));
+                }
+                if let Some(base) = base {
+                    if !base.is_absolute() {
+                        return Err(crate::MicrosandboxError::InvalidConfig(
+                            "owned disk base path must be absolute".into(),
+                        ));
+                    }
+                    validate_host_path_wire_safe(base, "owned disk base path")?;
                 }
                 validate_named_disk_mount_options(
                     guest,

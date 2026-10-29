@@ -9,7 +9,7 @@ use imago::qcow2::Qcow2;
 use imago::raw::Raw;
 use imago::{
     DenyImplicitOpenGate, DynStorage, FormatAccess, FormatCreateBuilder, FormatDriverBuilder,
-    Mapping,
+    Mapping, ShallowMapping, Storage,
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
@@ -168,6 +168,172 @@ pub async fn materialize_compact_prefix(
     })
 }
 
+/// Merge private qcow2 layers that read through an external base into one qcow2 layer over it.
+///
+/// `layers` is an oldest-first prefix of qcow2 heads whose first member reads through `base`.
+/// The base is opened read-only and never copied: clusters a prefix layer holds are copied,
+/// explicit zero clusters stay explicit zeros, and ranges no prefix layer holds stay
+/// unallocated, so they keep reading from the base. The destination must not exist; callers
+/// own staging and cleanup. Run outside the VM pause window.
+pub async fn materialize_compact_prefix_over_base(
+    layers: &[CompactLayer],
+    base: &CompactLayer,
+    destination: &Path,
+) -> io::Result<CompactMaterialization> {
+    if layers.is_empty() || layers.iter().any(|layer| !layer.qcow2) || base.qcow2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a prefix over an external base must be qcow2 layers over a raw base",
+        ));
+    }
+    // Opened without the base, ranges that fall through to it read as non-explicit zeros.
+    let source = open_chain(layers).await?;
+    let base_image = open_chain(std::slice::from_ref(base)).await?;
+    let virtual_size = source.size();
+    if virtual_size == 0 || !virtual_size.is_multiple_of(512) || base_image.size() != virtual_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "compaction prefix and its external base differ in size",
+        ));
+    }
+    let backing_name = base
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && !name.contains(['/', '\\', '\0', ':']))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "external base file name is not portable",
+            )
+        })?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    // The header names the base for ordinary tooling; attachment still passes the full chain.
+    Qcow2::<ImagoFile>::create_builder(ImagoFile::try_from(file)?)
+        .size(virtual_size)
+        .cluster_size(65536)
+        .backing(backing_name.to_string(), "raw".to_string())
+        .create()
+        .await?;
+    let storage: Box<dyn DynStorage> = Box::new(ImagoFile::try_from(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination)?,
+    )?);
+    // A partial-cluster write copies the rest of its cluster from the base, as the guest's
+    // writes did when the heads were live.
+    let target = FormatAccess::new(
+        Qcow2::<Box<dyn DynStorage>, SharedImage>::builder(storage)
+            .write(true)
+            .backing(Some(base_image))
+            .data_file(None)
+            .open(DenyImplicitOpenGate::default())
+            .await?,
+    );
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut offset = 0;
+    let mut materialized_bytes = 0;
+    while offset < virtual_size {
+        let (allocation, length) =
+            prefix_allocation(&source, offset, virtual_size - offset).await?;
+        if length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compaction mapping made no progress",
+            ));
+        }
+        match allocation {
+            PrefixAllocation::FallsThrough => offset += length,
+            PrefixAllocation::Zero => {
+                target.write_zeroes(offset, length).await?;
+                offset += length;
+            }
+            PrefixAllocation::Data => {
+                let count = length.min(buffer.len() as u64) as usize;
+                source.read(&mut buffer[..count], offset).await?;
+                // Zeros written over a base still hide it; keep them as explicit zero clusters.
+                if buffer[..count].iter().all(|byte| *byte == 0) {
+                    target.write_zeroes(offset, count as u64).await?;
+                } else {
+                    target.write(&buffer[..count], offset).await?;
+                    materialized_bytes += count as u64;
+                }
+                offset += count as u64;
+            }
+        }
+    }
+    target.flush().await?;
+    target.sync().await?;
+    Ok(CompactMaterialization {
+        virtual_size,
+        materialized_bytes,
+    })
+}
+
+/// How the topmost prefix layer that holds a range represents it.
+enum PrefixAllocation {
+    /// Some prefix layer holds data for the range.
+    Data,
+    /// Some prefix layer marks the range as explicit zeros.
+    Zero,
+    /// No prefix layer holds the range; it reads from whatever lies below the prefix.
+    FallsThrough,
+}
+
+/// Classify `offset` by the topmost prefix layer that holds it.
+///
+/// `FormatAccess::get_mapping` cannot be used here: it reports a lower layer's explicit zeros as
+/// plain zeros, which would let base data resurface where a head deliberately zeroed it.
+async fn prefix_allocation<S: Storage + 'static>(
+    top: &FormatAccess<S>,
+    offset: u64,
+    max_length: u64,
+) -> io::Result<(PrefixAllocation, u64)> {
+    let mut layer = top;
+    let mut layer_offset = offset;
+    let mut length = max_length;
+    loop {
+        let (mapping, mapped) = layer.get_shallow_mapping(layer_offset, length).await?;
+        length = length.min(mapped);
+        match mapping {
+            ShallowMapping::Raw { .. } | ShallowMapping::Special { .. } => {
+                return Ok((PrefixAllocation::Data, length));
+            }
+            ShallowMapping::Zero { explicit: true, .. } => {
+                return Ok((PrefixAllocation::Zero, length));
+            }
+            ShallowMapping::Zero {
+                explicit: false, ..
+            } => {
+                return Ok((PrefixAllocation::FallsThrough, length));
+            }
+            ShallowMapping::Indirect {
+                layer: lower,
+                offset: lower_offset,
+                ..
+            } => {
+                layer = lower;
+                layer_offset = lower_offset;
+            }
+            ShallowMapping::Eof { .. } => {
+                let remaining = if std::ptr::eq(layer, top) { 0 } else { length };
+                return Ok((PrefixAllocation::FallsThrough, remaining));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "unsupported qcow2 mapping in a compaction prefix",
+                ));
+            }
+        }
+    }
+}
+
 /// Materialize a complete explicit chain as a standalone sparse raw disk.
 ///
 /// Used when a consumer needs the resolved disk rather than a layered artifact.
@@ -262,6 +428,165 @@ pub async fn validate_compact_chain(layers: &[CompactLayer]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::checkpoint::create_qcow2_overlay;
+
+    const CLUSTER: usize = 65536;
+
+    #[tokio::test]
+    async fn prefix_over_external_base_keeps_fallthrough_zeroes_and_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.raw");
+        let mut base_bytes = Vec::new();
+        for value in [1u8, 2, 3, 4] {
+            base_bytes.extend(std::iter::repeat_n(value, CLUSTER));
+        }
+        std::fs::write(&base, &base_bytes).unwrap();
+        let size = base_bytes.len() as u64;
+        let base_layer = CompactLayer {
+            path: base.clone(),
+            qcow2: false,
+        };
+        let first = dir.path().join("first.qcow2");
+        create_qcow2_overlay(&first, size, &base, "raw")
+            .await
+            .unwrap();
+        let first_layer = CompactLayer {
+            path: first.clone(),
+            qcow2: true,
+        };
+        {
+            let image = open_writable_chain(&[base_layer.clone(), first_layer.clone()])
+                .await
+                .unwrap();
+            image.write(&vec![9u8; CLUSTER][..], 0).await.unwrap();
+            // Explicit zeros over base data: compaction must keep them hiding the base.
+            image
+                .write_zeroes(CLUSTER as u64, CLUSTER as u64)
+                .await
+                .unwrap();
+            image.flush().await.unwrap();
+            image.sync().await.unwrap();
+        }
+        let second = dir.path().join("second.qcow2");
+        create_qcow2_overlay(&second, size, &first, "qcow2")
+            .await
+            .unwrap();
+        let second_layer = CompactLayer {
+            path: second.clone(),
+            qcow2: true,
+        };
+        {
+            let image = open_writable_chain(&[
+                base_layer.clone(),
+                first_layer.clone(),
+                second_layer.clone(),
+            ])
+            .await
+            .unwrap();
+            // A partial-cluster write: the rest of the cluster was copied up from the base.
+            image
+                .write(&vec![7u8; 4096][..], 2 * CLUSTER as u64 + 4096)
+                .await
+                .unwrap();
+            image.flush().await.unwrap();
+            image.sync().await.unwrap();
+        }
+        let destination = dir.path().join("merged.qcow2");
+        let result = materialize_compact_prefix_over_base(
+            &[first_layer.clone(), second_layer.clone()],
+            &base_layer,
+            &destination,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.virtual_size, size);
+        // Only the two clusters the heads hold with data are materialized, never base bytes.
+        assert_eq!(result.materialized_bytes, 2 * CLUSTER as u64);
+
+        let input = open_chain(&[base_layer.clone(), first_layer, second_layer])
+            .await
+            .unwrap();
+        let merged_layer = CompactLayer {
+            path: destination.clone(),
+            qcow2: true,
+        };
+        let output = open_chain(&[base_layer.clone(), merged_layer.clone()])
+            .await
+            .unwrap();
+        let mut before = vec![0; size as usize];
+        let mut after = before.clone();
+        input.read(&mut before[..], 0).await.unwrap();
+        output.read(&mut after[..], 0).await.unwrap();
+        assert!(
+            before == after,
+            "compaction over a base changed guest bytes"
+        );
+        assert!(after[..CLUSTER].iter().all(|byte| *byte == 9));
+        assert!(after[CLUSTER..2 * CLUSTER].iter().all(|byte| *byte == 0));
+        assert!(
+            after[2 * CLUSTER..2 * CLUSTER + 4096]
+                .iter()
+                .all(|byte| *byte == 3)
+        );
+        assert!(
+            after[2 * CLUSTER + 4096..2 * CLUSTER + 8192]
+                .iter()
+                .all(|byte| *byte == 7)
+        );
+        assert!(after[3 * CLUSTER..].iter().all(|byte| *byte == 4));
+
+        // The untouched cluster still reads through to the base; the zeroed one does not.
+        let merged = open_chain(&[merged_layer]).await.unwrap();
+        let (untouched, _) = merged
+            .get_shallow_mapping(3 * CLUSTER as u64, CLUSTER as u64)
+            .await
+            .unwrap();
+        assert!(matches!(
+            untouched,
+            ShallowMapping::Zero {
+                explicit: false,
+                ..
+            }
+        ));
+        let (zeroed, _) = merged
+            .get_shallow_mapping(CLUSTER as u64, CLUSTER as u64)
+            .await
+            .unwrap();
+        assert!(matches!(
+            zeroed,
+            ShallowMapping::Zero { explicit: true, .. }
+        ));
+        // The header names the base for ordinary tooling; the base itself is untouched.
+        assert_eq!(
+            crate::checkpoint::qcow2_backing_basename(&destination).unwrap(),
+            "base.raw"
+        );
+        assert_eq!(std::fs::read(&base).unwrap(), base_bytes);
+    }
+
+    #[tokio::test]
+    async fn prefix_over_external_base_rejects_raw_heads_and_qcow2_bases() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = CompactLayer {
+            path: dir.path().join("base.raw"),
+            qcow2: false,
+        };
+        let head = CompactLayer {
+            path: dir.path().join("head.qcow2"),
+            qcow2: true,
+        };
+        let destination = dir.path().join("out.qcow2");
+        for (layers, base) in [
+            (vec![raw.clone()], raw.clone()),
+            (vec![head.clone()], head.clone()),
+            (Vec::new(), raw.clone()),
+        ] {
+            let error = materialize_compact_prefix_over_base(&layers, &base, &destination)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(!destination.exists());
+    }
 
     #[tokio::test]
     async fn compacted_prefix_preserves_overwrites_zeroes_and_grown_tail() {

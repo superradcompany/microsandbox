@@ -11,6 +11,7 @@ mod coordinator;
 mod disk;
 mod execution;
 mod external_mounts;
+mod integrity;
 mod local;
 #[cfg(feature = "runner")]
 mod local_disk;
@@ -43,12 +44,15 @@ pub use disk::{
 };
 pub use execution::captured_nested_virt;
 pub use external_mounts::ExternalMountAuthorization;
+pub use integrity::{INTEGRITY_RECEIPTS_DIRECTORY, integrity_receipts_beside};
 pub use local::LocalBranchState;
 pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};
 pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
 pub use network::captured_gateway_mac;
 pub use owned_disk::{
-    capture_stopped_owned_disk, load_runtime_owned_disk_chain, seed_runtime_owned_disk_chain,
+    OwnedDiskBase, capture_stopped_owned_disk, load_runtime_owned_disk_base,
+    load_runtime_owned_disk_chain, seed_runtime_owned_disk_chain,
+    seed_runtime_owned_disk_chain_over_base, verify_owned_disk_base,
 };
 #[cfg(feature = "runner")]
 pub(crate) use restore::{ExternalMountReport, PreparedCheckpointRestore, RestoredAgentState};
