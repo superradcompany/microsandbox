@@ -4,13 +4,13 @@ mod additional_disks;
 mod owned;
 
 pub(crate) use additional_disks::{apply_additional_disks, materialize_additional_disks};
-use microsandbox_runtime::checkpoint;
 pub(crate) use owned::materialize_owned_volumes;
 
 use std::path::{Path, PathBuf};
 
 use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
 use microsandbox_image::snapshot::SnapshotRootDisk;
+use microsandbox_runtime::checkpoint;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
 
 use crate::backend::local::creation::CreationStorage;

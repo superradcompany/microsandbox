@@ -289,6 +289,15 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
 
+    // Retire standalone volume tracking before sandbox-owned creation tracking.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "creation_state")
+            .await
+            .unwrap()
+    );
+
     // Completed catalogs can retire creation tracking before the older schema changes.
     rollback_schema(db.inner(), 1).await.unwrap();
 
