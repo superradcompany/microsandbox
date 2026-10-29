@@ -4,7 +4,7 @@ use std::path::Path;
 
 use microsandbox_image::checkpoint::{CompactLayer, DiskGenerationManifest};
 use microsandbox_image::snapshot::{OwnedVolumeCapture, OwnedVolumeData};
-use microsandbox_runtime::checkpoint::RuntimeOwnedRootLayer;
+use microsandbox_runtime::checkpoint::{OwnedDiskBase, RuntimeOwnedRootLayer};
 use microsandbox_types::VolumeMount;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -35,7 +35,31 @@ pub(crate) async fn materialize_owned_volumes(
                 volume.mount.guest
             )));
         }
+        let needs_base = volume.has_external_base();
+        if needs_base != choices.owned_bases.contains_key(&volume.mount.guest) {
+            return Err(MicrosandboxError::InvalidConfig(if needs_base {
+                format!(
+                    "owned disk {} was captured over an external base; supply its path to restore",
+                    volume.mount.guest
+                )
+            } else {
+                format!(
+                    "owned volume {} was not captured over an external base",
+                    volume.mount.guest
+                )
+            }));
+        }
     }
+    if let Some(guest) = choices
+        .owned_bases
+        .keys()
+        .find(|guest| !volumes.iter().any(|volume| &volume.mount.guest == *guest))
+    {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "no owned disk at {guest} needs an external base"
+        )));
+    }
+    let mut bases = std::collections::BTreeMap::new();
     let staging_parent = child
         .parent()
         .ok_or_else(|| invalid("owned storage child has no parent"))?;
@@ -48,13 +72,24 @@ pub(crate) async fn materialize_owned_volumes(
                 let generation = generation.clone();
                 let mount_id = volume.mount_id.clone();
                 let readonly = volume.mount.options.readonly;
+                let base = choices.owned_bases.get(&volume.mount.guest).cloned();
                 let pin = super::super::lease::pin_source(&source)?;
-                let staging = tokio::task::spawn_blocking(move || {
+                let (staging, base) = tokio::task::spawn_blocking(move || {
                     let _lease = pin;
-                    stage_owned_disk(&source, &parent, &mount_id, &generation, readonly)
+                    stage_owned_disk(
+                        &source,
+                        &parent,
+                        &mount_id,
+                        &generation,
+                        readonly,
+                        base.as_deref(),
+                    )
                 })
                 .await
                 .map_err(|error| invalid(&format!("owned disk restore worker: {error}")))??;
+                if let Some(base) = base {
+                    bases.insert(volume.mount.guest.clone(), base.path().to_path_buf());
+                }
                 // The worker knows only its private synthetic sandbox. Both paths can be
                 // relocated without rewriting data or retaining its temporary host path.
                 let journal = child.join("runtime/owned-disks").join(&volume.mount_id);
@@ -115,7 +150,14 @@ pub(crate) async fn materialize_owned_volumes(
     }
     Ok(volumes
         .iter()
-        .map(|volume| volume.mount.to_mount())
+        .map(|volume| {
+            let mut mount = volume.mount.to_mount();
+            if let VolumeMount::Owned { base, .. } = &mut mount {
+                // The child records the verified path it was restored over, not the capture's.
+                *base = bases.remove(&volume.mount.guest);
+            }
+            mount
+        })
         .collect())
 }
 
@@ -126,7 +168,16 @@ fn stage_owned_disk(
     mount_id: &str,
     generation: &DiskGenerationManifest,
     readonly: bool,
-) -> MicrosandboxResult<tempfile::TempDir> {
+    base: Option<&Path>,
+) -> MicrosandboxResult<(tempfile::TempDir, Option<OwnedDiskBase>)> {
+    let external = match (&generation.external_base, base) {
+        (Some(identity), Some(path)) => Some(
+            microsandbox_runtime::checkpoint::verify_owned_disk_base(path, Some(identity))
+                .map_err(MicrosandboxError::SnapshotIntegrity)?,
+        ),
+        (None, None) => None,
+        _ => return Err(invalid("owned disk base choice differs from its capture")),
+    };
     let stage = tempfile::Builder::new()
         .prefix(".owned-disk-restore-")
         .tempdir_in(parent)?;
@@ -158,6 +209,9 @@ fn stage_owned_disk(
         }
         if let Some(previous) = layers.last() {
             microsandbox_image::checkpoint::relocate_qcow2_backing(&target, &previous.path)?;
+        } else if external.is_some() {
+            // The first layer reads through the external base. It stays a shared hard link, so
+            // its header is never rewritten; attachment passes the base explicitly.
         } else if layer.format == "qcow2" {
             microsandbox_image::checkpoint::validate_standalone_qcow2(&std::fs::File::open(
                 &target,
@@ -195,10 +249,18 @@ fn stage_owned_disk(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
+    let chain: Vec<_> = external
+        .iter()
+        .map(|base| CompactLayer {
+            path: base.path().to_path_buf(),
+            qcow2: false,
+        })
+        .chain(compact.iter().cloned())
+        .collect();
     runtime.block_on(async {
         // Explicit opening refuses undeclared dependencies, even if a qcow2 header
         // contains an ambient host path. The private writable layer is never shared.
-        microsandbox_image::checkpoint::validate_compact_chain(&compact).await?;
+        microsandbox_image::checkpoint::validate_compact_chain(&chain).await?;
         microsandbox_image::checkpoint::create_qcow2_overlay(
             &writable,
             size,
@@ -211,15 +273,25 @@ fn stage_owned_disk(
         path: writable,
         format: "qcow2".into(),
     });
-    microsandbox_runtime::checkpoint::seed_runtime_owned_disk_chain(
-        &stage.path().join("runtime"),
-        mount_id,
-        &directory.join("disk.raw"),
-        &layers,
-        readonly,
-    )
+    match &external {
+        Some(base) => microsandbox_runtime::checkpoint::seed_runtime_owned_disk_chain_over_base(
+            &stage.path().join("runtime"),
+            mount_id,
+            &directory.join("disk.raw"),
+            &layers,
+            readonly,
+            base.clone(),
+        ),
+        None => microsandbox_runtime::checkpoint::seed_runtime_owned_disk_chain(
+            &stage.path().join("runtime"),
+            mount_id,
+            &directory.join("disk.raw"),
+            &layers,
+            readonly,
+        ),
+    }
     .map_err(MicrosandboxError::SnapshotIntegrity)?;
-    Ok(stage)
+    Ok((stage, external))
 }
 
 fn invalid(message: &str) -> MicrosandboxError {
@@ -281,9 +353,135 @@ mod tests {
                             integrity_root: Some(sparse_file_integrity(&upper).unwrap().root),
                         },
                     ],
+                    external_base: None,
                 },
             },
         }
+    }
+
+    /// A captured disk whose only layer is a qcow2 head over a base kept outside the snapshot.
+    async fn based_fixture(source: &Path, base: &Path) -> OwnedVolumeCapture {
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(base, vec![41_u8; 1024 * 1024]).unwrap();
+        let mount = MountBuilder::new("/data")
+            .owned_with(|owned| owned.disk().base(base))
+            .build()
+            .unwrap();
+        let mount_id = microsandbox_types::owned_volume_mount_id("/data");
+        std::fs::create_dir_all(source.join("layers")).unwrap();
+        let head = source.join("layers/change.qcow2");
+        create_qcow2_overlay(&head, 1024 * 1024, base, "raw")
+            .await
+            .unwrap();
+        OwnedVolumeCapture {
+            mount_id: mount_id.clone(),
+            mount: OwnedMountSnapshot::from_mount(&mount).unwrap(),
+            data: OwnedVolumeData::Disk {
+                generation: DiskGenerationManifest {
+                    schema: "microsandbox.disk-generation/1".into(),
+                    volume_id: "volume_owned".into(),
+                    device_id: mount_id,
+                    generation: 1,
+                    head: "change".into(),
+                    pause_generation: 0,
+                    layers: vec![DiskLayerRef {
+                        layer_id: "change".into(),
+                        format: "qcow2".into(),
+                        file_size: std::fs::metadata(&head).unwrap().len(),
+                        virtual_size: 1024 * 1024,
+                        predecessor: None,
+                        integrity_root: Some(sparse_file_integrity(&head).unwrap().root),
+                    }],
+                    external_base: Some(
+                        microsandbox_runtime::checkpoint::verify_owned_disk_base(base, None)
+                            .unwrap()
+                            .identity(),
+                    ),
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_disk_restore_over_external_base_requires_and_checks_the_base() {
+        use crate::sandbox::restore_resources::RestoreResources;
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join("snapshot");
+        let base = home.path().join("bases/app.raw");
+        let volume = based_fixture(&source, &base).await;
+        let volumes = std::slice::from_ref(&volume);
+        let child = home.path().join("child");
+
+        let error =
+            materialize_owned_volumes(volumes, &source, &child, &RestoreResources::default())
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("external base"), "{error}");
+        assert!(!child.join("owned-volumes").exists());
+
+        let other = home.path().join("bases/other.raw");
+        std::fs::write(&other, vec![1_u8; 1024 * 1024]).unwrap();
+        let mut wrong = RestoreResources::default();
+        wrong.owned_bases.insert("/data".into(), other);
+        assert!(
+            materialize_owned_volumes(volumes, &source, &child, &wrong)
+                .await
+                .is_err()
+        );
+        assert!(!child.join("owned-volumes").exists());
+
+        let mut extra = RestoreResources::default();
+        extra.owned_bases.insert("/data".into(), base.clone());
+        extra.owned_bases.insert("/elsewhere".into(), base.clone());
+        assert!(
+            materialize_owned_volumes(volumes, &source, &child, &extra)
+                .await
+                .is_err()
+        );
+
+        let mut choices = RestoreResources::default();
+        choices.owned_bases.insert("/data".into(), base.clone());
+        let mounts = materialize_owned_volumes(volumes, &source, &child, &choices)
+            .await
+            .unwrap();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        assert!(
+            matches!(&mounts[0], VolumeMount::Owned { base: Some(path), .. } if *path == canonical)
+        );
+        crate::runtime::owned_volumes::validate(&child, &mounts).unwrap();
+        let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
+            &child.join("runtime"),
+            &volume.mount_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chain.layers.len(), 3);
+        assert_eq!(chain.layers[0].path, canonical);
+        assert!(
+            chain.layers[1..]
+                .iter()
+                .all(|layer| layer.path.starts_with(&child))
+        );
+        let copied: u64 = std::fs::read_dir(child.join("owned-volumes").join(&volume.mount_id))
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum();
+        assert!(
+            copied < 1024 * 1024,
+            "the base must not be copied into the child"
+        );
+        microsandbox_image::checkpoint::validate_compact_chain(
+            &chain
+                .layers
+                .iter()
+                .map(|layer| CompactLayer {
+                    path: layer.path.clone(),
+                    qcow2: layer.format == "qcow2",
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

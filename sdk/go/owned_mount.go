@@ -20,9 +20,12 @@ func validateOwnedMounts(mounts map[string]MountConfig) error {
 			mount.Tmpfs || mount.Disk != "" || mount.Format != "" || mount.Fstype != "" {
 			return invalid("cannot specify a source, name, mode, format or filesystem type")
 		}
+		if mount.OwnedBase != "" && mount.Owned != "disk" {
+			return invalid("BasePath applies to disk storage only")
+		}
 		if mount.Owned == "disk" {
-			if mount.SizeMiB == 0 {
-				return invalid("disk storage requires positive SizeMiB")
+			if mount.SizeMiB == 0 && mount.OwnedBase == "" {
+				return invalid("disk storage requires positive SizeMiB or a BasePath")
 			}
 			if mount.QuotaMiB != 0 || mount.StatVirtualization != "" || mount.HostPermissions != "" || mount.Owner != nil {
 				return invalid("disk storage does not support quota or metadata policies")

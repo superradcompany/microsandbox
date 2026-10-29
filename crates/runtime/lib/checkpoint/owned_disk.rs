@@ -13,9 +13,10 @@ use std::time::Instant;
 
 use microsandbox_image::checkpoint::{
     CompactLayer, DiskCompactionPlan, DiskGenerationManifest, DiskLayerRef,
-    materialize_compact_prefix, sparse_file_integrity,
+    materialize_compact_prefix, materialize_compact_prefix_over_base, sparse_file_integrity,
 };
 use microsandbox_types::DiskCompactionResult;
+use microsandbox_types::snapshot::disk::ExternalDiskBase;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "runner")]
@@ -50,6 +51,33 @@ struct OwnedDiskState {
     read_only: bool,
     generation: u64,
     layers: Vec<OwnedDiskLayer>,
+    /// Caller-managed immutable base below `layers[0]`; never written, captured or retired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_base: Option<OwnedDiskBase>,
+}
+
+/// An owned disk's external base, pinned to the file its identity was computed over.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedDiskBase {
+    /// Absolute canonical host path; outside the sandbox and owned by the caller.
+    pub path: PathBuf,
+    /// Exact raw length, which is the disk's guest-visible capacity.
+    pub bytes: u64,
+    /// Sparse BLAKE3 root of the file, as recorded for sealed layers.
+    pub integrity_root: String,
+    /// File identity when the root was last verified.
+    pub stamp: OwnedDiskBaseStamp,
+}
+
+/// Cheap identity of a base file. A different stamp makes the base be hashed again.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnedDiskBaseStamp {
+    len: u64,
+    modified_ns: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -136,6 +164,12 @@ impl RuntimeOwnedDisk {
         {
             return Err("owned disk journal has invalid identity or bounds".into());
         }
+        if let Some(base) = &self.state.external_base {
+            if self.state.layers[0].format != "qcow2" {
+                return Err("an owned disk over an external base must start with qcow2".into());
+            }
+            check_base(base)?;
+        }
         let mut paths = BTreeSet::new();
         let mut ids = BTreeSet::new();
         for (index, layer) in self.state.layers.iter().enumerate() {
@@ -150,7 +184,8 @@ impl RuntimeOwnedDisk {
             }
             validate_relative_owned_path(mount_id, &layer.path)?;
             verify_owned_file(&self.runtime_dir, mount_id, &layer.path)?;
-            if index == 0 && layer.format == "qcow2" {
+            // Over an external base, the first layer reads through it rather than standing alone.
+            if index == 0 && layer.format == "qcow2" && self.state.external_base.is_none() {
                 // Explicit backing(None) may hide an ambient filename during capacity reads.
                 // A chain's first layer must actually be standalone, not merely openable.
                 let source = self
@@ -322,6 +357,7 @@ impl RuntimeOwnedDisk {
             head: captured.last().expect("nonempty chain").layer_id.clone(),
             layers: captured,
             pause_generation,
+            external_base: next.external_base.as_ref().map(OwnedDiskBase::identity),
         };
         manifest.validate().map_err(|error| error.to_string())?;
         let previous = next.layers.last().expect("nonempty chain");
@@ -397,9 +433,18 @@ impl RuntimeOwnedDisk {
                 qcow2: layer.format == "qcow2",
             })
             .collect::<Vec<_>>();
-        let materialized = runtime
-            .block_on(materialize_compact_prefix(&sources, &base))
-            .map_err(RootDiskRolloverError::pre_rebind)?;
+        let materialized = match &self.state.external_base {
+            Some(external) => runtime.block_on(materialize_compact_prefix_over_base(
+                &sources,
+                &CompactLayer {
+                    path: external.path.clone(),
+                    qcow2: false,
+                },
+                &base,
+            )),
+            None => runtime.block_on(materialize_compact_prefix(&sources, &base)),
+        }
+        .map_err(RootDiskRolloverError::pre_rebind)?;
         result.materialized_bytes = materialized.materialized_bytes;
         let mut next = self.state.clone();
         next.layers = vec![OwnedDiskLayer {
@@ -475,7 +520,8 @@ impl OwnedDiskCompaction {
         let Some(next) = self.next.take() else {
             return Ok(OwnedDiskRetired { paths: Vec::new() });
         };
-        let paths = disk.layers().into_iter().map(|layer| layer.path).collect();
+        // Retire only this sandbox's files; an external base is never collected.
+        let paths = owned_layer_paths(&disk.runtime_dir, &disk.state);
         // An uncertain journal rename may already be durable. Keep staged data for recovery.
         let _published = self
             .stage
@@ -508,6 +554,37 @@ pub fn seed_runtime_owned_disk_chain(
     launch_base: &Path,
     layers: &[RuntimeOwnedRootLayer],
     readonly: bool,
+) -> Result<(), String> {
+    seed_chain(runtime_dir, mount_id, launch_base, layers, readonly, None)
+}
+
+/// Seed an owned disk whose first layer reads through a verified external base.
+/// The base stays where the caller keeps it; only its path and identity enter the journal.
+pub fn seed_runtime_owned_disk_chain_over_base(
+    runtime_dir: &Path,
+    mount_id: &str,
+    launch_base: &Path,
+    layers: &[RuntimeOwnedRootLayer],
+    readonly: bool,
+    base: OwnedDiskBase,
+) -> Result<(), String> {
+    seed_chain(
+        runtime_dir,
+        mount_id,
+        launch_base,
+        layers,
+        readonly,
+        Some(base),
+    )
+}
+
+fn seed_chain(
+    runtime_dir: &Path,
+    mount_id: &str,
+    launch_base: &Path,
+    layers: &[RuntimeOwnedRootLayer],
+    readonly: bool,
+    external_base: Option<OwnedDiskBase>,
 ) -> Result<(), String> {
     let state_path = journal_path(runtime_dir, mount_id)?;
     if journal_exists(runtime_dir, mount_id)? {
@@ -543,6 +620,7 @@ pub fn seed_runtime_owned_disk_chain(
             read_only: readonly,
             generation: 0,
             layers: projected,
+            external_base,
         },
     };
     disk.validate(mount_id)?;
@@ -585,6 +663,136 @@ pub fn capture_stopped_owned_disk(
     write_state(&disk.state_path, &next).map_err(|error| error.to_string())?;
     disk.state = next;
     Ok(manifest)
+}
+
+/// Read the external base an owned disk's journal records, if any.
+/// A fork on the same host uses it as the default base for the child.
+pub fn load_runtime_owned_disk_base(
+    runtime_dir: &Path,
+    mount_id: &str,
+) -> Result<Option<OwnedDiskBase>, String> {
+    if !journal_exists(runtime_dir, mount_id)? {
+        return Ok(None);
+    }
+    Ok(RuntimeOwnedDisk::read(runtime_dir, mount_id)?
+        .state
+        .external_base)
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions: External Base
+//--------------------------------------------------------------------------------------------------
+
+impl OwnedDiskBase {
+    /// The portable identity a captured generation records; the host path is never included.
+    pub fn identity(&self) -> ExternalDiskBase {
+        ExternalDiskBase {
+            format: "raw".into(),
+            virtual_size: self.bytes,
+            file_size: self.bytes,
+            integrity_root: self.integrity_root.clone(),
+        }
+    }
+
+    /// Absolute canonical path of the base.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Resolve and hash a caller-supplied base, and require it to match `expected` when given.
+///
+/// The base must be a regular raw file of sector-aligned length. Its identity is read twice,
+/// around the hash, so a file replaced mid-verification is refused rather than recorded.
+pub fn verify_owned_disk_base(
+    path: &Path,
+    expected: Option<&ExternalDiskBase>,
+) -> Result<OwnedDiskBase, String> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("owned disk base {}: {error}", path.display()))?;
+    let before = base_stamp(&canonical)?;
+    if before.len == 0 || !before.len.is_multiple_of(512) {
+        return Err(format!(
+            "owned disk base {} must be a non-empty, sector-aligned raw image",
+            canonical.display()
+        ));
+    }
+    let root = sparse_file_integrity(&canonical)
+        .map_err(|error| format!("hash owned disk base {}: {error}", canonical.display()))?
+        .root;
+    if base_stamp(&canonical)? != before {
+        return Err(format!(
+            "owned disk base {} changed while it was being verified",
+            canonical.display()
+        ));
+    }
+    if let Some(expected) = expected
+        && (expected.format != "raw"
+            || expected.file_size != before.len
+            || expected.integrity_root != root)
+    {
+        return Err(format!(
+            "owned disk base {} differs from the base this disk was captured over",
+            canonical.display()
+        ));
+    }
+    Ok(OwnedDiskBase {
+        path: canonical,
+        bytes: before.len,
+        integrity_root: root,
+        stamp: before,
+    })
+}
+
+/// Refuse a base that is gone or changed. An unchanged stamp is trusted; any other stamp is
+/// hashed again, so a touched but identical file still boots.
+fn check_base(base: &OwnedDiskBase) -> Result<(), String> {
+    if !base.path.is_absolute() || base.bytes == 0 || !base.bytes.is_multiple_of(512) {
+        return Err("owned disk journal has an invalid external base".into());
+    }
+    if base_stamp(&base.path)? == base.stamp {
+        return Ok(());
+    }
+    let current = verify_owned_disk_base(&base.path, None)?;
+    if current.path != base.path
+        || current.bytes != base.bytes
+        || current.integrity_root != base.integrity_root
+    {
+        return Err(format!(
+            "owned disk base {} changed since this disk was created over it",
+            base.path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn base_stamp(path: &Path) -> Result<OwnedDiskBaseStamp, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("owned disk base {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "owned disk base {} is not a regular file",
+            path.display()
+        ));
+    }
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    #[cfg(unix)]
+    let file_id = {
+        use std::os::unix::fs::MetadataExt;
+        Some(format!("{}:{}", metadata.dev(), metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let file_id = None;
+    Ok(OwnedDiskBaseStamp {
+        len: metadata.len(),
+        modified_ns,
+        file_id,
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -701,15 +909,30 @@ fn verify_owned_file(runtime_dir: &Path, mount_id: &str, relative: &Path) -> Res
     Ok(())
 }
 
+/// The complete attachable chain, oldest first, including an external base.
 fn resolved_layers(runtime_dir: &Path, state: &OwnedDiskState) -> Vec<RuntimeOwnedRootLayer> {
+    let sandbox = runtime_dir.parent().expect("validated runtime parent");
+    state
+        .external_base
+        .iter()
+        .map(|base| RuntimeOwnedRootLayer {
+            path: base.path.clone(),
+            format: "raw".into(),
+        })
+        .chain(state.layers.iter().map(|layer| RuntimeOwnedRootLayer {
+            path: sandbox.join(&layer.path),
+            format: layer.format.clone(),
+        }))
+        .collect()
+}
+
+/// Only the files this sandbox owns; never an external base.
+fn owned_layer_paths(runtime_dir: &Path, state: &OwnedDiskState) -> Vec<PathBuf> {
     let sandbox = runtime_dir.parent().expect("validated runtime parent");
     state
         .layers
         .iter()
-        .map(|layer| RuntimeOwnedRootLayer {
-            path: sandbox.join(&layer.path),
-            format: layer.format.clone(),
-        })
+        .map(|layer| sandbox.join(&layer.path))
         .collect()
 }
 
@@ -1048,6 +1271,160 @@ mod tests {
                 .unwrap()
                 .layers,
         );
+    }
+
+    /// A sandbox whose owned disk starts over a base kept outside the sandbox.
+    fn based_fixture() -> (tempfile::TempDir, PathBuf, String, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sandbox");
+        let runtime = root.join("runtime");
+        let id = microsandbox_types::owned_volume_mount_id("/data");
+        let storage = root.join("owned-volumes").join(&id);
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let base = temp.path().join("bases").join("app.raw");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        let mut bytes = vec![0_u8; 131072];
+        bytes[..4].copy_from_slice(b"base");
+        std::fs::write(&base, bytes).unwrap();
+        let head = storage.join("writable.qcow2");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                &head, 131072, &base, "raw",
+            ))
+            .unwrap();
+        seed_runtime_owned_disk_chain_over_base(
+            &runtime,
+            &id,
+            &storage.join("disk.raw"),
+            &[RuntimeOwnedRootLayer {
+                path: head,
+                format: "qcow2".into(),
+            }],
+            false,
+            verify_owned_disk_base(&base, None).unwrap(),
+        )
+        .unwrap();
+        (temp, runtime, id, storage.join("disk.raw"), base)
+    }
+
+    #[test]
+    fn owned_disk_over_external_base_captures_heads_only_and_never_retires_base() {
+        let (temp, runtime, id, source, base) = based_fixture();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        let base_bytes = std::fs::read(&base).unwrap();
+        let chain = load_runtime_owned_disk_chain(&runtime, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chain.virtual_size, 131072);
+        assert_eq!(chain.layers.len(), 2);
+        assert_eq!(chain.layers[0].path, canonical);
+
+        let first = capture(&runtime, &id, &source, &temp.path().join("cp0"));
+        let identity = first
+            .external_base
+            .clone()
+            .expect("capture records the base");
+        assert_eq!(identity.virtual_size, 131072);
+        assert_eq!(first.layers.len(), 1);
+        assert_eq!(first.layers[0].format, "qcow2");
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("cp0/layers"))
+                .unwrap()
+                .count(),
+            1,
+            "a capture must not copy the base"
+        );
+        for n in 1..3 {
+            capture(&runtime, &id, &source, &temp.path().join(format!("cp{n}")));
+        }
+
+        let mut disk = RuntimeOwnedDisk::read(&runtime, &id).unwrap();
+        assert_eq!(disk.layers().len(), 5);
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let prepared = disk
+            .prepare_compaction(executor.handle(), None, false)
+            .unwrap();
+        prepared.validate_stopped(executor.handle()).unwrap();
+        prepared.commit(&mut disk).unwrap().cleanup();
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            base_bytes,
+            "compaction must never touch the base"
+        );
+        let layers = disk.layers();
+        assert_eq!(layers.len(), 3);
+        assert_eq!(layers[0].path, canonical);
+
+        let after = capture(&runtime, &id, &source, &temp.path().join("after"));
+        assert_eq!(after.external_base, Some(identity));
+        assert_eq!(after.layers.len(), 2);
+    }
+
+    #[test]
+    fn owned_disk_refuses_a_changed_base_and_accepts_an_identical_replacement() {
+        let (_temp, runtime, id, _source, base) = based_fixture();
+        let bytes = std::fs::read(&base).unwrap();
+        // The same bytes under a new inode and mtime: the stamp differs, the identity does not.
+        let replacement = base.with_extension("tmp");
+        std::fs::write(&replacement, &bytes).unwrap();
+        std::fs::rename(&replacement, &base).unwrap();
+        load_runtime_owned_disk_chain(&runtime, &id)
+            .unwrap()
+            .unwrap();
+
+        let mut changed = bytes.clone();
+        changed[0] = b'B';
+        std::fs::write(&base, changed).unwrap();
+        let error = load_runtime_owned_disk_chain(&runtime, &id).unwrap_err();
+        assert!(error.contains("changed"), "{error}");
+
+        std::fs::remove_file(&base).unwrap();
+        assert!(load_runtime_owned_disk_chain(&runtime, &id).is_err());
+    }
+
+    #[test]
+    fn owned_disk_base_verification_rejects_mismatches_and_bad_shapes() {
+        let (temp, _runtime, _id, _source, base) = based_fixture();
+        let verified = verify_owned_disk_base(&base, None).unwrap();
+        let identity = verified.identity();
+        verify_owned_disk_base(&base, Some(&identity)).unwrap();
+        let other = temp.path().join("other.raw");
+        std::fs::write(&other, vec![1_u8; 131072]).unwrap();
+        assert!(verify_owned_disk_base(&other, Some(&identity)).is_err());
+        let unaligned = temp.path().join("unaligned.raw");
+        std::fs::write(&unaligned, vec![0_u8; 1000]).unwrap();
+        assert!(verify_owned_disk_base(&unaligned, None).is_err());
+        assert!(verify_owned_disk_base(temp.path(), None).is_err());
+        assert!(verify_owned_disk_base(&temp.path().join("missing.raw"), None).is_err());
+    }
+
+    #[test]
+    fn owned_disk_over_base_requires_a_qcow2_first_layer() {
+        let (temp, _runtime, _id, _source, base) = based_fixture();
+        let root = temp.path().join("second");
+        let runtime = root.join("runtime");
+        let id = microsandbox_types::owned_volume_mount_id("/data");
+        let storage = root.join("owned-volumes").join(&id);
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        let raw = storage.join("disk.raw");
+        std::fs::write(&raw, vec![0_u8; 131072]).unwrap();
+        let error = seed_runtime_owned_disk_chain_over_base(
+            &runtime,
+            &id,
+            &raw,
+            &[RuntimeOwnedRootLayer {
+                path: raw.clone(),
+                format: "raw".into(),
+            }],
+            false,
+            verify_owned_disk_base(&base, None).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.contains("qcow2"), "{error}");
+        assert!(!journal_exists(&runtime, &id).unwrap());
     }
 
     #[test]

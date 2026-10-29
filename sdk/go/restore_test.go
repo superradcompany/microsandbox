@@ -145,6 +145,30 @@ func TestRestoreDiskVolumeReachesFFI(t *testing.T) {
 	}
 }
 
+func TestRestoreOwnedBasesReachFFI(t *testing.T) {
+	config := RestoreConfig{OwnedBases: map[string]string{"/data": "/srv/bases/app.raw"}}
+	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		OwnedBases map[string]string `json:"owned_bases"`
+	}
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.OwnedBases["/data"] != "/srv/bases/app.raw" {
+		t.Fatalf("owned base lost: %s", encoded)
+	}
+	plain, err := json.Marshal(buildFFIRestoreOptions("baseline", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plain), "owned_bases") {
+		t.Fatalf("a restore without owned bases must not emit the field: %s", plain)
+	}
+}
+
 func TestRestoreRejectsDuplicateTCPAliasesBeforeFFI(t *testing.T) {
 	// Matching values are also ambiguous: reject both spellings instead of
 	// letting option order silently select which limit reaches the runtime.

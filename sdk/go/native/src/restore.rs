@@ -51,6 +51,8 @@ struct RestoreOptions {
     #[serde(default)]
     captured_volumes: Vec<String>,
     #[serde(default)]
+    owned_bases: HashMap<String, String>,
+    #[serde(default)]
     ports: Vec<PortBindingOpts>,
     tcp_accept_queue_size: Option<u32>,
     max_inbound_tcp_connections: Option<usize>,
@@ -153,6 +155,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
     }
     for guest in &opts.captured_volumes {
         builder = builder.volume(guest, |m| m.captured());
+    }
+    for (guest, base) in &opts.owned_bases {
+        builder = builder.owned_base(guest, base);
     }
     for port in &opts.ports {
         let bind = port

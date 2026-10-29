@@ -452,6 +452,11 @@ pub enum CloudVolumeMount {
         stat_virtualization: StatVirtualization,
         /// Directory host permission policy.
         host_permissions: HostPermissions,
+        /// Immutable raw image a disk starts from, held by reference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
+        base: Option<PathBuf>,
     },
     /// Bind mount a host directory into the guest.
     Bind {
@@ -532,12 +537,14 @@ impl From<CloudVolumeMount> for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             } => VolumeMount::Owned {
                 guest,
                 storage,
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             },
             CloudVolumeMount::Bind {
                 host,
@@ -607,12 +614,14 @@ impl From<VolumeMount> for CloudVolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             } => CloudVolumeMount::Owned {
                 guest,
                 storage,
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             },
             VolumeMount::Bind {
                 host,

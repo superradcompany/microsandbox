@@ -342,6 +342,7 @@ mod tests {
                         .root,
                 ),
             }],
+            external_base: None,
         };
         let mut resource = ResourceDescriptor {
             id: device.clone(),

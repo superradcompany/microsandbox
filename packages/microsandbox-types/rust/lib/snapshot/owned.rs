@@ -17,6 +17,10 @@ use crate::error::{SnapshotManifestError, SnapshotManifestResult};
 /// Must-understand extension for complete, privately restored sandbox-owned storage.
 pub const OWNED_VOLUMES_EXTENSION: &str = "microsandbox.owned-volumes";
 
+/// Must-understand extension for owned disks that read through a caller-supplied base.
+/// Readers that cannot accept a base at restore must refuse such snapshots.
+pub const DISK_EXTERNAL_BASE_EXTENSION: &str = "microsandbox.disk-external-base";
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -88,16 +92,27 @@ impl Manifest {
         volumes: Vec<OwnedVolumeCapture>,
     ) -> SnapshotManifestResult<()> {
         validate_owned_volumes(&volumes)?;
-        self.requires.retain(|key| key != OWNED_VOLUMES_EXTENSION);
+        self.requires
+            .retain(|key| key != OWNED_VOLUMES_EXTENSION && key != DISK_EXTERNAL_BASE_EXTENSION);
+        self.extensions.remove(DISK_EXTERNAL_BASE_EXTENSION);
         if volumes.is_empty() {
             self.extensions.remove(OWNED_VOLUMES_EXTENSION);
         } else {
+            let based = based_guests(&volumes);
             self.extensions.insert(
                 OWNED_VOLUMES_EXTENSION.into(),
                 serde_json::to_value(volumes)
                     .map_err(|error| SnapshotManifestError::ManifestParse(error.to_string()))?,
             );
             self.requires.push(OWNED_VOLUMES_EXTENSION.into());
+            if !based.is_empty() {
+                // The guest paths whose restore needs a caller-supplied base.
+                self.extensions.insert(
+                    DISK_EXTERNAL_BASE_EXTENSION.into(),
+                    serde_json::json!(based),
+                );
+                self.requires.push(DISK_EXTERNAL_BASE_EXTENSION.into());
+            }
             self.requires.sort();
         }
         Ok(())
@@ -120,11 +135,31 @@ impl Manifest {
                 SnapshotManifestError::ManifestParse(format!("owned volumes: {error}"))
             })?;
         validate_owned_volumes(&volumes)?;
+        let based = based_guests(&volumes);
+        let required = self
+            .requires
+            .iter()
+            .any(|key| key == DISK_EXTERNAL_BASE_EXTENSION);
+        let listed = self
+            .extensions
+            .get(DISK_EXTERNAL_BASE_EXTENSION)
+            .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+            .transpose()
+            .map_err(|error| SnapshotManifestError::ManifestParse(error.to_string()))?
+            .unwrap_or_default();
+        if required == based.is_empty() || listed != based {
+            return invalid("external disk bases must match their required snapshot extension");
+        }
         Ok(volumes)
     }
 }
 
 impl OwnedVolumeCapture {
+    /// Whether restoring this volume needs a caller-supplied external base.
+    pub fn has_external_base(&self) -> bool {
+        matches!(&self.data, OwnedVolumeData::Disk { generation } if generation.external_base.is_some())
+    }
+
     /// Relative directory containing this mount's immutable filesystem generation.
     pub fn directory_path(&self) -> PathBuf {
         Path::new("owned").join(&self.mount_id)
@@ -151,12 +186,15 @@ impl OwnedVolumeCapture {
 impl OwnedMountSnapshot {
     /// Extract only sandbox-owned configuration from a public mount value.
     pub fn from_mount(mount: &VolumeMount) -> SnapshotManifestResult<Self> {
+        // The base path is a host binding: it is supplied again at every restore and never
+        // recorded here. The captured generation carries only the base's identity.
         let VolumeMount::Owned {
             guest,
             storage,
             options,
             stat_virtualization,
             host_permissions,
+            base: _,
         } = mount
         else {
             return invalid("owned volume inventory contains an external mount");
@@ -178,6 +216,7 @@ impl OwnedMountSnapshot {
             options: self.options,
             stat_virtualization: self.stat_virtualization,
             host_permissions: self.host_permissions,
+            base: None,
         }
     }
 }
@@ -185,6 +224,17 @@ impl OwnedMountSnapshot {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Sorted guest paths of the disks that read through an external base.
+fn based_guests(volumes: &[OwnedVolumeCapture]) -> Vec<String> {
+    let mut guests: Vec<String> = volumes
+        .iter()
+        .filter(|volume| volume.has_external_base())
+        .map(|volume| volume.mount.guest.clone())
+        .collect();
+    guests.sort();
+    guests
+}
 
 /// Validate confined identities and the agreement between ownership and captured backing.
 pub fn validate_owned_volumes(volumes: &[OwnedVolumeCapture]) -> SnapshotManifestResult<()> {

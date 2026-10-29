@@ -693,6 +693,7 @@ mod tests {
             }],
             head: "layer_base".into(),
             pause_generation: 7,
+            external_base: None,
         };
         let disk_id = store
             .put_bytes(&disk.to_canonical_bytes().unwrap())

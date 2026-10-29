@@ -717,6 +717,7 @@ struct CliMountOptions {
     format: Option<DiskImageFormat>,
     override_uid: Option<u32>,
     override_gid: Option<u32>,
+    base: Option<std::path::PathBuf>,
 }
 
 /// Which keyed options are valid for a public CLI mount flag.
@@ -725,6 +726,7 @@ struct CliMountOptionSupport {
     policies: bool,
     size: bool,
     quota: bool,
+    base: bool,
     named_kind: bool,
     fstype: bool,
     format: bool,
@@ -2241,6 +2243,7 @@ fn owned_mount_from_spec(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
             policies: true,
             size: true,
             quota: true,
+            base: true,
             named_kind: true,
             owner: true,
             ..Default::default()
@@ -2248,6 +2251,9 @@ fn owned_mount_from_spec(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     )?;
     if options.follow_root_symlinks {
         anyhow::bail!("mount-owned does not accept follow-root-symlinks");
+    }
+    if options.base.is_some() && options.named_kind == Some(VolumeKind::Directory) {
+        anyhow::bail!("mount-owned base= applies to kind=disk only");
     }
     // Keep storage options in the owned sub-builder; applying .size() to the
     // outer mount builder would accidentally select tmpfs-only semantics.
@@ -2261,10 +2267,14 @@ fn owned_mount_from_spec(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
         if let Some(quota) = options.quota_mib {
             volume = volume.quota(quota);
         }
+        if let Some(base) = &options.base {
+            volume = volume.base(base);
+        }
         volume
     });
     let mut common = options;
     common.quota_mib = None;
+    common.base = None;
     Ok((guest.to_owned(), apply_common_mount_options(mount, common)))
 }
 
@@ -2393,6 +2403,7 @@ fn parse_cli_mount_options(
     let mut seen_host_perms = false;
     let mut seen_size = false;
     let mut seen_quota = false;
+    let mut seen_base = false;
     let mut seen_named_kind = false;
     let mut seen_fstype = false;
     let mut seen_format = false;
@@ -2494,6 +2505,16 @@ fn parse_cli_mount_options(
                         seen_quota = true;
                         parsed.quota_mib =
                             Some(ui::parse_size_mib(value).map_err(anyhow::Error::msg)?);
+                    }
+                    "base" if support.base => {
+                        if seen_base {
+                            anyhow::bail!("mount option `base` specified more than once");
+                        }
+                        seen_base = true;
+                        if value.is_empty() {
+                            anyhow::bail!("mount option `base` needs a host path");
+                        }
+                        parsed.base = Some(value.into());
                     }
                     "kind" if support.named_kind => {
                         if seen_named_kind {
@@ -5125,6 +5146,46 @@ mod tests {
                     "{spec} unexpectedly accepted"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_mount_cli_starts_a_disk_from_a_base_held_by_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("app.raw");
+        std::fs::write(&base, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        for spec in [
+            format!("/data:base={}", base.display()),
+            format!("/data:kind=disk,base={},ro", base.display()),
+            format!("/data:kind=disk,size=2M,base={}", base.display()),
+        ] {
+            let mount = build_explicit(&spec, apply_owned_mount).await;
+            let VolumeMount::Owned {
+                storage,
+                base: Some(path),
+                ..
+            } = mount
+            else {
+                panic!("expected an owned disk over a base for {spec}")
+            };
+            assert_eq!(
+                storage,
+                microsandbox::sandbox::OwnedVolumeStorage::Disk { capacity_mib: 2 }
+            );
+            assert_eq!(path, base);
+            validate_mount_owned_spec(&spec).unwrap();
+        }
+        for spec in [
+            format!("/data:kind=disk,size=1G,base={}", base.display()),
+            format!("/data:kind=dir,base={}", base.display()),
+            format!("/data:base={},base={}", base.display(), base.display()),
+            format!("/data:base={}", temp.path().join("missing.raw").display()),
+            "/data:base=".to_string(),
+        ] {
+            assert!(
+                validate_mount_owned_spec(&spec).is_err(),
+                "accepted {spec:?}"
+            );
         }
     }
 

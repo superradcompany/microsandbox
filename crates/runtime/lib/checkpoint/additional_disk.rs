@@ -301,6 +301,7 @@ impl RuntimeOwnedAdditionalDisk {
             }],
             head: layer_id.clone(),
             pause_generation,
+            external_base: None,
         };
         manifest.validate().map_err(|error| error.to_string())?;
         let target = directory.join(format!("{layer_id}.{}", self.format));

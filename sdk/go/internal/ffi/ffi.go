@@ -130,6 +130,7 @@ typedef char *(*msb_sandbox_request_stop_fn)(uint64_t cancel_id, uint64_t handle
 typedef char *(*msb_sandbox_restore_warnings_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_fn)(uint64_t cancel_id, uint64_t handle, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_pause_with_guest_flush_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len);
+typedef int32_t (*msb_owned_disk_external_base_fn)(void);
 typedef char *(*msb_sandbox_branch_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, uint8_t *buf, size_t buf_len);
 typedef char *(*msb_sandbox_branch_with_options_fn)(uint64_t cancel_id, uint64_t handle, const char *source, const char *child, bool record_integrity, uint8_t *buf, size_t buf_len);
 typedef msb_sandbox_branch_with_options_fn msb_sandbox_branch_many_fn;
@@ -310,6 +311,7 @@ static msb_sandbox_request_stop_fn ptr_msb_sandbox_request_stop = NULL;
 static msb_sandbox_restore_warnings_fn ptr_msb_sandbox_restore_warnings = NULL;
 static msb_sandbox_pause_fn ptr_msb_sandbox_pause = NULL;
 static msb_sandbox_pause_with_guest_flush_fn ptr_msb_sandbox_pause_with_guest_flush = NULL;
+static msb_owned_disk_external_base_fn ptr_msb_owned_disk_external_base = NULL;
 static msb_sandbox_branch_fn ptr_msb_sandbox_branch = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_with_options = NULL;
 static msb_sandbox_branch_with_options_fn ptr_msb_sandbox_branch_many = NULL;
@@ -520,6 +522,7 @@ const char *load_microsandbox(const char *path) {
 	RESOLVE_OPTIONAL(msb_sandbox_restore_warnings);
 	RESOLVE(msb_sandbox_pause);
 	RESOLVE_OPTIONAL(msb_sandbox_pause_with_guest_flush);
+	RESOLVE_OPTIONAL(msb_owned_disk_external_base);
 	RESOLVE(msb_sandbox_branch);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_with_options);
 	RESOLVE_OPTIONAL(msb_sandbox_branch_many);
@@ -768,6 +771,7 @@ char *call_msb_sandbox_branch(uint64_t cancel_id, uint64_t handle, const char *s
 }
 bool has_branch_integrity(void) { return ptr_msb_sandbox_branch_with_options != NULL; }
 bool has_guest_flush(void) { return ptr_msb_sandbox_pause_with_guest_flush != NULL; }
+bool has_owned_disk_external_base(void) { return ptr_msb_owned_disk_external_base != NULL; }
 char *call_msb_sandbox_pause_with_guest_flush(uint64_t cancel_id, uint64_t handle, const char *source, const char *expected_id, const char *policy, uint8_t *buf, size_t buf_len) {
 	return ptr_msb_sandbox_pause_with_guest_flush ? ptr_msb_sandbox_pause_with_guest_flush(cancel_id, handle, source, expected_id, policy, buf, buf_len) : NULL;
 }
@@ -1856,6 +1860,7 @@ type MountSpec struct {
 	HostPermissions    string  `json:"host_permissions,omitempty"`
 	OverrideUid        *uint32 `json:"override_uid,omitempty"`
 	OverrideGid        *uint32 `json:"override_gid,omitempty"`
+	OwnedBase          string  `json:"owned_base,omitempty"`
 }
 
 // HTTPConfig carries HTTP denial settings to the native SDK.
@@ -2090,6 +2095,11 @@ func createSandbox(ctx context.Context, name string, opts CreateOptions, connect
 	if err := ensureLoaded(); err != nil {
 		return nil, err
 	}
+	for _, mount := range opts.Volumes {
+		if err := checkOwnedDiskBase(mount.OwnedBase != ""); err != nil {
+			return nil, err
+		}
+	}
 
 	optsJSON, err := json.Marshal(opts)
 	if err != nil {
@@ -2132,6 +2142,9 @@ func RestoreSandbox(ctx context.Context, name string, opts RestoreOptions) (*San
 	}
 	if !bool(C.has_sandbox_restore()) {
 		return nil, &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support Sandbox restore; update the native SDK"}
+	}
+	if err := checkOwnedDiskBase(len(opts.OwnedBases) > 0); err != nil {
+		return nil, err
 	}
 
 	optsJSON, err := json.Marshal(opts)
@@ -2946,6 +2959,15 @@ func branchSandbox(ctx context.Context, handle uint64, source, name string, reco
 	s := &Sandbox{name: name, backendKind: resp.BackendKind}
 	s.handle.Store(resp.Handle)
 	return s, nil
+}
+
+// checkOwnedDiskBase refuses an owned disk base on a native library that would silently
+// ignore it and format a fresh disk instead.
+func checkOwnedDiskBase(requested bool) error {
+	if requested && !bool(C.has_owned_disk_external_base()) {
+		return &Error{Kind: KindUnsupportedOperation, Message: "native SDK does not support owned disk bases; update the native SDK"}
+	}
+	return nil
 }
 
 // checkGuestFlush prevents older native libraries from silently ignoring JSON fields.

@@ -48,7 +48,9 @@ pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};
 pub use memory_cache::{CachedMemory, CachedMemoryRegion, MemoryCache};
 pub use network::captured_gateway_mac;
 pub use owned_disk::{
-    capture_stopped_owned_disk, load_runtime_owned_disk_chain, seed_runtime_owned_disk_chain,
+    OwnedDiskBase, capture_stopped_owned_disk, load_runtime_owned_disk_base,
+    load_runtime_owned_disk_chain, seed_runtime_owned_disk_chain,
+    seed_runtime_owned_disk_chain_over_base, verify_owned_disk_base,
 };
 #[cfg(feature = "runner")]
 pub(crate) use restore::{ExternalMountReport, PreparedCheckpointRestore, RestoredAgentState};

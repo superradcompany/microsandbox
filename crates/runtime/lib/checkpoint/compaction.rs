@@ -416,6 +416,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         }
     }
 

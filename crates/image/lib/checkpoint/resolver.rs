@@ -595,6 +595,7 @@ mod tests {
                     integrity_root: record_integrity
                         .then(|| sparse_file_integrity(&path).unwrap().root),
                 }],
+                external_base: None,
             };
             checkpoint.disks = vec![
                 store
@@ -770,6 +771,7 @@ mod tests {
                 head: layers.last().unwrap().layer_id.clone(),
                 layers,
                 pause_generation: checkpoint.pause_generation,
+                external_base: None,
             };
             checkpoint.disks.push(
                 store

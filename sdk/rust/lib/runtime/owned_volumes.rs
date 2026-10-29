@@ -66,17 +66,24 @@ pub(crate) async fn prepare(
         .to_path_buf();
     // The blocking worker owns its operation-unique directory. Cancellation cannot
     // leave a late formatter writing into a replacement sandbox's name.
-    let stage = tokio::task::spawn_blocking(move || -> MicrosandboxResult<tempfile::TempDir> {
+    let (stage, based) = tokio::task::spawn_blocking(move || -> MicrosandboxResult<_> {
         let stage = tempfile::Builder::new()
             .prefix(".owned-volume-create-")
             .tempdir_in(parent)?;
+        let mut based = Vec::new();
         for mount in owned {
-            let VolumeMount::Owned { guest, storage, .. } = mount else {
+            let VolumeMount::Owned {
+                guest,
+                storage,
+                options,
+                base,
+                ..
+            } = mount
+            else {
                 unreachable!()
             };
-            let directory = stage
-                .path()
-                .join(microsandbox_types::owned_volume_mount_id(&guest));
+            let id = microsandbox_types::owned_volume_mount_id(&guest);
+            let directory = stage.path().join(&id);
             std::fs::create_dir(&directory)?;
             match storage {
                 OwnedVolumeStorage::Directory { .. } => {
@@ -87,6 +94,34 @@ pub(crate) async fn prepare(
                         return Err(MicrosandboxError::InvalidConfig(
                             "owned disk size must be positive".into(),
                         ));
+                    }
+                    if let Some(base) = base {
+                        // Writes go to a private head from the first boot; the base is only read.
+                        let verified =
+                            microsandbox_runtime::checkpoint::verify_owned_disk_base(&base, None)
+                                .map_err(MicrosandboxError::InvalidConfig)?;
+                        if verified.bytes != u64::from(capacity_mib) * 1024 * 1024 {
+                            return Err(MicrosandboxError::InvalidConfig(format!(
+                                "owned disk {guest} size differs from its base image"
+                            )));
+                        }
+                        // imago futures are not Send; run the overlay on this worker's thread.
+                        tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()?
+                            .block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                                &directory.join(BASED_HEAD),
+                                verified.bytes,
+                                verified.path(),
+                                "raw",
+                            ))
+                            .map_err(|error| {
+                                MicrosandboxError::Custom(format!(
+                                    "create owned disk head {guest}: {error}"
+                                ))
+                            })?;
+                        based.push((id, options.readonly, verified));
+                        continue;
                     }
                     format_ext4(
                         &directory.join("disk.raw"),
@@ -101,14 +136,32 @@ pub(crate) async fn prepare(
                 }
             }
         }
-        Ok(stage)
+        Ok((stage, based))
     })
     .await
     .map_err(|error| MicrosandboxError::Custom(format!("owned volume preparation: {error}")))??;
     // No await between publication and returning to the retained creation cleanup.
     std::fs::rename(stage.path(), &destination)?;
+    for (id, readonly, base) in based {
+        let directory = destination.join(&id);
+        microsandbox_runtime::checkpoint::seed_runtime_owned_disk_chain_over_base(
+            &sandbox_dir.join("runtime"),
+            &id,
+            &directory.join("disk.raw"),
+            &[microsandbox_runtime::checkpoint::RuntimeOwnedRootLayer {
+                path: directory.join(BASED_HEAD),
+                format: "qcow2".into(),
+            }],
+            readonly,
+            base,
+        )
+        .map_err(MicrosandboxError::InvalidConfig)?;
+    }
     validate(sandbox_dir, mounts)
 }
+
+/// The private writable head of a new disk over an external base.
+const BASED_HEAD: &str = "writable.qcow2";
 
 /// Admit existing backing without recreating missing state or following planted symlinks.
 pub(crate) fn validate(sandbox_dir: &Path, mounts: &[VolumeMount]) -> MicrosandboxResult<()> {
@@ -558,6 +611,44 @@ mod tests {
             microsandbox_types::owned_volume_mount_id("/var/log"),
             microsandbox_types::owned_volume_mount_id("/var_log")
         );
+    }
+
+    #[tokio::test]
+    async fn owned_disk_over_base_starts_on_a_private_head_and_never_formats() {
+        let temp = tempfile::tempdir().unwrap();
+        let sandbox = temp.path().join("sandbox");
+        let base = temp.path().join("bases/app.raw");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::write(&base, vec![7_u8; 1024 * 1024]).unwrap();
+        let mount = |capacity_mib| VolumeMount::Owned {
+            guest: "/data".into(),
+            storage: OwnedVolumeStorage::Disk { capacity_mib },
+            options: Default::default(),
+            stat_virtualization: microsandbox_types::StatVirtualization::Strict,
+            host_permissions: microsandbox_types::HostPermissions::Private,
+            base: Some(base.clone()),
+        };
+        assert!(prepare(&sandbox, &[mount(2)], false).await.is_err());
+        assert!(!sandbox.join("owned-volumes").exists());
+
+        let mounts = [mount(1)];
+        prepare(&sandbox, &mounts, false).await.unwrap();
+        let id = microsandbox_types::owned_volume_mount_id("/data");
+        let storage = sandbox.join("owned-volumes").join(&id);
+        assert!(storage.join("writable.qcow2").is_file());
+        assert!(!storage.join("disk.raw").exists());
+        let chain = microsandbox_runtime::checkpoint::load_runtime_owned_disk_chain(
+            &sandbox.join("runtime"),
+            &id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chain.layers.len(), 2);
+        assert_eq!(chain.layers[0].path, std::fs::canonicalize(&base).unwrap());
+        assert_eq!(chain.virtual_size, 1024 * 1024);
+        assert_eq!(std::fs::read(&base).unwrap(), vec![7_u8; 1024 * 1024]);
+        validate(&sandbox, &mounts).unwrap();
+        prepare(&sandbox, &mounts, true).await.unwrap();
     }
 
     #[tokio::test]

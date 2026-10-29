@@ -2230,6 +2230,7 @@ mod tests {
             }],
             head: CAPTURE_BASE_ID.into(),
             pause_generation: 1,
+            external_base: None,
         };
         disk.validate().unwrap();
         microsandbox_runtime::control::DiskCheckpointControlState {
@@ -2251,6 +2252,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         };
 
         let result =
@@ -2723,6 +2725,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            base: None,
         };
         let mounts = vec![
             mount("/cache", OwnedVolumeStorage::Directory { quota_mib: None }),
@@ -2814,6 +2817,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: microsandbox_types::StatVirtualization::Strict,
             host_permissions: microsandbox_types::HostPermissions::Private,
+            base: None,
         })
         .collect()
     }

@@ -92,6 +92,7 @@ fn config_with_host_inputs(base: Option<&Path>) -> SandboxConfig {
             options: Default::default(),
             stat_virtualization: StatVirtualization::Strict,
             host_permissions: HostPermissions::Private,
+            base: None,
         },
         VolumeMount::Tmpfs {
             guest: "/scratch".into(),
@@ -176,6 +177,54 @@ fn resolves_bind_and_disk_rootfs_paths() {
             RootfsSource::Oci(_) => panic!("host rootfs changed kind"),
         }
     }
+}
+
+#[test]
+fn resolves_owned_disk_base_paths_for_create_and_restore() {
+    let cwd = std::env::current_dir().unwrap();
+    let absolute = cwd.join("missing").join(".").join("logs.raw");
+    let mut config = SandboxConfig::default();
+    config.spec.mounts.push(VolumeMount::Owned {
+        guest: "/data".into(),
+        storage: OwnedVolumeStorage::Disk { capacity_mib: 8 },
+        options: Default::default(),
+        stat_virtualization: StatVirtualization::Strict,
+        host_permissions: HostPermissions::Private,
+        base: Some("bases/app.raw".into()),
+    });
+    let bases = &mut config.restore_resources.owned_bases;
+    bases.insert("/data".into(), "bases/app.raw".into());
+    bases.insert("/logs".into(), absolute.clone());
+
+    resolve_host_paths(&mut config).unwrap();
+
+    let VolumeMount::Owned { base, .. } = &config.spec.mounts[0] else {
+        panic!("owned mount changed kind");
+    };
+    assert_eq!(base.as_deref(), Some(cwd.join("bases/app.raw").as_path()));
+    let bases = &config.restore_resources.owned_bases;
+    assert_eq!(bases["/data"], cwd.join("bases/app.raw"));
+    // Absolute bases keep their spelling, dot components included.
+    assert_eq!(bases["/logs"].as_os_str(), absolute.as_os_str());
+}
+
+#[test]
+fn builder_patches_anchor_restore_owned_bases() {
+    let mut patch = crate::SandboxConfigPatch {
+        restore_resources: Some(crate::sandbox::restore_resources::RestoreResources {
+            owned_bases: [("/data".to_string(), PathBuf::from("bases/app.raw"))].into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    super::resolve_patch_paths(&mut patch).unwrap();
+
+    let resources = patch.restore_resources.as_ref().unwrap();
+    assert_eq!(
+        resources.owned_bases["/data"],
+        std::env::current_dir().unwrap().join("bases/app.raw")
+    );
 }
 
 #[test]

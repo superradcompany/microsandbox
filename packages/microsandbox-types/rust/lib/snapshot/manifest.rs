@@ -44,6 +44,7 @@ pub const SUPPORTED_REQUIRES: &[&str] = &[
     super::GUEST_CLOCK_EXTENSION,
     super::RESTORE_DEFAULTS_EXTENSION,
     super::OWNED_VOLUMES_EXTENSION,
+    super::DISK_EXTERNAL_BASE_EXTENSION,
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -981,6 +982,7 @@ mod tests {
             options: Default::default(),
             stat_virtualization: crate::StatVirtualization::Strict,
             host_permissions: crate::HostPermissions::Private,
+            base: None,
         };
         manifest
             .set_owned_volumes(vec![OwnedVolumeCapture {
@@ -1012,6 +1014,108 @@ mod tests {
             manifest.validate().is_err(),
             "ownership cannot be advisory extension data"
         );
+    }
+
+    #[test]
+    fn owned_disk_over_external_base_is_a_required_extension() {
+        use super::super::disk::{DiskGenerationManifest, DiskLayerRef, ExternalDiskBase};
+        use super::super::{
+            DISK_EXTERNAL_BASE_EXTENSION, OWNED_VOLUMES_EXTENSION, OwnedMountSnapshot,
+            OwnedVolumeCapture, OwnedVolumeData,
+        };
+        let mount = crate::VolumeMount::Owned {
+            guest: "/data".into(),
+            storage: crate::OwnedVolumeStorage::Disk { capacity_mib: 1 },
+            options: Default::default(),
+            stat_virtualization: crate::StatVirtualization::Strict,
+            host_permissions: crate::HostPermissions::Private,
+            base: Some("/srv/bases/app.raw".into()),
+        };
+        let mount_id = crate::owned_volume_mount_id(mount.guest());
+        let root = format!("blake3:{}", "c".repeat(64));
+        let capture = |external_base| OwnedVolumeCapture {
+            mount_id: mount_id.clone(),
+            mount: OwnedMountSnapshot::from_mount(&mount).unwrap(),
+            data: OwnedVolumeData::Disk {
+                generation: DiskGenerationManifest {
+                    schema: "microsandbox.disk-generation/1".into(),
+                    volume_id: "vol_0123456789abcdef0123456789abcdef".into(),
+                    device_id: mount_id.clone(),
+                    generation: 1,
+                    layers: vec![DiskLayerRef {
+                        layer_id: "layer_0123456789abcdef0123456789abcdef".into(),
+                        format: "qcow2".into(),
+                        virtual_size: 1024 * 1024,
+                        file_size: 196_608,
+                        predecessor: None,
+                        integrity_root: Some(root.clone()),
+                    }],
+                    head: "layer_0123456789abcdef0123456789abcdef".into(),
+                    pause_generation: 1,
+                    external_base,
+                },
+            },
+        };
+        let base = ExternalDiskBase {
+            format: "raw".into(),
+            virtual_size: 1024 * 1024,
+            file_size: 1024 * 1024,
+            integrity_root: root.clone(),
+        };
+        // The snapshot carries the base's identity, never the host path it was created over.
+        let snapshot = OwnedMountSnapshot::from_mount(&mount).unwrap();
+        assert!(
+            !serde_json::to_string(&snapshot)
+                .unwrap()
+                .contains("/srv/bases")
+        );
+        assert!(matches!(
+            snapshot.to_mount(),
+            crate::VolumeMount::Owned { base: None, .. }
+        ));
+
+        let mut manifest = descriptor();
+        manifest
+            .set_owned_volumes(vec![capture(Some(base.clone()))])
+            .unwrap();
+        assert!(
+            manifest
+                .requires
+                .iter()
+                .any(|key| key == OWNED_VOLUMES_EXTENSION)
+        );
+        assert!(
+            manifest
+                .requires
+                .iter()
+                .any(|key| key == DISK_EXTERNAL_BASE_EXTENSION)
+        );
+        assert!(manifest.unsupported_requires().is_empty());
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+        assert!(restored.owned_volumes().unwrap()[0].has_external_base());
+
+        // Replacing the inventory with one without a base drops the requirement again.
+        manifest.set_owned_volumes(vec![capture(None)]).unwrap();
+        assert!(
+            !manifest
+                .requires
+                .iter()
+                .any(|key| key == DISK_EXTERNAL_BASE_EXTENSION)
+        );
+        assert!(
+            !manifest
+                .extensions
+                .contains_key(DISK_EXTERNAL_BASE_EXTENSION)
+        );
+
+        // A base without its requirement is refused, so older readers cannot drop it silently.
+        manifest
+            .set_owned_volumes(vec![capture(Some(base))])
+            .unwrap();
+        manifest
+            .requires
+            .retain(|key| key != DISK_EXTERNAL_BASE_EXTENSION);
+        assert!(manifest.owned_volumes().is_err());
     }
 
     #[test]

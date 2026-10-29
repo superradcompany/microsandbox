@@ -36,6 +36,7 @@ pub(crate) fn resolve_host_paths(config: &mut SandboxConfig) -> MicrosandboxResu
                 *base = value;
             }
         }
+        resolve_owned_bases(&mut config.restore_resources.owned_bases)?;
         config.local_restore_paths_resolved = true;
     }
     visit_host_paths(config, true, |path, label| {
@@ -156,7 +157,20 @@ pub(crate) fn resolve_patch_paths(patch: &mut crate::SandboxConfigPatch) -> Micr
     patch.snapshot_reference = config.snapshot_reference;
     patch.snapshot_archive_source = config.snapshot_archive_source;
     patch.snapshot_base = config.snapshot_base;
+    if let Some(resources) = &mut patch.restore_resources {
+        resolve_owned_bases(&mut resources.owned_bases)?;
+    }
     patch.local_restore_paths_resolved = Some(true);
+    Ok(())
+}
+
+/// Anchor the external bases a restore names: staging reads them after the operation yields.
+fn resolve_owned_bases(
+    bases: &mut std::collections::BTreeMap<String, PathBuf>,
+) -> MicrosandboxResult<()> {
+    for base in bases.values_mut().filter(|base| !base.is_absolute()) {
+        *base = std::path::absolute(&*base)?;
+    }
     Ok(())
 }
 
@@ -204,7 +218,12 @@ fn visit_host_paths(
         match mount {
             VolumeMount::Bind { host, .. } => visit(host, "bind mount host path")?,
             VolumeMount::DiskImage { host, .. } => visit(host, "disk mount host path")?,
-            VolumeMount::Owned { .. } | VolumeMount::Named { .. } | VolumeMount::Tmpfs { .. } => {}
+            VolumeMount::Owned {
+                base: Some(base), ..
+            } => visit(base, "owned disk base path")?,
+            VolumeMount::Owned { base: None, .. }
+            | VolumeMount::Named { .. }
+            | VolumeMount::Tmpfs { .. } => {}
         }
     }
 

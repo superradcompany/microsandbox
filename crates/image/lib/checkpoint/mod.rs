@@ -18,7 +18,8 @@ mod store;
 pub(crate) use compact::open_writable_chain;
 pub use compact::{
     CompactLayer, CompactMaterialization, compact_layer_capacity, layer_capacities,
-    materialize_compact_prefix, materialize_raw_prefix, validate_compact_chain,
+    materialize_compact_prefix, materialize_compact_prefix_over_base, materialize_raw_prefix,
+    validate_compact_chain,
 };
 pub use layer_selection::{DiskCompactionPlan, DiskLayerExportPlan, LayerSelectionError};
 pub use manifest::{

@@ -66,6 +66,10 @@ pub struct RestoreResourceArgs {
     /// Attach a host disk image (`SOURCE:DEST[:OPTIONS]`), like `create --mount-disk`.
     #[arg(long = "mount-disk", value_name = "SOURCE:DEST[:OPTIONS]")]
     pub mount_disk: Vec<String>,
+    /// Supply the external base of an owned disk captured over one: `GUEST=PATH`.
+    /// Required for every such disk; the base is checked against the captured identity.
+    #[arg(long = "owned-base", value_name = "GUEST=PATH")]
+    pub owned_base: Vec<String>,
     /// Publish child listeners: `[BIND:]HOST:GUEST[/tcp|udp]`, with equal-length port ranges.
     #[cfg(feature = "net")]
     #[arg(short, long)]
@@ -305,6 +309,17 @@ macro_rules! apply_resources {
                 for spec in &self.mount_disk {
                     let (guest, mount) = parse_explicit_disk_mount(spec)?;
                     builder = builder.volume(guest, |_| mount);
+                }
+                for spec in &self.owned_base {
+                    let (guest, path) = spec
+                        .split_once('=')
+                        .filter(|(guest, path)| guest.starts_with('/') && !path.is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "owned-base must be GUEST=PATH with an absolute guest path"
+                            )
+                        })?;
+                    builder = builder.owned_base(guest, std::path::absolute(path)?);
                 }
                 for route in &self.vsock {
                     let (host, port, kind) = parse_vsock_route(route)?;

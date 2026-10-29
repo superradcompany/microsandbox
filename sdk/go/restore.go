@@ -46,7 +46,11 @@ type RestoreConfig struct {
 	AllowMissingResources       bool
 	Volumes                     map[string]MountConfig
 	CapturedVolumes             []string
-	Ports                       []PortBinding
+	// OwnedBases supplies, by guest path, the external base of each owned disk that was
+	// captured over one. Required for every such disk; each is checked against the
+	// identity recorded at capture before the child is staged.
+	OwnedBases map[string]string
+	Ports      []PortBinding
 	// TCPAcceptQueueSize sets the accept-queue depth for the child's published TCP
 	// listeners, 1 to 2147483647. Nil keeps the default, 1024.
 	TCPAcceptQueueSize *uint32
@@ -221,7 +225,8 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		DangerouslyInheritResources: config.DangerouslyInheritResources,
 		AllowMissingResources:       config.AllowMissingResources,
 		Volumes:                     resources.Volumes, CapturedVolumes: config.CapturedVolumes,
-		Ports: buildFFIPortBindings(config.Ports), TCPAcceptQueueSize: config.TCPAcceptQueueSize,
+		OwnedBases: config.OwnedBases,
+		Ports:      buildFFIPortBindings(config.Ports), TCPAcceptQueueSize: config.TCPAcceptQueueSize,
 		MaxInboundTCPConnections: config.MaxInboundTCPConnections,
 		Vsock:                    buildFFIVsockRoutes(config.Vsock),
 	}

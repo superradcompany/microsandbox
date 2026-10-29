@@ -1,6 +1,7 @@
 //! Operation-local resource authorization and captured agent state for snapshot restore.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 #[cfg(feature = "local")]
 use microsandbox_image::checkpoint::CheckpointGeometry;
@@ -28,6 +29,9 @@ pub(crate) struct RestoreResources {
     pub captured: BTreeSet<String>,
     /// Explicit destination mappings take precedence over captured disk inheritance.
     pub mapped: BTreeSet<String>,
+    /// External bases for owned disks captured over one, by guest path. Every such disk needs
+    /// one; each is checked against the captured identity before the child is staged.
+    pub owned_bases: BTreeMap<String, PathBuf>,
     /// Fill unspecified choices only from validated local source records.
     pub inherit: bool,
     /// Immutable CPU and memory layout read from the checkpoint before config resolution.

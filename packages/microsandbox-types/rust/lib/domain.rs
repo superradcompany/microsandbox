@@ -404,6 +404,9 @@ pub enum VolumeMount {
         stat_virtualization: StatVirtualization,
         /// Host permission propagation policy for directory storage.
         host_permissions: HostPermissions,
+        /// Immutable raw image a disk starts from, held by reference and never written,
+        /// copied or captured. Writes go to private qcow2 layers from the first boot.
+        base: Option<PathBuf>,
     },
     /// Bind mount a host directory into the guest.
     Bind {
@@ -2067,16 +2070,20 @@ impl Serialize for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             } => {
                 // A distinct tag is intentional: older runtimes must reject ownership,
                 // not reinterpret a private mount as an external or named volume.
-                let mut map = serializer.serialize_map(Some(6))?;
+                let mut map = serializer.serialize_map(Some(6 + usize::from(base.is_some())))?;
                 map.serialize_entry("type", "Owned")?;
                 map.serialize_entry("guest", guest)?;
                 map.serialize_entry("storage", storage)?;
                 map.serialize_entry("options", options)?;
                 map.serialize_entry("stat_virtualization", stat_virtualization)?;
                 map.serialize_entry("host_permissions", host_permissions)?;
+                if let Some(base) = base {
+                    map.serialize_entry("base", base)?;
+                }
                 map.end()
             }
             Self::Bind {
@@ -2172,6 +2179,8 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 stat_virtualization: StatVirtualization,
                 #[serde(default = "default_private")]
                 host_permissions: HostPermissions,
+                #[serde(default)]
+                base: Option<PathBuf>,
             },
             Bind {
                 host: PathBuf,
@@ -2233,12 +2242,14 @@ impl<'de> Deserialize<'de> for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             } => Self::Owned {
                 guest,
                 storage,
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             },
             VolumeMountHelper::Bind {
                 host,
@@ -2312,6 +2323,7 @@ impl fmt::Debug for VolumeMount {
                 options,
                 stat_virtualization,
                 host_permissions,
+                base,
             } => f
                 .debug_struct("Owned")
                 .field("guest", guest)
@@ -2319,6 +2331,7 @@ impl fmt::Debug for VolumeMount {
                 .field("options", options)
                 .field("stat_virtualization", stat_virtualization)
                 .field("host_permissions", host_permissions)
+                .field("base", base)
                 .finish(),
             Self::Bind {
                 host,

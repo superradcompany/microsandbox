@@ -560,6 +560,7 @@ impl RuntimeOwnedRootDisk {
                 .clone(),
             layers: sealed_layers,
             pause_generation,
+            external_base: None,
         };
         manifest
             .validate()
@@ -1421,6 +1422,7 @@ mod tests {
                     integrity_root: roots[i].clone(),
                 })
                 .collect(),
+            external_base: None,
         };
         let admitted = super::super::local_disk::LocalDiskAdmissions::open(&child, &[manifest])
             .unwrap()
@@ -1527,6 +1529,7 @@ mod tests {
                 }],
                 head: layer_id.clone(),
                 pause_generation: 1,
+                external_base: None,
             };
             let admitted =
                 super::super::local_disk::LocalDiskAdmissions::open(&closure, &[manifest])
@@ -1828,6 +1831,7 @@ mod tests {
             head: layers.last().unwrap().layer_id.clone(),
             layers,
             pause_generation: 7,
+            external_base: None,
         };
         // The closure checks opaque execution bytes; only live restore decodes their codec.
         let checkpoint = CheckpointManifest {

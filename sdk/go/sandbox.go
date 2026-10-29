@@ -259,6 +259,7 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 				NamedMode:          m.NamedMode,
 				NamedKind:          m.NamedKind,
 				Owned:              m.Owned,
+				OwnedBase:          m.OwnedBase,
 				Tmpfs:              m.Tmpfs,
 				Disk:               m.Disk,
 				Format:             m.Format,

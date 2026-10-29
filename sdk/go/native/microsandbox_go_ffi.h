@@ -202,6 +202,12 @@ char *msb_sandbox_stop_gracefully(uint64_t cancel_id,
 char *msb_sandbox_pause(uint64_t cancel_id, Handle handle, unsigned char *buf, uintptr_t buf_len);
 
 /**
+ * Its presence advertises `owned_base` on owned disk mounts and `owned_bases` on restore.
+ * Older libraries ignore those JSON fields, so callers gate on this symbol.
+ */
+int32_t msb_owned_disk_external_base(void);
+
+/**
  * Pause with an explicit flush policy. Its presence also advertises policy-aware JSON APIs.
  */
 char *msb_sandbox_pause_with_guest_flush(uint64_t cancel_id,

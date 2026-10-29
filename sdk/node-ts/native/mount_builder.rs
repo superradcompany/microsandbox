@@ -493,6 +493,8 @@ fn to_built_mount(mount: RustVolumeMount) -> JsBuiltVolumeMount {
             options,
             stat_virtualization,
             host_permissions,
+            // The Node builder has no base option, so a built mount never has one.
+            base: _,
         } => {
             let (kind, size_mib, quota_mib) = match storage {
                 OwnedVolumeStorage::Directory { quota_mib } => ("dir", None, quota_mib),

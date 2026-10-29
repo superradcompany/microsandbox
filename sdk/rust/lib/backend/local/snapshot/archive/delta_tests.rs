@@ -117,6 +117,7 @@ async fn fixture(
             layers,
             head: layer_id,
             pause_generation: generation,
+            external_base: None,
         };
         disks.push(
             store
@@ -282,6 +283,7 @@ async fn with_owned_volumes(local: &LocalBackend, snapshot: Snapshot, generation
         options: Default::default(),
         stat_virtualization: microsandbox_types::StatVirtualization::Strict,
         host_permissions: microsandbox_types::HostPermissions::Private,
+        base: None,
     };
     let directory = OwnedVolumeCapture {
         mount_id,
@@ -322,6 +324,7 @@ async fn with_owned_volumes(local: &LocalBackend, snapshot: Snapshot, generation
             file_size: std::fs::metadata(&path).unwrap().len(),
             integrity_root: Some(sparse_file_integrity(&path).unwrap().root),
         }],
+        external_base: None,
     };
     checkpoint.disks.push(
         store
@@ -334,6 +337,7 @@ async fn with_owned_volumes(local: &LocalBackend, snapshot: Snapshot, generation
         options: Default::default(),
         stat_virtualization: microsandbox_types::StatVirtualization::Strict,
         host_permissions: microsandbox_types::HostPermissions::Private,
+        base: None,
     };
     checkpoint.owned_volumes = vec![
         directory,
@@ -1112,6 +1116,7 @@ async fn owned_file_archives_restore_all_backing_without_source_or_inheritance()
         options: Default::default(),
         stat_virtualization: microsandbox_types::StatVirtualization::Strict,
         host_permissions: microsandbox_types::HostPermissions::Private,
+        base: None,
     };
     let mount_id = microsandbox_types::owned_volume_mount_id(empty_mount.guest());
     let captured = microsandbox_filesystem::OwnedDirectorySnapshot::capture(
@@ -1267,6 +1272,7 @@ async fn with_additional_disks(
             }],
             head: layer_id,
             pause_generation: checkpoint.pause_generation,
+            external_base: None,
         };
         // Runtime inventories may put additional device IDs before the root. Neither loading
         // nor direct restore may confuse that manifest order with the selected root chain.
