@@ -62,7 +62,7 @@ pub use domain::{
     Socks5Credentials, StatVirtualization, TlsConfig, TlsConfigPatch, TokenBucketConfig,
     TransparentHugePagePolicy, VolumeKind, VolumeMount, VolumeSpec, VsockRouteSpec,
     VsockSocketType, VsockSpec, VsockSpecPatch, WELL_KNOWN_NAT64_PREFIX,
-    canonicalize_volume_mounts, owned_volume_mount_id,
+    canonical_guest_mount_path, canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
 pub use exec::{EXEC_OUTPUT_EVENT_OVERHEAD, ExecLimits};

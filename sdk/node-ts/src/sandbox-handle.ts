@@ -10,6 +10,7 @@ import {
 } from "./compact.js";
 import {
   modificationPlanFromJson,
+  assertModifyMountsSupported,
   modifyOptionsToNapi,
   requireModifyCapabilities,
   type ModifyOptions,
@@ -133,6 +134,7 @@ export class SandboxHandle {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
+    assertModifyMountsSupported(opts);
     requireModifyCapabilities(opts);
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
