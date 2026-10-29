@@ -2740,7 +2740,6 @@ mod tests {
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
 
-    use crate::db::entity::volume as volume_entity;
     use microsandbox_protocol::{
         bootstrap::{BootstrapBlockRoot, BootstrapEnvVar, BootstrapMountFlags},
         exec::ExecRlimit,
@@ -2761,6 +2760,7 @@ mod tests {
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
     use super::{block_writeback_policy, is_owned_restored_disk, machine_cli_args};
+    use crate::db::entity::volume as volume_entity;
     use crate::{
         LogLevel,
         backend::LocalBackend,

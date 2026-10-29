@@ -284,10 +284,11 @@ pub(crate) fn remove_socket_artifacts_at(
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::LocalBackend;
     #[cfg(unix)]
     use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use tempfile::tempdir;
+
+    use crate::backend::LocalBackend;
 
     #[tokio::test]
     async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
