@@ -14,6 +14,7 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
+pub(crate) mod environment;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -357,6 +358,14 @@ pub struct SandboxDefaults {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outbound_proxy: Option<OutboundProxy>,
 
+    /// Discover an HTTP CONNECT proxy from the host environment for new local sandboxes.
+    ///
+    /// This boolean is the only persisted ambient proxy state. Explicit outbound proxies win.
+    /// An explicit per-sandbox value overrides this default; managed values override both.
+    /// Default: false.
+    #[serde(default)]
+    pub proxy_from_env: bool,
+
     /// Default metrics sampling interval in milliseconds; `0` disables sampling globally.
     #[serde(
         default = "default_metrics_sample_interval",
@@ -687,6 +696,7 @@ impl Default for SandboxDefaults {
             shell: "/bin/sh".into(),
             workdir: None,
             outbound_proxy: None,
+            proxy_from_env: false,
             metrics_sample_interval_ms: default_metrics_sample_interval(),
             disable_metrics_sample: false,
         }
@@ -876,6 +886,7 @@ mod tests {
                     "address": "127.0.0.1:1080",
                     "user_id": "employee"
                 },
+                "proxy_from_env": false,
                 "metrics_sample_interval_ms": 2500,
                 "disable_metrics_sample": true
             },

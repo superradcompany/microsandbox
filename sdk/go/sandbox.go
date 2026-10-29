@@ -283,6 +283,13 @@ func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	if o.Network != nil {
 		ffiOpts.Network = buildFFINetwork(o.Network)
 	}
+	// The top-level option applies after the nested network field and wins when
+	// both are present. A nested-only value is also promoted so an older strict
+	// native library refuses the request instead of dropping it.
+	ffiOpts.ProxyFromEnv = o.ProxyFromEnv
+	if ffiOpts.ProxyFromEnv == nil && ffiOpts.Network != nil {
+		ffiOpts.ProxyFromEnv = ffiOpts.Network.ProxyFromEnv
+	}
 	ffiOpts.Proxy = buildFFIOutboundProxy(o.Proxy)
 
 	for _, s := range o.Secrets {
@@ -452,6 +459,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		RateLimiter:              buildFFINetworkRateLimiter(n.RateLimiter),
 		SecretViolationAction:    string(n.SecretViolationAction),
 		TrustHostCAs:             n.TrustHostCAs,
+		ProxyFromEnv:             n.ProxyFromEnv,
 	}
 
 	if n.HTTP != nil {

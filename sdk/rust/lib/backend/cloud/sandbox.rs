@@ -622,6 +622,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
     }
+    if config.spec.network.proxy_from_env {
+        return Err(unsupported("network.proxy_from_env"));
+    }
     if config.spec.network.max_inbound_tcp_connections.is_some() {
         return Err(unsupported("network.max_inbound_tcp_connections"));
     }
@@ -1789,6 +1792,16 @@ mod tests {
         assert_unsupported_config_field(config, "network.outbound_proxy");
     }
 
+    /// Ambient proxy intent is local-only; refuse it before any HTTP work.
+    #[test]
+    fn cloud_create_request_rejects_proxy_from_env() {
+        let mut config = base_cloud_config();
+        config.spec.network.proxy_from_env = true;
+
+        assert_unsupported_config_field(config, "network.proxy_from_env");
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn cloud_create_request_rejects_tcp_accept_queue_size() {
         let mut config = base_cloud_config();

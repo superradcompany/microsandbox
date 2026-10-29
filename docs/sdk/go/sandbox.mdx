@@ -1824,6 +1824,14 @@ Configure the single proxy used for outbound sandbox connections. See [Proxies](
   </div>
 </div>
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithProxyFromEnv()</span>
+
+```go
+func WithProxyFromEnv(enabled bool) SandboxOption
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. The value is preserved, including `false`; leaving the option out inherits the configured default. See [Proxies](/sdk/go/proxies#m-withproxyfromenv).
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithSecrets()</span>
 
 ```go

@@ -188,6 +188,9 @@ impl LocalBackend {
 
         let mut config =
             SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
+        // Saved ambient intent must be refused by a build without networking before
+        // any lifecycle mutation, and never reinterpreted through today's toggle.
+        crate::runtime::launch_contract::validate_build_network_intent(&config)?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
         // ownership alone can become available during Linux's deferred disk/KVM teardown.
         // Observe only this sandbox's owned markers; actual shared-disk conflicts still fail
@@ -1591,10 +1594,14 @@ mod tests {
     use microsandbox_db::entity::run as run_entity;
     use microsandbox_db::pool::DbPools;
     use microsandbox_migration::{Migrator, MigratorTrait};
+    #[cfg(not(feature = "net"))]
+    use sea_orm::ActiveModelTrait;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
     use tempfile::tempdir;
 
     use super::{SpawnMode, sandbox_entity};
+    #[cfg(not(feature = "net"))]
+    use crate::MicrosandboxError;
     use crate::backend::{Backend, BackendSelectionSource, LocalBackend, SandboxBackend};
     use crate::config::layers::BackendConfig;
     use crate::logs::{LogOptions, LogSource};
@@ -1846,6 +1853,81 @@ mod tests {
             .unwrap();
         assert_eq!(second[0].0.name, "first");
         assert!(cursor.is_none());
+    }
+
+    /// A no-network build refuses saved ambient intent at start, before the
+    /// Starting CAS or any launch-side mutation.
+    #[cfg(not(feature = "net"))]
+    #[tokio::test]
+    async fn proxy_from_env_no_net_start_refuses_saved_true_before_status_cas() {
+        let temp = tempdir().unwrap();
+        let backend = Arc::new(
+            LocalBackend::builder()
+                .config_path(temp.path().join("config.json"))
+                .managed_config_path(temp.path().join("managed.json"))
+                .home(temp.path())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+
+        for (enabled, refused) in [(true, true), (false, false)] {
+            let name = if enabled {
+                "ambient-saved-true"
+            } else {
+                "ambient-saved-false"
+            };
+            let mut config = test_config(name);
+            config.spec.network.proxy_from_env = enabled;
+            let raw = serde_json::to_string(&config).unwrap();
+            let pools = backend.db().await.unwrap();
+            let row = sandbox_entity::ActiveModel {
+                name: Set(name.to_string()),
+                config: Set(raw.clone()),
+                active_config: Set(None),
+                status: Set(SandboxStatus::Stopped),
+                ephemeral: Set(false),
+                ..Default::default()
+            }
+            .insert(pools.write())
+            .await
+            .unwrap();
+
+            let result = backend
+                .start_sandbox(backend_dyn.clone(), name, None, SpawnMode::Attached)
+                .await;
+
+            let saved = sandbox_entity::Entity::find_by_id(row.id)
+                .one(pools.read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.status, SandboxStatus::Stopped);
+            assert_eq!(saved.config, raw);
+
+            match (refused, result) {
+                (true, Err(error)) => assert!(
+                    matches!(
+                        &error,
+                        MicrosandboxError::InvalidConfig(message)
+                            if message.contains("proxy_from_env")
+                                && message.contains("rebuild with the net feature")
+                    ),
+                    "{error}"
+                ),
+                (true, Ok(_)) => panic!("saved ambient intent must be refused"),
+                (false, Err(error)) => assert!(
+                    !matches!(
+                        &error,
+                        MicrosandboxError::InvalidConfig(message)
+                            if message.contains("proxy_from_env")
+                    ),
+                    "false must reach the ordinary downstream error: {error}"
+                ),
+                (false, Ok(_)) => panic!("no runtime is installed in this fixture"),
+            }
+        }
     }
 
     #[tokio::test]

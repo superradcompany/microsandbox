@@ -799,6 +799,7 @@ fn apply_builder_options(
         "intercept_tls",
         "network",
         "proxy",
+        "proxy_from_env",
         "secrets",
         "quiet_logs",
         "entrypoint",
@@ -923,6 +924,9 @@ fn apply_builder_options(
     }
     if let Some(proxy) = keyword::<typed_data::Obj<RubyOutboundProxy>>(kwargs, "proxy")? {
         builder = apply_outbound_proxy(builder, &proxy);
+    }
+    if let Some(enabled) = keyword::<bool>(kwargs, "proxy_from_env")? {
+        builder = builder.proxy_from_env(enabled);
     }
     if let Some(v) = kwargs.get(symbol("secrets")) {
         builder = apply_secret_options(ruby, builder, v)?;
@@ -1260,6 +1264,9 @@ impl RubySandboxBuilder {
         proxy: typed_data::Obj<RubyOutboundProxy>,
     ) -> Result<(), Error> {
         put_builder(&this, |builder| apply_outbound_proxy(builder, &proxy))
+    }
+    fn proxy_from_env(this: typed_data::Obj<Self>, enabled: bool) -> Result<(), Error> {
+        put_builder(&this, |builder| builder.proxy_from_env(enabled))
     }
     fn vsock(this: typed_data::Obj<Self>, host_path: String, port: u32) -> Result<(), Error> {
         put_builder(&this, |b| b.vsock(host_path, port))
@@ -2897,6 +2904,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
     builder.define_method("proxy!", method!(RubySandboxBuilder::proxy, 1))?;
+    builder.define_method(
+        "proxy_from_env!",
+        method!(RubySandboxBuilder::proxy_from_env, 1),
+    )?;
     builder.define_method("vsock!", method!(RubySandboxBuilder::vsock, 2))?;
     builder.define_method("vsock_dgram!", method!(RubySandboxBuilder::vsock_dgram, 2))?;
     builder.define_method("create", method!(RubySandboxBuilder::create, 0))?;
@@ -3026,5 +3037,106 @@ mod runtime_tests {
         let result = catch_callback(|| panic!("callback panic"));
         let panic = result.expect_err("callback panic should be captured");
         assert_eq!(panic_message(panic.as_ref()), "callback panic");
+    }
+}
+
+/// Applied-value coverage for the ambient-proxy keyword and bang setter.
+///
+/// Native `init` does not load `lib/microsandbox.rb`, so the fluent wrapper is
+/// exercised by the normal Ruby suite instead. Everything here runs on one
+/// thread in one process (`--test-threads=1`) because Ruby is initialized once.
+#[cfg(test)]
+mod proxy_from_env_applied_values {
+    use magnus::{RHash, Ruby, Symbol};
+    use microsandbox_core::sandbox::SandboxConfig;
+    use tokio::runtime::Builder;
+
+    use super::{
+        RubySandboxBuilder, SandboxBuilder, apply_builder_options, init, sandbox_builder,
+        take_builder,
+    };
+
+    fn build_config(
+        ruby: &Ruby,
+        builder: SandboxBuilder,
+    ) -> SandboxConfig {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(builder.build()).unwrap_or_else(|error| {
+            panic!("built configuration rejected: {error}");
+        })
+    }
+
+    #[test]
+    fn proxy_from_env_applied_values() {
+        // SAFETY: this single test owns the only Ruby VM in this process and runs
+        // on its initialization thread with `--test-threads=1`.
+        let ruby = unsafe { magnus::embed::init() };
+        init(&ruby).expect("register the native surface");
+
+        let keyword = |value: Option<bool>| {
+            let kwargs = RHash::new();
+            kwargs.aset(Symbol::new("image"), "alpine").unwrap();
+            if let Some(enabled) = value {
+                kwargs
+                    .aset(Symbol::new("proxy_from_env"), enabled)
+                    .unwrap();
+            }
+            let builder = apply_builder_options(
+                &ruby,
+                SandboxBuilder::new("ruby-ambient"),
+                kwargs,
+            )
+            .expect("keyword accepted");
+            build_config(&ruby, builder).spec.network.proxy_from_env
+        };
+
+        // Keyword: explicit true/false and absence all reach the Rust builder.
+        assert!(keyword(Some(true)));
+        assert!(!keyword(Some(false)));
+        assert!(!keyword(None));
+
+        // The registered native bang setter applies the value and returns nil.
+        let bang = |prior: Option<bool>, value: bool| {
+            let builder = sandbox_builder("ruby-ambient".to_string());
+            {
+                let mut inner = builder.inner.borrow_mut();
+                let current = inner.take().unwrap().image("alpine");
+                *inner = Some(match prior {
+                    Some(prior) => current.proxy_from_env(prior),
+                    None => current,
+                });
+            }
+            let wrapped = ruby.obj_wrap(builder);
+            assert!(
+                RubySandboxBuilder::proxy_from_env(wrapped, value).is_ok(),
+                "bang setter must accept a boolean"
+            );
+            let config = build_config(&ruby, take_builder(&wrapped).unwrap());
+            config.spec.network.proxy_from_env
+        };
+
+        for (prior, value) in [
+            (None, true),
+            (None, false),
+            (Some(true), false),
+            (Some(false), true),
+        ] {
+            assert_eq!(bang(prior, value), value, "prior={prior:?} value={value}");
+        }
+
+        // Disabling networking neither enables nor clears ambient intent.
+        let builder = sandbox_builder("ruby-ambient".to_string());
+        {
+            let mut inner = builder.inner.borrow_mut();
+            *inner = Some(inner.take().unwrap().image("alpine").proxy_from_env(true));
+        }
+        let wrapped = ruby.obj_wrap(builder);
+        RubySandboxBuilder::disable_network(wrapped).expect("network disabled");
+        let config = build_config(&ruby, take_builder(&wrapped).unwrap());
+        assert!(config.spec.network.proxy_from_env);
+        assert!(!config.spec.network.enabled);
     }
 }

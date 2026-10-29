@@ -135,6 +135,14 @@ pub struct NetworkConfig {
     /// relays non-DNS UDP; SOCKS4 and HTTP CONNECT block it.
     #[serde(default)]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Discover an HTTP CONNECT proxy from the host environment at network startup.
+    ///
+    /// Only this boolean is persisted. The selected endpoint, `NO_PROXY` rules and URL
+    /// credentials are read from the launching host's environment once per network-engine
+    /// startup and stay in host memory. Explicit `outbound_proxy` wins.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_from_env: bool,
 }
 
 /// Network configuration whose runtime-only values have been resolved.
@@ -339,6 +347,7 @@ impl Default for NetworkConfig {
             trust_host_cas: false,
             http: HttpConfig::default(),
             outbound_proxy: None,
+            proxy_from_env: false,
         }
     }
 }
@@ -384,6 +393,10 @@ fn default_true() -> bool {
     true
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_host_bind() -> IpAddr {
     IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
@@ -406,6 +419,9 @@ fn default_nat64_prefixes() -> Vec<Ipv6Network> {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::NetworkSpec;
+    use serde_json::Value;
+
     use super::{InterfaceOverrides, NetworkConfig, PortProtocol};
     use crate::config::NetworkBuilder;
     use crate::dns::Nameserver;
@@ -652,7 +668,7 @@ mod tests {
             ..NetworkConfig::default()
         };
 
-        let wire: microsandbox_types::NetworkSpec =
+        let wire: NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
         assert_eq!(
             wire.outbound_proxy,
@@ -680,7 +696,7 @@ mod tests {
             ..NetworkConfig::default()
         };
 
-        let wire: microsandbox_types::NetworkSpec =
+        let wire: NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
         assert_eq!(
             wire.outbound_proxy,
@@ -706,7 +722,7 @@ mod tests {
     #[test]
     fn outbound_proxy_omitted_when_unset() {
         let config = NetworkConfig::default();
-        let wire: microsandbox_types::NetworkSpec =
+        let wire: NetworkSpec =
             serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
         assert_eq!(wire.outbound_proxy, None);
         assert!(
@@ -725,6 +741,80 @@ mod tests {
     fn config_without_rate_limiter_fields_stays_unlimited() {
         let config: NetworkConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(config.rate_limiter.is_none());
+    }
+
+    /// Ambient proxy intent is a plain default-false boolean that only appears
+    /// when true, in both the local config and the shared wire spec.
+    #[test]
+    fn proxy_from_env_round_trips_through_wire_network_spec() {
+        let disabled: NetworkConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!disabled.proxy_from_env);
+
+        let omitted = serde_json::to_value(NetworkConfig::default()).unwrap();
+        assert!(
+            !omitted.as_object().unwrap().contains_key("proxy_from_env"),
+            "false must be omitted from the persisted form"
+        );
+
+        for enabled in [true, false] {
+            let config = NetworkConfig {
+                proxy_from_env: enabled,
+                ..NetworkConfig::default()
+            };
+            let config_json = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                config_json.get("proxy_from_env"),
+                enabled.then_some(&Value::Bool(true)),
+                "only true is serialized"
+            );
+
+            let wire: NetworkSpec = serde_json::from_value(config_json).unwrap();
+            assert_eq!(wire.proxy_from_env, enabled);
+
+            let round_tripped: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+            assert_eq!(round_tripped.proxy_from_env, enabled);
+        }
+
+        assert!(
+            serde_json::from_value::<NetworkConfig>(serde_json::json!({"proxy_from_env": null}))
+                .is_err(),
+            "null is not a valid enablement value"
+        );
+        assert!(
+            serde_json::from_value::<NetworkConfig>(serde_json::json!({"proxy_from_env": "true"}))
+                .is_err(),
+            "non-boolean enablement values are rejected"
+        );
+    }
+
+    /// An explicit configured proxy and ambient intent survive the same JSON
+    /// hop together without introducing any endpoint or credential state.
+    #[test]
+    fn proxy_from_env_never_carries_endpoint_state() {
+        let config = NetworkConfig {
+            outbound_proxy: Some(OutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
+            }),
+            proxy_from_env: true,
+            ..NetworkConfig::default()
+        };
+        let wire: NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        let wire_json = serde_json::to_value(&wire).unwrap();
+        assert_eq!(wire_json["proxy_from_env"], serde_json::json!(true));
+        let keys: Vec<&String> = wire_json.as_object().unwrap().keys().collect();
+        assert!(!keys.iter().any(|key| {
+            matches!(
+                key.as_str(),
+                "proxy" | "no_proxy" | "proxy_endpoint" | "http_proxy" | "https_proxy"
+            )
+        }));
+        let round_tripped: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+        assert!(round_tripped.proxy_from_env);
+        assert_eq!(round_tripped.outbound_proxy, config.outbound_proxy);
     }
 
     #[test]

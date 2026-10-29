@@ -286,10 +286,12 @@ impl CloudBackendBuilder {
     /// explicitly supplied URL is empty, the HTTP client fails to construct,
     /// or user or managed configuration cannot be loaded.
     pub fn build(self) -> MicrosandboxResult<CloudBackend> {
+        // Capture the ordinary environment defaults once for either supplied or loaded sources.
         let config = match self.config {
-            Some(config) => config,
-            None => Arc::new(BackendConfig::load()?),
+            Some(config) => Arc::try_unwrap(config).unwrap_or_else(|arc| (*arc).clone()),
+            None => BackendConfig::load()?,
         };
+        let config = Arc::new(config.capture_environment_defaults()?);
 
         config.require_backend(super::BackendKind::Cloud, None)?;
         let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);

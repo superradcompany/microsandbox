@@ -36,6 +36,14 @@ Select and configure the single outbound proxy for the sandbox. The callback rec
 
 Invalid proxy configuration is retained by the sandbox builder and returned from `build()` or `create()` as `MicrosandboxError::NetworkBuilder(BuildError::InvalidOutboundProxy)`.
 
+### <span id="proxy-from-env">proxy_from_env()</span>
+
+```rust
+fn proxy_from_env(self, enabled: bool) -> Self
+```
+
+Discover an HTTP CONNECT proxy from the host `https_proxy`/`http_proxy`/`all_proxy` and `no_proxy` variables at each network startup. Default: `false`. This does not enable networking, an explicit [`proxy()`](#proxy) still wins routing, and only the boolean is persisted. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 ## OutboundProxyBuilder
 
 Protocol selector passed to [`SandboxBuilder::proxy()`](#proxy).

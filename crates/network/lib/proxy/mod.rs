@@ -1,6 +1,10 @@
 //! Outbound proxy configuration and transport implementations.
 
+#[cfg(feature = "engine")]
+mod ambient;
 mod http_connect;
+#[cfg(feature = "engine")]
+mod routing;
 mod socks;
 mod types;
 
@@ -11,8 +15,18 @@ mod types;
 #[cfg(feature = "engine")]
 pub use crate::tcp::proxy::*;
 
+#[cfg(feature = "engine")]
+#[doc(hidden)]
+pub use ambient::AmbientHttpProxy;
+#[cfg(feature = "engine")]
+#[doc(hidden)]
+pub use routing::OutboundRouting;
+
 #[doc(hidden)]
 pub use http_connect::ResolvedHttpConnectCredentials;
+#[doc(hidden)]
+#[cfg(feature = "engine")]
+pub use http_connect::ResolvedHttpConnectEndpoint;
 pub use http_connect::{HttpConnectCredentials, HttpConnectProxyBuilder};
 #[doc(hidden)]
 pub use socks::ResolvedSocks5Credentials;

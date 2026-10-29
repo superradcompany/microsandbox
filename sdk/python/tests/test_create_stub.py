@@ -41,6 +41,8 @@ EXPECTED_KWARGS = [
     "vsock",
     "network",
     "intercept_tls",
+    "proxy",
+    "proxy_from_env",
     "secrets",
     "secret_violation_action",
     "detached",

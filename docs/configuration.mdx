@@ -254,6 +254,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
 | `workdir` | `null` | Working directory inside the sandbox |
 | `outbound_proxy` | `null` | Default outbound HTTP CONNECT/SOCKS4/SOCKS5 proxy for local sandboxes. Uses the existing proxy object with `protocol`, `address` (`IP:port`), and optional authentication. See [managed proxy configuration](/enterprise/corporate-networking#route-sandbox-traffic). |
+| `proxy_from_env` | `false` | Default ambient HTTP CONNECT discovery from the host proxy environment for local sandboxes. Only this boolean is stored; see [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment). |
 | `metrics_sample_interval_ms` | `1000` | Runtime metrics sampling interval in milliseconds. Set to `0` to disable sampling. |
 | `disable_metrics_sample` | `false` | Force-disable metrics sampling regardless of `metrics_sample_interval_ms`. |
 
@@ -305,6 +306,16 @@ Enable nesting by default for local sandboxes:
 ```
 
 Per-sandbox settings override this user default; managed overrides take precedence. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for host requirements and restore limits.
+
+<Accordion title="Ambient proxy discovery and the host toggle">
+
+`sandbox_defaults.proxy_from_env` (and per-sandbox `network.proxy_from_env`) turn on discovery of an HTTP CONNECT proxy from the host environment. An explicit `outbound_proxy` wins without reading any host proxy variable.
+
+`MSB_PROXY_FROM_ENV` supplies an ordinary default for new sandboxes. It accepts `1`, `true`, `yes`, `on`, `0`, `false`, `no`, or `off`, case-insensitively and trimmed; an empty value counts as unset and anything else is a configuration error naming only the variable. The toggle is read once when an SDK backend is constructed, so a new backend sees a change and an existing backend does not. It overrides built-in and user defaults but never an explicit per-sandbox value or managed policy.
+
+A per-sandbox `proxy_from_env: false` overrides ordinary user and global defaults; managed policy is applied last and stays authoritative in both directions, so a managed `true` cannot be turned off by a per-sandbox value or a CLI flag. Only the boolean is written to user and managed files - never the discovered endpoint, credentials, or `no_proxy` rules. See [corporate networking](/enterprise/corporate-networking) for managed enforcement. Setting `outbound_proxy` to `null` clears explicit routing but does not disable ambient discovery; set `proxy_from_env: false` to force it off.
+
+</Accordion>
 
 ### `sandbox_defaults.oci`
 

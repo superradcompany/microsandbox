@@ -2836,7 +2836,17 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
+    use crate::MicrosandboxError;
     use crate::backend::LocalBackend;
+    #[cfg(all(unix, not(feature = "net")))]
+    use crate::sandbox::Sandbox;
+    #[cfg(unix)]
+    use std::fs::Permissions;
+    #[cfg(unix)]
+    use tempfile::Builder;
+    #[cfg(all(unix, not(feature = "net")))]
+    use tempfile::TempDir;
+
     #[cfg(unix)]
     use crate::db::entity::run;
     #[cfg(unix)]
@@ -5690,16 +5700,49 @@ mod tests {
     /// selected runtime cannot launch before stopping the VM. Regression: the
     /// capability check used to run only in the start that followed `stop`, which
     /// left the workload down with the rejected change persisted.
+    ///
+    /// Both host-backed network intents that this runtime cannot provide are covered:
+    /// an authenticated explicit HTTP CONNECT proxy and ambient-proxy discovery.
     #[cfg(all(unix, feature = "net"))]
     #[tokio::test]
     async fn restart_preflight_leaves_a_running_sandbox_untouched() {
+        assert_restart_preflight_refuses("HTTP CONNECT outbound proxies", |network| {
+            network.outbound_proxy = Some(
+                serde_json::from_value(serde_json::json!({
+                    "protocol": "http_connect",
+                    "address": "127.0.0.1:3128",
+                    "credentials": {
+                        "username": "proxy-user",
+                        "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
+                    }
+                }))
+                .unwrap(),
+            );
+        })
+        .await;
+
+        assert_restart_preflight_refuses("ambient host HTTP proxy discovery", |network| {
+            network.proxy_from_env = true;
+        })
+        .await;
+    }
+
+    /// Refuse `intent` before the workload stops, and leave saved state untouched.
+    ///
+    /// The fake runtime records each invocation, so "no stop, no launch" is observable
+    /// from the process side as well as from the unchanged desired/active rows.
+    #[cfg(all(unix, feature = "net"))]
+    async fn assert_restart_preflight_refuses(
+        expected_feature: &str,
+        intent: impl FnOnce(&mut crate::sandbox::NetworkConfig),
+    ) {
         use std::os::unix::fs::PermissionsExt;
 
         use crate::config::{GlobalConfig, PathsConfig};
 
         // Keep the home path short: the restart sequence derives Unix socket paths
         // from it, and a long macOS temporary directory can exceed the socket limit.
-        let temp = tempfile::Builder::new()
+        let temp = Builder::new()
             .prefix("msb-restart-preflight-")
             .tempdir_in("/tmp")
             .unwrap();
@@ -5707,23 +5750,28 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
 
         // A `#!` wrapper has no embedded version metadata, so it resolves as a
-        // legacy launch contract and the pre-stop validation refuses the proxy at
+        // legacy launch contract and the pre-stop validation refuses the intent at
         // the legacy network gate. The auth-specific capability gate needs a real
         // executable that also answers the capability probe, which a unit test
         // cannot fake; `http_connect_credentials_require_runtime_support_before_launch`
         // covers that gate, and this test covers where the gate runs.
         let msb = temp.path().join("msb");
+        let calls = temp.path().join("msb-calls");
         std::fs::write(
             &msb,
-            "#!/bin/sh\n\
-             case \"$1\" in\n\
-             --version) printf 'msb 0.6.18\\n' ;;\n\
-             __launch-protocol) printf '%s' '{\"protocols\":[2,1],\"http_connect_proxy\":true}' ;;\n\
-             *) exit 1 ;;\n\
-             esac\n",
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$1\" >> '{}'\n\
+                 case \"$1\" in\n\
+                 --version) printf 'msb 0.6.18\\n' ;;\n\
+                 __launch-protocol) printf '%s' '{{\"protocols\":[2,1],\"http_connect_proxy\":true}}' ;;\n\
+                 *) exit 1 ;;\n\
+                 esac\n",
+                calls.display()
+            ),
         )
         .unwrap();
-        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&msb, Permissions::from_mode(0o700)).unwrap();
         let library = temp
             .path()
             .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
@@ -5743,17 +5791,7 @@ mod tests {
         let mut config = config(2, 1024);
         config.spec.name = "restart-preflight".to_string();
         let mut network = config.local_network_config().unwrap();
-        network.outbound_proxy = Some(
-            serde_json::from_value(serde_json::json!({
-                "protocol": "http_connect",
-                "address": "127.0.0.1:3128",
-                "credentials": {
-                    "username": "proxy-user",
-                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
-                }
-            }))
-            .unwrap(),
-        );
+        intent(&mut network);
         config.set_local_network_config(network).unwrap();
 
         // The row has no recorded runtime, so `stop` converges the stale `Running`
@@ -5772,6 +5810,11 @@ mod tests {
         .insert(db.write())
         .await
         .unwrap();
+        let before = sandbox_entity::Entity::find_by_id(row.id)
+            .one(db.read())
+            .await
+            .unwrap()
+            .unwrap();
 
         let result = SandboxModificationBuilder::new(backend.clone(), &config.spec.name)
             .workdir("/srv")
@@ -5803,21 +5846,182 @@ mod tests {
             config.local_network_config().unwrap().outbound_proxy,
             "the durable network configuration must be unchanged"
         );
+        assert_eq!(
+            persisted.spec.network.proxy_from_env, config.spec.network.proxy_from_env,
+            "the durable ambient intent must be unchanged"
+        );
+        assert_eq!(
+            saved.config, before.config,
+            "the desired configuration must not change"
+        );
+        assert_eq!(
+            saved.active_config, before.active_config,
+            "the active configuration must not be rewritten"
+        );
 
-        // Both refusals must happen before stopping or persisting the change.
-        // Historical Linux x86 runtimes also cannot enforce nesting off; other
-        // hosts reach the legacy proxy gate. Proxy capability checks have their
-        // own launch-contract coverage.
+        // Only version/capability probes ran: no stop and no launch reached the runtime.
+        let calls = std::fs::read_to_string(&calls).unwrap_or_default();
+        for invocation in calls.lines().filter(|line| !line.is_empty()) {
+            assert!(
+                matches!(invocation, "--version" | "__launch-protocol"),
+                "the preflight must not reach the workload: {invocation}"
+            );
+        }
+
+        // The launch-contract refusal must happen before stopping or persisting
+        // the change. Historical Linux x86 runtimes cannot enforce nesting off;
+        // other hosts reach the requested proxy feature's legacy gate. Specific
+        // proxy capability checks have their own launch-contract coverage.
         let error = result.expect_err("an unsupported runtime must refuse the restart");
         let expected = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             "nested virtualization policy"
         } else {
-            "HTTP CONNECT outbound proxies"
+            expected_feature
         };
         assert!(
             error.to_string().contains(expected) && error.to_string().contains("upgrade msb"),
             "unexpected error: {error}"
         );
+    }
+
+    /// A no-network build refuses saved ambient intent before stopping a running
+    /// sandbox, for both ordinary restart and restart-backed modification, and
+    /// before a StartOnly restart. Raw desired/active state stays untouched.
+    #[cfg(all(unix, not(feature = "net")))]
+    #[tokio::test]
+    async fn proxy_from_env_no_net_restart_paths_refuse_before_stopping() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use sea_orm::EntityTrait;
+
+        use crate::config::{GlobalConfig, PathsConfig};
+
+        async fn fixture(status: SandboxStatus) -> (TempDir, Arc<dyn Backend>, i32, SandboxConfig) {
+            let temp = Builder::new()
+                .prefix("msb-ambient-restart-")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let home = temp.path().join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            // Both fixtures answer only their own probes; the build refusal must
+            // fire before either is executed.
+            let msb = temp.path().join("msb");
+            std::fs::write(
+                &msb,
+                "#!/bin/sh\ncase \"$1\" in\n--version) printf 'msb 0.7.10\\n' ;;\n                 __launch-protocol) printf '%s' '{\"protocols\":[2,1],\"proxy_from_env\":true}' ;;\n                 *) exit 1 ;;\nesac\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&msb, Permissions::from_mode(0o700)).unwrap();
+            let library = temp
+                .path()
+                .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
+            std::fs::write(&library, b"").unwrap();
+
+            let backend: Arc<dyn Backend> =
+                Arc::new(crate::test_support::local_backend(GlobalConfig {
+                    home: Some(home),
+                    paths: PathsConfig {
+                        msb: Some(msb),
+                        libkrunfw: Some(library),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }));
+
+            let mut config = config(2, 1024);
+            config.spec.name = "ambient-restart".to_string();
+            config.spec.network.proxy_from_env = true;
+
+            let local = backend.as_local().unwrap();
+            let db = local.db().await.unwrap();
+            let raw = serde_json::to_string(&config).unwrap();
+            let active = raw.clone();
+            let row = sandbox_entity::ActiveModel {
+                name: Set(config.spec.name.clone()),
+                config: Set(raw),
+                active_config: Set(Some(active)),
+                status: Set(status),
+                ephemeral: Set(false),
+                ..Default::default()
+            }
+            .insert(db.write())
+            .await
+            .unwrap();
+
+            (temp, backend, row.id, config)
+        }
+
+        async fn assert_untouched(
+            backend: &Arc<dyn Backend>,
+            id: i32,
+            expected_status: SandboxStatus,
+        ) {
+            let local = backend.as_local().unwrap();
+            let db = local.db().await.unwrap();
+            let saved = sandbox_entity::Entity::find_by_id(id)
+                .one(db.read())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.status, expected_status);
+            assert!(saved.config.contains("\"proxy_from_env\":true"));
+            assert!(
+                saved
+                    .active_config
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("\"proxy_from_env\":true")
+            );
+        }
+
+        fn assert_refused(error: MicrosandboxError) {
+            assert!(
+                matches!(
+                    &error,
+                    MicrosandboxError::InvalidConfig(message)
+                        if message.contains("proxy_from_env")
+                            && message.contains("rebuild with the net feature")
+                ),
+                "{error}"
+            );
+        }
+
+        // Ordinary restart of a running sandbox.
+        let (_temp, backend, id, _config) = fixture(SandboxStatus::Running).await;
+        let result = crate::backend::with_backend(backend.clone(), async {
+            let handle = Sandbox::get("ambient-restart").await?;
+            assert_refused(handle.preflight_local_restart().await.unwrap_err());
+            handle.restart().await
+        })
+        .await;
+        match result {
+            Ok(_) => panic!("ambient intent must refuse the ordinary restart"),
+            Err(error) => assert_refused(error),
+        }
+        assert_untouched(&backend, id, SandboxStatus::Running).await;
+
+        // Restart-backed modification of a running sandbox still never stops it.
+        let (_temp, backend, id, config) = fixture(SandboxStatus::Running).await;
+        let result = SandboxModificationBuilder::new(backend.clone(), &config.spec.name)
+            .workdir("/srv")
+            .restart()
+            .apply()
+            .await;
+        assert_refused(result.expect_err("ambient intent must refuse the modification"));
+        assert_untouched(&backend, id, SandboxStatus::Running).await;
+
+        // StartOnly restart of a stopped sandbox refuses before any launch.
+        let (_temp, backend, id, _config) = fixture(SandboxStatus::Stopped).await;
+        let result = crate::backend::with_backend(backend.clone(), async {
+            let handle = Sandbox::get("ambient-restart").await?;
+            handle.restart().await
+        })
+        .await;
+        match result {
+            Ok(_) => panic!("ambient intent must refuse the start-only restart"),
+            Err(error) => assert_refused(error),
+        }
+        assert_untouched(&backend, id, SandboxStatus::Stopped).await;
     }
 
     /// The `tls` change a secret patch emits when it must turn interception on.

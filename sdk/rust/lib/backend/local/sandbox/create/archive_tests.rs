@@ -456,6 +456,8 @@ async fn copy_on_write_disk_archive_preserves_replacement_target() {
     .await;
 }
 
+// Uses the networking builder surface, so this fixture is only available in net builds.
+#[cfg(feature = "net")]
 #[tokio::test]
 async fn historical_runtime_rejects_disk_only_restore_before_launch() {
     let root = tempfile::tempdir_in("/tmp").unwrap();

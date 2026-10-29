@@ -2263,6 +2263,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ChildStageGuard, sandbox_entity, sandbox_label_entity};
+    #[cfg(not(feature = "net"))]
+    use crate::MicrosandboxError;
     use crate::backend::{Backend, LocalBackend};
     use crate::runtime::SpawnMode;
     use crate::sandbox::{
@@ -2270,6 +2272,99 @@ mod tests {
         RootfsSource, SandboxConfig, SandboxStatus, StatVirtualization, VolumeMount,
     };
     use crate::snapshot::SnapshotReference;
+
+    /// A no-network build refuses ambient intent at create admission: before any
+    /// runtime lookup, provisional row, replacement or configuration write.
+    #[cfg(not(feature = "net"))]
+    #[tokio::test]
+    async fn proxy_from_env_no_net_create_refuses_true_before_any_mutation() {
+        use crate::backend::BackendSelectionSource;
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        use crate::sandbox::SandboxBuilder;
+        use microsandbox_types::RootfsSource as TypesRootfsSource;
+
+        let temp = tempfile::Builder::new()
+            .prefix("msb-ambient-no-net")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let layers = BackendConfig::new(
+            GlobalConfigPatch::new().home(temp.path().join("home")),
+            Default::default(),
+        );
+        let backend = Arc::new(LocalBackend::from_backend_config(
+            layers
+                .prepare_for_local_backend(Default::default())
+                .unwrap(),
+            BackendSelectionSource::Programmatic,
+            None,
+        ));
+        let backend_dyn: Arc<dyn Backend> = backend.clone();
+
+        // A bind rootfs needs no pull, so create reaches runtime admission.
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir(&rootfs).unwrap();
+        let sandbox_config = |name: &str, enabled: bool| {
+            let mut config = SandboxConfig::default();
+            config.spec.name = name.to_string();
+            config.spec.image = TypesRootfsSource::Bind {
+                path: rootfs.clone(),
+                follow_root_symlinks: false,
+            };
+            config.spec.network.proxy_from_env = enabled;
+            config
+        };
+
+        let error = backend
+            .create_sandbox(
+                backend_dyn.clone(),
+                SandboxBuilder::from(sandbox_config("ambient-true", true)),
+                SpawnMode::Attached,
+                None,
+            )
+            .await
+            .err()
+            .expect("true must be refused by a build without networking");
+        assert!(
+            matches!(
+                &error,
+                MicrosandboxError::InvalidConfig(message)
+                    if message.contains("proxy_from_env")
+                        && message.contains("rebuild with the net feature")
+            ),
+            "{error}"
+        );
+
+        // No provisional row or directory survived the refusal.
+        let pools = backend.db().await.unwrap();
+        assert!(
+            sandbox_entity::Entity::find()
+                .one(pools.read())
+                .await
+                .unwrap()
+                .is_none(),
+            "the refusal must precede the provisional row"
+        );
+        assert!(!backend.sandboxes_dir().join("ambient-true").exists());
+
+        // False is accepted by this guard and reaches the ordinary image/runtime path.
+        let error = backend
+            .create_sandbox(
+                backend_dyn,
+                SandboxBuilder::from(sandbox_config("ambient-false", false)),
+                SpawnMode::Attached,
+                None,
+            )
+            .await
+            .err()
+            .expect("the missing runtime must still fail downstream");
+        assert!(
+            !matches!(
+                &error,
+                MicrosandboxError::InvalidConfig(message) if message.contains("proxy_from_env")
+            ),
+            "{error}"
+        );
+    }
 
     #[tokio::test]
     async fn starting_sandbox_owns_image_before_runtime_launch() {

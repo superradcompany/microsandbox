@@ -159,3 +159,37 @@ def test_native_create_accepts_http_connect_credentials() -> None:
     )
 
     assert type(error) is type(baseline), f"HTTP CONNECT credentials rejected: {error!r}"
+
+
+def test_network_proxy_from_env_is_tri_state() -> None:
+    from microsandbox import Network
+
+    # None means inherit; true and false are explicit per-sandbox intent.
+    assert "proxy_from_env" not in Network()._to_dict()
+    assert Network(proxy_from_env=True)._to_dict()["proxy_from_env"] is True
+    assert Network(proxy_from_env=False)._to_dict()["proxy_from_env"] is False
+
+
+def test_native_create_accepts_top_level_proxy_from_env() -> None:
+    baseline = _native_create_error()
+    for value in (True, False):
+        error = _native_create_error(proxy_from_env=value)
+        assert type(error) is type(baseline), (
+            f"top-level proxy_from_env={value} rejected: {error!r}"
+        )
+
+
+def test_native_create_accepts_nested_proxy_from_env() -> None:
+    from microsandbox import Network
+
+    baseline = _native_create_error()
+    for value in (True, False):
+        error = _native_create_error(network=Network(proxy_from_env=value))
+        assert type(error) is type(baseline), (
+            f"nested proxy_from_env={value} rejected: {error!r}"
+        )
+
+
+def test_native_create_rejects_non_boolean_proxy_from_env() -> None:
+    with pytest.raises(TypeError):
+        Sandbox.create("proxy-parse-probe", image="alpine", proxy_from_env="true")

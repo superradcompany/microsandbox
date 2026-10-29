@@ -28,6 +28,7 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::proxy::OutboundRouting;
 use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
@@ -76,6 +77,9 @@ pub struct SmoltcpNetwork {
 
     // Live-swappable secrets view shared with the poll loop and TLS state.
     secrets: SecretsHandle,
+
+    // Outbound proxy source captured once at startup.
+    outbound_routing: Arc<OutboundRouting>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +223,9 @@ impl SmoltcpNetwork {
         host_routes: HostRoutes,
     ) -> Result<Self, NetworkInitError> {
         enforce_deployment_profile(&mut config, deployment_profile);
+        // Capture the outbound proxy source exactly once, after profile
+        // sanitization and explicit-proxy precedence make this startup eligible.
+        let outbound_routing = Arc::new(OutboundRouting::capture(&config));
         let platform_policy = Self::platform_policy(deployment_profile);
         let resolved_config = config;
         let config = resolved_config.config();
@@ -344,6 +351,7 @@ impl SmoltcpNetwork {
             gateway_ipv6,
             tls_state,
             secrets,
+            outbound_routing,
         })
     }
 
@@ -409,7 +417,7 @@ impl SmoltcpNetwork {
         let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
-        let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
+        let outbound_routing = Arc::clone(&self.outbound_routing);
 
         self.poll_handle = Some(
             std::thread::Builder::new()
@@ -433,7 +441,7 @@ impl SmoltcpNetwork {
                         max_inbound_tcp_connections,
                         tokio_handle,
                         secrets,
-                        outbound_proxy,
+                        outbound_routing,
                     );
                 })
                 .expect("failed to spawn smoltcp poll thread"),
@@ -659,17 +667,22 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
     let disabled_rebind_protection = !config.dns.rebind_protection;
     let trusted_host_cas = config.trust_host_cas;
     let had_outbound_proxy = config.outbound_proxy.is_some();
+    let had_proxy_from_env = config.proxy_from_env;
     config.interface = Default::default();
     config.ports.clear();
     config.dns.nameservers.clear();
     config.dns.rebind_protection = true;
     config.trust_host_cas = false;
+    // Clear ambient intent before discovery so a tenant never inherits the
+    // server's host proxy settings.
+    config.proxy_from_env = false;
     if interface_overridden
         || had_published_ports
         || had_custom_nameservers
         || disabled_rebind_protection
         || trusted_host_cas
         || had_outbound_proxy
+        || had_proxy_from_env
     {
         tracing::warn!(
             interface_overridden,
@@ -678,6 +691,7 @@ fn enforce_deployment_profile(config: &mut ResolvedNetworkConfig, profile: Deplo
             disabled_rebind_protection,
             trusted_host_cas,
             had_outbound_proxy,
+            had_proxy_from_env,
             "multi-tenant deployment profile overrode unsafe network configuration"
         );
     }
@@ -802,9 +816,12 @@ mod published_ports_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
     use crate::config::{EnvNetworkSecretResolver, NetworkConfig, PortProtocol, PublishedPort};
     use crate::dns::Nameserver;
+    use crate::proxy::OutboundProxy;
 
     fn resolved(config: NetworkConfig) -> ResolvedNetworkConfig {
         config.resolve(&EnvNetworkSecretResolver).unwrap()
@@ -924,7 +941,7 @@ mod tests {
         config.dns.nameservers = vec!["10.0.0.53".parse::<Nameserver>().unwrap()];
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
-        config.outbound_proxy = Some(crate::proxy::OutboundProxy::Socks5 {
+        config.outbound_proxy = Some(OutboundProxy::Socks5 {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
@@ -942,6 +959,7 @@ mod tests {
         assert!(config.dns.rebind_protection);
         assert!(!config.trust_host_cas);
         assert!(config.outbound_proxy.is_none());
+        assert!(!config.proxy_from_env);
         assert_eq!(config.max_tcp_connections, Some(ConnectionLimit::from(257)));
         assert!(resolved.config().outbound_proxy.is_none());
         assert!(resolved.outbound_proxy().is_none());
@@ -1022,7 +1040,7 @@ mod tests {
         config.interface.mtu = Some(9000);
         config.dns.rebind_protection = false;
         config.trust_host_cas = true;
-        config.outbound_proxy = Some(crate::proxy::OutboundProxy::Socks5 {
+        config.outbound_proxy = Some(OutboundProxy::Socks5 {
             address: "127.0.0.1:1080".parse().unwrap(),
             credentials: None,
         });
@@ -1035,6 +1053,40 @@ mod tests {
         assert!(!config.dns.rebind_protection);
         assert!(config.trust_host_cas);
         assert!(config.outbound_proxy.is_some());
+    }
+
+    /// Discovery is skipped without reading the environment whenever the
+    /// effective configuration is not eligible, and runs exactly once when it is.
+    #[test]
+    fn outbound_routing_capture_happens_after_the_profile_floor() {
+        fn count_calls(config: &ResolvedNetworkConfig) -> usize {
+            let calls = Cell::new(0);
+            let _ = OutboundRouting::capture_with(config, || {
+                calls.set(calls.get() + 1);
+                None
+            });
+            calls.get()
+        }
+
+        // Eligible: enabled networking, ambient intent, no explicit proxy.
+        assert_eq!(count_calls(&resolved(NetworkConfig::default())), 0);
+        assert_eq!(
+            count_calls(&resolved(NetworkConfig {
+                proxy_from_env: true,
+                ..Default::default()
+            })),
+            1
+        );
+
+        // Multi-tenancy clears the intent before capture, so the server's host
+        // proxy settings are never inherited.
+        let mut multi_tenant = resolved(NetworkConfig {
+            proxy_from_env: true,
+            ..Default::default()
+        });
+        enforce_deployment_profile(&mut multi_tenant, DeploymentProfile::MultiTenant);
+        assert!(!multi_tenant.config().proxy_from_env);
+        assert_eq!(count_calls(&multi_tenant), 0);
     }
 
     #[test]

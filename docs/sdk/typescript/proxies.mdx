@@ -31,6 +31,14 @@ proxy(configure: (proxy: OutboundProxyBuilder) => HttpConnectProxyBuilder | Sock
 
 Select and configure the single outbound proxy for the sandbox. The callback receives an [`OutboundProxyBuilder`](#outboundproxybuilder) and must return one protocol-specific builder. Invalid addresses throw while applying the callback.
 
+### <span id="proxy-from-env">proxyFromEnv()</span>
+
+```typescript
+proxyFromEnv(enabled: boolean): this
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. Default: `false`. An explicit [`proxy()`](#proxy) still wins routing, and built network configurations report the effective value as `proxyFromEnv`. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 ## OutboundProxyBuilder
 
 Protocol selector passed to [`SandboxBuilder.proxy()`](#proxy).

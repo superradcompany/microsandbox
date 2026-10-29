@@ -401,6 +401,7 @@ struct NetworkConfigInput {
     tls: Option<TlsInput>,
     strict: Option<bool>,
     trust_host_cas: Option<bool>,
+    proxy_from_env: Option<bool>,
     #[serde(alias = "max_connections")]
     max_tcp_connections: Option<usize>,
     max_udp_connections: Option<usize>,
@@ -1752,6 +1753,9 @@ fn materialize_network_patch(
     if let Some(enabled) = input.trust_host_cas {
         patch = patch.trust_host_cas(enabled);
     }
+    if let Some(enabled) = input.proxy_from_env {
+        patch = patch.proxy_from_env(enabled);
+    }
     if let Some(max) = input.max_tcp_connections {
         patch = patch.max_tcp_connections(max);
     }
@@ -1862,6 +1866,8 @@ fn parse_duration_millis(value: &str) -> anyhow::Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_types::NetworkSpec;
+
     use super::*;
 
     #[test]
@@ -1894,6 +1900,47 @@ mod tests {
             .unwrap()
             .apply_to(&mut network);
         assert_eq!(network.max_inbound_tcp_connections, Some(0));
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn network_config_proxy_from_env_keeps_explicit_false() {
+        let mut network = NetworkSpec::default();
+        materialize_network_patch(None, None, None)
+            .unwrap()
+            .apply_to(&mut network);
+        assert!(!network.proxy_from_env);
+
+        for (value, expected) in [(true, true), (false, false)] {
+            let input: NetworkInput =
+                serde_json::from_value(serde_json::json!({ "proxy_from_env": value })).unwrap();
+            let patch = materialize_network_patch(Some(&input), None, None).unwrap();
+            // The sparse patch keeps an explicit false rather than dropping it.
+            assert_eq!(patch.proxy_from_env, Some(expected));
+            let mut network = NetworkSpec {
+                proxy_from_env: !expected,
+                ..Default::default()
+            };
+            patch.apply_to(&mut network);
+            assert_eq!(network.proxy_from_env, expected, "value {value}");
+        }
+
+        // Typed booleans only; a string is rejected (null follows the existing
+        // optional-input convention and means "omitted", never true).
+        assert!(
+            serde_json::from_value::<NetworkConfigInput>(
+                serde_json::json!({ "proxy_from_env": "true" })
+            )
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<NetworkConfigInput>(
+                serde_json::json!({ "proxy_from_env": null })
+            )
+            .unwrap()
+            .proxy_from_env,
+            None
+        );
     }
 
     #[cfg(feature = "net")]
@@ -2275,6 +2322,7 @@ network:
     verify_upstream: false
     block_quic: true
   trust_host_cas: true
+  proxy_from_env: true
   max_tcp_connections: 10
 secrets:
   TOKEN:
@@ -2300,6 +2348,7 @@ tls:
   bypass: ["higher.example.com"]
 strict: true
 trust_host_cas: false
+proxy_from_env: false
 max_tcp_connections: 20
 "#,
         );
@@ -2345,6 +2394,8 @@ ADD:
         assert_eq!(tls.block_quic, Some(true));
         assert_eq!(network.strict, Some(true));
         assert_eq!(network.trust_host_cas, Some(false));
+        // An explicit file-level false overrides a lower true.
+        assert_eq!(network.proxy_from_env, Some(false));
         assert_eq!(network.max_tcp_connections, Some(20));
 
         let secrets = input.secrets.unwrap();
@@ -2982,6 +3033,28 @@ secrets:
             microsandbox_types::SecretViolationAction::BlockAndTerminate
         );
         assert!(network.tls.is_none());
+    }
+
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn proxy_from_env_no_net_network_files_remain_unavailable() {
+        // Without networking the whole `network:` block stays unavailable, including
+        // both explicit true and explicit false for this flag.
+        for value in ["true", "false"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = write_config(
+                dir.path(),
+                "network.yaml",
+                &format!("image: alpine\nnetwork:\n  proxy_from_env: {value}\n"),
+            );
+            let error =
+                resolve(&SandboxConfigSources::default().source(SandboxConfigKind::Root, root))
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("networking enabled"),
+                "{value}: {error}"
+            );
+        }
     }
 
     #[cfg(not(feature = "net"))]

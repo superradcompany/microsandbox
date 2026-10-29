@@ -3,12 +3,12 @@
 use std::fmt;
 use std::net::{AddrParseError, SocketAddr};
 use std::str::FromStr;
-#[cfg(feature = "engine")]
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use super::http_connect::HttpConnectCredentials;
+#[cfg(feature = "engine")]
+use super::http_connect::ResolvedHttpConnectEndpoint;
 use super::socks::Socks5Credentials;
 
 //--------------------------------------------------------------------------------------------------
@@ -77,6 +77,18 @@ pub enum ResolvedOutboundProxy {
         address: SocketAddr,
         /// Optional resolved username/password authentication credentials.
         credentials: Option<super::socks::ResolvedSocks5Credentials>,
+    },
+
+    /// An HTTP CONNECT proxy endpoint held only by the network runtime.
+    ///
+    /// Runtime-only: this generic in-memory leaf transport is never serialized,
+    /// so the dial address and credentials cannot enter launch JSON, catalog
+    /// state, snapshots, or logs.
+    #[cfg(feature = "engine")]
+    #[serde(skip)]
+    HttpConnectEndpoint {
+        /// Runtime-only endpoint used for the CONNECT handshake.
+        endpoint: ResolvedHttpConnectEndpoint,
     },
 }
 
@@ -201,17 +213,17 @@ pub trait OutboundProxyConfig {
 
 #[cfg(feature = "engine")]
 impl ResolvedOutboundProxy {
-    /// Selects the configured proxy unless the host-side destination was
-    /// rewritten for a host-local connection.
-    pub(crate) fn select_for_destination(
-        configured: &Option<Arc<Self>>,
-        guest_dst: SocketAddr,
-        host_dst: SocketAddr,
-    ) -> Option<Arc<Self>> {
-        if guest_dst == host_dst {
-            configured.clone()
-        } else {
-            None
+    /// Returns the protocol this leaf speaks.
+    ///
+    /// Both HTTP CONNECT representations classify identically, so callers that
+    /// need a transport capability never inspect where the endpoint came from.
+    pub(crate) fn protocol(&self) -> OutboundProxyProtocol {
+        match self {
+            Self::HttpConnect { .. } | Self::HttpConnectEndpoint { .. } => {
+                OutboundProxyProtocol::HttpConnect
+            }
+            Self::Socks4 { .. } => OutboundProxyProtocol::Socks4,
+            Self::Socks5 { .. } => OutboundProxyProtocol::Socks5,
         }
     }
 }
@@ -274,5 +286,126 @@ impl FromStr for OutboundProxy {
                 Ok(OutboundProxyBuilder::new().socks5(address).build()?)
             }
         }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "engine"))]
+mod tests {
+    use serde_json::json;
+
+    use super::{OutboundProxyProtocol, ResolvedOutboundProxy};
+    use crate::proxy::http_connect::{ConnectAddress, ResolvedHttpConnectEndpoint};
+    use crate::proxy::{ResolvedHttpConnectCredentials, ResolvedSocks5Credentials};
+
+    /// Golden launch shapes for every configured leaf, independent of the
+    /// runtime CONNECT leaf. IPv4 and IPv6 addresses, credential presence and
+    /// omission are all frozen here.
+    #[test]
+    fn configured_resolved_variants_keep_their_wire_shapes() {
+        for (proxy, expected) in [
+            (
+                ResolvedOutboundProxy::HttpConnect {
+                    address: "127.0.0.1:3128".parse().unwrap(),
+                    credentials: None,
+                },
+                json!({"http_connect": {"address": "127.0.0.1:3128"}}),
+            ),
+            (
+                ResolvedOutboundProxy::HttpConnect {
+                    address: "[2001:db8::1]:3128".parse().unwrap(),
+                    credentials: Some(ResolvedHttpConnectCredentials::new("user", "pass")),
+                },
+                json!({
+                    "http_connect": {
+                        "address": "[2001:db8::1]:3128",
+                        "credentials": {"username": "user", "password": "pass"}
+                    }
+                }),
+            ),
+            (
+                ResolvedOutboundProxy::Socks4 {
+                    address: "127.0.0.1:1080".parse().unwrap(),
+                    user_id: None,
+                },
+                json!({"Socks4": {"address": "127.0.0.1:1080", "user_id": null}}),
+            ),
+            (
+                ResolvedOutboundProxy::Socks4 {
+                    address: "[::1]:1080".parse().unwrap(),
+                    user_id: Some("sandbox".to_string()),
+                },
+                json!({"Socks4": {"address": "[::1]:1080", "user_id": "sandbox"}}),
+            ),
+            (
+                ResolvedOutboundProxy::Socks5 {
+                    address: "127.0.0.1:1080".parse().unwrap(),
+                    credentials: None,
+                },
+                json!({"Socks5": {"address": "127.0.0.1:1080", "credentials": null}}),
+            ),
+            (
+                ResolvedOutboundProxy::Socks5 {
+                    address: "[2001:db8::2]:1080".parse().unwrap(),
+                    credentials: Some(ResolvedSocks5Credentials::new("user", "pass")),
+                },
+                json!({
+                    "Socks5": {
+                        "address": "[2001:db8::2]:1080",
+                        "credentials": {"username": "user", "password": "pass"}
+                    }
+                }),
+            ),
+        ] {
+            let serialized = serde_json::to_value(&proxy).unwrap();
+            assert_eq!(serialized, expected);
+
+            let restored: ResolvedOutboundProxy = serde_json::from_value(serialized).unwrap();
+            assert_eq!(restored, proxy);
+        }
+    }
+
+    /// Both CONNECT representations classify as HTTP CONNECT, so capability
+    /// checks never depend on where the endpoint came from.
+    #[test]
+    fn connect_representations_share_one_protocol_class() {
+        let runtime = ResolvedOutboundProxy::HttpConnectEndpoint {
+            endpoint: ResolvedHttpConnectEndpoint::new(
+                ConnectAddress::Host {
+                    name: "proxy.test".to_string(),
+                    port: 3128,
+                },
+                None,
+                None,
+            ),
+        };
+        for proxy in [
+            ResolvedOutboundProxy::HttpConnect {
+                address: "127.0.0.1:3128".parse().unwrap(),
+                credentials: None,
+            },
+            runtime,
+        ] {
+            assert_eq!(proxy.protocol(), OutboundProxyProtocol::HttpConnect);
+        }
+        assert_eq!(
+            ResolvedOutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: None,
+            }
+            .protocol(),
+            OutboundProxyProtocol::Socks4
+        );
+        assert_eq!(
+            ResolvedOutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
+            }
+            .protocol(),
+            OutboundProxyProtocol::Socks5
+        );
     }
 }

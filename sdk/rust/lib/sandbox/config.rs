@@ -356,6 +356,7 @@ impl SandboxConfigPatch {
             shell,
             workdir,
             outbound_proxy,
+            proxy_from_env,
             metrics_sample_interval_ms,
             disable_metrics_sample,
             // Resolved by OciSandboxDefaultsPatch::from_managed() and SandboxConfig::apply_rootfs_defaults().
@@ -403,6 +404,9 @@ impl SandboxConfigPatch {
         let mut network = NetworkSpecPatch::new();
         if let Some(outbound_proxy) = outbound_proxy {
             network.set_outbound_proxy_mut(outbound_proxy.clone());
+        }
+        if let Some(proxy_from_env) = proxy_from_env {
+            network.proxy_from_env_mut(*proxy_from_env);
         }
         let mut spec = SandboxSpecPatch::new()
             .resources(resources)
@@ -2908,6 +2912,18 @@ mod layering_tests {
                 true,
             ),
             (
+                "sandbox_defaults.proxy_from_env",
+                "spec.network.proxy_from_env",
+                json!(true),
+                false,
+            ),
+            (
+                "sandbox_defaults.proxy_from_env",
+                "spec.network.proxy_from_env",
+                json!(false),
+                false,
+            ),
+            (
                 "sandbox_defaults.metrics_sample_interval_ms",
                 "spec.runtime.metrics_sample_interval_ms",
                 json!(2500),
@@ -3101,6 +3117,7 @@ mod layering_tests {
             }
             "spec.runtime.log_level" => value(&patch.spec.runtime.log_level),
             "spec.network.outbound_proxy" => value(&patch.spec.network.outbound_proxy),
+            "spec.network.proxy_from_env" => value(&patch.spec.network.proxy_from_env),
             "spec.deployment_profile" => value(&patch.spec.deployment_profile),
             _ => panic!("unclassified field {path}"),
         }

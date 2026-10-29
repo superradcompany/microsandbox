@@ -24,6 +24,8 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfigPatch};
 pub(crate) struct BackendConfig {
     defaults: GlobalConfigPatch,
     managed: GlobalConfigPatch,
+    environment_defaults: GlobalConfigPatch,
+    environment_captured: bool,
     resolved: OnceLock<Arc<GlobalConfig>>,
     defaults_file: Option<PathBuf>,
     managed_file: Option<PathBuf>,
@@ -69,12 +71,31 @@ impl BackendConfig {
         Self {
             defaults,
             managed,
+            environment_defaults: GlobalConfigPatch::new(),
+            environment_captured: false,
             resolved: OnceLock::new(),
             defaults_file: None,
             managed_file: None,
             #[cfg(feature = "local")]
             legacy_metrics_registry: None,
         }
+    }
+
+    /// Capture the ordinary environment defaults once, between saved defaults and request options.
+    ///
+    /// The environment is read at most once per backend instance: cloning an already
+    /// captured backend keeps its snapshot, while a new backend sees a changed toggle.
+    /// Layering changes invalidate the cached resolved settings.
+    pub(crate) fn capture_environment_defaults(mut self) -> MicrosandboxResult<Self> {
+        if self.environment_captured {
+            return Ok(self);
+        }
+
+        self.environment_defaults = super::environment::capture_sandbox_defaults()?;
+        self.environment_captured = true;
+        self.resolved = OnceLock::new();
+
+        Ok(self)
     }
 
     /// Read the user config (honoring `MSB_CONFIG_PATH`) and system managed config.
@@ -110,8 +131,10 @@ impl BackendConfig {
     /// Runtime lookup and diagnostics also use this; callers enforce backend permission separately.
     pub(crate) fn prepare_for_local_backend(
         mut self,
-        mut builder: GlobalConfigPatch,
+        builder: GlobalConfigPatch,
     ) -> MicrosandboxResult<Self> {
+        self = self.capture_environment_defaults()?;
+        let mut builder = builder;
         let mut builtins = GlobalConfigPatch::from_present_fields(GlobalConfig::default());
         let mut runtime =
             GlobalConfigPatch::new().paths(PathsConfigPatch::from_env_or_sdk(&self.managed.paths)?);
@@ -239,15 +262,22 @@ impl BackendConfig {
 
     /// Supply the stored settings with administrator overrides already included.
     pub(crate) fn global_layers(&self) -> ConfigLayers<GlobalConfigPatch> {
-        ConfigLayers::new(self.defaults.clone(), self.managed.clone())
+        ConfigLayers::new(self.composed_defaults(), self.managed.clone())
     }
 
     /// Supply sandbox defaults and policy; the caller adds image metadata and request options.
     pub(crate) fn sandbox_layers(&self) -> ConfigLayers<SandboxConfigPatch> {
         ConfigLayers::new(
-            SandboxConfigPatch::from_defaults(&self.defaults),
+            SandboxConfigPatch::from_defaults(&self.composed_defaults()),
             SandboxConfigPatch::from_managed(&self.managed),
         )
+    }
+
+    /// Saved and backend defaults with the captured environment defaults above them.
+    fn composed_defaults(&self) -> GlobalConfigPatch {
+        self.defaults
+            .clone()
+            .overlay(self.environment_defaults.clone())
     }
 
     /// Managed overrides must be enforceable on the captured guest; the managed
@@ -341,7 +371,7 @@ impl Overlay for GlobalConfigPatch {
 mod tests {
     use super::*;
     use crate::config::SandboxDefaultsPatch;
-    use microsandbox_types::{RootDisk, SandboxResourcesPatch, SandboxSpecPatch};
+    use microsandbox_types::{NetworkSpecPatch, RootDisk, SandboxResourcesPatch, SandboxSpecPatch};
 
     #[test]
     fn backend_policy_replaces_inherits_and_clears_without_rerouting() {
@@ -697,6 +727,171 @@ mod tests {
             Some(std::path::absolute("environment-agentd").unwrap().as_path())
         );
         assert_eq!(enforced.resolved_config().paths.agentd, None);
+    }
+
+    /// The host toggle is an ordinary default: above saved/builder defaults and
+    /// below request options and managed policy. It is captured once per backend.
+    #[test]
+    fn proxy_from_env_toggle_layers_between_defaults_options_and_managed() {
+        const CHILD: &str = "MSB_LAYERING_PROXY_FROM_ENV_TEST";
+        const VARIABLE: &str = "MSB_PROXY_FROM_ENV";
+
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("proxy_from_env_toggle_layers_between_defaults_options_and_managed")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env_remove(VARIABLE)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _guard = crate::test_support::lock_env();
+        let previous = std::env::var_os(VARIABLE);
+        let _restore = scopeguard::guard(previous, |previous| {
+            // SAFETY: the shared lock remains held through restoration.
+            unsafe {
+                match previous {
+                    Some(value) => std::env::set_var(VARIABLE, value),
+                    None => std::env::remove_var(VARIABLE),
+                }
+            }
+        });
+
+        let sandbox = |config: &BackendConfig| {
+            config
+                .sandbox_layers()
+                .base(Default::default())
+                .options(Default::default())
+                .build()
+                .into_config()
+        };
+
+        // Absent toggle: no synthetic value is layered.
+        unsafe { std::env::remove_var(VARIABLE) };
+        let plain = BackendConfig::new(Default::default(), Default::default())
+            .capture_environment_defaults()
+            .unwrap();
+        assert_eq!(
+            plain.sandbox_layers().build().spec.network.proxy_from_env,
+            None
+        );
+        assert!(!sandbox(&plain).spec.network.proxy_from_env);
+
+        // Toggle beats ordinary saved defaults in both directions.
+        for (user, toggle, expected) in [(Some(true), "0", false), (Some(false), "1", true)] {
+            unsafe { std::env::set_var(VARIABLE, toggle) };
+            let mut defaults = SandboxDefaultsPatch::new();
+            defaults.proxy_from_env_mut(user.unwrap());
+            let user_patch = GlobalConfigPatch::new().sandbox_defaults(defaults);
+            let config = BackendConfig::new(user_patch, Default::default())
+                .capture_environment_defaults()
+                .unwrap();
+            assert_eq!(
+                sandbox(&config).spec.network.proxy_from_env,
+                expected,
+                "user={user:?}, toggle={toggle}"
+            );
+        }
+
+        // Ordinary defaults still apply when the toggle is absent.
+        unsafe { std::env::remove_var(VARIABLE) };
+        let ordinary = BackendConfig::new(
+            GlobalConfigPatch::new()
+                .sandbox_defaults(SandboxDefaultsPatch::new().proxy_from_env(true)),
+            Default::default(),
+        )
+        .capture_environment_defaults()
+        .unwrap();
+        assert!(sandbox(&ordinary).spec.network.proxy_from_env);
+
+        // Request options beat the toggle; managed policy beats both.
+        unsafe { std::env::set_var(VARIABLE, "1") };
+        let config = BackendConfig::new(Default::default(), Default::default())
+            .capture_environment_defaults()
+            .unwrap();
+        let with_options = config
+            .sandbox_layers()
+            .base(Default::default())
+            .options(SandboxConfigPatch::new().spec(
+                SandboxSpecPatch::new().network(NetworkSpecPatch::new().proxy_from_env(false)),
+            ))
+            .build()
+            .into_config();
+        assert!(!with_options.spec.network.proxy_from_env);
+
+        let managed = BackendConfig::new(
+            Default::default(),
+            GlobalConfigPatch::new()
+                .sandbox_defaults(SandboxDefaultsPatch::new().proxy_from_env(false)),
+        )
+        .capture_environment_defaults()
+        .unwrap();
+        assert!(!sandbox(&managed).spec.network.proxy_from_env);
+
+        // A captured backend keeps its snapshot; a fresh backend sees a change.
+        unsafe { std::env::set_var(VARIABLE, "1") };
+        let captured = BackendConfig::new(Default::default(), Default::default())
+            .capture_environment_defaults()
+            .unwrap();
+        let cloned = captured.clone();
+        unsafe { std::env::set_var(VARIABLE, "0") };
+        assert!(sandbox(&captured).spec.network.proxy_from_env);
+        assert!(sandbox(&cloned).spec.network.proxy_from_env);
+        assert!(
+            !sandbox(
+                &BackendConfig::new(Default::default(), Default::default())
+                    .capture_environment_defaults()
+                    .unwrap()
+            )
+            .spec
+            .network
+            .proxy_from_env
+        );
+
+        // Re-capturing an already captured backend does not reread the environment.
+        let recaptured = cloned.capture_environment_defaults().unwrap();
+        assert!(sandbox(&recaptured).spec.network.proxy_from_env);
+    }
+
+    /// Local backend preparation captures the toggle before any resolution work.
+    #[test]
+    fn invalid_proxy_from_env_toggle_fails_local_preparation() {
+        const CHILD: &str = "MSB_LAYERING_PROXY_FROM_ENV_INVALID_TEST";
+        const VARIABLE: &str = "MSB_PROXY_FROM_ENV";
+
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("invalid_proxy_from_env_toggle_fails_local_preparation")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env_remove(VARIABLE)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let _guard = crate::test_support::lock_env();
+        // SAFETY: environment-mutating tests hold the shared lock.
+        unsafe { std::env::set_var(VARIABLE, "definitely-not-a-toggle") };
+        let error = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .err()
+            .expect("invalid toggle must fail preparation");
+        assert!(matches!(error, MicrosandboxError::InvalidConfig(_)));
+        assert!(error.to_string().contains(VARIABLE));
+        unsafe { std::env::remove_var(VARIABLE) };
     }
 
     #[test]

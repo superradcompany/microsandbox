@@ -1896,6 +1896,7 @@ mod tests {
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),
                 outbound_proxy: None,
+                proxy_from_env: false,
                 metrics_sample_interval_ms: NonZero::new(750),
                 disable_metrics_sample: true,
             },

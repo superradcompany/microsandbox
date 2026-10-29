@@ -27,3 +27,7 @@ tokio = { version = "1.52", features = ["rt-multi-thread", "time"] }
 serde = "1"
 serde_json = "1"
 futures = "0.3"
+
+[dev-dependencies]
+# Dev-only: the single applied-value test embeds a Ruby VM in-process.
+magnus = { version = "0.8.2", features = ["embed"] }

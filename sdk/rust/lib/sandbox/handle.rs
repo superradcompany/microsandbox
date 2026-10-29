@@ -814,6 +814,23 @@ impl SandboxHandle {
         }
     }
 
+    /// Re-run local restart admission against the persisted desired configuration.
+    ///
+    /// Callers that stop and start outside [`SandboxHandle::restart_with`] use this
+    /// before their first destructive step. It reads the saved configuration, not
+    /// the running snapshot or a re-captured host toggle, and performs no write.
+    #[doc(hidden)]
+    pub async fn preflight_local_restart(&self) -> MicrosandboxResult<()> {
+        #[cfg(feature = "local")]
+        if let Some(local) = self.backend.as_local() {
+            let config = self.config()?;
+            crate::runtime::launch_contract::validate_runtime_config(&config, local.config())
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Stop and start this exact sandbox using default graceful options.
     pub async fn restart(&self) -> MicrosandboxResult<Sandbox> {
         self.restart_with(RestartOptions::default()).await
@@ -824,11 +841,19 @@ impl SandboxHandle {
         let current = loop {
             let current = self.refresh().await?;
             match restart_action(current.status_snapshot()) {
-                RestartAction::Start => break current,
+                RestartAction::Start => {
+                    // Start rechecks in `spawn_sandbox`; admit here so nothing is
+                    // mutated when the saved intent cannot be honored.
+                    current.preflight_local_restart().await?;
+                    break current;
+                }
                 RestartAction::Wait => {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 RestartAction::StopThenStart => {
+                    // Refuse before stopping a running VM when the saved intent needs
+                    // a capable runtime or build.
+                    current.preflight_local_restart().await?;
                     stop_for_convergence(&current, options.force, options.timeout).await?;
                     break current;
                 }

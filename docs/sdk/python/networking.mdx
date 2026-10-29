@@ -172,6 +172,14 @@ Default: `BLOCK_AND_LOG`.
 
 Sandbox-wide action when a secret placeholder reaches a disallowed host
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">proxy_from_env</span>
+
+`bool | None` · Default: `None`
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup <Tooltip tip="Ambient proxy discovery is not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+`None` inherits the configured default (built-in `False`); `True` and `False` are explicit and survive serialization. The top-level `Sandbox.create(proxy_from_env=...)` keyword overrides this field. An explicit outbound `proxy` still wins routing. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">http</span>
 
 `HttpConfig | None` · Default: `None`

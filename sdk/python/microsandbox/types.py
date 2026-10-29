@@ -1867,6 +1867,12 @@ class Network:
     secret_violation_action: ViolationAction = ViolationAction.BLOCK_AND_LOG
     http: HttpConfig | None = None
     """HTTP denial response settings."""
+    proxy_from_env: bool | None = field(default=None, kw_only=True)
+    """Discover an HTTP CONNECT proxy from the host environment at network startup.
+
+    ``None`` inherits the configured/global default (built-in ``False``); ``True``
+    and ``False`` are explicit per-sandbox intent. An explicit outbound proxy wins.
+    """
 
     @classmethod
     def none(cls) -> Network:
@@ -1931,6 +1937,8 @@ class Network:
             d["max_tcp_connections"] = self.max_connections
         elif self.max_tcp_connections is not None:
             d["max_tcp_connections"] = self.max_tcp_connections
+        if self.proxy_from_env is not None:
+            d["proxy_from_env"] = self.proxy_from_env
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
         if self.max_inbound_tcp_connections is not None:

@@ -1,20 +1,23 @@
 //! HTTP CONNECT outbound proxy builders and transport.
 
 use std::fmt;
+#[cfg(feature = "engine")]
+use std::future::Future;
 use std::net::AddrParseError;
 #[cfg(feature = "engine")]
 use std::{io, net::SocketAddr, time::Duration};
 
 #[cfg(feature = "engine")]
 use base64::Engine as _;
-use microsandbox_types::SecretSource;
+use microsandbox_types::{SecretSource, SecretValue};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "engine")]
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
+#[cfg(feature = "engine")]
 use zeroize::Zeroizing;
 
 use super::types::{
@@ -43,10 +46,67 @@ pub struct HttpConnectCredentials {
 
 /// Resolved HTTP CONNECT credentials held only by the network runtime.
 #[doc(hidden)]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResolvedHttpConnectCredentials {
-    username: String,
-    password: Zeroizing<String>,
+    username: SecretValue,
+    password: SecretValue,
+}
+
+/// Proxy address a runtime CONNECT endpoint dials.
+#[cfg(feature = "engine")]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum ConnectAddress {
+    /// A literal socket address, dialed without host name resolution.
+    Socket(SocketAddr),
+    /// A host name and port, resolved by the host OS resolver on dial.
+    Host {
+        /// Proxy host name or literal IP address.
+        name: String,
+        /// Proxy TCP port.
+        port: u16,
+    },
+}
+
+/// Optional outer deadline for one CONNECT exchange.
+///
+/// The budget is independent of the address form: a caller may give a socket or
+/// host address with or without one.
+#[cfg(feature = "engine")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConnectBudget {
+    /// Total time allowed for dial, request write/flush and response negotiation.
+    pub(super) total: Duration,
+    /// Message reported when the total budget expires.
+    pub(super) timeout_message: &'static str,
+}
+
+/// An HTTP CONNECT proxy endpoint held only by the network runtime.
+///
+/// This is a generic in-memory CONNECT leaf, not an environment-specific
+/// transport: configured and discovered callers share it, and the address form
+/// and optional outer budget stay independent. Never implements serialization:
+/// the dial address and any credentials stay in host memory and must not enter
+/// launch JSON, catalog state, snapshots, or logs.
+///
+/// ```compile_fail
+/// fn assert_serialize<T: serde::Serialize>() {}
+/// assert_serialize::<microsandbox_network::proxy::ResolvedHttpConnectEndpoint>();
+/// ```
+///
+/// ```compile_fail
+/// fn assert_deserialize<T: serde::de::DeserializeOwned>() {}
+/// assert_deserialize::<microsandbox_network::proxy::ResolvedHttpConnectEndpoint>();
+/// ```
+#[cfg(feature = "engine")]
+#[doc(hidden)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResolvedHttpConnectEndpoint {
+    /// Proxy address, either a socket or a host name resolved at dial time.
+    pub(super) address: ConnectAddress,
+    /// Optional resolved Basic authentication credentials.
+    pub(super) credentials: Option<ResolvedHttpConnectCredentials>,
+    /// Optional total budget for the whole exchange.
+    pub(super) budget: Option<ConnectBudget>,
 }
 
 /// Builds an HTTP CONNECT outbound proxy.
@@ -100,7 +160,7 @@ impl HttpConnectCredentials {
 
     /// Validates the durable username and the host-side password source.
     pub(super) fn validate(&self) -> Result<(), OutboundProxyBuildError> {
-        let reason = if let Err(reason) = validate_username(&self.username) {
+        let reason = if let Err(reason) = validate_username(self.username.as_str()) {
             reason
         } else {
             match &self.password {
@@ -120,21 +180,21 @@ impl ResolvedHttpConnectCredentials {
     #[doc(hidden)]
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
-            username: username.into(),
-            password: Zeroizing::new(password.into()),
+            username: SecretValue(username.into()),
+            password: SecretValue(password.into()),
         }
     }
 
     /// Returns the resolved authentication username.
     pub(super) fn username(&self) -> &str {
-        &self.username
+        self.username.0.as_str()
     }
 
     /// Validates the resolved username and password.
     pub(super) fn validate(&self) -> Result<(), OutboundProxyBuildError> {
-        let reason = if let Err(reason) = validate_username(&self.username) {
+        let reason = if let Err(reason) = validate_username(self.username.0.as_str()) {
             reason
-        } else if self.password.is_empty() {
+        } else if self.password.0.is_empty() {
             "password must not be empty"
         } else {
             return Ok(());
@@ -144,14 +204,117 @@ impl ResolvedHttpConnectCredentials {
 }
 
 #[cfg(feature = "engine")]
+impl ResolvedHttpConnectEndpoint {
+    /// Builds an endpoint from its address, credentials and optional budget.
+    pub(super) fn new(
+        address: ConnectAddress,
+        credentials: Option<ResolvedHttpConnectCredentials>,
+        budget: Option<ConnectBudget>,
+    ) -> Self {
+        Self {
+            address,
+            credentials,
+            budget,
+        }
+    }
+
+    /// Opens an HTTP CONNECT tunnel through this runtime endpoint.
+    ///
+    /// The address is dialed as given: a socket address directly, a host name
+    /// through the host OS resolver rather than guest DNS. The whole exchange -
+    /// dial, request write/flush and response negotiation - shares the
+    /// endpoint's optional outer budget, while response headers keep their
+    /// earlier 10-second subdeadline.
+    pub(crate) async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
+        HttpConnectProtocol::connect(
+            &self.address,
+            destination,
+            self.credentials.as_ref(),
+            self.budget,
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "engine")]
 impl HttpConnectProtocol {
-    /// Opens a TCP tunnel through the configured HTTP proxy.
+    /// Opens a TCP tunnel through an HTTP CONNECT proxy address.
+    ///
+    /// The address form decides only how the proxy is dialed; the optional
+    /// budget is independent of it. A socket address is dialed unchanged, so
+    /// IPv6 scope and flow metadata survive.
     pub(super) async fn connect(
-        address: SocketAddr,
+        address: &ConnectAddress,
         destination: SocketAddr,
         credentials: Option<&ResolvedHttpConnectCredentials>,
+        budget: Option<ConnectBudget>,
     ) -> io::Result<TcpStream> {
-        let mut stream = TcpStream::connect(address).await?;
+        match address {
+            ConnectAddress::Socket(socket) => {
+                Self::connect_with_dial(
+                    destination,
+                    credentials,
+                    budget,
+                    TcpStream::connect(*socket),
+                )
+                .await
+            }
+            ConnectAddress::Host { name, port } => {
+                Self::connect_with_dial(
+                    destination,
+                    credentials,
+                    budget,
+                    TcpStream::connect((name.as_str(), *port)),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Runs one CONNECT exchange around an injected dial future.
+    ///
+    /// With a budget, the timer starts before the dial is polled and wraps dial,
+    /// request write/flush and response negotiation together, so a stalled
+    /// resolver, connect, write or flush cannot outlive it. Without a budget the
+    /// configured transport keeps its existing independent deadlines.
+    async fn connect_with_dial<S, F>(
+        destination: SocketAddr,
+        credentials: Option<&ResolvedHttpConnectCredentials>,
+        budget: Option<ConnectBudget>,
+        dial: F,
+    ) -> io::Result<S>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+        F: Future<Output = io::Result<S>>,
+    {
+        let exchange = async {
+            let stream = dial.await?;
+            Self::negotiate(stream, destination, credentials).await
+        };
+
+        let Some(budget) = budget else {
+            return exchange.await;
+        };
+
+        timeout(budget.total, exchange)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, budget.timeout_message))?
+    }
+
+    /// Performs the HTTP CONNECT request/response exchange over an open proxy connection.
+    ///
+    /// The 10-second response-header deadline starts after the request is written
+    /// and flushed, so it also bounds a proxy that accepts the connection and then
+    /// stalls before replying. Callers that add an outer budget keep this subdeadline
+    /// as the earlier deadline.
+    async fn negotiate<S>(
+        mut stream: S,
+        destination: SocketAddr,
+        credentials: Option<&ResolvedHttpConnectCredentials>,
+    ) -> io::Result<S>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
         let authority = destination.to_string();
         let request = Self::build_connect_request(&authority, credentials);
 
@@ -206,8 +369,8 @@ impl HttpConnectProtocol {
         let encoded = credentials.map(|credentials| {
             let userinfo = Zeroizing::new(format!(
                 "{}:{}",
-                credentials.username,
-                credentials.password.as_str()
+                credentials.username.0.as_str(),
+                credentials.password.0.as_str()
             ));
             Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(userinfo.as_bytes()))
         });
@@ -238,7 +401,10 @@ impl HttpConnectProtocol {
         request
     }
 
-    async fn read_connect_response_status(stream: &mut TcpStream) -> io::Result<u16> {
+    async fn read_connect_response_status<S>(stream: &mut S) -> io::Result<u16>
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut total_header_bytes = 0;
 
         loop {
@@ -341,6 +507,16 @@ impl HttpConnectProtocol {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl PartialEq for ResolvedHttpConnectCredentials {
+    fn eq(&self, other: &Self) -> bool {
+        self.username.0 == other.username.0 && self.password.0 == other.password.0
+    }
+}
+
+// The shared wrapper does not implement `Eq`, so the derived marker cannot be
+// used; equality is still by value over the two strings.
+impl Eq for ResolvedHttpConnectCredentials {}
+
 impl OutboundProxyConfig for HttpConnectProxyBuilder {
     fn build(self) -> Result<OutboundProxy, OutboundProxyBuildError> {
         let address = self.address.parse().map_err(|source: AddrParseError| {
@@ -364,9 +540,29 @@ impl OutboundProxyConfig for HttpConnectProxyBuilder {
 
 impl fmt::Debug for ResolvedHttpConnectCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Both halves of the Basic credential pair are redacted: a username can
+        // itself be a token, and the field is environment-discovered rather than
+        // durable configuration.
         f.debug_struct("ResolvedHttpConnectCredentials")
-            .field("username", &self.username)
+            .field("username", &"[REDACTED]")
             .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "engine")]
+impl fmt::Debug for ResolvedHttpConnectEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The dial address never renders, for either address form. Only the
+        // nonsecret port is kept.
+        let port = match &self.address {
+            ConnectAddress::Socket(address) => address.port(),
+            ConnectAddress::Host { port, .. } => *port,
+        };
+        f.debug_struct("ResolvedHttpConnectEndpoint")
+            .field("address", &"[REDACTED]")
+            .field("port", &port)
+            .field("credentials", &self.credentials)
             .finish()
     }
 }
@@ -396,12 +592,12 @@ fn validate_username(username: &str) -> Result<(), &'static str> {
 
 #[cfg(all(test, feature = "engine"))]
 mod tests {
-    use std::{future::Future, io, net::SocketAddr, time::Duration};
+    use std::{future::Future, io, net::SocketAddr, pin::Pin, time::Duration};
 
     use base64::Engine as _;
-    use microsandbox_types::SecretSource;
+    use microsandbox_types::{SecretSource, SecretValue};
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncReadExt, AsyncWriteExt, DuplexStream},
         net::{TcpListener, TcpStream},
         sync::oneshot,
         task::JoinHandle,
@@ -409,9 +605,10 @@ mod tests {
     };
 
     use super::{
-        CONNECT_RESPONSE_HEADER_LIMIT, CONNECT_RESPONSE_TIMEOUT, HttpConnectProtocol,
-        ResolvedHttpConnectCredentials,
+        CONNECT_RESPONSE_HEADER_LIMIT, CONNECT_RESPONSE_TIMEOUT, ConnectAddress, ConnectBudget,
+        HttpConnectProtocol, ResolvedHttpConnectCredentials, ResolvedHttpConnectEndpoint,
     };
+    use crate::config::{NetworkConfig, ResolvedNetworkConfig};
     use crate::proxy::{
         OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
         ResolvedOutboundProxy,
@@ -948,7 +1145,13 @@ mod tests {
             bounded(release_rx).await.unwrap();
         });
 
-        let result = bounded(HttpConnectProtocol::connect(address, destination(), None)).await;
+        let result = bounded(HttpConnectProtocol::connect(
+            &ConnectAddress::Socket(address),
+            destination(),
+            None,
+            None,
+        ))
+        .await;
 
         let request = bounded(request_rx).await.unwrap();
         release_tx.send(()).unwrap();
@@ -977,9 +1180,14 @@ mod tests {
             bounded(stream.write_all(b"pong")).await.unwrap();
         });
 
-        let mut stream = bounded(HttpConnectProtocol::connect(address, destination(), None))
-            .await
-            .unwrap();
+        let mut stream = bounded(HttpConnectProtocol::connect(
+            &ConnectAddress::Socket(address),
+            destination(),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
         assert_eq!(stream.peer_addr().unwrap(), address);
         assert_eq!(
             bounded(request_rx).await.unwrap(),
@@ -1039,8 +1247,13 @@ mod tests {
                 }
             });
 
-            let mut handshake =
-                Box::pin(HttpConnectProtocol::connect(address, destination(), None));
+            let proxy_address = ConnectAddress::Socket(address);
+            let mut handshake = Box::pin(HttpConnectProtocol::connect(
+                &proxy_address,
+                destination(),
+                None,
+                None,
+            ));
 
             let request = tokio::select! {
                 biased;
@@ -1080,8 +1293,13 @@ mod tests {
             let (address, request_rx, written_rx, task) =
                 spawn_stalled_proxy(response.to_vec()).await;
             let started = Instant::now();
-            let mut handshake =
-                Box::pin(HttpConnectProtocol::connect(address, destination(), None));
+            let proxy_address = ConnectAddress::Socket(address);
+            let mut handshake = Box::pin(HttpConnectProtocol::connect(
+                &proxy_address,
+                destination(),
+                None,
+                None,
+            ));
 
             let request = tokio::select! {
                 biased;
@@ -1117,7 +1335,15 @@ mod tests {
     #[tokio::test]
     async fn cancelling_connect_closes_proxy_socket() {
         let (address, request_rx, written_rx, task) = spawn_stalled_proxy(Vec::new()).await;
-        let handshake = tokio::spawn(HttpConnectProtocol::connect(address, destination(), None));
+        let handshake = tokio::spawn(async move {
+            HttpConnectProtocol::connect(
+                &ConnectAddress::Socket(address),
+                destination(),
+                None,
+                None,
+            )
+            .await
+        });
 
         let request = bounded(request_rx).await.unwrap();
         assert_eq!(request, expected_request(destination()));
@@ -1256,15 +1482,117 @@ mod tests {
     }
 
     #[test]
-    fn resolved_credentials_never_render_the_password() {
-        let credentials = ResolvedHttpConnectCredentials::new("user", "hunter2");
+    fn resolved_credentials_redact_both_halves() {
+        let credentials =
+            ResolvedHttpConnectCredentials::new("username-sentinel", "password-sentinel");
         let debug = format!("{credentials:?}");
-        assert!(debug.contains("user"), "username missing from debug output");
-        assert!(debug.contains("[REDACTED]"), "password was not redacted");
         assert!(
-            !debug.contains("hunter2"),
-            "password appeared in debug output"
+            debug.contains("[REDACTED]"),
+            "credentials were not redacted"
         );
+        for sentinel in ["username-sentinel", "password-sentinel"] {
+            assert!(!debug.contains(sentinel), "{sentinel} leaked: {debug}");
+        }
+        // The derived Basic token must not appear either.
+        let token =
+            base64::engine::general_purpose::STANDARD.encode("username-sentinel:password-sentinel");
+        assert!(!debug.contains(&token), "token leaked: {debug}");
+    }
+
+    #[test]
+    fn resolved_credential_fields_use_the_shared_secret_wrapper() {
+        let credentials =
+            ResolvedHttpConnectCredentials::new("field-user-sentinel", "field-pass-sentinel");
+
+        // Typing each field as `&SecretValue` proves both retained halves use the
+        // shared wrapper, whose Debug output is exactly `[redacted]`.
+        let fields: [(&SecretValue, &str); 2] = [
+            (&credentials.username, "field-user-sentinel"),
+            (&credentials.password, "field-pass-sentinel"),
+        ];
+        for (field, sentinel) in fields {
+            let debug = format!("{field:?}");
+            assert_eq!(debug, "[redacted]");
+            assert!(!debug.contains(sentinel), "{sentinel} leaked: {debug}");
+        }
+    }
+
+    #[test]
+    fn resolved_credential_equality_compares_values() {
+        let credentials = ResolvedHttpConnectCredentials::new(
+            String::from("equality-user"),
+            String::from("equality-pass"),
+        );
+
+        // Equal strings in separate allocations compare equal, and so does a clone.
+        assert_eq!(
+            credentials,
+            ResolvedHttpConnectCredentials::new(
+                String::from("equality-user"),
+                String::from("equality-pass"),
+            )
+        );
+        assert_eq!(credentials, credentials.clone());
+
+        // Changing either half compares unequal.
+        assert_ne!(
+            credentials,
+            ResolvedHttpConnectCredentials::new("other-user", "equality-pass")
+        );
+        assert_ne!(
+            credentials,
+            ResolvedHttpConnectCredentials::new("equality-user", "other-pass")
+        );
+    }
+
+    #[test]
+    fn resolved_credentials_keep_their_plaintext_serde_shape() {
+        for (username, password) in [
+            ("", ""),
+            ("us\u{e9}r", "p\u{e4}ssw\u{f6}rd"),
+            ("user", "p@ss:word/with+punctuation= and space"),
+        ] {
+            let credentials = ResolvedHttpConnectCredentials::new(username, password);
+
+            // The wrapper serializes transparently, so the launch object keeps its
+            // exact plaintext member values.
+            let serialized = serde_json::to_value(&credentials).unwrap();
+            assert_eq!(
+                serialized,
+                serde_json::json!({"username": username, "password": password})
+            );
+
+            // An independently written document decodes to equal credentials.
+            let independent = format!(
+                r#"{{"username":{},"password":{}}}"#,
+                serde_json::to_string(username).unwrap(),
+                serde_json::to_string(password).unwrap()
+            );
+            let restored: ResolvedHttpConnectCredentials =
+                serde_json::from_str(&independent).unwrap();
+            assert_eq!(restored, credentials);
+        }
+
+        // Decoding performs no new validation; the unchanged validation seam still
+        // rejects the empty password that an older writer could have produced.
+        let empty: ResolvedHttpConnectCredentials =
+            serde_json::from_str(r#"{"username":"","password":""}"#).unwrap();
+        assert!(empty.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_credentials_constructor_moves_both_strings() {
+        let username = String::from("moved-user");
+        let password = String::from("moved-pass");
+        let username_pointer = username.as_ptr();
+        let password_pointer = password.as_ptr();
+
+        let credentials = ResolvedHttpConnectCredentials::new(username, password);
+
+        // The public constructor keeps its `impl Into<String>` signature and adopts
+        // the caller's allocations instead of copying them.
+        assert_eq!(credentials.username.0.as_ptr(), username_pointer);
+        assert_eq!(credentials.password.0.as_ptr(), password_pointer);
     }
 
     #[test]
@@ -1329,6 +1657,85 @@ mod tests {
         assert_eq!(restored, resolved);
     }
 
+    /// A runtime CONNECT endpoint is a leaf transport, never durable state:
+    /// serializing it, or a launch config holding it, must fail rather than drop
+    /// the proxy or serialize a secret.
+    #[test]
+    fn endpoint_variant_refuses_serialization() {
+        let endpoint = runtime_endpoint(
+            ConnectAddress::Host {
+                name: "proxy.test".to_string(),
+                port: 3128,
+            },
+            Some(ResolvedHttpConnectCredentials::new(
+                "endpoint-user-sentinel",
+                "endpoint-password-sentinel",
+            )),
+        );
+        let resolved = ResolvedOutboundProxy::HttpConnectEndpoint {
+            endpoint: endpoint.clone(),
+        };
+
+        let sentinels = [
+            "proxy.test",
+            "endpoint-user-sentinel",
+            "endpoint-password-sentinel",
+        ];
+
+        let error =
+            serde_json::to_value(&resolved).expect_err("runtime endpoints must not serialize");
+        for sentinel in sentinels {
+            assert!(!error.to_string().contains(sentinel), "{error}");
+        }
+
+        // A launch config holding the runtime leaf also refuses instead of
+        // omitting the proxy field or writing the secret.
+        let config = ResolvedNetworkConfig::new(NetworkConfig::default(), Some(resolved));
+        let error = serde_json::to_value(&config)
+            .expect_err("configs holding runtime endpoints must not serialize");
+        for sentinel in sentinels {
+            assert!(!error.to_string().contains(sentinel), "{error}");
+        }
+
+        // Debug output reaches no address or credential value, for either
+        // address form; only the nonsecret port may stay.
+        for endpoint in [
+            endpoint,
+            runtime_endpoint(
+                ConnectAddress::Socket("127.0.0.1:3128".parse().unwrap()),
+                None,
+            ),
+        ] {
+            let debug = format!("{endpoint:?}");
+            for sentinel in ["proxy.test", "127.0.0.1", "endpoint-user-sentinel"] {
+                assert!(!debug.contains(sentinel), "{sentinel} leaked: {debug}");
+            }
+            assert!(debug.contains("3128"), "nonsecret port may stay: {debug}");
+        }
+
+        // Neither the current runtime key nor the retired origin-named spelling
+        // decodes back into a runtime leaf.
+        for key in ["HttpConnectEndpoint", "HttpConnectFromEnv"] {
+            let value = serde_json::json!({
+                key: {"address": {"Host": {"name": "proxy.test", "port": 3128}}}
+            });
+            assert!(
+                serde_json::from_value::<ResolvedOutboundProxy>(value).is_err(),
+                "{key} must not decode into a runtime leaf"
+            );
+        }
+
+        // Configured decoding is unchanged.
+        let restored: ResolvedOutboundProxy = serde_json::from_value(
+            serde_json::json!({"http_connect": {"address": "127.0.0.1:3128"}}),
+        )
+        .unwrap();
+        assert!(matches!(
+            restored,
+            ResolvedOutboundProxy::HttpConnect { .. }
+        ));
+    }
+
     #[test]
     fn durable_http_connect_credentials_round_trip_without_the_secret() {
         let proxy = OutboundProxyBuilder::new()
@@ -1365,6 +1772,369 @@ mod tests {
         );
     }
 
+    /// Runtime endpoint with a 30-second outer budget.
+    fn runtime_endpoint(
+        address: ConnectAddress,
+        credentials: Option<ResolvedHttpConnectCredentials>,
+    ) -> ResolvedHttpConnectEndpoint {
+        ResolvedHttpConnectEndpoint::new(address, credentials, Some(thirty_second_budget()))
+    }
+
+    fn thirty_second_budget() -> ConnectBudget {
+        ConnectBudget {
+            total: Duration::from_secs(30),
+            timeout_message: "test CONNECT exchange did not complete within 30 seconds",
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_connects_with_the_numeric_guest_authority() {
+        let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+        let task = tokio::spawn(async move {
+            let mut stream = accept_and_capture(listener, request_tx).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\n\r\ntail")
+                .await
+                .unwrap();
+        });
+
+        let endpoint = runtime_endpoint(
+            ConnectAddress::Host {
+                name: address.ip().to_string(),
+                port: address.port(),
+            },
+            None,
+        );
+        let mut stream = bounded(endpoint.connect(destination())).await.unwrap();
+        assert_eq!(
+            bounded(request_rx).await.unwrap(),
+            expected_request(destination()),
+            "CONNECT must keep the numeric guest destination authority"
+        );
+
+        let mut tail = [0; 4];
+        stream.read_exact(&mut tail).await.unwrap();
+        assert_eq!(&tail, b"tail");
+        join_proxy(task).await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_sends_exactly_one_basic_header() {
+        for (username, password, token) in [
+            ("user", "pass", "dXNlcjpwYXNz"),
+            // `http://@proxy` keeps the empty pair, which encodes to `Og==`.
+            ("", "", "Og=="),
+        ] {
+            let credentials = ResolvedHttpConnectCredentials::new(username, password);
+            let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+            let task = tokio::spawn(async move {
+                let mut stream = accept_and_capture(listener, request_tx).await;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            });
+
+            let endpoint = runtime_endpoint(
+                ConnectAddress::Host {
+                    name: address.ip().to_string(),
+                    port: address.port(),
+                },
+                Some(credentials),
+            );
+            let result = bounded(endpoint.connect(destination())).await;
+            let request = bounded(request_rx).await.unwrap();
+            result.expect("CONNECT tunnel");
+            join_proxy(task).await;
+
+            let expected = format!("Proxy-Authorization: Basic {token}\r\n").into_bytes();
+            assert_eq!(
+                request
+                    .windows(expected.len())
+                    .filter(|window| *window == expected.as_slice())
+                    .count(),
+                1,
+                "{request:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_resolves_its_hostname_on_dial() {
+        let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+        let task = tokio::spawn(async move {
+            let mut stream = accept_and_capture(listener, request_tx).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        });
+
+        // `localhost` must resolve through the host resolver rather than being
+        // treated as a numeric guest destination.
+        let endpoint = ResolvedHttpConnectEndpoint::new(
+            ConnectAddress::Host {
+                name: "localhost".to_string(),
+                port: address.port(),
+            },
+            None,
+            None,
+        );
+        let result = bounded(endpoint.connect(destination())).await;
+        let request = bounded(request_rx).await.unwrap();
+        result.expect("hostname dial must reach the loopback proxy");
+        assert_eq!(request, expected_request(destination()));
+        join_proxy(task).await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_reports_proxy_rejection_without_direct_fallback() {
+        let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+        let task = tokio::spawn(async move {
+            let mut stream = accept_and_capture(listener, request_tx).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
+                .await;
+        });
+
+        let endpoint = runtime_endpoint(ConnectAddress::Socket(address), None);
+        let error = bounded(endpoint.connect(destination())).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("requires authentication"));
+        let request = bounded(request_rx).await.unwrap();
+        assert_eq!(request, expected_request(destination()));
+        join_proxy(task).await;
+    }
+
+    /// The optional outer budget is independent of the dial address form: the
+    /// socket form also tunnels while a budget is set. The Socket/no-budget and
+    /// Host/budget combinations are already covered by `exchange` and
+    /// `endpoint_connects_with_the_numeric_guest_authority`.
+    #[tokio::test]
+    async fn socket_address_with_a_budget_tunnels() {
+        let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+        let task = tokio::spawn(async move {
+            let mut stream = accept_and_capture(listener, request_tx).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        });
+
+        let endpoint = ResolvedHttpConnectEndpoint::new(
+            ConnectAddress::Socket(address),
+            None,
+            Some(thirty_second_budget()),
+        );
+
+        let result = bounded(endpoint.connect(destination())).await;
+        let request = bounded(request_rx).await.unwrap();
+        result.expect("socket address with a budget must tunnel");
+        assert_eq!(request, expected_request(destination()));
+        join_proxy(task).await;
+    }
+
+    /// The host form also tunnels without an outer budget, so neither the
+    /// address form nor the budget implies the other.
+    #[tokio::test]
+    async fn host_address_without_a_budget_tunnels() {
+        let (listener, address, request_tx, request_rx) = bind_mock_proxy().await;
+        let task = tokio::spawn(async move {
+            let mut stream = accept_and_capture(listener, request_tx).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        });
+
+        let endpoint = ResolvedHttpConnectEndpoint::new(
+            ConnectAddress::Host {
+                name: address.ip().to_string(),
+                port: address.port(),
+            },
+            None,
+            None,
+        );
+
+        let result = bounded(endpoint.connect(destination())).await;
+        let request = bounded(request_rx).await.unwrap();
+        result.expect("host address without a budget must tunnel");
+        assert_eq!(request, expected_request(destination()));
+        join_proxy(task).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_pending_dial_fails_at_the_outer_budget() {
+        let started = Instant::now();
+        let error = HttpConnectProtocol::connect_with_dial(
+            destination(),
+            None,
+            Some(thirty_second_budget()),
+            std::future::pending::<io::Result<TcpStream>>(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("within 30 seconds"), "{error}");
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_without_a_budget_keeps_a_pending_dial_pending() {
+        let mut connect = Box::pin(HttpConnectProtocol::connect_with_dial(
+            destination(),
+            None,
+            None,
+            std::future::pending::<io::Result<TcpStream>>(),
+        ));
+        assert!(futures::poll!(&mut connect).is_pending());
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            futures::poll!(&mut connect).is_pending(),
+            "configured CONNECT must not acquire an outer deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_stalled_headers_fail_at_the_header_subdeadline() {
+        // In-memory streams keep this timing test deterministic: an injected dial
+        // completes immediately and the peer never answers. The 10-second header
+        // subdeadline is the earlier deadline with or without an outer budget.
+        for budget in [Some(thirty_second_budget()), None] {
+            let (client, mut peer) = tokio::io::duplex(4096);
+            let mut connect = Box::pin(HttpConnectProtocol::connect_with_dial(
+                destination(),
+                None,
+                budget,
+                async move { Ok(client) },
+            ));
+
+            drive_connect_request(&mut connect, &mut peer).await;
+
+            let started = Instant::now();
+            let error = virtual_bounded(&mut connect).await.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(
+                error.to_string().contains("within 10 seconds"),
+                "expected the header subdeadline, got {error}"
+            );
+            assert_eq!(started.elapsed(), super::CONNECT_RESPONSE_TIMEOUT);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_slow_dial_leaves_only_the_remaining_outer_budget() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let dial = async move {
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            Ok(client)
+        };
+        let mut connect = Box::pin(HttpConnectProtocol::connect_with_dial(
+            destination(),
+            None,
+            Some(thirty_second_budget()),
+            dial,
+        ));
+
+        drive_connect_request(&mut connect, &mut peer).await;
+
+        let started = Instant::now();
+        let error = virtual_bounded(&mut connect).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            error.to_string().contains("within 30 seconds"),
+            "the outer budget must win over the 10-second header subdeadline: {error}"
+        );
+        // 25 seconds of dial leaves only the remaining 5 seconds of the budget,
+        // never the 35 seconds independent deadlines would allow.
+        assert_eq!(started.elapsed(), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_stalled_write_is_bounded_only_when_a_budget_exists() {
+        // A tiny duplex buffer blocks the request write; the peer never reads it.
+        let (client, _peer) = tokio::io::duplex(8);
+        let mut bounded_connect = Box::pin(HttpConnectProtocol::connect_with_dial(
+            destination(),
+            None,
+            Some(thirty_second_budget()),
+            async move { Ok(client) },
+        ));
+        assert!(futures::poll!(&mut bounded_connect).is_pending());
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let error = virtual_bounded(&mut bounded_connect).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("within 30 seconds"), "{error}");
+
+        let (client, _peer) = tokio::io::duplex(8);
+        let mut unbounded_connect = Box::pin(HttpConnectProtocol::connect_with_dial(
+            destination(),
+            None,
+            None,
+            async move { Ok(client) },
+        ));
+        assert!(futures::poll!(&mut unbounded_connect).is_pending());
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            futures::poll!(&mut unbounded_connect).is_pending(),
+            "a stalled configured write must not be timed out"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_completes_within_both_budgets() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let dial = async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok(client)
+        };
+        let responder = async {
+            let mut request = Vec::new();
+            bounded(peer.read_buf(&mut request)).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            peer.write_all(b"HTTP/1.1 200 OK\r\n\r\ntail")
+                .await
+                .unwrap();
+            request
+        };
+
+        let (result, request) = tokio::join!(
+            virtual_bounded(HttpConnectProtocol::connect_with_dial(
+                destination(),
+                None,
+                Some(thirty_second_budget()),
+                dial,
+            )),
+            responder
+        );
+        assert_eq!(request, expected_request(destination()));
+        let mut stream = result.unwrap();
+        let mut tail = [0; 4];
+        stream.read_exact(&mut tail).await.unwrap();
+        assert_eq!(&tail, b"tail");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn endpoint_without_a_budget_allows_a_dial_beyond_thirty_seconds() {
+        let (client, mut peer) = tokio::io::duplex(4096);
+        let dial = async move {
+            tokio::time::sleep(Duration::from_secs(35)).await;
+            Ok(client)
+        };
+        let responder = async {
+            let mut request = Vec::new();
+            // The dial alone takes 35 virtual seconds, so the fixture watchdog
+            // must use the virtual-time bound rather than the 5-second default.
+            virtual_bounded(peer.read_buf(&mut request)).await.unwrap();
+            peer.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+            request
+        };
+
+        let started = Instant::now();
+        let (result, request) = tokio::join!(
+            virtual_bounded(HttpConnectProtocol::connect_with_dial(
+                destination(),
+                None,
+                None,
+                dial,
+            )),
+            responder
+        );
+        assert_eq!(request, expected_request(destination()));
+        result.expect("configured dial has no outer 30-second budget");
+        assert_eq!(started.elapsed(), Duration::from_secs(35));
+    }
+
     async fn assert_success(response: Vec<u8>, label: &str, tail: &[u8]) {
         let (result, request) = exchange(response, destination()).await;
 
@@ -1389,7 +2159,13 @@ mod tests {
         destination: SocketAddr,
     ) -> (io::Result<TcpStream>, Vec<u8>) {
         let (address, request_rx, task) = spawn_mock_proxy(response).await;
-        let result = bounded(HttpConnectProtocol::connect(address, destination, None)).await;
+        let result = bounded(HttpConnectProtocol::connect(
+            &ConnectAddress::Socket(address),
+            destination,
+            None,
+            None,
+        ))
+        .await;
 
         let request = bounded(request_rx).await.expect("request capture stalled");
         join_proxy(task).await;
@@ -1406,9 +2182,10 @@ mod tests {
     ) -> (io::Result<TcpStream>, Vec<u8>) {
         let (address, request_rx, task) = spawn_mock_proxy(response).await;
         let result = bounded(HttpConnectProtocol::connect(
-            address,
+            &ConnectAddress::Socket(address),
             destination,
             Some(credentials),
+            None,
         ))
         .await;
 
@@ -1502,6 +2279,41 @@ mod tests {
         timeout(TEST_TIMEOUT, future)
             .await
             .expect("operation did not complete before TEST_TIMEOUT")
+    }
+
+    /// Awaits a fixture future under a virtual-time bound generous enough for the
+    /// 30-second outer budget used by discovered-style endpoints, so paused-time
+    /// tests cannot trip the 5-second fixture watchdog before the real deadline
+    /// under test.
+    async fn virtual_bounded<F: Future>(future: F) -> F::Output {
+        timeout(Duration::from_secs(60), future)
+            .await
+            .expect("operation did not complete before the virtual-test deadline")
+    }
+
+    /// Drives a pinned CONNECT future until its request is written and flushed, then
+    /// pins it in the header read so the subdeadline is registered before time moves.
+    ///
+    /// Never advances virtual time: it only yields between polls of the future and the
+    /// peer read, so each scenario keeps control of its own deadlines.
+    async fn drive_connect_request<S>(
+        connect: &mut Pin<Box<impl Future<Output = io::Result<S>>>>,
+        peer: &mut DuplexStream,
+    ) where
+        S: std::fmt::Debug,
+    {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = tokio::select! {
+                biased;
+                result = &mut *connect => panic!("completed before the request was written: {result:?}"),
+                read = peer.read_buf(&mut request) => read.unwrap(),
+            };
+            assert!(read > 0, "proxy connection closed before the request");
+        }
+
+        assert_eq!(request, expected_request(destination()));
+        assert!(futures::poll!(&mut *connect).is_pending());
     }
 
     /// Binds a loopback listener for a mock proxy and returns its address plus

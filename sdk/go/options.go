@@ -76,6 +76,10 @@ type SandboxConfig struct {
 	Vsock               []VsockRoute      // host local IPC → guest host-CID port
 	Network             *NetworkConfig
 	Proxy               *OutboundProxy
+	// ProxyFromEnv discovers an HTTP CONNECT proxy from the host environment at
+	// network startup. Nil inherits the configured default (built-in false);
+	// explicit false is an override. An explicit Proxy still wins routing.
+	ProxyFromEnv *bool
 	Secrets             []SecretEntry
 	Patches             []PatchConfig
 	Volumes             map[string]MountConfig // guest path → mount config
@@ -1065,6 +1069,15 @@ func WithProxy(proxy *OutboundProxy) SandboxOption {
 	return func(o *SandboxConfig) { o.Proxy = proxy }
 }
 
+// WithProxyFromEnv discovers an HTTP CONNECT proxy from the host environment at
+// each network-engine startup. Nil (the option not applied) inherits the
+// configured default; the explicit value is preserved, including false. An
+// explicit WithProxy still wins routing without clearing this flag.
+func WithProxyFromEnv(enabled bool) SandboxOption {
+	value := enabled
+	return func(o *SandboxConfig) { o.ProxyFromEnv = &value }
+}
+
 // WithSecrets appends credential secrets to the sandbox. Secrets never enter
 // the VM; the network proxy substitutes them at the transport layer.
 func WithSecrets(secrets ...SecretEntry) SandboxOption {
@@ -1266,6 +1279,10 @@ type NetworkConfig struct {
 
 	// HTTP configures HTTP denial responses.
 	HTTP *HTTPConfig
+
+	// ProxyFromEnv discovers an HTTP CONNECT proxy from the host environment.
+	// Nil inherits; true and false are explicit per-sandbox intent.
+	ProxyFromEnv *bool
 }
 
 // HTTPDenyResponseFormat selects the denial response contract.

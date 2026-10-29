@@ -385,6 +385,7 @@ type NetworkConfig struct {
     RateLimiter             *NetworkRateLimiterConfig
     SecretViolationAction   ViolationAction
     TrustHostCAs            *bool
+    ProxyFromEnv            *bool
     HTTP                     *HTTPConfig
 }
 ```
@@ -424,6 +425,14 @@ For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRest
 `WithRestoreTCPAcceptQueueSize` (or `RestoreConfig.TCPAcceptQueueSize`) sets the accept-queue depth for the listeners a restored child publishes.
 
 Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.
+
+#### ProxyFromEnv
+
+```go
+ProxyFromEnv *bool
+```
+
+Discover an HTTP CONNECT proxy from the host environment. `nil` inherits (built-in `false`); `true` and `false` are explicit. The top-level [`WithProxyFromEnv`](/sdk/go/proxies#m-withproxyfromenv) wins over this nested field. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
 
 #### MaxInboundTCPConnections
 

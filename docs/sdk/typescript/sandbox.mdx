@@ -1502,6 +1502,14 @@ Configure the single proxy used for outbound sandbox connections. See [Proxies](
   </div>
 </div>
 
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">proxyFromEnv()</span>
+
+```typescript
+proxyFromEnv(enabled: boolean): this
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. Default: `false`; an explicit [`proxy()`](#proxy) still wins routing. See [Proxies](/sdk/typescript/proxies#proxy-from-env).
+
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">patch()</span>
 
 ```typescript

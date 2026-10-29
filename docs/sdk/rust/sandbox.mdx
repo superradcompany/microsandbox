@@ -1477,6 +1477,14 @@ where
 
 Configure the single proxy used for outbound sandbox connections. See [Proxies](/sdk/rust/proxies) for the protocol builders and examples.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">proxy_from_env()</span>
+
+```rust
+fn proxy_from_env(self, enabled: bool) -> Self
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. Default: `false`; an explicit [`proxy()`](#proxy) still wins routing. A [`network()`](#sandbox-network) callback leaves this setting unchanged, so call this setter directly to change it. See [Proxies](/sdk/rust/proxies#proxy-from-env).
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">patch()</span>
 
 ```rust

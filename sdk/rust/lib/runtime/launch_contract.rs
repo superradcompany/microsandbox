@@ -19,6 +19,8 @@ use microsandbox_network::policy::{Action, Destination, Direction};
 use microsandbox_protocol::bootstrap::*;
 use microsandbox_runtime::launch::{LaunchCapabilities, LaunchConfig};
 #[cfg(feature = "net")]
+use microsandbox_types::DeploymentProfile;
+#[cfg(feature = "net")]
 use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types::compat as types_compat;
 use microsandbox_types::{
@@ -45,6 +47,9 @@ static CAPABILITIES: LazyLock<Mutex<HashMap<PathBuf, CachedCapabilities>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VERSION_OUTPUT: u64 = 4096;
+
+/// Feature name used by every ambient-proxy capability diagnostic.
+const AMBIENT_PROXY_FEATURE: &str = "ambient host HTTP proxy discovery (proxy_from_env)";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -138,6 +143,17 @@ impl LaunchContract {
             .await?;
         }
 
+        // Ambient intent is gated regardless of explicit-proxy precedence, network
+        // enablement, or ambient authentication: the bit covers the whole feature.
+        if self.machine && network.proxy_from_env {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.proxy_from_env,
+                AMBIENT_PROXY_FEATURE,
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -147,13 +163,19 @@ impl LaunchContract {
     pub(crate) fn validate_network(
         self,
         network: &microsandbox_network::config::NetworkConfig,
-        profile: microsandbox_types::DeploymentProfile,
+        profile: DeploymentProfile,
     ) -> MicrosandboxResult<()> {
         network.secrets.validate().map_err(|error| {
             MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
         })?;
         if self.machine {
             return Ok(());
+        }
+
+        if network.proxy_from_env {
+            return Err(MicrosandboxError::Runtime(upgrade_required(
+                AMBIENT_PROXY_FEATURE,
+            )));
         }
 
         if matches!(
@@ -181,7 +203,7 @@ impl LaunchContract {
             if cap.get() > 4096 {
                 return unsupported("network connection limits above 4096");
             }
-            if profile == microsandbox_types::DeploymentProfile::MultiTenant && cap.get() > 256 {
+            if profile == DeploymentProfile::MultiTenant && cap.get() > 256 {
                 return unsupported("multi-tenant network connection limits above 256");
             }
         }
@@ -368,7 +390,7 @@ impl LaunchContract {
                     return unsupported("RAM-backed root disk");
                 }
                 #[cfg(feature = "net")]
-                if launch.deployment_profile != microsandbox_types::DeploymentProfile::default() {
+                if launch.deployment_profile != DeploymentProfile::default() {
                     return unsupported("deployment profile");
                 }
             }
@@ -473,6 +495,7 @@ impl LaunchContract {
 
     /// Check SDK launch intent before preparation can replace an existing sandbox.
     pub(crate) fn validate_launch_intent(self, config: &SandboxConfig) -> MicrosandboxResult<()> {
+        validate_build_network_intent(config)?;
         #[cfg(feature = "net")]
         self.validate_network(
             &config.local_network_config()?,
@@ -621,12 +644,34 @@ impl FileIdentity {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Refuse ambient-proxy intent that this build cannot honor, before any launch work.
+///
+/// This is a build-feature refusal, distinct from the installed-runtime upgrade
+/// error: a build without networking cannot discover a proxy at all, so it
+/// refuses `true` even when networking is disabled, an explicit proxy wins, or
+/// the deployment profile would later clear the intent. It reads only shared
+/// configuration, never the host environment or the runtime probe.
+pub(crate) fn validate_build_network_intent(config: &SandboxConfig) -> MicrosandboxResult<()> {
+    #[cfg(not(feature = "net"))]
+    if config.spec.network.proxy_from_env {
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "{AMBIENT_PROXY_FEATURE} requires a microsandbox SDK build with networking enabled; \
+            rebuild with the net feature"
+        )));
+    }
+    #[cfg(feature = "net")]
+    let _ = config;
+
+    Ok(())
+}
+
 /// Check launch intent before create can replace an existing sandbox.
 /// Host paths, named volumes and network slots are checked again in the final encoder.
 pub(crate) async fn validate_runtime_config(
     config: &SandboxConfig,
     global: &GlobalConfig,
 ) -> MicrosandboxResult<()> {
+    validate_build_network_intent(config)?;
     #[cfg(feature = "net")]
     let network = config.local_network_config()?;
     #[cfg(feature = "net")]
@@ -1212,10 +1257,7 @@ mod tests {
                 };
                 assert!(
                     legacy
-                        .validate_network(
-                            &network,
-                            microsandbox_types::DeploymentProfile::SingleTenant
-                        )
+                        .validate_network(&network, DeploymentProfile::SingleTenant)
                         .is_err()
                 );
             }
@@ -1263,6 +1305,395 @@ mod tests {
             .require_network_capabilities(&absent, &tuned)
             .await
             .unwrap();
+    }
+
+    /// The ambient-proxy capability is a new, default-false promise: an older
+    /// probe that omits it must never be treated as supporting ambient discovery.
+    #[test]
+    fn ambient_proxy_capability_defaults_to_false() {
+        let capabilities: LaunchCapabilities =
+            serde_json::from_value(json!({"protocols": [2, 1]})).unwrap();
+        assert!(!capabilities.proxy_from_env);
+        assert!(!capabilities.http_connect_proxy);
+
+        let capabilities: LaunchCapabilities = serde_json::from_value(json!({
+            "protocols": [2, 1],
+            "proxy_from_env": true
+        }))
+        .unwrap();
+        assert!(capabilities.proxy_from_env);
+
+        let encoded = serde_json::to_value(LaunchCapabilities {
+            protocols: vec![2, 1],
+            required_restore_backing: false,
+            tcp_accept_queue_size: false,
+            max_inbound_tcp_connections: false,
+            http_deny_message: false,
+            http_deny_json: false,
+            http_connect_proxy: false,
+            http_connect_proxy_auth: false,
+            proxy_from_env: true,
+            nested_virt: None,
+            guest_clock: false,
+            fs_state_limit: false,
+            exec_limits: false,
+        })
+        .unwrap();
+        assert_eq!(encoded["proxy_from_env"], json!(true));
+        // Protocol generations are unchanged by this feature.
+        assert_eq!(encoded["protocols"], json!([2, 1]));
+    }
+
+    /// Every v0.6 contract refuses ambient intent with the same actionable error,
+    /// while false keeps the historical encoding path.
+    #[cfg(feature = "net")]
+    #[test]
+    fn legacy_contracts_refuse_ambient_proxy_intent() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let enabled: NetworkConfig =
+            serde_json::from_value(json!({"proxy_from_env": true})).unwrap();
+        let disabled: NetworkConfig = NetworkConfig::default();
+        let profile = DeploymentProfile::SingleTenant;
+
+        for patch in [0, 6, 9, 17, 18] {
+            let contract = LaunchContract {
+                patch,
+                machine: false,
+            };
+            let error = contract.validate_network(&enabled, profile).unwrap_err();
+            let MicrosandboxError::Runtime(inner) = &error else {
+                panic!("patch {patch}: expected a runtime upgrade error, got {error}");
+            };
+            assert_eq!(
+                inner,
+                "selected msb runtime does not support ambient host HTTP proxy discovery \
+                (proxy_from_env); upgrade msb in the configured home or select a newer runtime \
+                explicitly",
+                "patch {patch}"
+            );
+            contract.validate_network(&disabled, profile).unwrap();
+        }
+    }
+
+    /// A machine runtime must advertise the ambient bit before launch, regardless of
+    /// explicit-proxy precedence, network enablement, or ambient authentication.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn ambient_proxy_requires_machine_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        // Probing this path fails, so an Ok below proves no probe ran.
+        let absent = dir.path().join("absent-msb");
+
+        let plain: NetworkConfig = serde_json::from_value(json!({"proxy_from_env": true})).unwrap();
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"proxy_from_env":false}'"#,
+            r#"printf '%s' '{"protocols":[1],"proxy_from_env":true}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-ambient-proxy", response);
+            let error = machine
+                .require_network_capabilities(&old, &plain)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("ambient host HTTP proxy discovery (proxy_from_env)"),
+                "{error}"
+            );
+            assert!(error.contains("upgrade msb"), "{error}");
+        }
+
+        // Malformed probes retain the shared decoder's diagnostic rather than
+        // being misclassified as a valid unsupported-capability response.
+        let malformed = script(
+            dir.path(),
+            "malformed-ambient-proxy",
+            r#"printf '%s' '{"protocols":[2,1],"proxy_from_env":"yes"}'"#,
+        );
+        let error = machine
+            .require_network_capabilities(&malformed, &plain)
+            .await
+            .unwrap_err();
+        let MicrosandboxError::Json(error) = error else {
+            panic!("expected a capability decoding error, got {error}");
+        };
+        assert!(error.is_data(), "{error}");
+
+        // An explicit proxy, disabled networking, and multi-tenant intent all keep
+        // the gate because the requested intent is still true.
+        for (label, network) in [
+            (
+                "explicit socks5",
+                json!({
+                    "proxy_from_env": true,
+                    "outbound_proxy": {"protocol": "socks5", "address": "127.0.0.1:1080"}
+                }),
+            ),
+            (
+                "explicit http connect",
+                json!({
+                    "proxy_from_env": true,
+                    "outbound_proxy": {"protocol": "http_connect", "address": "127.0.0.1:3128"}
+                }),
+            ),
+            (
+                "networking disabled",
+                json!({"enabled": false, "proxy_from_env": true}),
+            ),
+        ] {
+            let network: NetworkConfig = serde_json::from_value(network).unwrap();
+            let old = script(
+                dir.path(),
+                "unsupported-ambient-proxy-with-explicit",
+                r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":true}'"#,
+            );
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("proxy_from_env"), "{label}: {error}");
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-ambient-proxy",
+            r#"printf '%s' '{"protocols":[2,1],"proxy_from_env":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &plain)
+            .await
+            .unwrap();
+
+        // Ambient URL auth must not demand the separate configured-auth bit.
+        machine
+            .require_network_capabilities(&supported, &plain)
+            .await
+            .unwrap();
+
+        // False/unset intent never invokes this capability probe.
+        machine
+            .require_network_capabilities(&absent, &NetworkConfig::default())
+            .await
+            .unwrap();
+        let disabled: NetworkConfig =
+            serde_json::from_value(json!({"proxy_from_env": false})).unwrap();
+        machine
+            .require_network_capabilities(&absent, &disabled)
+            .await
+            .unwrap();
+
+        // A probe that cannot execute keeps its diagnostic instead of routing direct.
+        let broken = script(dir.path(), "broken-probe", "exit 3");
+        let error = machine
+            .require_network_capabilities(&broken, &plain)
+            .await
+            .unwrap_err();
+        assert!(
+            !error.to_string().contains("upgrade msb"),
+            "probe I/O failures must not masquerade as capability refusals: {error}"
+        );
+    }
+
+    /// A build without networking refuses effective ambient intent before any
+    /// launch-side work, from every ordinary configuration source.
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn proxy_from_env_no_net_build_intent_refuses_effective_true() {
+        use std::ffi::OsStr;
+
+        use serde_json::Value;
+
+        use crate::SandboxConfig;
+        use crate::SandboxConfigPatch;
+        use crate::config::SandboxDefaultsPatch;
+        use crate::config::{GlobalConfigPatch, layers::BackendConfig};
+        use microsandbox_types::{
+            NetworkSpec, NetworkSpecPatch, RootfsSource, SandboxSpec, SandboxSpecPatch,
+        };
+
+        fn layered(user: Value, managed: Value) -> SandboxConfig {
+            let layers = BackendConfig::new(
+                serde_json::from_value(user).unwrap(),
+                serde_json::from_value(managed).unwrap(),
+            );
+            layers
+                .sandbox_layers()
+                .base(Default::default())
+                .options(Default::default())
+                .build()
+                .into_config()
+        }
+
+        fn concrete(enabled: bool) -> SandboxConfig {
+            SandboxConfig {
+                spec: SandboxSpec {
+                    network: NetworkSpec {
+                        proxy_from_env: enabled,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+
+        let expected = format!(
+            "{AMBIENT_PROXY_FEATURE} requires a microsandbox SDK build with networking enabled; \
+            rebuild with the net feature"
+        );
+        let assert_refused = |config: &SandboxConfig, label: &str| {
+            let error = validate_build_network_intent(config)
+                .expect_err(&format!("{label} must be refused"));
+            assert!(
+                matches!(&error, MicrosandboxError::InvalidConfig(message) if message == &expected),
+                "{label}: {error}"
+            );
+        };
+
+        // Direct concrete configuration, including explicitly disabled networking.
+        assert_refused(&concrete(true), "concrete true");
+        validate_build_network_intent(&concrete(false)).unwrap();
+        let mut disabled = concrete(true);
+        disabled.spec.network.enabled = false;
+        assert_refused(&disabled, "networking disabled");
+
+        // Ordinary user and managed defaults, both directions of managed forcing.
+        assert_refused(
+            &layered(
+                json!({"sandbox_defaults": {"proxy_from_env": true}}),
+                json!({}),
+            ),
+            "user default",
+        );
+        assert_refused(
+            &layered(
+                json!({}),
+                json!({"sandbox_defaults": {"proxy_from_env": true}}),
+            ),
+            "managed default",
+        );
+        validate_build_network_intent(&layered(
+            json!({"sandbox_defaults": {"proxy_from_env": true}}),
+            json!({"sandbox_defaults": {"proxy_from_env": false}}),
+        ))
+        .unwrap();
+        validate_build_network_intent(&layered(json!({}), json!({}))).unwrap();
+
+        // Explicit per-sandbox options still refuse a no-network build.
+        let options = SandboxConfigPatch::new()
+            .spec(SandboxSpecPatch::new().network(NetworkSpecPatch::new().proxy_from_env(true)));
+        let config = BackendConfig::new(Default::default(), Default::default())
+            .sandbox_layers()
+            .base(Default::default())
+            .options(options)
+            .build()
+            .into_config();
+        assert_refused(&config, "explicit option");
+
+        // A saved row carrying true is refused exactly like live intent.
+        let saved = serde_json::to_string(&SandboxConfig {
+            spec: SandboxSpec {
+                image: RootfsSource::oci("alpine"),
+                network: NetworkSpec {
+                    proxy_from_env: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let restored: SandboxConfig = serde_json::from_str(&saved).unwrap();
+        assert_refused(&restored, "saved row");
+
+        // The captured environment toggle reaches the same sparse default.
+        let captured =
+            crate::config::environment::proxy_from_env_default(Some(OsStr::new("1"))).unwrap();
+        assert_eq!(captured, Some(true));
+        let user = GlobalConfigPatch::new()
+            .sandbox_defaults(SandboxDefaultsPatch::new().proxy_from_env(true));
+        assert_refused(
+            &layered(serde_json::to_value(user).unwrap(), json!({})),
+            "captured toggle",
+        );
+    }
+
+    /// This build supports the feature, so the build-feature refusal is a no-op.
+    #[cfg(feature = "net")]
+    #[test]
+    fn ambient_proxy_build_intent_is_accepted_by_net_builds() {
+        use microsandbox_types::{NetworkSpec, SandboxSpec};
+
+        for enabled in [true, false] {
+            let config = SandboxConfig {
+                spec: SandboxSpec {
+                    network: NetworkSpec {
+                        proxy_from_env: enabled,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            validate_build_network_intent(&config).unwrap();
+        }
+    }
+
+    /// The launch payload carries the enablement boolean and never any ambient
+    /// endpoint, `NO_PROXY` value, or credential.
+    #[cfg(feature = "net")]
+    #[test]
+    fn ambient_proxy_launch_json_carries_only_the_boolean() {
+        use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
+
+        let resolved = NetworkConfig {
+            proxy_from_env: true,
+            ..Default::default()
+        }
+        .resolve(&EnvNetworkSecretResolver)
+        .unwrap();
+        let payload = serde_json::to_value(&resolved).unwrap();
+
+        assert_eq!(payload["config"]["proxy_from_env"], json!(true));
+        assert!(
+            payload["outbound_proxy"].is_null(),
+            "ambient discovery must not populate the explicit proxy field"
+        );
+        let text = payload.to_string();
+        for forbidden in [
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+            "proxy.test",
+            "username",
+            "password",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "launch JSON leaked {forbidden}: {text}"
+            );
+        }
+
+        // False/unset stays byte-identical to the previous launch form.
+        let resolved = NetworkConfig::default()
+            .resolve(&EnvNetworkSecretResolver)
+            .unwrap();
+        let payload = serde_json::to_value(&resolved).unwrap();
+        assert!(
+            !payload["config"]
+                .as_object()
+                .unwrap()
+                .contains_key("proxy_from_env")
+        );
     }
 
     #[cfg(all(unix, feature = "net"))]
@@ -2267,7 +2698,6 @@ mod encoding {
     #[test]
     fn legacy_network_limits_reject_changed_meanings_before_launch() {
         use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
-        use microsandbox_types::DeploymentProfile;
 
         for profile in [
             DeploymentProfile::SingleTenant,

@@ -38,6 +38,14 @@ Set the single proxy used for outbound sandbox connections.
   </div>
 </div>
 
+### <span className="msb-recv" id="m-withproxyfromenv">m.</span><span className="msb-hn">WithProxyFromEnv()</span>
+
+```go
+func WithProxyFromEnv(enabled bool) SandboxOption
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. The value is preserved, including `false`; without the option the configured default applies. `NetworkConfig.ProxyFromEnv` sets the same intent per network. An explicit `WithProxy` still wins routing. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 ### <span className="msb-recv" id="m-socks4proxy">m.</span><span className="msb-hn">SOCKS4Proxy()</span>
 
 ```go

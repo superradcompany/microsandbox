@@ -442,3 +442,120 @@ fn all_disabled_secrets_are_rejected_in_current_and_previous_launches() {
     );
     assert!(!error.contains("private-marker"));
 }
+
+/// Historical launch records carry no ambient-proxy intent, reencode through the
+/// current envelope, and are never asserted equal to their old flat shape. The
+/// required fields of the hand-authored v0.6.0 record stay independent of
+/// current serialization so new required fields are detected. Separately
+/// labelled hand-written proxy members then check only that the current decoder
+/// accepts those shapes inside the older envelope.
+#[cfg(feature = "net")]
+#[test]
+fn historical_launch_envelopes_have_no_ambient_intent_and_reencode() {
+    let mut inputs: Vec<(&str, Value)> = vec![
+        (
+            "captured launch-v0.6.10.json",
+            serde_json::from_slice(include_bytes!(
+                "../../../tests/fixtures/launch-v0.6.10.json"
+            ))
+            .unwrap(),
+        ),
+        (
+            "captured launch-v0.6.18.json",
+            serde_json::from_slice(include_bytes!(
+                "../../../tests/fixtures/launch-v0.6.18.json"
+            ))
+            .unwrap(),
+        ),
+        ("hand-authored v0.6.0 launch", previous_launch(vec![])),
+    ];
+
+    for (label, input) in inputs.drain(..) {
+        let launch = decode(&input).unwrap_or_else(|error| panic!("{label}: {error}"));
+
+        match &launch.network {
+            Some(network) => {
+                assert!(!network.config().proxy_from_env, "{label} intent");
+                let network = serde_json::to_value(network).unwrap();
+                assert!(
+                    network.get("proxy_from_env").is_none(),
+                    "{label}: false intent must stay omitted"
+                );
+                assert_eq!(network["outbound_proxy"], Value::Null, "{label}");
+            }
+            // The hand-authored v0.6.0 record leaves networking unset entirely.
+            None => assert_eq!(label, "hand-authored v0.6.0 launch"),
+        }
+
+        // Current-envelope reencoding succeeds. This is deliberately not an
+        // equality check against the old flat or default-omitted JSON.
+        let envelope =
+            serde_json::to_value(&launch).unwrap_or_else(|error| panic!("{label}: {error}"));
+        if launch.network.is_some() {
+            assert!(envelope["network"].get("config").is_some(), "{label}");
+        }
+
+        // The reencoded envelope decodes again with the same absence of intent.
+        let reencoded = serde_json::from_value(envelope).unwrap();
+        let restored = decode(&reencoded).unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert!(
+            restored
+                .network
+                .as_ref()
+                .is_none_or(|network| !network.config().proxy_from_env),
+            "{label}"
+        );
+    }
+
+    // Hand-written proxy members spliced into the captured v0.6.18 envelope. No
+    // v0.6.x SDK could produce these payloads: `http_connect` first shipped in
+    // v0.7.7, and credentials for either protocol arrived later still. The Socks4
+    // and Socks5 *variants* did exist in v0.6.18. So this checks one narrow thing:
+    // the current decoder accepts these proxy shapes inside the older envelope
+    // and re-encodes them unchanged without adding ambient intent. The envelope
+    // bytes are the released capture; only the proxy member is hand-written.
+    let base: Value = serde_json::from_slice(include_bytes!(
+        "../../../tests/fixtures/launch-v0.6.18.json"
+    ))
+    .unwrap();
+    for (label, proxy) in [
+        (
+            "v0.6.18 envelope, unauthenticated http_connect (current decoder only)",
+            json!({"http_connect": {"address": "127.0.0.1:3128"}}),
+        ),
+        (
+            "v0.6.18 envelope, authenticated http_connect (current decoder only)",
+            json!({"http_connect": {
+                "address": "[2001:db8::1]:3128",
+                "credentials": {"username": "user", "password": "pass"}
+            }}),
+        ),
+        (
+            "v0.6.18 envelope, socks5 credentials (current decoder only)",
+            json!({"Socks5": {
+                "address": "127.0.0.1:1080",
+                "credentials": {"username": "user", "password": "pass"}
+            }}),
+        ),
+        (
+            "v0.6.18 envelope, socks4 user id (captured variant)",
+            json!({"Socks4": {"address": "[::1]:1080", "user_id": "sandbox"}}),
+        ),
+    ] {
+        let mut value = base.clone();
+        value["network"]["outbound_proxy"] = proxy.clone();
+
+        let launch = decode(&value).unwrap_or_else(|error| panic!("{label}: {error}"));
+        let network = launch.network.as_ref().expect(label);
+        assert!(!network.config().proxy_from_env, "{label}");
+
+        let envelope = serde_json::to_value(&launch).unwrap();
+        assert_eq!(envelope["network"]["outbound_proxy"], proxy, "{label}");
+        assert!(
+            envelope["network"]["config"]
+                .get("proxy_from_env")
+                .is_none(),
+            "{label}: configured proxies add no ambient intent"
+        );
+    }
+}

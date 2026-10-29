@@ -6,7 +6,7 @@ use std::io;
 #[cfg(feature = "engine")]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use microsandbox_types::SecretSource;
+use microsandbox_types::{SecretSource, SecretValue};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "engine")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,11 +14,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 #[cfg(feature = "engine")]
 use tokio_socks::tcp::Socks4Stream;
-use zeroize::Zeroizing;
 
 use super::http_connect::HttpConnectCredentials;
 #[cfg(feature = "engine")]
-use super::http_connect::HttpConnectProtocol;
+use super::http_connect::{ConnectAddress, HttpConnectProtocol};
 use super::types::{
     OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder, OutboundProxyConfig,
     OutboundProxyProtocol, ResolvedOutboundProxy, ResolvedProxyCredentials,
@@ -39,10 +38,10 @@ pub struct Socks5Credentials {
 
 /// Resolved SOCKS5 credentials held only by the network runtime.
 #[doc(hidden)]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ResolvedSocks5Credentials {
     username: String,
-    password: Zeroizing<String>,
+    password: SecretValue,
 }
 
 /// Builds a SOCKS4 outbound proxy.
@@ -193,7 +192,18 @@ impl ResolvedOutboundProxy {
             Self::HttpConnect {
                 address,
                 credentials,
-            } => HttpConnectProtocol::connect(*address, destination, credentials.as_ref()).await,
+            } => {
+                // Configured CONNECT dials the socket address unchanged, borrows
+                // its credentials, and keeps its existing deadlines.
+                HttpConnectProtocol::connect(
+                    &ConnectAddress::Socket(*address),
+                    destination,
+                    credentials.as_ref(),
+                    None,
+                )
+                .await
+            }
+            Self::HttpConnectEndpoint { endpoint } => endpoint.connect(destination).await,
             Self::Socks4 { address, user_id } => match user_id {
                 Some(user_id) => {
                     Socks4Stream::connect_with_userid(*address, destination, user_id).await
@@ -290,7 +300,7 @@ impl ResolvedSocks5Credentials {
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             username: username.into(),
-            password: Zeroizing::new(password.into()),
+            password: SecretValue(password.into()),
         }
     }
 
@@ -300,9 +310,9 @@ impl ResolvedSocks5Credentials {
             "username must not be empty"
         } else if self.username.len() > u8::MAX as usize {
             "username must be at most 255 bytes"
-        } else if self.password.is_empty() {
+        } else if self.password.0.is_empty() {
             "password must not be empty"
-        } else if self.password.len() > u8::MAX as usize {
+        } else if self.password.0.len() > u8::MAX as usize {
             "password must be at most 255 bytes"
         } else {
             return Ok(());
@@ -488,6 +498,16 @@ impl Socks5ProxyBuilder {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl PartialEq for ResolvedSocks5Credentials {
+    fn eq(&self, other: &Self) -> bool {
+        self.username == other.username && self.password.0 == other.password.0
+    }
+}
+
+// The shared wrapper does not implement `Eq`, so the derived marker cannot be
+// used; equality is still by value over the two strings.
+impl Eq for ResolvedSocks5Credentials {}
+
 impl OutboundProxyConfig for Socks4ProxyBuilder {
     fn build(self) -> Result<OutboundProxy, OutboundProxyBuildError> {
         let address =
@@ -589,7 +609,7 @@ impl Socks5Protocol {
                     )
                 })?;
                 let username = credentials.username.as_bytes();
-                let password = credentials.password.as_bytes();
+                let password = credentials.password.0.as_bytes();
                 let mut request = Vec::with_capacity(3 + username.len() + password.len());
                 request.extend_from_slice(&[0x01, username.len() as u8]);
                 request.extend_from_slice(username);
@@ -807,7 +827,7 @@ mod tests {
     use hickory_net::proto::rr::rdata::{A, AAAA};
     use hickory_net::proto::rr::{RData, Record, RecordType};
     use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
-    use microsandbox_types::SecretSource;
+    use microsandbox_types::{SecretSource, SecretValue};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, UdpSocket};
     use tokio::sync::watch;
@@ -820,6 +840,7 @@ mod tests {
     use crate::engine::dns::forwarder::DnsForwarder;
     use crate::netstack::poll::GatewayIps;
     use crate::netstack::shared::SharedState;
+    use crate::proxy::ResolvedHttpConnectCredentials;
 
     async fn responding_dns(relay_ipv6: Ipv6Addr, source_ipv4: Ipv4Addr) -> SocketAddr {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1030,6 +1051,100 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn resolved_socks5_password_uses_the_shared_secret_wrapper() {
+        let credentials = ResolvedSocks5Credentials::new("sandbox", "socks-pass-sentinel");
+
+        // Typing the password as `&SecretValue` proves it uses the shared wrapper,
+        // whose Debug output is exactly `[redacted]`. The username stays a plain
+        // durable string.
+        let password: &SecretValue = &credentials.password;
+        let username: &String = &credentials.username;
+        assert_eq!(username, "sandbox");
+
+        let debug = format!("{password:?}");
+        assert_eq!(debug, "[redacted]");
+        assert!(
+            !debug.contains("socks-pass-sentinel"),
+            "sentinel leaked: {debug}"
+        );
+    }
+
+    #[test]
+    fn resolved_socks5_credential_equality_compares_values() {
+        let credentials = ResolvedSocks5Credentials::new(
+            String::from("equality-user"),
+            String::from("equality-pass"),
+        );
+
+        // Equal strings in separate allocations compare equal, and so does a clone.
+        assert_eq!(
+            credentials,
+            ResolvedSocks5Credentials::new(
+                String::from("equality-user"),
+                String::from("equality-pass"),
+            )
+        );
+        assert_eq!(credentials, credentials.clone());
+
+        // Changing either half compares unequal.
+        assert_ne!(
+            credentials,
+            ResolvedSocks5Credentials::new("other-user", "equality-pass")
+        );
+        assert_ne!(
+            credentials,
+            ResolvedSocks5Credentials::new("equality-user", "other-pass")
+        );
+    }
+
+    #[test]
+    fn resolved_socks5_credentials_keep_their_plaintext_serde_shape() {
+        for (username, password) in [
+            ("user", ""),
+            ("us\u{e9}r", "p\u{e4}ssw\u{f6}rd"),
+            ("user", "p@ss:word/with+punctuation= and space"),
+        ] {
+            let credentials = ResolvedSocks5Credentials::new(username, password);
+
+            // The wrapper serializes transparently, so the launch object keeps its
+            // exact plaintext member values.
+            let serialized = serde_json::to_value(&credentials).unwrap();
+            assert_eq!(
+                serialized,
+                serde_json::json!({"username": username, "password": password})
+            );
+
+            // An independently written document decodes to equal credentials.
+            let independent = format!(
+                r#"{{"username":{},"password":{}}}"#,
+                serde_json::to_string(username).unwrap(),
+                serde_json::to_string(password).unwrap()
+            );
+            let restored: ResolvedSocks5Credentials = serde_json::from_str(&independent).unwrap();
+            assert_eq!(restored, credentials);
+        }
+
+        // Decoding performs no new validation; the unchanged validation seam still
+        // rejects the empty password that an older writer could have produced.
+        let empty: ResolvedSocks5Credentials =
+            serde_json::from_str(r#"{"username":"sandbox","password":""}"#).unwrap();
+        assert!(empty.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_socks5_credentials_constructor_moves_the_password() {
+        let username = String::from("moved-user");
+        let password = String::from("moved-pass");
+        let password_pointer = password.as_ptr();
+
+        let credentials = ResolvedSocks5Credentials::new(username, password);
+
+        // The public constructor keeps its `impl Into<String>` signature and adopts
+        // the caller's password allocation instead of copying it.
+        assert_eq!(credentials.password.0.as_ptr(), password_pointer);
     }
 
     #[test]
@@ -1406,5 +1521,52 @@ mod tests {
         assert_eq!(&response[..received], b"hello");
 
         proxy_task.await.unwrap();
+    }
+
+    /// Configured CONNECT dispatch dials the socket address unchanged, borrows
+    /// its resolved credentials and sends exactly one Basic header.
+    #[tokio::test]
+    async fn configured_http_connect_dispatches_borrowed_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let destination: SocketAddr = "203.0.113.9:443".parse().unwrap();
+
+        let proxy_task = tokio::spawn(async move {
+            let (mut stream, peer) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                request.push(stream.read_u8().await.unwrap());
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\n\r\ntail")
+                .await
+                .unwrap();
+            (request, peer)
+        });
+
+        let proxy = ResolvedOutboundProxy::HttpConnect {
+            address: proxy_addr,
+            credentials: Some(ResolvedHttpConnectCredentials::new("user", "pass")),
+        };
+        let mut tunnel = proxy.connect(destination).await.unwrap();
+        let local = tunnel.local_addr().unwrap();
+        let (request, peer) = proxy_task.await.unwrap();
+
+        // The configured socket address is dialed directly, never stringified.
+        assert_eq!(tunnel.peer_addr().unwrap(), proxy_addr);
+        assert_eq!(peer, local);
+        let expected = format!(
+            "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\n\
+             Proxy-Authorization: Basic dXNlcjpwYXNz\r\n\r\n"
+        );
+        assert_eq!(request, expected.into_bytes());
+
+        // Tunnel bytes after the response headers stay with the caller.
+        let mut tail = [0; 4];
+        tunnel.read_exact(&mut tail).await.unwrap();
+        assert_eq!(&tail, b"tail");
     }
 }

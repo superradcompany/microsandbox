@@ -837,6 +837,71 @@ describe("SandboxBuilder outbound proxy", () => {
   });
 });
 
+describe("proxyFromEnv", () => {
+  it("defaults to false on both built shapes", async () => {
+    const network = new NetworkBuilder().build();
+    expect(network.proxyFromEnv).toBe(false);
+
+    const sandbox = await Sandbox.builder("x").image("alpine").build();
+    expect(sandbox.network.proxyFromEnv).toBe(false);
+  });
+
+  it("is not a network-builder method", () => {
+    expect("proxyFromEnv" in new NetworkBuilder()).toBe(false);
+  });
+
+  it("keeps explicit true and false from the top-level setter", async () => {
+    for (const enabled of [true, false]) {
+      const topLevel = await Sandbox.builder("x")
+        .image("alpine")
+        .proxyFromEnv(enabled)
+        .build();
+      expect(topLevel.network.proxyFromEnv).toBe(enabled);
+    }
+  });
+
+  it("keeps the last explicit setting across later network callbacks", async () => {
+    const builder = Sandbox.builder("x")
+      .image("alpine")
+      .proxyFromEnv(true)
+      .network((n) => n.maxTcpConnections(64));
+    expect(builder).toBe(builder);
+    const retained = await builder.build();
+    expect(retained.network.proxyFromEnv).toBe(true);
+
+    const toggled = await Sandbox.builder("x")
+      .image("alpine")
+      .proxyFromEnv(true)
+      .network((n) => n.maxTcpConnections(64))
+      .proxyFromEnv(false)
+      .network((n) => n.maxTcpConnections(32))
+      .build();
+    expect(toggled.network.proxyFromEnv).toBe(false);
+
+    const toggledBack = await Sandbox.builder("x")
+      .image("alpine")
+      .network((n) => n.maxTcpConnections(64))
+      .proxyFromEnv(true)
+      .build();
+    expect(toggledBack.network.proxyFromEnv).toBe(true);
+  });
+
+  it("coexists with an explicit proxy without clearing the flag or re-enabling networking", async () => {
+    const cfg = await Sandbox.builder("x")
+      .image("alpine")
+      .proxyFromEnv(true)
+      .proxy((p) => p.socks5("127.0.0.1:1080"))
+      .network((n) => n.enabled(false))
+      .build();
+    expect(cfg.network.proxyFromEnv).toBe(true);
+    expect(cfg.network.enabled).toBe(false);
+    expect(cfg.network.outboundProxy).toMatchObject({
+      protocol: "socks5",
+      address: "127.0.0.1:1080",
+    });
+  });
+});
+
 describe("NetworkBuilder rate limiters", () => {
   it("maps bucket values through build()", () => {
     const cfg = new NetworkBuilder()

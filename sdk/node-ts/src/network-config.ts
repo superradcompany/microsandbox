@@ -153,6 +153,11 @@ export interface NetworkConfig {
   };
   readonly nat64Prefixes: readonly string[];
   readonly trustHostCAs: boolean;
+  /**
+   * Discover an HTTP CONNECT proxy from the host environment at network startup.
+   * Default false; an explicit outbound proxy still wins.
+   */
+  readonly proxyFromEnv: boolean;
   /** Canonical proxy configuration for outbound connections. */
   readonly outboundProxy: OutboundProxy | null;
   /**

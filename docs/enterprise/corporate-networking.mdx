@@ -26,6 +26,7 @@ Connect the company network client on the host and confirm an approved service i
 | --- | --- |
 | Host VPN or traffic-steering client | Host routes and sandbox destination rules |
 | HTTP CONNECT, SOCKS4, or SOCKS5 proxy | `sandbox_defaults.outbound_proxy` in managed configuration |
+| Host proxy environment variables (`https_proxy`, `no_proxy`, ...) | `sandbox_defaults.proxy_from_env` in managed configuration |
 | PAC file | Proxy settings in the guest application; no direct managed support |
 
 For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's reachable `IP:port`:
@@ -49,6 +50,23 @@ For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's rea
 A managed proxy replaces per-sandbox proxy settings, including SOCKS and HTTP CONNECT credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
 
 Use CLI and SDK releases that support the selected proxy protocol. Older releases reject the HTTP CONNECT protocol as unknown.
+
+### Use the host proxy environment
+
+When the company client exports proxy variables to the host, managed configuration can enable ambient discovery instead of pinning one endpoint:
+
+```json JSON
+{
+  "version": 1,
+  "overrides": {
+    "sandbox_defaults": { "proxy_from_env": true }
+  }
+}
+```
+
+Set it to `false` to force ambient discovery off. Managed `true` and `false` are both authoritative over user defaults and per-sandbox options. Explicit `sandbox_defaults.outbound_proxy` still wins routing without reading the host variables, so a managed proxy and managed ambient discovery can coexist; `outbound_proxy: null` clears explicit routing but does not disable ambient discovery.
+
+Ambient discovery is local-only: cloud creation rejects it, and multi-tenant deployments clear the intent before discovery so a tenant never inherits the server's proxy environment. Discovery uses the host runtime's `no_proxy` rules, which apply to sandbox egress; DNS forwarding and image downloads keep their existing host paths. Older clients ignore the new managed key and cannot be forced into ambient discovery until upgraded, exactly like other newly added managed settings. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment) for variable precedence and `NO_PROXY` semantics.
 
 <Accordion title="Examples: host VPNs and traffic steering">
   - **Cloudflare WARP:** enroll the host client with the administrator's **Traffic and DNS** profile. Check that [split tunnels and private DNS](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/private-net/cloudflared/private-dns/) cover the required services.

@@ -28,6 +28,14 @@ sandbox = await Sandbox.create(
 |-----------|------|---------|-------------|
 | proxy | [`OutboundProxy`](#outboundproxy)` \| None` | `None` | Single proxy used for outbound sandbox connections |
 
+### proxy_from_env
+
+```python
+proxy_from_env: bool | None = None
+```
+
+Discover an HTTP CONNECT proxy from the host environment. `None` inherits (built-in `False`); explicit `True`/`False` override. The nested `Network.proxy_from_env` field accepts the same tri-state, and the top-level keyword wins. An explicit `proxy` still wins routing. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 ## OutboundProxy
 
 Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.

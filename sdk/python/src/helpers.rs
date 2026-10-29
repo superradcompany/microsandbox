@@ -54,6 +54,7 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
     "network",
     "intercept_tls",
     "proxy",
+    "proxy_from_env",
     "secrets",
     "secret_violation_action",
     "detached",
@@ -730,6 +731,12 @@ pub fn sandbox_builder_from_args(
     // The shortcut overlays the supplied network settings without resetting TLS options.
     if extract_opt::<bool>(kwargs, "intercept_tls")?.unwrap_or(false) {
         builder = builder.intercept_tls();
+    }
+
+    // Ambient host proxy discovery. `None`/omission inherits; explicit false is an
+    // override, and this never enables networking.
+    if let Some(enabled) = extract_opt::<bool>(kwargs, "proxy_from_env")? {
+        builder = builder.proxy_from_env(enabled);
     }
 
     // Outbound proxy.
@@ -1622,6 +1629,11 @@ fn apply_network(
     // Strict hostname policy.
     if let Some(strict) = extract_opt::<bool>(net, "strict")? {
         builder = builder.network(move |n| n.strict(strict));
+    }
+
+    // Ambient host proxy discovery, inherited when omitted.
+    if let Some(enabled) = extract_opt::<bool>(net, "proxy_from_env")? {
+        builder = builder.proxy_from_env(enabled);
     }
 
     // Rate limiters (egress = guest -> runtime, ingress = runtime -> guest).
@@ -2701,6 +2713,67 @@ pub(crate) mod tests {
                     "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"},
                 },
             })
+        );
+    }
+
+    #[test]
+    fn proxy_from_env_reaches_the_builder_with_explicit_presence() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+        // Install the package stub the same way the proxy helpers do, so the
+        // nested-network parser can import `microsandbox.types`.
+        Python::attach(|py| proxy_from_python(py, "None").map(|_| ())).unwrap();
+
+        // (top-level, nested, expected effective value)
+        for (top_level, nested, expected) in [
+            (None, None, false),
+            (Some(true), None, true),
+            (Some(false), None, false),
+            (Some(false), Some(true), false),
+            (Some(true), Some(false), true),
+            (None, Some(true), true),
+            (None, Some(false), false),
+        ] {
+            let config = Python::attach(|py| {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("image", "alpine").unwrap();
+                if let Some(enabled) = top_level {
+                    kwargs.set_item("proxy_from_env", enabled).unwrap();
+                }
+                if let Some(enabled) = nested {
+                    let network_type = py
+                        .import("microsandbox.types")
+                        .unwrap()
+                        .getattr("Network")
+                        .unwrap();
+                    let fields = PyDict::new(py);
+                    fields.set_item("proxy_from_env", enabled).unwrap();
+                    let network = network_type.call((), Some(&fields)).unwrap();
+                    kwargs.set_item("network", network).unwrap();
+                }
+                let builder =
+                    sandbox_builder_from_args("proxy-parse-probe".into(), Some(&kwargs)).unwrap();
+                build_created_config(builder)
+            });
+            assert_eq!(
+                config.spec.network.proxy_from_env, expected,
+                "top_level={top_level:?} nested={nested:?}"
+            );
+        }
+
+        // A non-boolean value is a type error at parse time, never a silent true.
+        let error = Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("image", "alpine").unwrap();
+            kwargs.set_item("proxy_from_env", "true").unwrap();
+            match sandbox_builder_from_args("proxy-parse-probe".into(), Some(&kwargs)) {
+                Ok(_) => panic!("a string must not be accepted as a boolean"),
+                Err(error) => error,
+            }
+        });
+        assert!(
+            error.to_string().contains("bool"),
+            "unexpected error: {error}"
         );
     }
 

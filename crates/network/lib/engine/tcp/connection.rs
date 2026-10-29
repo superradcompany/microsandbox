@@ -17,6 +17,7 @@ use smoltcp::wire::IpListenEndpoint;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::proxy::ResolvedOutboundProxy;
 use crate::tcp::deferred_close::DeferredClose;
 use crate::tcp::pending::PendingConnect;
 
@@ -150,6 +151,11 @@ struct Connection {
     /// Egress policy already denied this flow at SYN time; the connection
     /// was accepted only so an HTTP/HTTPS client can be answered with 403.
     policy_denied: bool,
+    /// Frozen egress route chosen once at the guest SYN.
+    ///
+    /// `None` means direct. Holding the choice here keeps later DNS-index or
+    /// environment changes from selecting a different path for this flow.
+    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 }
 
 /// Proxy-side channel ends, created at socket creation time and taken when
@@ -180,6 +186,9 @@ pub struct NewConnection {
     /// Egress policy already denied this flow at SYN time. The dispatcher
     /// must answer it (HTTP 403) and never dial upstream.
     pub policy_denied: bool,
+    /// Egress route frozen at the guest SYN: `None` is direct, otherwise the
+    /// connection keeps this proxy for both the upstream dial and the proxy task.
+    pub outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -266,11 +275,13 @@ impl TcpConnectionTracker {
     }
 
     /// Finish host dials and collect sockets whose validated SYN needs a dial.
-    /// Returns `(socket handle, guest destination)` pairs to dial and track.
+    ///
+    /// Returns `(socket handle, guest destination, frozen route)` entries to dial
+    /// and track. The route was chosen once when the socket was created.
     pub(crate) fn poll_connects(
         &mut self,
         sockets: &mut SocketSet<'_>,
-    ) -> Vec<(SocketHandle, SocketAddr)> {
+    ) -> Vec<(SocketHandle, SocketAddr, Option<Arc<ResolvedOutboundProxy>>)> {
         // Drop sockets returned to Listen by a guest reset, including any
         // pending dial or connected host stream they still own.
         self.cleanup_closed(sockets);
@@ -280,7 +291,7 @@ impl TcpConnectionTracker {
             match &mut conn.upstream {
                 UpstreamConnection::Waiting => {
                     if socket.state() == tcp::State::SynReceived {
-                        requests.push((handle, conn.dst));
+                        requests.push((handle, conn.dst, conn.outbound_proxy.clone()));
                     }
                 }
                 UpstreamConnection::Connecting(pending) => {
@@ -324,6 +335,21 @@ impl TcpConnectionTracker {
         dst: SocketAddr,
         sockets: &mut SocketSet<'_>,
         mode: TcpAcceptMode,
+    ) -> bool {
+        self.create_tcp_socket_with_proxy(src, dst, sockets, mode, None)
+    }
+
+    /// Create a socket and attach the egress route frozen for this flow.
+    ///
+    /// The route is stored in the new connection in O(1) so the poll loop never
+    /// scans the connection map or recomputes the choice for each SYN.
+    pub(crate) fn create_tcp_socket_with_proxy(
+        &mut self,
+        src: SocketAddr,
+        dst: SocketAddr,
+        sockets: &mut SocketSet<'_>,
+        mode: TcpAcceptMode,
+        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
     ) -> bool {
         if matches!(mode, TcpAcceptMode::Reject) {
             return false;
@@ -397,6 +423,7 @@ impl TcpConnectionTracker {
                 read_buf: None,
                 deferred_close: DeferredClose::default(),
                 policy_denied,
+                outbound_proxy,
             },
         );
 
@@ -546,6 +573,7 @@ impl TcpConnectionTracker {
                         to_smoltcp: channels.to_smoltcp,
                         proxy_connect: conn.proxy_connect.clone(),
                         policy_denied: conn.policy_denied,
+                        outbound_proxy: conn.outbound_proxy.clone(),
                     });
                 }
             }
@@ -661,6 +689,55 @@ fn write_proxy_data(socket: &mut tcp::Socket<'_>, conn: &mut Connection) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The route chosen at the SYN is stored on the connection and handed to the
+    /// proxy task unchanged, and the legacy public entry point attaches none.
+    #[tokio::test(start_paused = true)]
+    async fn frozen_egress_route_survives_to_the_new_connection() {
+        use crate::tcp::test_support::TestNetwork;
+
+        let proxy = Arc::new(ResolvedOutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".parse().unwrap(),
+            credentials: None,
+        });
+        let src: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        let dst: SocketAddr = "10.0.0.2:8099".parse().unwrap();
+
+        let mut network = TestNetwork::new(true);
+        let mut tracker = TcpConnectionTracker::new(None);
+        assert!(tracker.create_tcp_socket_with_proxy(
+            src,
+            dst,
+            &mut network.sockets,
+            TcpAcceptMode::AcceptImmediately,
+            Some(Arc::clone(&proxy)),
+        ));
+        for _ in 0..16 {
+            network.poll();
+        }
+        let mut connections = tracker.take_new_connections(&mut network.sockets);
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections.remove(0).outbound_proxy, Some(proxy));
+
+        // Duplicate SYNs cannot reattach or overwrite the stored choice.
+        assert!(tracker.has_socket_for(&src, &dst));
+
+        // The public compatibility wrapper attaches no route.
+        let mut network = TestNetwork::new(true);
+        let mut tracker = TcpConnectionTracker::new(None);
+        assert!(tracker.create_tcp_socket(
+            src,
+            dst,
+            &mut network.sockets,
+            TcpAcceptMode::AcceptImmediately,
+        ));
+        for _ in 0..16 {
+            network.poll();
+        }
+        let mut connections = tracker.take_new_connections(&mut network.sockets);
+        assert_eq!(connections.len(), 1);
+        assert!(connections.remove(0).outbound_proxy.is_none());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn exited_proxy_drains_slow_guest_and_times_out_only_when_stalled() {

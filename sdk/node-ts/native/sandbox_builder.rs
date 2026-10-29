@@ -566,6 +566,16 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Discover an HTTP CONNECT proxy from the host environment. Default: false.
+    ///
+    /// An explicit `.proxy(...)` still wins routing without clearing this flag.
+    #[napi(js_name = "proxyFromEnv")]
+    pub fn proxy_from_env(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.proxy_from_env(enabled));
+        self
+    }
+
     /// Publish a TCP port from host -> guest.
     #[napi]
     pub fn port(&mut self, host_port: f64, guest_port: f64) -> Result<&Self> {

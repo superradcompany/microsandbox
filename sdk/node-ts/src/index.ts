@@ -235,6 +235,9 @@ wrapMethodWithErrorMap(napi.VolumeBuilder, "create");
         throw mapNapiError(e);
       }
       const config = remapKeysToCamel(JSON.parse(json));
+      // The boolean is omitted from Rust JSON when false; fill the documented
+      // default without ever overwriting an explicit true.
+      config.network.proxyFromEnv ??= false;
       // Preserve the deprecated read accessor on built configurations.
       config.network.maxTcpConnections = config.network.maxConnections;
       Object.defineProperty(config.network, "maxConnections", {
@@ -290,6 +293,9 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
         throw mapNapiError(e);
       }
       const config = remapKeysToCamel(JSON.parse(json));
+      // The boolean is omitted from Rust JSON when false; fill the documented
+      // default without ever overwriting an explicit true.
+      config.proxyFromEnv ??= false;
       // Preserve the deprecated read accessor on built configurations.
       config.maxTcpConnections = config.maxConnections;
       Object.defineProperty(config, "maxConnections", {

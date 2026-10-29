@@ -1257,3 +1257,100 @@ func TestInvalidConfigRejectedBeforeCreate(t *testing.T) {
 		}
 	}
 }
+
+func TestProxyFromEnvOmissionAndExplicitValues(t *testing.T) {
+	// Nil inherits; true and false are both emitted so `false` cannot be mistaken
+	// for absence by a strict decoder.
+	omitted := marshalCreateOptions(t)
+	if _, ok := omitted["proxy_from_env"]; ok {
+		t.Fatalf("nil ProxyFromEnv must be omitted: %v", omitted)
+	}
+	for _, enabled := range []bool{true, false} {
+		payload := marshalCreateOptions(t, WithProxyFromEnv(enabled))
+		value, ok := payload["proxy_from_env"]
+		if !ok {
+			t.Fatalf("proxy_from_env=%v was omitted: %v", enabled, payload)
+		}
+		if value != enabled {
+			t.Fatalf("proxy_from_env = %v, want %v", value, enabled)
+		}
+	}
+}
+
+func TestProxyFromEnvNestedPromotionAndPrecedence(t *testing.T) {
+	// A nested-only value is promoted to the strict top-level key.
+	promoted := marshalCreateOptions(t, WithNetwork(&NetworkConfig{ProxyFromEnv: boolPtr(true)}))
+	if promoted["proxy_from_env"] != true {
+		t.Fatalf("nested value was not promoted: %v", promoted)
+	}
+
+	// The top-level option wins when both are present, in either order.
+	for _, options := range [][]SandboxOption{
+		{WithNetwork(&NetworkConfig{ProxyFromEnv: boolPtr(true)}), WithProxyFromEnv(false)},
+		{WithProxyFromEnv(false), WithNetwork(&NetworkConfig{ProxyFromEnv: boolPtr(true)})},
+	} {
+		payload := marshalCreateOptions(t, options...)
+		if payload["proxy_from_env"] != false {
+			t.Fatalf("top-level value lost precedence: %v", payload)
+		}
+	}
+
+	// Explicit false alone is still emitted at the top level and in the nested object.
+	nestedFalse := marshalCreateOptions(t, WithNetwork(&NetworkConfig{ProxyFromEnv: boolPtr(false)}))
+	if nestedFalse["proxy_from_env"] != false {
+		t.Fatalf("nested false not promoted: %v", nestedFalse)
+	}
+	network, ok := nestedFalse["network"].(map[string]any)
+	if !ok {
+		t.Fatalf("network payload missing: %v", nestedFalse)
+	}
+	if network["proxy_from_env"] != false {
+		t.Fatalf("nested false lost: %v", network)
+	}
+}
+
+func TestProxyFromEnvIsIndependentOfProxyOrdering(t *testing.T) {
+	proxy := SOCKS5Proxy("127.0.0.1:1080")
+	for _, options := range [][]SandboxOption{
+		{WithProxy(proxy), WithProxyFromEnv(true)},
+		{WithProxyFromEnv(true), WithProxy(proxy)},
+	} {
+		payload := marshalCreateOptions(t, options...)
+		if payload["proxy_from_env"] != true {
+			t.Fatalf("proxy ordering cleared ambient intent: %v", payload)
+		}
+		if _, ok := payload["proxy"]; !ok {
+			t.Fatalf("explicit proxy missing: %v", payload)
+		}
+	}
+}
+
+func TestProxyFromEnvRejectedByAnOldStrictDecoder(t *testing.T) {
+	// The top-level object is deny_unknown_fields in older native libraries. Both
+	// spellings are promoted, so either request fails closed instead of routing direct.
+	type oldStrictCreateOptions struct {
+		Image string `json:"image,omitempty"`
+	}
+	for _, options := range [][]SandboxOption{
+		{WithProxyFromEnv(true)},
+		{WithProxyFromEnv(false)},
+		{WithNetwork(&NetworkConfig{ProxyFromEnv: boolPtr(true)})},
+	} {
+		cfg := SandboxConfig{}
+		for _, o := range options {
+			o(&cfg)
+		}
+		raw, err := json.Marshal(buildFFICreateOptions(cfg))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.DisallowUnknownFields()
+		var decoded oldStrictCreateOptions
+		if err := decoder.Decode(&decoded); err == nil {
+			t.Fatalf("old strict decoder accepted the request: %s", raw)
+		}
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }

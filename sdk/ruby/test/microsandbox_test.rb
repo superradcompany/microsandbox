@@ -360,3 +360,37 @@ class MicrosandboxTest < Test::Unit::TestCase
     end
   end
 end
+
+class ProxyFromEnvTest < Test::Unit::TestCase
+  def test_create_accepts_proxy_from_env_keyword
+    # Parse-time acceptance is observable because the runtime never launches:
+    # both explicit values reach the builder, and the failure is the ordinary
+    # runtime/detection error rather than an unknown keyword.
+    [true, false, nil].each do |value|
+      error = assert_raise(Microsandbox::Error) do
+        Microsandbox::Sandbox.create("ruby-ambient", image: "alpine", proxy_from_env: value)
+      end
+      refute_match(/unknown keyword/i, error.message)
+    end
+  end
+
+  def test_unknown_keyword_is_rejected
+    assert_raise(ArgumentError) do
+      Microsandbox::Sandbox.create("ruby-ambient", image: "alpine", proxy_from_environment: true)
+    end
+  end
+
+  def test_fluent_proxy_from_env_returns_the_same_builder
+    builder = Microsandbox::Sandbox.builder("ruby-ambient").image("alpine")
+    [true, false].each do |value|
+      assert_same builder, builder.proxy_from_env(value)
+    end
+  end
+
+  def test_bang_proxy_from_env_returns_nil
+    builder = Microsandbox::Sandbox.builder("ruby-ambient").image("alpine")
+    [true, false].each do |value|
+      assert_nil builder.proxy_from_env!(value)
+    end
+  end
+end

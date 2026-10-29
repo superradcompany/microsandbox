@@ -91,6 +91,14 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub http_connect_proxy_auth: bool,
 
+    /// Ambient host HTTP proxy discovery (`proxy_from_env`) is supported.
+    ///
+    /// This single bit promises runtime discovery, `NO_PROXY` matching, URL
+    /// authentication and hostname proxy dialing together. Older runtimes omit
+    /// it and would silently route directly.
+    #[serde(default)]
+    pub proxy_from_env: bool,
+
     /// The launch field `guest_clock` is honored by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]

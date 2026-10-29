@@ -236,6 +236,8 @@ export interface NapiSandboxBuilderSetters {
       b: NapiOutboundProxyBuilder,
     ) => NapiHttpConnectProxyBuilder | NapiSocks4ProxyBuilder | NapiSocks5ProxyBuilder,
   ): this;
+  /** Discover an HTTP CONNECT proxy from the host environment. Default: false. */
+  proxyFromEnv(enabled: boolean): this;
   port(host: number, guest: number): this;
   portBind(bind: string, host: number, guest: number): this;
   portUdp(host: number, guest: number): this;

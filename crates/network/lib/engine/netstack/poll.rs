@@ -32,7 +32,7 @@ use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
-use crate::proxy::ResolvedOutboundProxy;
+use crate::proxy::{OutboundRouting, ResolvedOutboundProxy};
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
     connection::{TcpAcceptMode, TcpConnectionTracker},
@@ -234,6 +234,8 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `tcp_accept_queue_size` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
+/// * `outbound_routing` - Outbound proxy source frozen at engine startup; each eligible flow
+///   selects one leaf at its SYN and never reselects afterwards.
 #[allow(clippy::too_many_arguments)]
 pub fn smoltcp_poll_loop(
     shared: Arc<SharedState>,
@@ -250,7 +252,7 @@ pub fn smoltcp_poll_loop(
     max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
-    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    outbound_routing: Arc<OutboundRouting>,
 ) {
     let mut device = SmoltcpDevice::new(shared.clone(), config.mtu);
     let mut iface = create_interface(&mut device, &config);
@@ -309,7 +311,7 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
         config.mtu,
         tokio_handle.clone(),
-        outbound_proxy.clone(),
+        Arc::clone(&outbound_routing),
     );
     udp_relay.set_max_sessions(max_udp_connections.and_then(ConnectionLimit::cap));
     udp_relay.attach_dns_forwarder(dns_forwarder_handle.clone());
@@ -376,7 +378,8 @@ pub fn smoltcp_poll_loop(
 
             match classify_frame(frame) {
                 FrameAction::TcpSyn { src, dst } => {
-                    let accept_mode = match DnsPortType::from_tcp(dst.port()) {
+                    let dns_port_type = DnsPortType::from_tcp(dst.port());
+                    let accept_mode = match dns_port_type {
                         // Plain DNS: the interceptor enforces policy at
                         // the application layer (block list + rebind
                         // protection); bypass the network egress check.
@@ -455,7 +458,31 @@ pub fn smoltcp_poll_loop(
                     // including when both packets arrive in the same batch.
                     conn_tracker.cleanup_closed(&mut sockets);
                     if !conn_tracker.has_socket_for(&src, &dst) {
-                        conn_tracker.create_tcp_socket(src, dst, &mut sockets, accept_mode);
+                        // Freeze the egress route for this flow at the SYN. DNS, DoT,
+                        // rejected and denial-only flows never take a proxy route.
+                        let eligible = matches!(dns_port_type, DnsPortType::Other)
+                            && matches!(
+                                accept_mode,
+                                TcpAcceptMode::WaitForUpstream | TcpAcceptMode::AcceptImmediately
+                            );
+                        let outbound_route = if eligible {
+                            select_flow_route(
+                                &outbound_routing,
+                                dst,
+                                &config,
+                                tls_state.as_deref(),
+                                &shared,
+                            )
+                        } else {
+                            None
+                        };
+                        conn_tracker.create_tcp_socket_with_proxy(
+                            src,
+                            dst,
+                            &mut sockets,
+                            accept_mode,
+                            outbound_route,
+                        );
                     }
 
                     // smoltcp validates the packet before any host-side dial.
@@ -535,14 +562,11 @@ pub fn smoltcp_poll_loop(
             }
         }
 
-        for (handle, dst) in conn_tracker.poll_connects(&mut sockets) {
+        for (handle, dst, outbound_route) in conn_tracker.poll_connects(&mut sockets) {
             let target = resolve_tcp_host_target(dst, config.gateway);
-            let proxy = ResolvedOutboundProxy::select_for_destination(
-                &outbound_proxy,
-                dst,
-                target.primary(),
-            );
-            let pending = PendingConnect::start(target, proxy, shared.clone(), &tokio_handle);
+            // Consume the route frozen at the SYN; do not recompute it here.
+            let pending =
+                PendingConnect::start(target, outbound_route, shared.clone(), &tokio_handle);
             conn_tracker.track_connect(handle, pending);
         }
 
@@ -598,11 +622,7 @@ pub fn smoltcp_poll_loop(
             {
                 // TLS-intercepted port — spawn TLS MITM proxy.
                 let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-                let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
-                    &outbound_proxy,
-                    conn.dst,
-                    connect_target.primary(),
-                );
+                let connection_outbound_proxy = conn.outbound_proxy.clone();
                 let proxy = TlsProxy::new(
                     conn.upstream,
                     conn.dst,
@@ -671,11 +691,7 @@ pub fn smoltcp_poll_loop(
             }
             // Plain TCP proxy.
             let connect_target = resolve_tcp_host_target(conn.dst, config.gateway);
-            let connection_outbound_proxy = ResolvedOutboundProxy::select_for_destination(
-                &outbound_proxy,
-                conn.dst,
-                connect_target.primary(),
-            );
+            let connection_outbound_proxy = conn.outbound_proxy.clone();
             let proxy = TcpProxy::new(
                 conn.upstream,
                 conn.dst,
@@ -909,6 +925,33 @@ fn handle_reassembled_udp_datagram(
         udp_relay,
     );
     device.drop_staged_frame();
+}
+
+/// Select the egress route frozen for one eligible guest TCP flow.
+///
+/// Runs once per new flow at the SYN, using the host dial target and the TLS
+/// destination classification. The result is stored on the connection so a
+/// later DNS-index change cannot switch the route.
+fn select_flow_route(
+    routing: &OutboundRouting,
+    guest_dst: SocketAddr,
+    config: &PollLoopConfig,
+    tls_state: Option<&TlsState>,
+    shared: &SharedState,
+) -> Option<Arc<ResolvedOutboundProxy>> {
+    let host_dst = resolve_tcp_host_target(guest_dst, config.gateway).primary();
+    let tls = tls_destination(guest_dst, tls_state);
+
+    routing.select(guest_dst, host_dst, tls, shared)
+}
+
+/// Classify a destination as TLS for proxy endpoint preference only.
+///
+/// The engine dials at the guest SYN, before any SNI exists, so the class comes
+/// from the destination port: 443 or a configured TLS-intercepted port.
+fn tls_destination(guest_dst: SocketAddr, tls_state: Option<&TlsState>) -> bool {
+    guest_dst.port() == 443
+        || tls_state.is_some_and(|state| state.config.intercepted_ports.contains(&guest_dst.port()))
 }
 
 /// Resolve host-side TCP destination candidates for a guest connection.
@@ -1233,6 +1276,7 @@ mod tests {
     };
 
     use super::super::{device::SmoltcpDevice, shared::SharedState};
+    use crate::proxy::AmbientHttpProxy;
     use crate::tcp::connection::NewConnection;
 
     /// Build a minimal Ethernet + IPv4 + TCP SYN frame.
@@ -1781,40 +1825,163 @@ mod tests {
     fn outbound_proxy_is_skipped_for_host_destination() {
         let gw = test_gateway();
         let guest_dst = SocketAddr::new(IpAddr::V4(gw.ipv4.unwrap()), 8080);
-        let connect_target = resolve_tcp_host_target(guest_dst, gw);
-        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
-            address: "192.0.2.1:1080".parse().unwrap(),
-            credentials: None,
-        }));
+        let config = poll_config_for(&gw);
+        let routing = configured_routing();
+        let shared = SharedState::new(8);
 
-        assert!(
-            ResolvedOutboundProxy::select_for_destination(
-                &proxy,
-                guest_dst,
-                connect_target.primary(),
-            )
-            .is_none()
-        );
+        assert!(select_flow_route(&routing, guest_dst, &config, None, &shared).is_none());
     }
 
     #[test]
     fn outbound_proxy_is_preserved_for_external_destination() {
         let gw = test_gateway();
         let guest_dst = "198.51.100.10:443".parse().unwrap();
-        let connect_target = resolve_tcp_host_target(guest_dst, gw);
-        let proxy = Some(Arc::new(ResolvedOutboundProxy::Socks5 {
+        let config = poll_config_for(&gw);
+        let routing = configured_routing();
+        let shared = SharedState::new(8);
+
+        assert!(select_flow_route(&routing, guest_dst, &config, None, &shared).is_some());
+    }
+
+    fn configured_routing() -> OutboundRouting {
+        OutboundRouting::configured(Some(Arc::new(ResolvedOutboundProxy::Socks5 {
             address: "192.0.2.1:1080".parse().unwrap(),
             credentials: None,
-        }));
+        })))
+    }
 
+    /// Minimal poll config carrying the gateway for host-target resolution.
+    fn poll_config_for(gateway: &GatewayIps) -> PollLoopConfig {
+        PollLoopConfig {
+            gateway_mac: [0; 6],
+            guest_mac: [0; 6],
+            gateway: *gateway,
+            guest_ipv4: None,
+            guest_ipv6: None,
+            mtu: 1500,
+        }
+    }
+
+    fn ambient_test_proxy(http: &str, https: Option<&str>) -> AmbientHttpProxy {
+        AmbientHttpProxy::from_test_values_split(http, https, None).unwrap()
+    }
+
+    #[test]
+    fn tls_destination_classification_uses_443_and_intercepted_ports() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let tls_443: SocketAddr = "203.0.113.9:443".parse().unwrap();
+        let ordinary: SocketAddr = "203.0.113.9:80".parse().unwrap();
+        assert!(tls_destination(tls_443, None));
+        assert!(!tls_destination(ordinary, None));
+
+        // Without TLS interception no other port is classified as TLS.
+        let nonstandard: SocketAddr = "203.0.113.9:8443".parse().unwrap();
+        assert!(!tls_destination(nonstandard, None));
+
+        // A genuinely configured intercepted port is classified as TLS. The
+        // resulting endpoint-class choice is covered by the routing selector
+        // tests.
+        let state = tls_state_with_intercepted_ports(vec![8443]);
+        assert!(tls_destination(nonstandard, Some(&state)));
+    }
+
+    /// Build a disposable TLS state whose only persistent CA files live in an
+    /// exclusive temporary directory; the real MSB_HOME is never touched.
+    fn tls_state_with_intercepted_ports(ports: Vec<u16>) -> Arc<TlsState> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use microsandbox_types::TlsConfig;
+
+        use crate::engine::tls::ca::CertAuthority;
+
+        static NEXT_CA: AtomicUsize = AtomicUsize::new(0);
+        let directory = loop {
+            let directory = std::env::temp_dir().join(format!(
+                "msb-poll-ca-{}-{}",
+                std::process::id(),
+                NEXT_CA.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&directory) {
+                Ok(()) => break directory,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create test CA directory: {error}"),
+            }
+        };
+        let ca = CertAuthority::generate();
+        let cert_path = directory.join("ca.crt");
+        let key_path = directory.join("ca.key");
+        std::fs::write(&cert_path, ca.cert_pem()).unwrap();
+        std::fs::write(&key_path, ca.key_pem()).unwrap();
+
+        let mut config = TlsConfig::default();
+        config.intercept_ca.cert_path = Some(cert_path);
+        config.intercept_ca.key_path = Some(key_path);
+        config.intercepted_ports = ports;
+
+        let state = TlsState::new(config, SecretsHandle::new(Default::default()));
+        std::fs::remove_dir_all(directory).unwrap();
+        Arc::new(state.unwrap())
+    }
+
+    /// The SYN-selected route reaches the pending dial unchanged: `poll_connects`
+    /// hands the same `Arc` (or `None`) to the dial, for the same destination the
+    /// selection was made for. The tracker's immediate-accept path and the
+    /// selector itself are covered by `tcp::connection` and `proxy::routing`.
+    #[test]
+    fn wait_for_upstream_handoff_keeps_the_selected_route() {
+        use crate::tcp::connection::TcpAcceptMode;
+        use crate::tcp::test_support::TestNetwork;
+
+        let src: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+        let dst: SocketAddr = "10.0.0.2:8099".parse().unwrap();
+        let config = poll_config_for(&test_gateway());
+        let shared = SharedState::new(8);
+        let routing = OutboundRouting::ambient(ambient_test_proxy("http://proxy.test:3128", None));
+
+        let selected = select_flow_route(&routing, dst, &config, None, &shared)
+            .expect("external destination must select the proxy");
+
+        let mut network = TestNetwork::new(true);
+        let mut tracker = TcpConnectionTracker::new(None);
+        assert!(tracker.create_tcp_socket_with_proxy(
+            src,
+            dst,
+            &mut network.sockets,
+            TcpAcceptMode::WaitForUpstream,
+            Some(Arc::clone(&selected)),
+        ));
+        for _ in 0..16 {
+            network.poll();
+        }
+        let mut dials = tracker.poll_connects(&mut network.sockets);
+        assert_eq!(dials.len(), 1);
+        let (_, dial_dst, route) = dials.remove(0);
+        assert_eq!(dial_dst, dst, "the dial must use the selected destination");
+        let route = route.expect("the pending dial must keep the selected proxy");
+        assert!(Arc::ptr_eq(&route, &selected));
+
+        // A direct selection is handed off as `None`, never as a late proxy.
         assert!(
-            ResolvedOutboundProxy::select_for_destination(
-                &proxy,
-                guest_dst,
-                connect_target.primary(),
-            )
-            .is_some()
+            select_flow_route(&OutboundRouting::default(), dst, &config, None, &shared).is_none()
         );
+        let mut network = TestNetwork::new(true);
+        let mut tracker = TcpConnectionTracker::new(None);
+        assert!(tracker.create_tcp_socket_with_proxy(
+            src,
+            dst,
+            &mut network.sockets,
+            TcpAcceptMode::WaitForUpstream,
+            None,
+        ));
+        for _ in 0..16 {
+            network.poll();
+        }
+        let mut dials = tracker.poll_connects(&mut network.sockets);
+        assert_eq!(dials.len(), 1);
+        let (_, dial_dst, route) = dials.remove(0);
+        assert_eq!(dial_dst, dst, "the dial must use the selected destination");
+        assert!(route.is_none(), "a direct selection must stay direct");
     }
 
     #[test]
@@ -2071,7 +2238,7 @@ mod tests {
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
-                None,
+                Arc::new(OutboundRouting::default()),
             );
         });
         let send = |guest_port, control, seq, ack, payload: &[u8]| {
@@ -2220,7 +2387,7 @@ mod tests {
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
-                None,
+                Arc::new(OutboundRouting::default()),
             );
         });
 

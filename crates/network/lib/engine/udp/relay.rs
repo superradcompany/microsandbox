@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use crate::engine::dns::forwarder::DnsForwarderHandle;
 use crate::icmp::error::{construct_packet_too_big, ethernet_ip_payload};
 use crate::netstack::shared::SharedState;
-use crate::proxy::ResolvedOutboundProxy;
+use crate::proxy::{OutboundProxyProtocol, OutboundRouting, ResolvedOutboundProxy};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -99,7 +99,9 @@ pub struct UdpRelay {
     guest_mac: EthernetAddress,
     mtu: usize,
     tokio_handle: tokio::runtime::Handle,
-    outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+    /// Outbound proxy source frozen at engine startup; a new session selects
+    /// one leaf and keeps it.
+    outbound_routing: Arc<OutboundRouting>,
     dns_forwarder: Option<DnsForwarderHandle>,
 }
 
@@ -149,14 +151,15 @@ impl UdpRelay {
     /// * `guest_mac` - MAC address stamped as the destination on synthesized response frames.
     /// * `mtu` - Guest IP-level MTU. Large UDP replies are fragmented to fit it.
     /// * `tokio_handle` - Runtime the per-session relay tasks are spawned on.
-    /// * `outbound_proxy` - Optional proxy used for external UDP sessions.
+    /// * `outbound_routing` - Outbound proxy source used to select the upstream for
+    ///   new external UDP sessions.
     pub fn new(
         shared: Arc<SharedState>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
         mtu: usize,
         tokio_handle: tokio::runtime::Handle,
-        outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
+        outbound_routing: Arc<OutboundRouting>,
     ) -> Self {
         Self {
             shared,
@@ -166,7 +169,7 @@ impl UdpRelay {
             guest_mac: EthernetAddress(guest_mac),
             mtu,
             tokio_handle,
-            outbound_proxy,
+            outbound_routing,
             dns_forwarder: None,
         }
     }
@@ -390,15 +393,14 @@ impl UdpRelay {
         guest_dst: SocketAddr,
         host_dst: SocketAddr,
     ) -> Option<UdpUpstream> {
-        match ResolvedOutboundProxy::select_for_destination(
-            &self.outbound_proxy,
-            guest_dst,
-            host_dst,
-        ) {
+        match self
+            .outbound_routing
+            .select(guest_dst, host_dst, false, &self.shared)
+        {
             None => Some(UdpUpstream::Direct),
-            Some(proxy) => match proxy.as_ref() {
-                ResolvedOutboundProxy::Socks5 { .. } => Some(UdpUpstream::Socks5(proxy)),
-                ResolvedOutboundProxy::Socks4 { .. } => {
+            Some(proxy) => match proxy.protocol() {
+                OutboundProxyProtocol::Socks5 => Some(UdpUpstream::Socks5(proxy)),
+                OutboundProxyProtocol::Socks4 => {
                     tracing::debug!(
                         guest_src = %guest_src,
                         guest_dst = %guest_dst,
@@ -406,7 +408,7 @@ impl UdpRelay {
                     );
                     None
                 }
-                ResolvedOutboundProxy::HttpConnect { .. } => {
+                OutboundProxyProtocol::HttpConnect => {
                     tracing::debug!(
                         guest_src = %guest_src,
                         guest_dst = %guest_dst,
@@ -1551,7 +1553,96 @@ fn cmsg_align(len: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::runtime::Handle;
+
     use super::*;
+    use crate::proxy::AmbientHttpProxy;
+
+    /// HTTP CONNECT cannot carry datagrams in either representation: an eligible
+    /// session is dropped, while exclusions and explicit SOCKS5 keep their
+    /// existing paths.
+    #[tokio::test]
+    async fn outbound_routing_drops_non_dns_udp_unless_excluded() {
+        let guest_src: SocketAddr = "10.0.0.2:40000".parse().unwrap();
+        let guest_dst: SocketAddr = "203.0.113.9:9000".parse().unwrap();
+
+        let relay = |routing: OutboundRouting| {
+            UdpRelay::new(
+                Arc::new(SharedState::new(16)),
+                [2, 0, 0, 0, 0, 1],
+                [2, 0, 0, 0, 0, 2],
+                1500,
+                Handle::current(),
+                Arc::new(routing),
+            )
+        };
+        let ambient = |rules: Option<&str>| {
+            OutboundRouting::ambient(
+                AmbientHttpProxy::from_test_values("http://proxy.test:3128", rules).unwrap(),
+            )
+        };
+
+        // The ambient selector returns a runtime CONNECT leaf: no UDP transport.
+        let relay_instance = relay(ambient(None));
+        assert!(
+            relay_instance
+                .select_upstream(guest_src, guest_dst, guest_dst)
+                .is_none()
+        );
+
+        // A configured CONNECT leaf classifies identically and drops the same way.
+        let relay_instance = relay(OutboundRouting::configured(Some(Arc::new(
+            ResolvedOutboundProxy::HttpConnect {
+                address: "127.0.0.1:3128".parse().unwrap(),
+                credentials: None,
+            },
+        ))));
+        assert!(
+            relay_instance
+                .select_upstream(guest_src, guest_dst, guest_dst)
+                .is_none()
+        );
+
+        // SOCKS4 has no UDP transport either, with its own drop message.
+        let relay_instance = relay(OutboundRouting::configured(Some(Arc::new(
+            ResolvedOutboundProxy::Socks4 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                user_id: None,
+            },
+        ))));
+        assert!(
+            relay_instance
+                .select_upstream(guest_src, guest_dst, guest_dst)
+                .is_none()
+        );
+
+        // A bypassed session still maps to the direct datagram path. Rule
+        // matching itself (IP, CIDR, wildcard, loopback) is covered by the
+        // routing selector and ambient parser tests.
+        let relay_instance = relay(ambient(Some("*")));
+        assert!(matches!(
+            relay_instance.select_upstream(guest_src, guest_dst, guest_dst),
+            Some(UdpUpstream::Direct)
+        ));
+
+        // An explicit SOCKS5 proxy still wins and keeps UDP relay support.
+        let relay_instance = relay(OutboundRouting::configured(Some(Arc::new(
+            ResolvedOutboundProxy::Socks5 {
+                address: "127.0.0.1:1080".parse().unwrap(),
+                credentials: None,
+            },
+        ))));
+        assert!(matches!(
+            relay_instance.select_upstream(guest_src, guest_dst, guest_dst),
+            Some(UdpUpstream::Socks5(_))
+        ));
+
+        // The chosen upstream is stable for the same session inputs.
+        assert!(matches!(
+            relay_instance.select_upstream(guest_src, guest_dst, guest_dst),
+            Some(UdpUpstream::Socks5(_))
+        ));
+    }
 
     #[tokio::test]
     async fn configured_session_limit_evicts_oldest_and_can_be_unlimited() {
@@ -1560,8 +1651,8 @@ mod tests {
             [2, 0, 0, 0, 0, 1],
             [2, 0, 0, 0, 0, 2],
             1500,
-            tokio::runtime::Handle::current(),
-            None,
+            Handle::current(),
+            Arc::new(OutboundRouting::default()),
         );
         relay.set_max_sessions(NonZeroUsize::new(2));
         let dst: SocketAddr = "127.0.0.1:12345".parse().unwrap();

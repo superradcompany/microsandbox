@@ -466,3 +466,28 @@ fn mutable_nullable_setters_distinguish_clear_from_omission() {
     };
     assert_eq!(image.reference, "alpine:latest");
 }
+#[test]
+fn network_spec_proxy_from_env_patch_preserves_presence() {
+    use microsandbox_types::NetworkSpecPatch;
+    // Omission leaves the lower value untouched in both directions.
+    for inherited in [false, true] {
+        let mut target = SandboxSpec::default();
+        target.network.proxy_from_env = inherited;
+        NetworkSpecPatch::new().apply_to(&mut target.network);
+        assert_eq!(target.network.proxy_from_env, inherited);
+    }
+
+    // Explicit false overrides a lower true.
+    let mut target = SandboxSpec::default();
+    target.network.proxy_from_env = true;
+    NetworkSpecPatch::new()
+        .proxy_from_env(false)
+        .apply_to(&mut target.network);
+    assert!(!target.network.proxy_from_env);
+
+    // Explicit true overrides a lower false.
+    NetworkSpecPatch::new()
+        .proxy_from_env(true)
+        .apply_to(&mut target.network);
+    assert!(target.network.proxy_from_env);
+}

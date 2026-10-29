@@ -561,6 +561,14 @@ pub struct SandboxOpts {
     #[arg(long = "net-strict", num_args = 0..=1, require_equals = true, default_missing_value = "true")]
     pub net_strict: Option<bool>,
 
+    /// Discover an HTTP CONNECT proxy from the host environment for this sandbox.
+    ///
+    /// Bare `--proxy-from-env` enables it; `--proxy-from-env=false` disables it.
+    /// Omission inherits the configured default. An explicit `--proxy` wins.
+    #[cfg(feature = "net")]
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub proxy_from_env: Option<bool>,
+
     /// Ship the host's trusted root CAs into the guest. Opt in to make
     /// outbound TLS work behind corporate MITM proxies (Warp Zero
     /// Trust, Zscaler, etc.) whose gateway CA is installed on the host
@@ -930,6 +938,7 @@ impl SandboxOpts {
             || self.tcp_accept_queue_size.is_some()
             || self.max_inbound_tcp_connections.is_some()
             || self.net_strict.is_some()
+            || self.proxy_from_env.is_some()
             || self.trust_host_cas
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
@@ -1187,6 +1196,7 @@ impl SandboxOpts {
             || self.tcp_accept_queue_size.is_some()
             || self.max_inbound_tcp_connections.is_some()
             || self.net_strict.is_some()
+            || self.proxy_from_env.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
             || self.socks4_user_id.is_some()
@@ -2703,6 +2713,7 @@ fn apply_network_opts(
             .collect::<anyhow::Result<Vec<_>>>()?;
         let trust_host_cas = opts.trust_host_cas;
         let net_strict = opts.net_strict;
+        let proxy_from_env = opts.proxy_from_env;
         let tls_intercept = opts.tls_intercept;
         let tls_ports = opts.tls_intercept_port.clone();
         let tls_bypass = opts.tls_bypass.clone();
@@ -2828,6 +2839,12 @@ fn apply_network_opts(
 
             n
         });
+
+        // Explicit false must be preserved; whatever was requested, this never enables
+        // networking. Ambient intent belongs to the sandbox builder, not the network closure.
+        if let Some(enabled) = proxy_from_env {
+            builder = builder.proxy_from_env(enabled);
+        }
     }
 
     if let Some(proxy) = proxy {
@@ -3775,6 +3792,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The ambient-proxy flag is an optional boolean like `--net-strict`: bare
+    /// means true, omission inherits, `=false` is explicit, and an invalid value
+    /// fails parsing instead of defaulting.
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn proxy_from_env_flag_defaults_and_explicit_overrides() {
+        for (args, explicit) in [
+            (vec!["test"], None),
+            (vec!["test", "--proxy-from-env"], Some(true)),
+            (vec!["test", "--proxy-from-env=true"], Some(true)),
+            (vec!["test", "--proxy-from-env=false"], Some(false)),
+        ] {
+            let matches = SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(&args)
+                .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            assert_eq!(opts.proxy_from_env, explicit, "{args:?}");
+
+            for initial in [None, Some(true), Some(false)] {
+                let mut builder = SandboxBuilder::new("test").image("alpine");
+                if let Some(enabled) = initial {
+                    builder = builder.proxy_from_env(enabled);
+                }
+                let config = apply_sandbox_opts(builder, &opts)
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    config.spec.network.proxy_from_env,
+                    explicit.or(initial).unwrap_or(false),
+                    "{args:?} initial={initial:?}"
+                );
+            }
+        }
+
+        // An invalid value is a clean parse failure.
+        assert!(
+            SandboxOpts::augment_args(Command::new("test"))
+                .try_get_matches_from(["test", "--proxy-from-env=maybe"])
+                .is_err()
+        );
+
+        // The flag co-exists with an explicit proxy and never enables networking.
+        let matches = SandboxOpts::augment_args(Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "--proxy-from-env",
+                "--proxy",
+                "socks5://127.0.0.1:1080",
+            ])
+            .unwrap();
+        let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+        let config = apply_sandbox_opts(
+            SandboxBuilder::new("test")
+                .image("alpine")
+                .disable_network(),
+            &opts,
+        )
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+        assert!(!config.spec.network.enabled);
+        assert!(config.spec.network.proxy_from_env);
+        assert!(config.spec.network.outbound_proxy.is_some());
     }
 
     #[test]

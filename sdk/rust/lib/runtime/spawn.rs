@@ -306,6 +306,9 @@ pub async fn spawn_sandbox(
     mode: SpawnMode,
     lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+    // Refuse intent this build cannot honor before any runtime or directory work.
+    crate::runtime::launch_contract::validate_build_network_intent(config)?;
+
     // Durable configuration stores only host-side source references. Resolve
     // them into the private runtime configuration before the sandbox process
     // is spawned.
@@ -4072,10 +4075,10 @@ mod tests {
             .unwrap()
     }
 
-    /// Return the typed launch payload generated for a sandbox configuration.
-    fn render_launch(config: &SandboxConfig) -> LaunchConfig {
+    /// Return the visible argv and typed launch payload generated for a configuration.
+    fn render_launch_and_args(config: &SandboxConfig) -> (Vec<String>, LaunchConfig) {
         let local = test_local_backend();
-        let (_, launch) = machine_cli_args(
+        let (visible, launch) = machine_cli_args(
             &local,
             config,
             42,
@@ -4096,7 +4099,18 @@ mod tests {
             None,
             None,
         );
-        launch
+        (
+            visible
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            launch,
+        )
+    }
+
+    /// Return the typed launch payload generated for a sandbox configuration.
+    fn render_launch(config: &SandboxConfig) -> LaunchConfig {
+        render_launch_and_args(config).1
     }
 
     /// Re-expand a [`LaunchConfig`] into the historical `--flag value` token
@@ -4427,34 +4441,113 @@ mod tests {
         assert_eq!(render_launch(&config).sandbox_slot, 1);
     }
 
+    /// The launcher's host proxy environment never reaches the launch payload or argv.
+    ///
+    /// Drives the real `machine_cli_args` renderer in an isolated subprocess where sentinel
+    /// proxy variables are genuinely present in the encoding process, then feeds the
+    /// encoded payload to the runtime's own decoder.
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn ambient_proxy_launch_payload_is_boolean_only_under_a_proxy_host_environment() {
+        const CHILD: &str = "MSB_LAUNCH_PRIVACY_TEST";
+        const NAME: &str =
+            "ambient_proxy_launch_payload_is_boolean_only_under_a_proxy_host_environment";
+        const HOST: &str = "proxy-sentinel-4f2a.test";
+        const USER: &str = "user-sentinel-8c1d";
+        const PASSWORD: &str = "password-sentinel-2b7e";
+        const EXCLUDED: &str = "excluded-sentinel-6a90.test";
+
+        if std::env::var_os(CHILD).is_none() {
+            let proxy = format!("http://{USER}:{PASSWORD}@{HOST}:3128");
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg(NAME)
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env("HTTP_PROXY", &proxy)
+                .env("http_proxy", &proxy)
+                .env("HTTPS_PROXY", &proxy)
+                .env("https_proxy", &proxy)
+                .env("ALL_PROXY", &proxy)
+                .env("NO_PROXY", EXCLUDED)
+                .env("no_proxy", EXCLUDED)
+                .env_remove("MSB_PROXY_FROM_ENV")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            // A filtered run that selects nothing would pass vacuously.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("1 passed"),
+                "the isolated probe must run: {stdout}"
+            );
+            return;
+        }
+
+        use crate::runtime::launch_contract::LaunchContract;
+
+        // The sentinels are present in this process, not merely absent search strings.
+        for name in ["HTTP_PROXY", "https_proxy", "NO_PROXY"] {
+            let value = std::env::var(name).unwrap_or_default();
+            assert!(
+                value.contains(HOST) || value.contains(EXCLUDED),
+                "{name} must carry a sentinel: {value}"
+            );
+        }
+
+        // Encode exactly what the launcher encodes for an ambient-enabled sandbox, through
+        // the same renderer that produces the process argv and the config-fd payload.
+        let config = SandboxBuilder::new("ambient-launch")
+            .image("/tmp/rootfs")
+            .proxy_from_env(true)
+            .build()
+            .await
+            .unwrap();
+        let (visible, launch) = render_launch_and_args(&config);
+        // The argv is what `ps` can show, including any guest bootstrap/startup tokens.
+        let visible = visible.join("\u{1f}");
+
+        // The current build is the only contract that can carry the field at all.
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        let bytes = serde_json::to_vec(&contract.encode(&launch).unwrap()).unwrap();
+
+        // The runtime's own decoder accepts it and sees only the enablement boolean.
+        let decoded = LaunchConfig::decode(&bytes).expect("runtime decoder accepts the payload");
+        let decoded_network = decoded.network.expect("network launch config");
+        assert!(decoded_network.config().proxy_from_env);
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            payload["network"]["outbound_proxy"].is_null(),
+            "ambient discovery must not populate the explicit proxy field: {payload}"
+        );
+
+        let text = String::from_utf8(bytes).unwrap();
+        for sentinel in [
+            HOST,
+            USER,
+            PASSWORD,
+            EXCLUDED,
+            "3128",
+            "http_proxy",
+            "no_proxy",
+        ] {
+            assert!(!text.contains(sentinel), "launch payload leaked {sentinel}");
+            assert!(
+                !visible.contains(sentinel),
+                "visible launch argv leaked {sentinel}: {visible}"
+            );
+        }
+    }
+
     /// Render only the `visible` argv (what shows up in `ps`).
     fn render_visible_args(config: &SandboxConfig) -> Vec<String> {
-        let local = test_local_backend();
-        let (visible, _piped) = machine_cli_args(
-            &local,
-            config,
-            42,
-            #[cfg(feature = "net")]
-            test_network_slot(),
-            #[cfg(feature = "net")]
-            test_resolved_network(config),
-            Path::new("/tmp/msb.db"),
-            30,
-            Path::new("/tmp/logs"),
-            Path::new("/tmp/runtime"),
-            Path::new("/tmp/agent.sock"),
-            Path::new("/tmp/libkrunfw.dylib"),
-            &HashMap::new(),
-            &HashMap::new(),
-            None,
-            None,
-            None,
-            None,
-        );
-        visible
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
+        render_launch_and_args(config).0
     }
 
     fn render_args_with_file_mounts(

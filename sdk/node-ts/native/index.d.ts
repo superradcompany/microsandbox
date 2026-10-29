@@ -1385,6 +1385,12 @@ export declare class SandboxBuilder {
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Configure the single proxy used for outbound sandbox connections. */
   proxy(configure: (arg: OutboundProxyBuilder) => HttpConnectProxyBuilder | Socks4ProxyBuilder | Socks5ProxyBuilder): this
+  /**
+   * Discover an HTTP CONNECT proxy from the host environment. Default: false.
+   *
+   * An explicit `.proxy(...)` still wins routing without clearing this flag.
+   */
+  proxyFromEnv(enabled: boolean): this
   /** Publish a TCP port from host -> guest. */
   port(hostPort: number, guestPort: number): this
   /** Publish a TCP port from host -> guest on a specific host bind address. */

@@ -76,6 +76,22 @@ sandbox = Microsandbox::Sandbox.create(
 
 Accepts an `OutboundProxy`. The same object can be passed to `builder.proxy(proxy)`.
 
+### proxy_from_env
+
+```ruby
+Microsandbox::Sandbox.create(name, image:, proxy_from_env: nil) # => Sandbox
+```
+
+Discover an HTTP CONNECT proxy from the host proxy environment at each network startup. `nil` or omission inherits the configured default; `true` and `false` are explicit. The fluent `builder.proxy_from_env(true)` returns the builder and `builder.proxy_from_env!(true)` returns `nil`. An explicit `proxy:` still wins routing. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("ambient", image: "python", proxy_from_env: true)
+```
+
+</Accordion>
+
 ## OutboundProxy
 
 #### <span className="msb-recv">Microsandbox::OutboundProxy.</span><span className="msb-hn">http_connect()</span>

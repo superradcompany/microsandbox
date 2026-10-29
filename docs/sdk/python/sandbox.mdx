@@ -96,7 +96,7 @@ Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while pr
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><code>**kwargs</code><a className="msb-type" href="#sandboxconfig">SandboxConfig</a></div>
-    <div className="msb-param-desc">Configuration fields: <code>image</code>, <code>cpus</code>, <code>memory</code>, <code>volumes</code>, <code>ports</code>, <code>network</code>, <code>proxy</code>, <code>secrets</code>, <code>detached</code>, and more.</div>
+    <div className="msb-param-desc">Configuration fields: <code>image</code>, <code>cpus</code>, <code>memory</code>, <code>volumes</code>, <code>ports</code>, <code>network</code>, <code>proxy</code>, <code>proxy_from_env</code>, <code>secrets</code>, <code>detached</code>, and more.</div>
   </div>
 </div>
 
@@ -1838,6 +1838,14 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | secrets | `Sequence[`[`SecretEntry`](/sdk/python/secrets#secretentry)`]` | `[]` | Secret injection |
 | secret_violation_action | [`ViolationAction`](/sdk/python/secrets#violationaction) | `BLOCK_AND_LOG` | Sandbox-wide default action when a secret placeholder would leak to a non-eligible destination. Shorthand for `Network.secret_violation_action`; if both are provided, this top-level value takes precedence. |
 | detached | `bool` | `False` | If `True`, spawn the sandbox in detached mode; call [`detach()`](#sb-detach) before dropping the returned handle when it should keep running |
+
+#### proxy_from_env
+
+```python
+proxy_from_env: bool | None = None
+```
+
+Discover an HTTP CONNECT proxy from the host environment at each network start. `None` inherits (built-in `False`); `True` and `False` are explicit. Overrides [`Network.proxy_from_env`](/sdk/python/networking#proxy_from_env); an explicit `proxy` still wins routing. See [Proxies](/sdk/python/proxies).
 
 ### InitConfig
 

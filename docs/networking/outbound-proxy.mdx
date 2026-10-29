@@ -274,6 +274,88 @@ msb run alpine \
   HTTP Basic authentication does not encrypt credentials in transit. Use a trusted local or private proxy, or encrypt the connection separately.
 </Warning>
 
+## Discover a proxy from the host environment
+
+Enable opt-in ambient discovery when a corporate or developer environment already exports proxy variables. Only the enablement boolean is stored; the selected endpoint, its URL credentials, and the `NO_PROXY` rules stay in host memory and are reread at each runtime network startup.
+
+```bash
+msb run python --proxy-from-env
+```
+
+<CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("ambient")
+  .image("python")
+  .proxyFromEnv(true)
+  .create();
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::builder("ambient")
+    .image("python")
+    .proxy_from_env(true)
+    .create()
+    .await?;
+```
+
+```python Python
+sb = await Sandbox.create("ambient", image="python", proxy_from_env=True)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "ambient",
+    m.WithImage("python"),
+    m.WithProxyFromEnv(true),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("ambient", image: "python", proxy_from_env: true)
+```
+</CodeGroup>
+
+- **Default and overrides:** Off by default. `--proxy-from-env[=true|false]`, `network.proxy_from_env`, SDK setters, and `sandbox_defaults.proxy_from_env` set it. Explicit `false` is an override, not an omission, and an explicit outbound proxy wins over it.
+- **Precedence:** An explicit `--proxy`/outbound proxy wins without reading any proxy variable. Multi-tenant deployments clear ambient intent before discovery, and cloud creation rejects it.
+- **Policy:** Explicit values override ordinary user, global, and sandbox-file defaults. Managed configuration is applied last and is authoritative in both directions, so a managed `true` cannot be turned off by a per-sandbox or CLI `false`. See [corporate networking](/enterprise/corporate-networking) for managed enforcement.
+- **Host toggle:** `MSB_PROXY_FROM_ENV=1|true|yes|on` (or `0|false|no|off`) supplies an ordinary default for new sandboxes. It is read when the SDK backend is constructed and never overrides an explicit per-sandbox value or managed policy.
+
+<Accordion title="Variable precedence and endpoint selection">
+
+- **Variables:** `https_proxy`, `http_proxy`, `all_proxy`, and `no_proxy`, plus their uppercase spellings. Lowercase wins; an empty lowercase value falls back to uppercase. Only `http://` endpoints (or a scheme-less `host:port`) are supported, with port 80 by default.
+- **Preference:** TLS destinations try `HTTPS_PROXY`, then `ALL_PROXY`, then `HTTP_PROXY`. Other TCP destinations try `HTTP_PROXY`, then `ALL_PROXY`, then `HTTPS_PROXY`. No runtime failure falls back to another candidate.
+- **TLS classification:** The preference is chosen when the guest opens the connection, before any TLS ClientHello exists, so a destination counts as TLS only on port 443 or a port configured for TLS interception. HTTPS on a nonstandard, unintercepted port uses the HTTP preference, which matters when the two variables point at different proxies.
+- **Transport:** HTTP CONNECT only. `https_proxy` names a proxy for TLS destinations; it does not mean TLS to the proxy. Basic authentication comes from URL userinfo and is held only in host memory.
+
+</Accordion>
+
+<Accordion title="NO_PROXY rules and exclusions">
+
+- **`NO_PROXY` syntax:** Comma or whitespace separated. Supports `*`, IP addresses, CIDR ranges, and domain names (exact or dot-delimited subdomains, case-insensitive, trailing dots ignored). Numeric ports on a rule are ignored.
+- **Domain matching:** Domain rules match a live DNS answer for the destination IP, not SNI or PTR. If the guest never resolved a matching name, only IP/CIDR/`*` rules can exempt the destination.
+- **Shared IPs:** Matching is per destination IP, so any live cached name that matches a rule exempts every hostname that currently resolves to the same address. Two hostnames behind one IP are therefore either both proxied or both direct. Use IP/CIDR rules when you need deterministic bypasses.
+- **Local destinations:** Loopback, unspecified, and link-local host dial addresses, plus `host.microsandbox.internal`, stay direct.
+
+</Accordion>
+
+<Accordion title="Failures, limits, and restarts">
+
+- **Missing settings:** When none of the proxy variables is set, routing stays direct and the runtime logs nothing.
+- **Unusable settings:** A proxy variable that is present but unusable is ignored with a credential-free warning in the runtime log. If another usable proxy variable remains, traffic is proxied through it; traffic connects directly only when no usable proxy variable remains.
+- **Failures after selection:** Once a proxy is selected, DNS, connect, handshake, timeout, or proxy-rejection failures fail that connection; there is no direct retry.
+- **Limits:** Non-DNS UDP cannot travel over HTTP CONNECT and is dropped while ambient routing is selected. DNS, DNS-over-TLS, and ICMP keep their existing paths. Ambient discovery is not a mandatory egress tunnel; use an explicit proxy or network policy when traffic must never leave directly.
+- **Restarts:** Each network-engine startup re-reads the launching host environment. Restarting reads the environment of the process performing the restart; changing the variables while a sandbox runs affects its next network start. Do not expect the saved configuration to remember the previously selected endpoint.
+- **Runtime support:** The selected `msb` runtime must advertise the `proxy_from_env` capability. An older runtime fails with an upgrade-required error instead of routing direct.
+
+</Accordion>
+
+<Accordion title="Older SDKs and shared homes">
+
+Only the enablement boolean is saved. Older SDKs/CLIs that can open the same home may silently remove saved `proxy_from_env=true` when rewriting sandbox settings; there is no new catalog marker or feature-specific downgrade guard. Runtime capability admission does not protect against that loss. Coordinate older SDK/CLI writers or use separate homes, and use supporting clients for managed enforcement.
+
+</Accordion>
+
 ## Behavior and limits
 
 - Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.

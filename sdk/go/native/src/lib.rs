@@ -992,6 +992,8 @@ struct NetworkOpts {
     trust_host_cas: Option<bool>,
     /// HTTP denial response settings.
     http: Option<microsandbox_network::config::HttpConfig>,
+    /// Discover an HTTP CONNECT proxy from the host environment.
+    proxy_from_env: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1163,6 +1165,9 @@ struct SandboxCreateOpts {
     network: Option<NetworkOpts>,
     /// Proxy that all outbound sandbox connections are dialed through.
     proxy: Option<OutboundProxyOpts>,
+    /// Discover an HTTP CONNECT proxy from the host environment. The Go SDK
+    /// promotes either spelling here so an older strict decoder refuses it.
+    proxy_from_env: Option<bool>,
     /// Top-level ports shorthand: {host_port: guest_port} (TCP).
     #[serde(default)]
     ports: HashMap<u16, u16>,
@@ -1663,6 +1668,11 @@ fn apply_network(
     // Trust host CA bundles inside the guest.
     if let Some(trust) = net.trust_host_cas {
         builder = builder.network(move |n| n.trust_host_cas(trust));
+    }
+
+    // Ambient host proxy discovery, inherited when omitted.
+    if let Some(enabled) = net.proxy_from_env {
+        builder = builder.proxy_from_env(enabled);
     }
 
     // HTTP denial response settings.
@@ -2682,6 +2692,10 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(proxy) = opts.proxy {
                 builder = apply_outbound_proxy(builder, proxy)?;
+            }
+            // Top-level intent applies after the nested network field and wins.
+            if let Some(enabled) = opts.proxy_from_env {
+                builder = builder.proxy_from_env(enabled);
             }
             // Secrets.
             for s in &opts.secrets {
@@ -7862,9 +7876,9 @@ fn agent_error(err: microsandbox::AgentClientError) -> FfiError {
 
 #[cfg(test)]
 mod tests {
-    use microsandbox::{MicrosandboxError, RestoreKind};
+    use microsandbox::{MicrosandboxError, RestoreKind, Sandbox};
 
-    use super::FfiError;
+    use super::{FfiError, NetworkOpts, SandboxCreateOpts, apply_network};
 
     #[test]
     fn missing_restore_bindings_keep_the_invalid_config_kind() {
@@ -7915,6 +7929,43 @@ mod tests {
         let config = builder.build().await.unwrap();
         assert_eq!(config.spec.network.tcp_accept_queue_size, Some(4096));
         assert_eq!(config.spec.network.max_inbound_tcp_connections, Some(0));
+    }
+
+    #[tokio::test]
+    async fn proxy_from_env_reaches_the_sandbox_config() {
+        // Nested spelling.
+        for enabled in [true, false] {
+            let net: NetworkOpts = serde_json::from_value(serde_json::json!({
+                "proxy_from_env": enabled
+            }))
+            .unwrap();
+            let builder = Sandbox::builder("ambient-nested").image("alpine");
+            let Ok(builder) = apply_network(builder, &net) else {
+                panic!("apply_network rejected proxy_from_env");
+            };
+            let config = builder.build().await.unwrap();
+            assert_eq!(config.spec.network.proxy_from_env, enabled);
+        }
+
+        // Omission stays omitted from the sparse patch.
+        let net: NetworkOpts = serde_json::from_value(serde_json::json!({})).unwrap();
+        let builder = Sandbox::builder("ambient-omitted").image("alpine");
+        let Ok(builder) = apply_network(builder, &net) else {
+            panic!("apply_network rejected empty options");
+        };
+        // The sparse patch leaves the effective value at the built-in false.
+        assert!(!builder.build().await.unwrap().spec.network.proxy_from_env);
+
+        // Top-level intent from the create envelope, applied after the nested one.
+        let opts: SandboxCreateOpts = serde_json::from_value(serde_json::json!({
+            "image": "alpine",
+            "network": {"proxy_from_env": true},
+            "proxy_from_env": false
+        }))
+        .unwrap();
+        assert_eq!(opts.proxy_from_env, Some(false));
+        let net = opts.network.as_ref().unwrap();
+        assert_eq!(net.proxy_from_env, Some(true));
     }
 
     #[tokio::test]

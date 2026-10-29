@@ -84,10 +84,15 @@ async fn restart_one(
 
     match restart_action(handle.status_snapshot()) {
         RestartAction::StopThenStart => {
+            // Refuse unsupported saved intent before stopping or killing the VM.
+            handle.preflight_local_restart().await?;
             stop_for_restart(name, force, timeout_secs, quiet).await?;
             start_for_restart(&handle, name, quiet).await
         }
-        RestartAction::StartOnly => start_for_restart(&handle, name, quiet).await,
+        RestartAction::StartOnly => {
+            handle.preflight_local_restart().await?;
+            start_for_restart(&handle, name, quiet).await
+        }
         RestartAction::FailAlreadyStarting => {
             anyhow::bail!("sandbox '{name}' is already starting")
         }

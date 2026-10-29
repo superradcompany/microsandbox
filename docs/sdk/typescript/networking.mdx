@@ -1960,6 +1960,14 @@ Built network configuration produced by `NetworkBuilder.build()`. Keys are camel
 | trustHostCAs | `boolean` | Ship host CAs into the guest |
 | outboundProxy | [`OutboundProxy`](/sdk/typescript/proxies#outboundproxy)` \| null` | Canonical outbound proxy configuration stored in the sandbox network spec; `null` when unset |
 
+#### proxyFromEnv
+
+```typescript
+proxyFromEnv: boolean
+```
+
+Discover an HTTP CONNECT proxy from the host environment. Defaults to `false`; an explicit outbound proxy still wins routing. See [Proxies](/networking/outbound-proxy#discover-a-proxy-from-the-host-environment).
+
 #### http
 
 ```typescript

@@ -705,6 +705,17 @@ pub struct NetworkSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[config_patch(nullable)]
     pub outbound_proxy: Option<OutboundProxy>,
+
+    /// Discover an HTTP CONNECT proxy for outbound connections from the host environment.
+    ///
+    /// When true, each new runtime network startup reads `http_proxy`/`https_proxy`/`all_proxy`
+    /// (and their uppercase forms) plus `no_proxy` and routes eligible guest TCP traffic through
+    /// the selected proxy. HTTP CONNECT carries no datagrams, so non-DNS UDP is dropped while
+    /// ambient routing is selected; DNS, DNS-over-TLS, and ICMP keep their existing paths. Only
+    /// this boolean is persisted; the discovered endpoint and its credentials stay in host
+    /// memory. Explicit `outbound_proxy` wins. Default: false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub proxy_from_env: bool,
 }
 
 /// Proxy configuration for outbound sandbox connections.
@@ -1999,6 +2010,7 @@ impl Default for NetworkSpec {
             nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
             outbound_proxy: None,
+            proxy_from_env: false,
             http: HttpConfig::default(),
         }
     }
@@ -2845,6 +2857,10 @@ impl Default for SecretSubstitution {
 
 fn default_true() -> bool {
     true
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Validate an HTTP header field name (RFC 9110 `token`).

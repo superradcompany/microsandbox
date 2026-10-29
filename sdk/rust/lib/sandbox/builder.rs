@@ -720,6 +720,10 @@ impl SandboxBuilder {
 
     /// Configure networking via a closure.
     ///
+    /// The sandbox builder owns ambient proxy intent. A closure that returns a
+    /// concrete configuration leaves this sandbox's `proxy_from_env` setting
+    /// unchanged; use [`.proxy_from_env`](Self::proxy_from_env) to change it.
+    ///
     /// ```ignore
     /// .network(|n| n
     ///     .port(8080, 80)
@@ -738,6 +742,7 @@ impl SandboxBuilder {
                 return self;
             }
         };
+
         match f(NetworkBuilder::from_config(network)).build() {
             Ok(net) => {
                 if let Err(err) = self.set_local_network_config(net)
@@ -752,6 +757,18 @@ impl SandboxBuilder {
                 }
             }
         }
+        self
+    }
+
+    /// Discover an HTTP CONNECT proxy from the host environment at network startup.
+    ///
+    /// Default: false. This does not enable networking and is overridden by an
+    /// explicit [`.proxy`](Self::proxy). Only the boolean is persisted; the selected
+    /// endpoint, `NO_PROXY` rules and URL credentials are read from the launching
+    /// host at each runtime network startup.
+    #[cfg(feature = "net")]
+    pub fn proxy_from_env(mut self, enabled: bool) -> Self {
+        self.config.spec.network.proxy_from_env_mut(enabled);
         self
     }
 
@@ -1474,8 +1491,12 @@ impl SandboxBuilder {
         &mut self,
         network: microsandbox_network::config::NetworkConfig,
     ) -> MicrosandboxResult<()> {
+        // The concrete config always carries a boolean; preserve the sparse patch
+        // presence across the conversion so unrelated calls cannot fabricate intent.
+        let proxy_from_env = self.config.spec.network.proxy_from_env;
         let network = super::config::network_spec_from_config(&network)?;
         self.config.spec.network = network.into();
+        self.config.spec.network.proxy_from_env = proxy_from_env;
         Ok(())
     }
 
@@ -2548,6 +2569,11 @@ impl From<SandboxConfig> for SandboxBuilder {
         {
             patch.spec.runtime.workdir = Some(workdir);
         }
+        // Ambient-proxy intent is sparse: the concrete value may merely be inherited, so
+        // only the saved caller-override record decides whether it stays explicit here.
+        if let Some(caller_overrides) = saved_overrides.as_ref() {
+            patch.spec.network.proxy_from_env = caller_overrides.spec.network.proxy_from_env;
+        }
 
         let mut caller_overrides = patch.clone();
         caller_overrides.spec = saved_overrides
@@ -2577,12 +2603,19 @@ mod tests {
         BackendConfig, ConfigSource, SandboxBuilder, SandboxConfig, SandboxConfigPatch,
         checkpoint_network_override_conflicts,
     };
+    use std::collections::BTreeMap;
+
+    #[cfg(feature = "net")]
+    use microsandbox_network::config::{NetworkBuilder, NetworkConfig};
+    #[cfg(feature = "net")]
+    use microsandbox_types::NetworkSpec;
+    use serde_json::Value;
+
     use crate::config::GlobalConfigPatch;
     #[cfg(feature = "local")]
     use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
     use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, RestoreKind};
-    use std::collections::BTreeMap;
 
     #[test]
     fn rebuild_preserves_resolved_init_and_honors_new_init_edits() {
@@ -2808,6 +2841,8 @@ mod tests {
         }
     }
 
+    // Uses the networking builder surface, so this fixture is only available in net builds.
+    #[cfg(feature = "net")]
     #[test]
     fn additive_setters_preserve_existing_config_lists() {
         for saved_state in ["legacy", "captured", "explicit"] {
@@ -2911,6 +2946,8 @@ mod tests {
         }
     }
 
+    // Uses the networking builder surface, so this fixture is only available in net builds.
+    #[cfg(feature = "net")]
     #[test]
     fn network_edits_preserve_existing_config() {
         let mut original = SandboxBuilder::new("existing")
@@ -2930,6 +2967,8 @@ mod tests {
         );
     }
 
+    // Uses the networking builder surface, so this fixture is only available in net builds.
+    #[cfg(feature = "net")]
     #[test]
     fn restored_bindings_survive_persistence_and_rebuild() {
         let backend = BackendConfig::new(Default::default(), Default::default());
@@ -2973,6 +3012,358 @@ mod tests {
                 }
             );
             assert_eq!(rebuilt.spec.network.ports.len(), 1);
+        }
+    }
+
+    /// Ambient-proxy intent is sparse sandbox configuration: explicit false is a
+    /// real override, omission inherits, and callbacks only apply what they set.
+    #[cfg(feature = "net")]
+    #[test]
+    fn proxy_from_env_preserves_sparse_intent_across_network_calls() {
+        use microsandbox_types::NetworkSpecPatch;
+
+        fn configured(builder: SandboxBuilder) -> bool {
+            let mut network = NetworkSpec::default();
+            builder.config.spec.network.clone().apply_to(&mut network);
+            network.proxy_from_env
+        }
+
+        // Top-level setter writes explicit true/false and keeps networking enabled.
+        let enabled = SandboxBuilder::new("ambient").proxy_from_env(true);
+        assert_eq!(enabled.config.spec.network.proxy_from_env, Some(true));
+        assert!(configured(enabled));
+        let disabled = SandboxBuilder::new("ambient")
+            .proxy_from_env(true)
+            .proxy_from_env(false);
+        assert_eq!(disabled.config.spec.network.proxy_from_env, Some(false));
+        assert!(!configured(disabled));
+
+        // Unrelated network calls never fabricate presence.
+        for prior in [None, Some(true), Some(false)] {
+            for case in ["port", "proxy", "tls", "disable", "callback"] {
+                let mut builder = SandboxBuilder::new("ambient");
+                builder.config.spec.network.proxy_from_env = prior;
+                let builder = match case {
+                    "port" => builder.port(8080, 80),
+                    "proxy" => builder.proxy(|p| p.socks5("127.0.0.1:1080")),
+                    "tls" => builder.intercept_tls(),
+                    "disable" => builder.disable_network(),
+                    _ => builder.network(|n| n.port(8081, 81)),
+                };
+                assert_eq!(
+                    builder.config.spec.network.proxy_from_env, prior,
+                    "prior={prior:?}, case={case}"
+                );
+            }
+        }
+
+        // A callback that never touches the setting inherits the prior state.
+        for prior in [None, Some(true), Some(false)] {
+            let mut builder = SandboxBuilder::new("ambient");
+            builder.config.spec.network.proxy_from_env = prior;
+            let builder = builder.network(|network| network);
+            assert_eq!(builder.config.spec.network.proxy_from_env, prior);
+        }
+
+        // A concrete configuration returned by a callback never establishes sandbox
+        // ambient intent: the prior sparse option survives in every direction.
+        for prior in [None, Some(true), Some(false)] {
+            for concrete in [true, false] {
+                let mut builder = SandboxBuilder::new("ambient");
+                builder.config.spec.network.proxy_from_env = prior;
+                let config = microsandbox_network::config::NetworkConfig {
+                    proxy_from_env: concrete,
+                    ..Default::default()
+                };
+                let builder = builder.network(move |_| NetworkBuilder::from_config(config));
+                assert_eq!(
+                    builder.config.spec.network.proxy_from_env, prior,
+                    "prior={prior:?}, concrete={concrete}"
+                );
+            }
+        }
+
+        // The concrete field itself survives a standalone network build.
+        for concrete in [true, false] {
+            let config = microsandbox_network::config::NetworkConfig {
+                proxy_from_env: concrete,
+                ..Default::default()
+            };
+            let built = NetworkBuilder::from_config(config).build().unwrap();
+            assert_eq!(built.proxy_from_env, concrete);
+        }
+
+        // The top-level setter owns ambient intent, unrelated callbacks between two
+        // calls never change it, and the last explicit call still wins.
+        let toggled = SandboxBuilder::new("ambient")
+            .proxy_from_env(true)
+            .network(|network| network.port(8083, 83))
+            .proxy_from_env(false)
+            .network(|network| network);
+        assert_eq!(toggled.config.spec.network.proxy_from_env, Some(false));
+
+        // A failed network build keeps the prior sparse option and records only the
+        // first error.
+        let mut builder = SandboxBuilder::new("ambient");
+        builder.config.spec.network.proxy_from_env = Some(true);
+        let builder = builder.network(|network| {
+            // A CA certificate without its key fails the network build.
+            network.tls(|tls| tls.enabled(true).intercept_ca_cert("ca.pem"))
+        });
+        let first_error = builder.build_error.as_ref().map(ToString::to_string);
+        assert!(
+            first_error.is_some(),
+            "the mismatched CA must fail the build"
+        );
+        assert_eq!(builder.config.spec.network.proxy_from_env, Some(true));
+
+        // The second failure is independently a different error, so replacing the first
+        // one would be visible below.
+        let distinct = NetworkBuilder::new()
+            .nat64_prefix("64:ff9b::/64".parse().unwrap())
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert_ne!(first_error.as_deref(), Some(distinct.as_str()));
+
+        let builder =
+            builder.network(|network| network.nat64_prefix("64:ff9b::/64".parse().unwrap()));
+        assert_eq!(
+            builder.build_error.as_ref().map(ToString::to_string),
+            first_error,
+            "a later failure must not replace the first error"
+        );
+        assert_eq!(builder.config.spec.network.proxy_from_env, Some(true));
+
+        // A prior true survives a network call that only adds a port.
+        let mut builder = SandboxBuilder::new("ambient");
+        builder.config.spec.network.proxy_from_env = Some(true);
+        let builder = builder.network(|network| network.port(8082, 82));
+        assert_eq!(builder.config.spec.network.proxy_from_env, Some(true));
+
+        // Disabling networking does not clear or enable ambient intent.
+        let builder = SandboxBuilder::new("ambient")
+            .proxy_from_env(true)
+            .disable_network();
+        assert_eq!(builder.config.spec.network.proxy_from_env, Some(true));
+        let network = builder.local_network_config().unwrap();
+        assert!(!network.enabled);
+        assert!(network.proxy_from_env);
+
+        // The generated patch keeps an explicit false in its sparse form.
+        let patch = NetworkSpecPatch::new().proxy_from_env(false);
+        assert_eq!(patch.proxy_from_env, Some(false));
+    }
+
+    /// One ambient-proxy default layer, as `sandbox_defaults.proxy_from_env`.
+    #[cfg(feature = "net")]
+    fn ambient_defaults(value: Option<bool>) -> Value {
+        match value {
+            Some(value) => serde_json::json!({"sandbox_defaults":{"proxy_from_env":value}}),
+            None => serde_json::json!({}),
+        }
+    }
+
+    /// Backend layers for the ambient-intent rebuild fixtures.
+    #[cfg(feature = "net")]
+    fn ambient_layers(user: Value, managed: Value) -> BackendConfig {
+        BackendConfig::new(
+            serde_json::from_value(user).unwrap(),
+            serde_json::from_value(managed).unwrap(),
+        )
+    }
+
+    /// Save and reload a config through the caller-override record.
+    ///
+    /// Asserting presence here keeps the persistence invariant visible to every
+    /// caller instead of only the first test that needed it.
+    #[cfg(feature = "net")]
+    fn ambient_reload(config: &SandboxConfig) -> SandboxConfig {
+        let json = serde_json::to_string(config).unwrap();
+        let saved = config.caller_config_overrides_json(&json).unwrap();
+        assert!(saved.is_some(), "sandbox builders always record callers");
+        SandboxConfig::from_stored(&json, saved.as_deref()).unwrap()
+    }
+
+    #[cfg(feature = "net")]
+    fn ambient_base() -> SandboxBuilder {
+        SandboxBuilder::new("ambient").image("alpine")
+    }
+
+    /// Ambient-proxy intent must ride #1913's caller-override record through a save,
+    /// reload, and rebuild: an explicit value beats ordinary and global defaults, an
+    /// omitted value inherits, and managed policy stays authoritative in both
+    /// directions. The same holds when the intent came from a network callback.
+    #[cfg(feature = "net")]
+    #[test]
+    fn proxy_from_env_survives_saved_caller_overrides_across_rebuilds() {
+        // Full cross-product of explicit intent, ordinary/global defaults, and managed
+        // policy. Precedence per the plan: managed wins, then explicit, then defaults.
+        for explicit in [None, Some(true), Some(false)] {
+            for user in [None, Some(true), Some(false)] {
+                for managed in [None, Some(true), Some(false)] {
+                    let built = match explicit {
+                        Some(enabled) => ambient_base().proxy_from_env(enabled),
+                        None => ambient_base(),
+                    }
+                    .finish(None, None)
+                    .unwrap();
+                    let layers = ambient_layers(ambient_defaults(user), ambient_defaults(managed));
+                    let rebuilt = SandboxBuilder::from(ambient_reload(&built))
+                        .finish(Some(&layers), None)
+                        .unwrap();
+                    let expected = managed.or(explicit).or(user).unwrap_or(false);
+                    assert_eq!(
+                        rebuilt.spec.network.proxy_from_env, expected,
+                        "explicit={explicit:?}, user={user:?}, managed={managed:?}"
+                    );
+                }
+            }
+        }
+
+        // Without backend layers the explicit value is the effective value.
+        for explicit in [None, Some(true), Some(false)] {
+            let built = match explicit {
+                Some(enabled) => ambient_base().proxy_from_env(enabled),
+                None => ambient_base(),
+            }
+            .finish(None, None)
+            .unwrap();
+            let rebuilt = SandboxBuilder::from(ambient_reload(&built))
+                .finish(None, None)
+                .unwrap();
+            assert_eq!(
+                rebuilt.spec.network.proxy_from_env,
+                explicit.unwrap_or(false),
+                "explicit={explicit:?}, no layers"
+            );
+        }
+
+        // A saved config can resolve true while its caller record stays sparse. The
+        // rebuild must read the caller intent, not the materialized boolean.
+        let inherited = ambient_base()
+            .finish(
+                Some(&ambient_layers(
+                    ambient_defaults(Some(true)),
+                    ambient_defaults(None),
+                )),
+                None,
+            )
+            .unwrap();
+        assert!(inherited.spec.network.proxy_from_env);
+
+        let saved = ambient_reload(&inherited);
+        let caller = saved
+            .caller_config_overrides
+            .as_ref()
+            .expect("saved builders record callers");
+        assert_eq!(
+            caller.spec.network.proxy_from_env, None,
+            "an omitted ambient setting stays sparse in the caller record"
+        );
+
+        // An ordinary false default, with no managed override, must resolve false: a
+        // rebuild that promoted the saved true to explicit intent would return true.
+        let ordinary = ambient_layers(ambient_defaults(Some(false)), ambient_defaults(None));
+        let rebuilt = SandboxBuilder::from(saved.clone())
+            .finish(Some(&ordinary), None)
+            .unwrap();
+        assert!(!rebuilt.spec.network.proxy_from_env);
+        assert_eq!(
+            rebuilt
+                .caller_config_overrides
+                .as_ref()
+                .expect("rebuilds keep the caller record")
+                .spec
+                .network
+                .proxy_from_env,
+            None,
+            "the rebuilt caller record still omits ambient intent"
+        );
+
+        // A managed false stays authoritative over the same sparse caller record.
+        let managed = ambient_layers(ambient_defaults(None), ambient_defaults(Some(false)));
+        let rebuilt = SandboxBuilder::from(saved)
+            .finish(Some(&managed), None)
+            .unwrap();
+        assert!(!rebuilt.spec.network.proxy_from_env);
+    }
+
+    /// The same survivability through the sandbox callbacks that rebuild local
+    /// network configuration after a reload. Ambient intent belongs to the sandbox
+    /// builder, so a callback neither sets nor drops it.
+    #[cfg(feature = "net")]
+    #[test]
+    fn proxy_from_env_survives_saved_caller_overrides_through_network_callbacks() {
+        // A callback that leaves ambient intent alone preserves the caller's recorded
+        // value, whether explicit true, explicit false, or omitted.
+        for (explicit, user, expected) in [
+            (Some(false), Some(true), false),
+            (Some(false), None, false),
+            (Some(true), None, true),
+            (Some(true), Some(false), true),
+            (None, Some(true), true),
+            (None, None, false),
+        ] {
+            let mut builder = ambient_base();
+            if let Some(enabled) = explicit {
+                builder = builder.proxy_from_env(enabled);
+            }
+            let built = builder.finish(None, None).unwrap();
+            let user_layers = ambient_layers(ambient_defaults(user), ambient_defaults(None));
+            let rebuilt = SandboxBuilder::from(ambient_reload(&built))
+                .network(|network| network.port(8085, 85))
+                .finish(Some(&user_layers), None)
+                .unwrap();
+            assert_eq!(
+                rebuilt.spec.network.proxy_from_env, expected,
+                "explicit={explicit:?}, user={user:?}"
+            );
+        }
+
+        // A prior explicit value survives an untouched callback across the round trip.
+        for (explicit, user, expected) in [(false, Some(true), false), (true, None, true)] {
+            let built = ambient_base()
+                .proxy_from_env(explicit)
+                .finish(None, None)
+                .unwrap();
+            let user_layers = ambient_layers(ambient_defaults(user), ambient_defaults(None));
+            let rebuilt = SandboxBuilder::from(ambient_reload(&built))
+                .network(|network| network)
+                .finish(Some(&user_layers), None)
+                .unwrap();
+            assert_eq!(
+                rebuilt.spec.network.proxy_from_env, expected,
+                "explicit={explicit}, user={user:?}"
+            );
+        }
+
+        // A callback returning a concrete configuration preserves the recorded sparse
+        // intent in both directions, against opposite ordinary defaults, and under both
+        // managed directions.
+        for (prior, concrete, user, managed, expected) in [
+            (None, false, Some(true), None, true),
+            (None, true, None, Some(false), false),
+            (Some(true), false, None, Some(false), false),
+            (Some(false), true, Some(true), None, false),
+            (Some(false), false, None, Some(true), true),
+        ] {
+            let mut base = ambient_base();
+            base.config.spec.network.proxy_from_env = prior;
+            let built = base.finish(None, None).unwrap();
+            let layers = ambient_layers(ambient_defaults(user), ambient_defaults(managed));
+            let network = NetworkConfig {
+                proxy_from_env: concrete,
+                ..Default::default()
+            };
+            let rebuilt = SandboxBuilder::from(ambient_reload(&built))
+                .network(move |_| NetworkBuilder::from_config(network))
+                .finish(Some(&layers), None)
+                .unwrap();
+            assert_eq!(
+                rebuilt.spec.network.proxy_from_env, expected,
+                "prior={prior:?}, concrete={concrete}, user={user:?}, managed={managed:?}"
+            );
         }
     }
 

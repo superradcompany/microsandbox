@@ -352,6 +352,43 @@ async fn branch(
         .await
 }
 
+/// Whether the source relies on host-backed resources that need explicit authorization.
+///
+/// Ambient discovery reads the source host's proxy environment, so it carries the
+/// same authorization requirement as an explicit proxy, TLS interception, secret
+/// sources, or host CA trust.
+#[cfg(feature = "local")]
+fn uses_host_backed_resources(config: &SandboxConfig) -> bool {
+    config.spec.network.outbound_proxy.is_some()
+        || config.spec.network.secrets.is_some()
+        || config.spec.network.tls.is_some()
+        || config.spec.network.trust_host_cas
+        || config.spec.network.proxy_from_env
+}
+
+/// Adopt the child's caller intent without erasing host-backed state it inherits.
+///
+/// An authorized branch copies the source's ambient-proxy boolean. The child's own
+/// caller record is normally sparse, and the rebuild hand-off treats an omitted field
+/// as inherit, so the copied boolean has to be recorded explicitly or it would be
+/// rewritten to the destination default.
+#[cfg(feature = "local")]
+fn adopt_caller_overrides(config: &mut SandboxConfig, options: &SandboxConfig) {
+    let inherits_host_state = options.restore_resources.inherit;
+    let inherited_proxy_from_env = config.spec.network.proxy_from_env;
+
+    config.caller_config_overrides = options.caller_config_overrides.clone();
+
+    if !inherits_host_state {
+        return;
+    }
+    if let Some(caller_overrides) = config.caller_config_overrides.as_mut()
+        && caller_overrides.spec.network.proxy_from_env.is_none()
+    {
+        caller_overrides.spec.network.proxy_from_env = Some(inherited_proxy_from_env);
+    }
+}
+
 /// Resolve source configuration once, shared by single-child and explicit batch operations.
 #[cfg(feature = "local")]
 pub(super) async fn prepare_branch(
@@ -398,18 +435,13 @@ pub(super) async fn prepare_branch(
         .active_config()?
         .unwrap_or(handle.config()?)
         .clone_for_persistence();
-    if !options.restore_resources.inherit
-        && (config.spec.network.outbound_proxy.is_some()
-            || config.spec.network.secrets.is_some()
-            || config.spec.network.tls.is_some()
-            || config.spec.network.trust_host_cas)
-    {
+    if !options.restore_resources.inherit && uses_host_backed_resources(&config) {
         return Err(MicrosandboxError::InvalidConfig(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
 
-    config.caller_config_overrides = options.caller_config_overrides.clone();
+    adopt_caller_overrides(&mut config, &options);
 
     // Owned declarations contain no source host path. Retain them as the required inventory
     // until capture proves that every one has independent child backing; clear external mounts.
@@ -731,7 +763,10 @@ fn reclaim_abandoned_memory(root: &Path) {
 
 #[cfg(all(test, feature = "local"))]
 mod tests {
+    use microsandbox_types::{NetworkSpecPatch, OutboundProxy, SandboxSpecPatch};
+
     use super::*;
+    use crate::sandbox::SandboxConfigPatch;
 
     fn fork() -> ForkBuilder {
         let backend = crate::test_support::local_backend(Default::default());
@@ -752,6 +787,117 @@ mod tests {
                 if host == Path::new("/images/seed.img") && guest == "/data"
         ));
         assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    /// An authorized branch inherits the source's ambient boolean through the sparse
+    /// child caller record: the rebuild hand-off must not erase the copied value.
+    #[test]
+    fn authorized_branch_keeps_inherited_ambient_intent() {
+        use crate::config::layers::BackendConfig;
+
+        let plain_layers = BackendConfig::new(Default::default(), Default::default());
+        let defaults_on = BackendConfig::new(
+            serde_json::from_value(serde_json::json!({
+                "sandbox_defaults": { "proxy_from_env": true }
+            }))
+            .unwrap(),
+            Default::default(),
+        );
+        let source = |enabled: bool| {
+            SandboxBuilder::new("source")
+                .image("alpine")
+                .overlay(
+                    SandboxConfigPatch::new().spec(
+                        SandboxSpecPatch::new()
+                            .network(NetworkSpecPatch::new().proxy_from_env(enabled)),
+                    ),
+                )
+                .finish(None, None)
+                .unwrap()
+        };
+        let sparse_options = |inherit: bool| {
+            let mut options = SandboxConfig::default();
+            options.restore_resources.inherit = inherit;
+            options.caller_config_overrides = Some(Box::new(SandboxConfigPatch::new()));
+            options
+        };
+        let rebuild = |mut config: SandboxConfig, layers: &BackendConfig, inherited: bool| {
+            adopt_caller_overrides(&mut config, &sparse_options(inherited));
+            SandboxBuilder::from(config)
+                .finish(Some(layers), None)
+                .unwrap()
+        };
+
+        // Source enabled, child inherits: batch siblings clone the prepared template and
+        // every one of them keeps the boolean.
+        let template = {
+            let mut config = source(true).clone_for_persistence();
+            adopt_caller_overrides(&mut config, &sparse_options(true));
+            config
+        };
+        for sibling in [template.clone(), template.clone()] {
+            let rebuilt = SandboxBuilder::from(sibling)
+                .finish(Some(&plain_layers), None)
+                .unwrap();
+            assert!(rebuilt.spec.network.proxy_from_env);
+        }
+
+        // The copied boolean is the source's value in both directions.
+        assert!(
+            !rebuild(source(false), &defaults_on, true)
+                .spec
+                .network
+                .proxy_from_env
+        );
+
+        // Without authorization the source's ambient state is not re-asserted; such a
+        // source is refused before this point.
+        assert!(
+            !rebuild(source(true), &plain_layers, false)
+                .spec
+                .network
+                .proxy_from_env
+        );
+
+        // A child that states its own intent keeps it.
+        let mut child = source(true).clone_for_persistence();
+        let mut options = sparse_options(true);
+        options.caller_config_overrides =
+            Some(Box::new(SandboxConfigPatch::new().spec(
+                SandboxSpecPatch::new().network(NetworkSpecPatch::new().proxy_from_env(false)),
+            )));
+        adopt_caller_overrides(&mut child, &options);
+        assert!(
+            !SandboxBuilder::from(child)
+                .finish(Some(&plain_layers), None)
+                .unwrap()
+                .spec
+                .network
+                .proxy_from_env
+        );
+    }
+
+    /// Ambient intent is a host-backed resource for branch authorization: a source
+    /// that relies on the host proxy environment needs explicit inheritance.
+    #[test]
+    fn ambient_proxy_intent_requires_branch_resource_authorization() {
+        let mut config = SandboxConfig::default();
+        assert!(!uses_host_backed_resources(&config));
+
+        config.spec.network.proxy_from_env = true;
+        assert!(uses_host_backed_resources(&config));
+
+        // The source boolean is the only ambient state considered; no endpoint or
+        // credential is ever part of the decision.
+        config.spec.network.proxy_from_env = false;
+        assert!(!uses_host_backed_resources(&config));
+
+        // Explicit proxies and other host-backed settings keep their own trigger.
+        config.spec.network.outbound_proxy = Some(OutboundProxy::Socks5 {
+            address: "127.0.0.1:1080".to_string(),
+            credentials: None,
+        });
+        assert!(uses_host_backed_resources(&config));
     }
 
     #[test]
