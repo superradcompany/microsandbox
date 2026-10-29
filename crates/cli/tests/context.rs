@@ -214,3 +214,84 @@ fn cloud_context_uses_explicit_selection_without_contacting_the_endpoint() {
     assert!(context["selection_error"].is_null());
     assert!(!dir.path().join("runtime").exists());
 }
+
+#[test]
+fn explicit_flags_override_environment_without_saving_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let config = r#"{"active_profile":"work","profiles":{"work":{"backend":"cloud","api_key_ref":"env:MSB_UNSET_CONTEXT_KEY"}}}"#;
+    std::fs::write(&path, config).unwrap();
+
+    let local = success_json(
+        command(dir.path(), &["context", "--local", "--format", "json"])
+            .env("MSB_BACKEND", "invalid")
+            .env("MSB_API_KEY", "NEVER_PRINT_THIS")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(local["kind"], "local");
+
+    let cloud = success_json(
+        command(dir.path(), &["--cloud", "context", "--format", "json"])
+            .env("MSB_BACKEND", "local")
+            .env("MSB_API_KEY", "NEVER_PRINT_THIS")
+            .env("MSB_API_URL", "http://127.0.0.1:1")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(cloud["kind"], "cloud");
+    assert_eq!(cloud["api_url"], "http://127.0.0.1:1");
+    assert!(!cloud.to_string().contains("NEVER_PRINT_THIS"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), config);
+    assert!(!dir.path().join("runtime").exists());
+}
+
+#[test]
+fn cloud_flag_can_use_saved_profile_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{
+        "active_profile":"work", "profiles":{"work":{
+            "backend":"cloud", "url":"http://127.0.0.1:1",
+            "api_key_ref":"env:MSB_CONTEXT_TEST_KEY"
+        }}
+    }"#,
+    )
+    .unwrap();
+    let cloud = success_json(
+        command(dir.path(), &["context", "--cloud", "--format", "json"])
+            .env("MSB_CONTEXT_TEST_KEY", "NEVER_PRINT_THIS")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(cloud["kind"], "cloud");
+    assert_eq!(cloud["profile"], "work");
+    assert_eq!(cloud["api_url"], "http://127.0.0.1:1");
+}
+
+#[test]
+fn explicit_flags_do_not_bypass_policy_or_fall_back_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = command(dir.path(), &["ls", "--cloud"]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("MSB_API_KEY"));
+    assert!(!dir.path().join("runtime").exists());
+
+    for (allowed, prohibited) in [("local", "cloud"), ("cloud", "local")] {
+        std::fs::write(
+            dir.path().join("config.json"),
+            json!({"allowed_backends":[allowed]}).to_string(),
+        )
+        .unwrap();
+        let flag = format!("--{prohibited}");
+        let output = command(dir.path(), &["context", &flag])
+            .env("MSB_API_KEY", "NEVER_PRINT_THIS")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("allowed backends"), "{error}");
+        assert!(!error.contains("NEVER_PRINT_THIS"));
+    }
+}
