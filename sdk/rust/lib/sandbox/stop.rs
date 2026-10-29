@@ -31,6 +31,10 @@ pub(super) async fn stop(
         if let (Some(local), SandboxIdentity::Local(id)) = (backend.as_local(), &identity) {
             return local.stop_complete(name, *id, _ephemeral).await;
         }
+        #[cfg(feature = "cloud")]
+        if let (Some(cloud), SandboxIdentity::Cloud(id)) = (backend.as_cloud(), &identity) {
+            return cloud.stop_complete(id).await;
+        }
         // The cloud control-plane's terminal status is its completion authority. Local process
         // locks have no meaning there; keep the backend identity checks on every observation.
         let handle = backend.sandboxes().get(backend.clone(), name).await?;

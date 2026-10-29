@@ -79,6 +79,36 @@ pub(in crate::backend) enum CloudRegistrySelection {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudBackend {
+    /// Stop the captured cloud identity and observe completion, including ephemeral deletion.
+    pub(crate) async fn stop_complete(&self, id: &str) -> MicrosandboxResult<()> {
+        let current = self.get_sandbox_by_id(id).await?;
+        if matches!(
+            current.status,
+            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
+        ) {
+            return Ok(());
+        }
+        self.stop_sandbox_by_id(id).await?;
+        loop {
+            match self.get_sandbox_by_id(id).await {
+                Ok(observed)
+                    if matches!(
+                        observed.status,
+                        CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
+                    ) =>
+                {
+                    return Ok(());
+                }
+                // Only disappearance after a successful stop of a confirmed ephemeral
+                // sandbox is completion. Missing persistent sandboxes and failed stop
+                // requests still surface their errors, and a reused name is never followed.
+                Err(MicrosandboxError::SandboxNotFound(_)) if current.ephemeral => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
     /// Apply captured device settings before validating or sending a cloud create request.
     pub(crate) async fn create_from_builder(
         &self,

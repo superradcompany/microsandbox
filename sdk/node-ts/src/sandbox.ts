@@ -190,7 +190,7 @@ export class PullProgressCreate {
   /** @internal */
   private readonly name: string;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
+  constructor(inner: NapiPullProgressCreate, name: string, private readonly cloudOwnsLifecycle = false) {
     this.inner = inner;
     this.name = name;
   }
@@ -214,9 +214,9 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    // Full restores can auto-detach even without an explicit detached builder option.
-    // Only the completed native handle knows whether disposal owns this lifecycle.
-    return new Sandbox(inner, this.name);
+    // Local full restores can auto-detach; their native ownership stays authoritative.
+    // Cloud creation captures JS scope cleanup separately from host process ownership.
+    return new Sandbox(inner, this.name, inner.backendKind === "cloud" ? this.cloudOwnsLifecycle : inner.ownsLifecycle);
   }
 }
 
@@ -224,8 +224,8 @@ export class PullProgressCreate {
 export class CreationProgressCreate {
   private readonly creation: PullProgressCreate;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string) {
-    this.creation = new PullProgressCreate(inner, name);
+  constructor(inner: NapiPullProgressCreate, name: string, cloudOwnsLifecycle = false) {
+    this.creation = new PullProgressCreate(inner, name, cloudOwnsLifecycle);
   }
   get progress(): import("./creation-progress.js").CreationProgressStream {
     return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
@@ -238,6 +238,7 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
+  private detachedFromScope = false;
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
@@ -280,6 +281,7 @@ export class Sandbox implements AsyncDisposable {
   readonly name: string;
   /** Stable identity that changes when this name is removed and recreated. */
   readonly id: string;
+  /** Whether this handle acquired cleanup ownership for its scope. */
   readonly ownsLifecycle: boolean;
   /** Backend retained by this sandbox. */
   readonly backendKind: "local" | "cloud";
@@ -303,13 +305,23 @@ export class Sandbox implements AsyncDisposable {
   static builder(name: string): SandboxBuilder {
     const nb = new napi.SandboxBuilder(name);
     const origCreate = nb.create.bind(nb);
+    const origDetached = nb.detached.bind(nb);
+    let detached = false;
+    nb.detached = (enabled: boolean) => {
+      const result = origDetached(enabled);
+      detached = enabled;
+      return result;
+    };
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const origCreateWithProgress = nb.createWithProgress?.bind(nb);
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
+      const cloudOwnsLifecycle = !detached;
       const inner = await withMappedErrors(() => origCreate());
-      return new Sandbox(inner, name);
+      // Cloud workers own their OS processes, but an attached JS creation still
+      // owns scope cleanup. Preserve native ownership for local/full restores.
+      return new Sandbox(inner, name, inner.backendKind === "cloud" ? cloudOwnsLifecycle : inner.ownsLifecycle);
     };
     (
       nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
@@ -324,13 +336,15 @@ export class Sandbox implements AsyncDisposable {
         createWithPullProgress: () => Promise<PullProgressCreate>;
       }
     ).createWithPullProgress = async () => {
+      const cloudOwnsLifecycle = !detached;
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name);
+      return new PullProgressCreate(raw, name, cloudOwnsLifecycle);
     };
     (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
       if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
+      const cloudOwnsLifecycle = !detached;
       const raw = await withMappedErrors(() => origCreateWithProgress());
-      return new CreationProgressCreate(raw, name);
+      return new CreationProgressCreate(raw, name, cloudOwnsLifecycle);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -729,10 +743,11 @@ export class Sandbox implements AsyncDisposable {
    */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
+    this.detachedFromScope = true;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
-    if (!this.ownsLifecycle) return;
+    if (!this.ownsLifecycle || this.detachedFromScope) return;
     try {
       await this.inner.stop();
     } catch {

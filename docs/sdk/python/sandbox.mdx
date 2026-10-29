@@ -359,21 +359,22 @@ Delete a stopped sandbox by name. See [Destroy or remove](/sandboxes/lifecycle#d
 
 Command execution (`exec`, `exec_stream`, `shell`, `shell_stream`) is documented on the [Execution](/sdk/python/execution) page; SSH (`ssh`) on the [SSH](/sdk/python/ssh) page. The lifecycle, attach, metrics, and logs methods follow.
 
-#### <span className="msb-recv">sb.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">sb.</span><span className="msb-hn">name</span>
 
 ```python
-async def name(self) -> str
+@property
+def name(self) -> Awaitable[str]
 ```
 
 <Accordion title="Example">
 
 ```python
-print(await sb.name())
+print(await sb.name)
 ```
 
 </Accordion>
 
-Return the sandbox name.
+Await this property to read the sandbox name.
 
 <p className="msb-label">Returns</p>
 

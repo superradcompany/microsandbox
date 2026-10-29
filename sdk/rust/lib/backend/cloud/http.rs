@@ -531,7 +531,13 @@ fn cloud_http_error(
     let summary = cloud_error_message(body)
         .or_else(|| (!raw_body.trim().is_empty()).then_some(raw_body.trim()))
         .unwrap_or("no response body");
-    let message = format!("{op}: {summary}");
+    let message = if status == 401 {
+        format!(
+            "{op}: {summary}. Check MSB_API_KEY or the selected cloud profile's credentials; create a replacement key at https://dashboard.microsandbox.dev if the key has expired or been revoked"
+        )
+    } else {
+        format!("{op}: {summary}")
+    };
 
     match code.as_deref() {
         Some("sandbox_not_found") => return MicrosandboxError::SandboxNotFound(message),
@@ -769,6 +775,28 @@ pub(super) fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unauthorized_errors_keep_their_type_and_explain_credential_recovery() {
+        let body: CloudErrorBody =
+            serde_json::from_str(r#"{"error":{"code":"unauthorized","message":"unauthorized"}}"#)
+                .unwrap();
+        let error = cloud_http_error(401, Some(&body), "", "GET /v1/sandboxes");
+        let MicrosandboxError::CloudHttp {
+            status,
+            code,
+            message,
+        } = error
+        else {
+            panic!("authentication error type changed")
+        };
+        assert_eq!(status, 401);
+        assert_eq!(code.as_deref(), Some("unauthorized"));
+        assert!(message.contains("MSB_API_KEY"));
+        assert!(message.contains("https://dashboard.microsandbox.dev"));
+        let forbidden = cloud_http_error(403, Some(&body), "", "GET /v1/sandboxes");
+        assert!(!forbidden.to_string().contains("replacement key"));
+    }
 
     #[test]
     fn cloud_http_error_uses_nested_error_body() {
