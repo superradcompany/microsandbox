@@ -7,6 +7,7 @@ use std::io::{IsTerminal, Write};
 use clap::{CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
+    backend_args::BackendArgs,
     commands::{
         completion, context, image, install, pull, registry,
         sandbox::{self, SandboxCommands},
@@ -66,6 +67,9 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
+    #[command(flatten)]
+    backend: BackendArgs,
+
     #[command(flatten)]
     tree: microsandbox_cli::tree::TreeArgs,
 
@@ -205,6 +209,25 @@ struct HelpStyles {}
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl Cli {
+    fn try_parse_backend_args<I, T>(arguments: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(arguments)?;
+        // Clap checks conflicts within a command, but global flags supplied at
+        // different nesting levels also need to be checked after propagation.
+        if cli.backend.cloud && cli.backend.local {
+            return Err(Self::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--cloud cannot be used with --local",
+            ));
+        }
+        Ok(cli)
+    }
+}
+
 impl Commands {
     /// Normalize shortcuts before choosing the executor or resolving the backend.
     fn into_canonical(self) -> Self {
@@ -290,7 +313,12 @@ fn main() {
 
     let mut argv: Vec<_> = std::env::args_os().collect();
     let legacy_launch = microsandbox_cli::launch_compat::route_legacy_launch(&mut argv);
-    let cli = Cli::parse_from(argv);
+    let cli = Cli::try_parse_backend_args(argv).unwrap_or_else(|error| error.exit());
+    if let Some(kind) = cli.backend.selected_kind() {
+        // SAFETY: CLI parsing precedes tracing and Tokio initialization. Reuse the
+        // existing resolver without changing saved profiles or the parent shell.
+        unsafe { std::env::set_var("MSB_BACKEND", kind.as_str()) };
+    }
     let log_level = cli.logs.selected_level();
 
     let exit_code = match cli.command.into_canonical() {
@@ -347,7 +375,7 @@ fn main() {
             // built-in detection.
             let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
-            match run_async_command_anyhow(command, log_level) {
+            match run_async_command_anyhow(command, log_level, cli.backend) {
                 Ok(()) => 0,
                 Err(e) => render_anyhow_error(&e),
             }
@@ -643,6 +671,7 @@ fn extract_quoted_token_str(s: &str) -> Option<String> {
 fn run_async_command_anyhow(
     command: Commands,
     log_level: Option<microsandbox::LogLevel>,
+    backend_args: BackendArgs,
 ) -> anyhow::Result<()> {
     // Internal maintenance commands do not execute sandbox operations and
     // must remain usable while diagnosing an invalid backend configuration.
@@ -669,6 +698,7 @@ fn run_async_command_anyhow(
     let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
+        backend_args.validate_selection()?;
         let mut cleanup_backend = None;
         // Stale-sandbox reaping and ephemeral cleanup are owned by host
         // runtime processes (`msb machine`) now, not the CLI; see
@@ -791,6 +821,58 @@ fn is_backend_independent_command(command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn backend_flags_work_throughout_command_hierarchy() {
+        for prefix in [vec![], vec!["sandbox"], vec!["sbx"]] {
+            let mut base = vec!["msb"];
+            base.extend(prefix);
+            base.push("ls");
+            for position in 1..=base.len() {
+                for flag in ["--cloud", "--local"] {
+                    let mut argv = base.clone();
+                    argv.insert(position, flag);
+                    let cli = Cli::try_parse_backend_args(argv.clone()).unwrap();
+                    assert_eq!(cli.backend.cloud, flag == "--cloud", "{argv:?}");
+                    assert_eq!(cli.backend.local, flag == "--local", "{argv:?}");
+                    argv.push(if flag == "--cloud" {
+                        "--local"
+                    } else {
+                        "--cloud"
+                    });
+                    assert_eq!(
+                        Cli::try_parse_backend_args(argv).err().unwrap().kind(),
+                        clap::error::ErrorKind::ArgumentConflict
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn backend_flags_after_separator_belong_to_the_guest() {
+        for prefix in [vec![], vec!["sandbox"], vec!["sbx"]] {
+            let cli = Cli::try_parse_from(["msb", "--cloud"].into_iter().chain(prefix).chain([
+                "run",
+                "python:3.12",
+                "--",
+                "python",
+                "script.py",
+                "--local",
+                "--cloud",
+            ]))
+            .unwrap();
+            assert!(cli.backend.cloud);
+            assert!(!cli.backend.local);
+            let Commands::Sandbox(args) = cli.command.into_canonical() else {
+                panic!("expected sandbox command")
+            };
+            let SandboxCommands::Run(args) = args.command else {
+                panic!("expected run command")
+            };
+            assert_eq!(args.command, ["python", "script.py", "--local", "--cloud"]);
+        }
+    }
 
     #[test]
     fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
