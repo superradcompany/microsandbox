@@ -445,10 +445,11 @@ pub struct SandboxOpts {
     /// `<action>[:<direction>]@<target>[:<proto>[:<ports>]]`.
     ///
     /// Target kinds: IPs/CIDRs, domains (`example.com`), domain suffixes
-    /// (`*.example.com` shorthand or `suffix=example.com`), and groups
-    /// (`public`, `private`, `multicast`, ...), plus the semantic `dns`
-    /// target for gateway UDP/TCP port 53. Suffixes must be at
-    /// least two labels (e.g. `*.example.com`, not `*.com`).
+    /// (`*.example.com` shorthand or `suffix=example.com`), subdomains
+    /// only (`subdomain=example.com`, never `example.com` itself), and
+    /// groups (`public`, `private`, `multicast`, ...), plus the semantic
+    /// `dns` target for gateway UDP/TCP port 53. Suffixes and subdomains
+    /// must be at least two labels (e.g. `*.example.com`, not `*.com`).
     ///
     /// Examples: --net-rule "allow@public"
     /// --net-rule "deny@198.51.100.5,allow@public"

@@ -453,7 +453,9 @@ mod tests {
             .allow_domain("example.com")
             .expect("valid domain")
             .allow_domain_suffix("staging.example.com")
-            .expect("valid suffix");
+            .expect("valid suffix")
+            .allow_subdomain("internal.example.com")
+            .expect("valid subdomain");
         policy.rules.push(Rule::allow_egress(Destination::Cidr(
             "151.101.0.0/16".parse().unwrap(),
         )));
@@ -506,6 +508,13 @@ mod tests {
             legacy,
             microsandbox_types::Destination::DomainSuffix(_)
         ));
+        assert_eq!(
+            serde_json::to_string(&Destination::Subdomain(
+                "internal.example.com".parse().unwrap()
+            ))
+            .unwrap(),
+            r#"{"subdomain":"internal.example.com"}"#
+        );
         let legacy_group: microsandbox_types::DestinationGroup =
             serde_json::from_str(r#""link_local""#).unwrap();
         assert_eq!(

@@ -396,7 +396,7 @@ msb create python --name github-only \
 
 <Accordion title="How strict hostname checks work">
 
-Domain and domain-suffix rules start with the hostname microsandbox can observe. DNS rules see the query name, and TLS connections usually expose SNI before the encrypted session starts. That is enough to decide whether a connection may be opened, but it is not the same as seeing the HTTP request authority.
+Domain, domain-suffix, and subdomain rules start with the hostname microsandbox can observe. DNS rules see the query name, and TLS connections usually expose SNI before the encrypted session starts. That is enough to decide whether a connection may be opened, but it is not the same as seeing the HTTP request authority.
 
 For plaintext HTTP, microsandbox can inspect the `Host` header and require it to match the hostname that policy allowed. For HTTPS without TLS interception, or for a host that is configured to bypass interception, the HTTP `Host` header and HTTP/2 `:authority` value are encrypted. In that case microsandbox cannot prove which application hostname the request is using after the TLS session starts.
 

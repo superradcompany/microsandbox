@@ -138,6 +138,15 @@ impl LaunchContract {
             .await?;
         }
 
+        if self.machine && has_subdomain_rule(network) {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.subdomain_destination,
+                "subdomain network destinations",
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -163,6 +172,10 @@ impl LaunchContract {
             return Err(MicrosandboxError::Runtime(upgrade_required(
                 "HTTP CONNECT outbound proxies",
             )));
+        }
+
+        if has_subdomain_rule(network) {
+            return unsupported("subdomain network destinations");
         }
 
         if network.max_udp_connections.is_some() {
@@ -1068,6 +1081,16 @@ fn parse_version(bytes: &[u8]) -> MicrosandboxResult<Version> {
     parsed.ok_or_else(|| MicrosandboxError::Runtime("unrecognized runtime version response".into()))
 }
 
+/// Whether any rule uses the `subdomain` destination, which older runtimes cannot parse.
+#[cfg(feature = "net")]
+fn has_subdomain_rule(network: &microsandbox_network::config::NetworkConfig) -> bool {
+    network
+        .policy
+        .rules
+        .iter()
+        .any(|rule| matches!(rule.destination, Destination::Subdomain(_)))
+}
+
 /// A consistent, actionable refusal for features that cannot be downgraded.
 fn upgrade_required(feature: &str) -> String {
     format!(
@@ -1381,6 +1404,84 @@ mod tests {
         machine
             .require_network_capabilities(&without_auth, &plain)
             .await
+            .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn subdomain_destination_requires_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let subdomain: NetworkConfig = serde_json::from_value(json!({
+            "policy": {
+                "default_egress": "deny",
+                "default_ingress": "allow",
+                "rules": [{
+                    "direction": "egress",
+                    "destination": {"subdomain": "example.com"},
+                    "action": "allow"
+                }]
+            }
+        }))
+        .unwrap();
+        let suffix: NetworkConfig = serde_json::from_value(json!({
+            "policy": {
+                "default_egress": "deny",
+                "default_ingress": "allow",
+                "rules": [{
+                    "direction": "egress",
+                    "destination": {"domain_suffix": "example.com"},
+                    "action": "allow"
+                }]
+            }
+        }))
+        .unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"subdomain_destination":false}'"#,
+            r#"printf '%s' '{"protocols":[1],"subdomain_destination":true}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-subdomain", response);
+            let error = machine
+                .require_network_capabilities(&old, &subdomain)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("subdomain"), "{error}");
+            assert!(error.to_string().contains("upgrade msb"), "{error}");
+            // A suffix rule keeps working on a runtime without the capability.
+            machine
+                .require_network_capabilities(&old, &suffix)
+                .await
+                .unwrap();
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-subdomain",
+            r#"printf '%s' '{"protocols":[2,1],"subdomain_destination":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &subdomain)
+            .await
+            .unwrap();
+
+        // Earlier launch contracts cannot carry the rule.
+        let legacy = LaunchContract {
+            patch: 18,
+            machine: false,
+        };
+        let error = legacy
+            .validate_network(&subdomain, Default::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("subdomain"), "{error}");
+        legacy
+            .validate_network(&suffix, Default::default())
             .unwrap();
     }
 

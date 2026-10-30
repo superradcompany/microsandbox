@@ -320,13 +320,13 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
   // The Rust enums are `serde(rename_all = "snake_case")`, while TS uses kebab-case.
   const kebabToSnake = (s: string): string => s.replace(/-/g, "_");
   // Detect a TS-side Destination object (carries `kind` discriminator
-  // produced by `Destination.any/cidr/domain/domainSuffix/group`) and
+  // produced by `Destination.any/cidr/domain/domainSuffix/subdomain/group`) and
   // rewrite it to the Rust externally-tagged form.
   const isDestination = (v: unknown): v is { kind: string } & Record<string, unknown> => {
     if (!v || typeof v !== "object" || Array.isArray(v)) return false;
     const obj = v as Record<string, unknown>;
     if (typeof obj.kind !== "string") return false;
-    return ["any", "cidr", "domain", "domainSuffix", "group"].includes(obj.kind);
+    return ["any", "cidr", "domain", "domainSuffix", "subdomain", "group"].includes(obj.kind);
   };
   const remapDestination = (
     v: { kind: string } & Record<string, unknown>,
@@ -336,7 +336,7 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
     const tag = camelToSnake(v.kind);
     if (v.kind === "any") return tag; // unit variant -> bare string
     // The data field name in the TS factory varies by variant: cidr →
-    // `cidr`, domain → `domain`, domainSuffix → `suffix`, group → `group`.
+    // `cidr`, domain → `domain`, domainSuffix → `suffix`, subdomain → `subdomain`, group → `group`.
     // Map each to its Rust externally-tagged data slot.
     const dataField = v.kind === "domainSuffix" ? "suffix" : v.kind;
     // Only `group` carries an enum string ("link-local" -> "link_local").

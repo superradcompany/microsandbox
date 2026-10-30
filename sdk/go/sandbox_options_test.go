@@ -839,7 +839,8 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 					Port:        "443",
 				},
 			},
-			DenyDomains: []string{"blocked.example.com"},
+			DenyDomains:    []string{"blocked.example.com"},
+			DenySubdomains: []string{"ads.example.com"},
 			DNS: &DNSConfig{
 				Nameservers: []string{"1.1.1.1:53"},
 			},
@@ -868,6 +869,9 @@ func TestFFIWireShape_NetworkCustomRules(t *testing.T) {
 	deny := net["deny_domains"].([]any)
 	if len(deny) != 1 || deny[0] != "blocked.example.com" {
 		t.Fatalf("deny_domains = %v", deny)
+	}
+	if sub := net["deny_subdomains"].([]any); len(sub) != 1 || sub[0] != "ads.example.com" {
+		t.Fatalf("deny_subdomains = %v", sub)
 	}
 	if net["strict"] != true {
 		t.Fatalf("strict = %v", net["strict"])

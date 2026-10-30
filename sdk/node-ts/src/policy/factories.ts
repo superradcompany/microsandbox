@@ -88,6 +88,10 @@ export const Destination = {
     kind: "domainSuffix",
     suffix,
   }),
+  subdomain: (name: string): Types.Destination => ({
+    kind: "subdomain",
+    subdomain: name,
+  }),
   group: (group: Types.DestinationGroup): Types.Destination => ({
     kind: "group",
     group,

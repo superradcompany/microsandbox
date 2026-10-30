@@ -137,11 +137,11 @@ pub enum Direction {
 
 /// Traffic destination specification.
 ///
-/// `Domain` and `DomainSuffix` values carry a validated [`DomainName`],
-/// whose construction enforces the canonical form (lowercase ASCII,
-/// leading/trailing dots stripped) once at parse time. Matching code
-/// can then rely on byte equality against the DNS cache's own
-/// canonical entries.
+/// `Domain`, `DomainSuffix` and `Subdomain` values carry a validated
+/// [`DomainName`], whose construction enforces the canonical form
+/// (lowercase ASCII, leading/trailing dots stripped) once at parse time.
+/// Matching code can then rely on byte equality against the DNS cache's
+/// own canonical entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Destination {
@@ -159,6 +159,11 @@ pub enum Destination {
     /// of it (e.g. suffix `example.com` matches `example.com` and
     /// `foo.example.com` but not `evilexample.com`).
     DomainSuffix(DomainName),
+
+    /// Strict subdomain. Matches any name below the given one (e.g.
+    /// `example.com` matches `foo.example.com` and `a.b.example.com`)
+    /// but never the name itself or `evilexample.com`.
+    Subdomain(DomainName),
 
     /// Pre-defined destination group.
     Group(DestinationGroup),
@@ -227,16 +232,16 @@ pub struct PortRange {
     pub end: u16,
 }
 
-/// Source of the hostname used to match `Domain` / `DomainSuffix`
-/// rules during an egress evaluation.
+/// Source of the hostname used to match `Domain` / `DomainSuffix` /
+/// `Subdomain` rules during an egress evaluation.
 #[derive(Debug, Clone, Copy)]
 pub enum HostnameSource<'a> {
     /// Hostname from a TLS ClientHello, canonicalized.
     Sni(&'a str),
     /// No SNI — match `Domain` rules via the resolved-hostname cache.
     CacheOnly,
-    /// SYN time, before SNI is known. `Domain` / `DomainSuffix`
-    /// allow rules defer only when the resolved-hostname cache already
+    /// SYN time, before SNI is known. `Domain` / `DomainSuffix` /
+    /// `Subdomain` allow rules defer only when the resolved-hostname cache already
     /// ties the destination IP to that rule; deny rules defer only when
     /// the remaining policy could otherwise allow the flow.
     Deferred,
@@ -261,8 +266,8 @@ pub enum EgressEvaluation {
     Allow,
     /// Refuse the connection.
     Deny,
-    /// First match was a Domain / DomainSuffix rule and the SNI isn't
-    /// known yet — accept the SYN and re-evaluate at first-flight.
+    /// First match was a Domain / DomainSuffix / Subdomain rule and the
+    /// SNI isn't known yet — accept the SYN and re-evaluate at first-flight.
     DeferUntilHostname,
 }
 
@@ -411,7 +416,8 @@ impl NetworkPolicy {
     }
 
     /// Evaluate an outbound connection with an explicit
-    /// [`HostnameSource`] for `Domain` / `DomainSuffix` matching.
+    /// [`HostnameSource`] for `Domain` / `DomainSuffix` / `Subdomain`
+    /// matching.
     /// Walk order and protocol/port filtering are identical across
     /// sources — only the Domain match predicate varies.
     #[cfg(feature = "engine")]
@@ -426,7 +432,8 @@ impl NetworkPolicy {
     }
 
     /// Return true when the first matching egress rule is an allow
-    /// `Domain` / `DomainSuffix` rule for the supplied hostname source.
+    /// `Domain` / `DomainSuffix` / `Subdomain` rule for the supplied
+    /// hostname source.
     #[cfg(feature = "engine")]
     pub fn allows_egress_via_hostname(
         &self,
@@ -623,14 +630,14 @@ impl NetworkPolicy {
         self.default_ingress
     }
 
-    /// True if any rule references a `Domain` or `DomainSuffix`
-    /// destination. The TCP proxy uses this to skip its SNI peek when
+    /// True if any rule references a `Domain`, `DomainSuffix` or
+    /// `Subdomain` destination. The TCP proxy uses this to skip its SNI peek when
     /// no rule could possibly need a hostname for evaluation.
     pub fn has_domain_rules(&self) -> bool {
         self.rules.iter().any(|r| {
             matches!(
                 r.destination,
-                Destination::Domain(_) | Destination::DomainSuffix(_)
+                Destination::Domain(_) | Destination::DomainSuffix(_) | Destination::Subdomain(_)
             )
         })
     }
@@ -643,9 +650,9 @@ impl NetworkPolicy {
     /// gateway forwarder the query is actually delivered to, so a
     /// `Group::Host` rule is honored for DNS subject to its
     /// protocol/port filter. Name-based destinations
-    /// (`Domain` / `DomainSuffix`) match the query name directly,
-    /// ignoring protocol and port filters that apply to the later
-    /// connection. `Any` rules still match the DNS transport's
+    /// (`Domain` / `DomainSuffix` / `Subdomain`) match the query name
+    /// directly, ignoring protocol and port filters that apply to the
+    /// later connection. `Any` rules still match the DNS transport's
     /// protocol and port. If no rule matches, `default_egress`
     /// applies.
     pub fn evaluate_dns_query(&self, name: &DomainName, protocol: Protocol, port: u16) -> Action {
@@ -678,6 +685,9 @@ impl NetworkPolicy {
                 Destination::DomainSuffix(s) => {
                     name.is_some_and(|name| matches_suffix(name.as_str(), s.as_str()))
                 }
+                Destination::Subdomain(s) => {
+                    name.is_some_and(|name| matches_subdomain(name.as_str(), s.as_str()))
+                }
                 _ => false,
             };
             if matched {
@@ -705,6 +715,16 @@ impl NetworkPolicy {
     /// Single-suffix sugar over [`Self::allow_domain_suffixes`].
     pub fn allow_domain_suffix<S: AsRef<str>>(self, suffix: S) -> Result<Self, DomainNameError> {
         self.allow_domain_suffixes([suffix])
+    }
+
+    /// Single-name sugar over [`Self::deny_subdomains`].
+    pub fn deny_subdomain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
+        self.deny_subdomains([name])
+    }
+
+    /// Single-name sugar over [`Self::allow_subdomains`].
+    pub fn allow_subdomain<S: AsRef<str>>(self, name: S) -> Result<Self, DomainNameError> {
+        self.allow_subdomains([name])
     }
 
     /// Prepend `deny Domain(name)` egress rules. Prepending lets the
@@ -747,6 +767,25 @@ impl NetworkPolicy {
         self.prepend_egress_rules(suffixes, |d| {
             Rule::allow_egress(Destination::DomainSuffix(d))
         })
+    }
+
+    /// Prepend `deny Subdomain(name)` egress rules. Names match any
+    /// subdomain (label-aligned), never the name itself.
+    pub fn deny_subdomains<I, S>(self, names: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(names, |d| Rule::deny_egress(Destination::Subdomain(d)))
+    }
+
+    /// Prepend `allow Subdomain(name)` egress rules.
+    pub fn allow_subdomains<I, S>(self, names: I) -> Result<Self, DomainNameError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.prepend_egress_rules(names, |d| Rule::allow_egress(Destination::Subdomain(d)))
     }
 
     fn prepend_egress_rules<I, S, F>(
@@ -944,7 +983,10 @@ fn rule_matches_protocol_and_port(rule: &Rule, protocol: Protocol, port: u16) ->
 
 #[cfg(feature = "engine")]
 fn is_hostname_destination(dest: &Destination) -> bool {
-    matches!(dest, Destination::Domain(_) | Destination::DomainSuffix(_))
+    matches!(
+        dest,
+        Destination::Domain(_) | Destination::DomainSuffix(_) | Destination::Subdomain(_)
+    )
 }
 
 /// Internal helper: does this rule match a flow's address/port/protocol?
@@ -978,8 +1020,8 @@ fn rule_matches(
 
 /// Internal three-state result for [`matches_egress_destination_with_source`].
 /// `Defer` is reachable only when the source is
-/// [`HostnameSource::Deferred`] and the destination is `Domain` or
-/// `DomainSuffix`.
+/// [`HostnameSource::Deferred`] and the destination is `Domain`,
+/// `DomainSuffix` or `Subdomain`.
 #[cfg(feature = "engine")]
 enum DestinationMatch {
     Match,
@@ -1001,8 +1043,8 @@ impl From<bool> for DestinationMatch {
 /// Check if an egress IP / hostname source matches a destination specification.
 ///
 /// IP-based destinations (`Any`, `Cidr`, `Group`) ignore `source` since
-/// they decide on the address alone. `Domain` / `DomainSuffix` consult
-/// `source`:
+/// they decide on the address alone. `Domain` / `DomainSuffix` /
+/// `Subdomain` consult `source`:
 ///
 /// - [`HostnameSource::Sni`]: byte-equality against the canonicalized
 ///   SNI string (or label-aware suffix match). Allow rules also require
@@ -1047,23 +1089,29 @@ fn matches_egress_destination_with_source(
                 deferred_domain_match(action, addr, shared, |hostname| hostname == domain.as_str())
             }
         },
-        Destination::DomainSuffix(suffix) => match source {
-            HostnameSource::Sni(name) => {
-                let name_matches = matches_suffix(name, suffix.as_str());
-                let cache_matches = || {
-                    shared.any_resolved_hostname(addr, |hostname| {
-                        matches_suffix(hostname, suffix.as_str())
-                    })
-                };
-                (name_matches && (action.is_deny() || cache_matches())).into()
+        Destination::DomainSuffix(suffix) | Destination::Subdomain(suffix) => {
+            let strict = matches!(dest, Destination::Subdomain(_));
+            let matches_name = |hostname: &str| {
+                if strict {
+                    matches_subdomain(hostname, suffix.as_str())
+                } else {
+                    matches_suffix(hostname, suffix.as_str())
+                }
+            };
+            match source {
+                HostnameSource::Sni(name) => {
+                    let name_matches = matches_name(name);
+                    let cache_matches = || shared.any_resolved_hostname(addr, matches_name);
+                    (name_matches && (action.is_deny() || cache_matches())).into()
+                }
+                HostnameSource::CacheOnly => {
+                    shared.any_resolved_hostname(addr, matches_name).into()
+                }
+                HostnameSource::Deferred => {
+                    deferred_domain_match(action, addr, shared, matches_name)
+                }
             }
-            HostnameSource::CacheOnly => shared
-                .any_resolved_hostname(addr, |hostname| matches_suffix(hostname, suffix.as_str()))
-                .into(),
-            HostnameSource::Deferred => deferred_domain_match(action, addr, shared, |hostname| {
-                matches_suffix(hostname, suffix.as_str())
-            }),
-        },
+        }
     }
 }
 
@@ -1124,6 +1172,12 @@ fn matches_suffix(hostname: &str, suffix: &str) -> bool {
     hostname
         .strip_suffix(suffix)
         .is_some_and(|prefix| prefix.len() > 1 && prefix.ends_with('.'))
+}
+
+/// Like [`matches_suffix`], but the apex itself never matches: only
+/// names strictly below `name` do.
+fn matches_subdomain(hostname: &str, name: &str) -> bool {
+    hostname != name && matches_suffix(hostname, name)
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2695,6 +2749,48 @@ mod tests {
             HostnameSource::Sni("files.pythonhosted.org"),
         );
         assert_eq!(eval, EgressEvaluation::Allow);
+    }
+
+    #[test]
+    fn matches_subdomain_excludes_apex() {
+        assert!(!matches_subdomain("example.com", "example.com"));
+        assert!(matches_subdomain("a.example.com", "example.com"));
+        assert!(matches_subdomain("b.a.example.com", "example.com"));
+        assert!(!matches_subdomain("evilexample.com", "example.com"));
+    }
+
+    #[test]
+    fn subdomain_dns_query_excludes_apex() {
+        let policy = deny_domain_policy(Destination::Subdomain(name("evil.com")));
+        let deny = |q: &str| policy.evaluate_dns_query(&name(q), Protocol::Udp, 53);
+        assert_eq!(deny("evil.com"), Action::Allow);
+        assert_eq!(deny("a.evil.com"), Action::Deny);
+        assert_eq!(deny("b.a.evil.com"), Action::Deny);
+        assert_eq!(deny("evilevil.com"), Action::Allow);
+    }
+
+    /// An allow `Subdomain` rule needs the cache to bind a name strictly
+    /// below the rule name; a binding for the apex alone must not admit
+    /// an SNI naming a subdomain.
+    #[test]
+    fn hostname_source_sni_subdomain_ignores_apex_cache_binding() {
+        let policy = allow_rule(Destination::Subdomain(name("example.com")));
+        let sni = |shared: &SharedState| {
+            policy.evaluate_egress_with_source(
+                sock(FILES_V4, 443),
+                Protocol::Tcp,
+                shared,
+                HostnameSource::Sni("x.example.com"),
+            )
+        };
+        assert_eq!(
+            sni(&shared_with_host("example.com", FILES_V4)),
+            EgressEvaluation::Deny
+        );
+        assert_eq!(
+            sni(&shared_with_host("x.example.com", FILES_V4)),
+            EgressEvaluation::Allow
+        );
     }
 
     #[test]

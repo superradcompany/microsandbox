@@ -304,6 +304,7 @@ class NetworkDestinationKind(StrEnum):
     CIDR = "cidr"
     DOMAIN = "domain"
     DOMAIN_SUFFIX = "domain_suffix"
+    SUBDOMAIN = "subdomain"
     GROUP = "group"
 
 
@@ -1319,6 +1320,10 @@ class Destination:
         return NetworkDestination(NetworkDestinationKind.DOMAIN_SUFFIX, suffix)
 
     @staticmethod
+    def subdomain(name: str) -> NetworkDestination:
+        return NetworkDestination(NetworkDestinationKind.SUBDOMAIN, name)
+
+    @staticmethod
     def group(group: DestGroup) -> NetworkDestination:
         return NetworkDestination(
             NetworkDestinationKind.GROUP,
@@ -1838,6 +1843,9 @@ class Network:
     deny_domain_suffixes: tuple[str, ...] = ()
     """Deny egress to all subdomains of these suffixes. Same enforcement
     layers as `deny_domains`."""
+    deny_subdomains: tuple[str, ...] = field(default=(), kw_only=True)
+    """Deny egress to subdomains of these names, never the names
+    themselves. Same enforcement layers as `deny_domains`."""
     dns: DnsConfig | None = None
     tls: TlsConfig | None = None
     strict: bool = True
@@ -1903,6 +1911,8 @@ class Network:
             d["deny_domains"] = list(self.deny_domains)
         if self.deny_domain_suffixes:
             d["deny_domain_suffixes"] = list(self.deny_domain_suffixes)
+        if self.deny_subdomains:
+            d["deny_subdomains"] = list(self.deny_subdomains)
         if self.dns is not None:
             if not isinstance(self.dns, DnsConfig):
                 raise TypeError("Network.dns must be DnsConfig or None")

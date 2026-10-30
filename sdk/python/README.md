@@ -197,6 +197,7 @@ filtered = await Sandbox.create(
     network=Network(
         deny_domains=("blocked.example.com",),
         deny_domain_suffixes=(".evil.com",),
+        deny_subdomains=("tracker.example.com",),
         dns=DnsConfig(nameservers=("1.1.1.1:53",)),
     ),
     replace=True,

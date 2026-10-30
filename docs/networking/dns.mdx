@@ -14,7 +14,7 @@ Every DNS query must pass the sandbox's egress policy.
 
 | Rule | How it applies to DNS |
 | --- | --- |
-| Domain or domain suffix | Matches the requested name directly. Protocol and port filters do not apply. |
+| Domain, domain suffix, or subdomain | Matches the requested name directly. Protocol and port filters do not apply. |
 | `Any` | Matches the protocol and port used for the query |
 | `Group::Host` | Matches the gateway that handles the query |
 | IP or CIDR | Does not match because the name has not been resolved yet |
@@ -85,6 +85,8 @@ msb create python --name safe-agent --net-default allow \
   --net-rule "deny@malware.example.com,deny@*.tracking.com"
 ```
 </CodeGroup>
+
+A domain suffix also matches the domain itself, so `.tracking.com` blocks `tracking.com`. To block only the names below it, use a subdomain rule: `deny@subdomain=tracking.com` in the CLI, `deny_subdomains` in Rust and Python, `denySubdomains` in TypeScript, or `DenySubdomains` in Go.
 
 ## Pinning nameservers
 

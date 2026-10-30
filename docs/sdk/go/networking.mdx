@@ -344,7 +344,7 @@ sb, err := m.CreateSandbox(ctx, "ci-runner",
 
 <p className="msb-backref">Used by <a href="#policyrule">PolicyRule.Destination</a></p>
 
-The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains. A domain prefixed with `.` becomes a suffix match: `.example.com` matches `api.example.com` but not `example.com`.
+The `Destination` field on [`PolicyRule`](#policyrule) accepts these well-known group names alongside literal CIDRs and domains. A domain prefixed with `.` becomes a suffix match that includes the domain itself: `.example.com` matches `example.com` and `api.example.com`. Prefix `subdomain=` to leave the domain out: `subdomain=example.com` matches `api.example.com` but not `example.com`.
 
 | Value | Description |
 |-------|-------------|
@@ -368,7 +368,8 @@ type NetworkConfig struct {
     DefaultEgress           PolicyAction
     DefaultIngress          PolicyAction
     DenyDomains             []string
-    DenyDomainSuffixes       []string
+    DenyDomainSuffixes      []string
+    DenySubdomains          []string
     DNS                     *DNSConfig
     DNSRebindProtection     *bool
     TLS                     *TLSConfig
@@ -425,6 +426,14 @@ For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRest
 
 Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.
 
+#### DenySubdomains
+
+```go
+DenySubdomains []string
+```
+
+Domains whose subdomains are blocked, never the domain itself: `ads.example` blocks `x.ads.example` but not `ads.example`. Use `DenyDomainSuffixes` to block both.
+
 #### MaxInboundTCPConnections
 
 ```go
@@ -468,7 +477,7 @@ A single firewall rule. Ingress rules carrying ICMP protocols are rejected at sa
 |-------|------|-------------|
 | Action | [`PolicyAction`](#policyaction) | `allow` or `deny` |
 | Direction | [`PolicyDirection`](#policydirection) | Direction this rule considers. `PolicyDirectionAny` matches in either |
-| Destination | `string` | Target filter: a [destination group](#destination-groups), domain, domain suffix (prefixed with `.`), CIDR (`10.0.0.0/8`), exact IP, or `"*"` |
+| Destination | `string` | Target filter: a [destination group](#destination-groups), domain, domain suffix (prefixed with `.`), subdomain only (prefixed with `subdomain=`, never the domain itself), CIDR (`10.0.0.0/8`), exact IP, or `"*"` |
 | Protocol | [`PolicyProtocol`](#policyprotocol) | Legacy single-protocol field. The empty string means any. Prefer `Protocols` when matching multiple |
 | Protocols | `[]`[`PolicyProtocol`](#policyprotocol) | Protocol set. Empty means any |
 | Port | `string` | Single port (`"443"`) or range (`"8000-9000"`) |

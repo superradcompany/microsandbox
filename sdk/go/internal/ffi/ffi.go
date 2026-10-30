@@ -1874,6 +1874,7 @@ type NetworkOptions struct {
 	DNSRebindProtection      *bool                      `json:"dns_rebind_protection,omitempty"`
 	DenyDomains              []string                   `json:"deny_domains,omitempty"`
 	DenyDomainSuffixes       []string                   `json:"deny_domain_suffixes,omitempty"`
+	DenySubdomains           []string                   `json:"deny_subdomains,omitempty"`
 	TLS                      *TLSOptions                `json:"tls,omitempty"`
 	Strict                   *bool                      `json:"strict,omitempty"`
 	Ports                    map[uint16]uint16          `json:"ports,omitempty"`

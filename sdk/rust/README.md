@@ -209,6 +209,7 @@ let filtered_policy = NetworkPolicy::builder()
     .default_allow()
     .rule(|r| r.egress().deny().domain("blocked.example.com"))
     .rule(|r| r.egress().deny().domain_suffix(".evil.com"))
+    .rule(|r| r.egress().deny().subdomain("tracker.example.com"))
     .build()?;
 
 let filtered = Sandbox::builder("readme-filtered")
