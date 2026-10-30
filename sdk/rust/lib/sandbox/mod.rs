@@ -31,6 +31,8 @@ pub mod jobs;
 pub(crate) mod metrics;
 #[cfg(feature = "local")]
 mod modify;
+#[cfg(all(feature = "local", feature = "net"))]
+mod network_policy;
 #[cfg(feature = "local")]
 mod patch;
 #[cfg(all(feature = "local", windows))]
@@ -906,6 +908,18 @@ impl Sandbox {
         #[cfg(not(feature = "local"))]
         let client = None;
         fs::SandboxFsOps::new(self.backend.clone(), &self.name, client)
+    }
+
+    /// Replace this running sandbox's network policy. Flows opened from now on are evaluated
+    /// against it, and open flows it denies are ended. The change is not saved: the sandbox's
+    /// next start uses its configured policy.
+    #[cfg(all(feature = "local", feature = "net"))]
+    pub async fn set_network_policy(&self, policy: &NetworkPolicy) -> MicrosandboxResult<()> {
+        let sandbox_id = match self.identity() {
+            SandboxIdentity::Local(id) => Some(id),
+            SandboxIdentity::Cloud(_) => None,
+        };
+        network_policy::set(self.backend.as_ref(), &self.name, sandbox_id, policy).await
     }
 
     /// Request graceful shutdown and wait without a built-in deadline for completion.

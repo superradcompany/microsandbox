@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use smoltcp::iface::{SocketHandle, SocketSet};
@@ -17,6 +17,7 @@ use smoltcp::wire::IpListenEndpoint;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::netstack::shared::normalize_hostname;
 use crate::tcp::deferred_close::DeferredClose;
 use crate::tcp::pending::PendingConnect;
 
@@ -63,6 +64,9 @@ pub enum ProxyConnectStatus {
 /// whether the guest should see a clean close or a TCP reset.
 pub struct ProxyConnectState {
     status: AtomicU8,
+    /// TLS server name the guest presented, kept so a narrowed policy can judge the
+    /// connection by the name as well as by its address.
+    hostname: OnceLock<String>,
 }
 
 /// Tracks TCP connections between guest and proxy tasks.
@@ -206,7 +210,19 @@ impl ProxyConnectState {
     pub fn new() -> Self {
         Self {
             status: AtomicU8::new(ProxyConnectStatus::Pending.as_u8()),
+            hostname: OnceLock::new(),
         }
+    }
+
+    /// Record the TLS server name the guest presented, in the canonical form policy rules
+    /// compare against; the first one stands.
+    pub fn record_hostname(&self, hostname: &str) {
+        let _ = self.hostname.set(normalize_hostname(hostname));
+    }
+
+    /// The TLS server name the guest presented, if any was seen.
+    pub fn hostname(&self) -> Option<&str> {
+        self.hostname.get().map(String::as_str)
     }
 
     /// Mark the proxy as successfully connected to upstream.
@@ -605,6 +621,29 @@ impl TcpConnectionTracker {
                 true
             }
         });
+    }
+
+    /// End every open connection that `denies` now refuses, given its destination and the
+    /// TLS server name it presented: the guest gets an RST and the host-side proxy task's
+    /// channels close, so it exits. Used when a running sandbox's policy narrows. Returns
+    /// how many connections were ended.
+    pub fn abort_denied(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+        mut denies: impl FnMut(SocketAddr, Option<&str>) -> bool,
+    ) -> usize {
+        let mut ended = 0;
+        for (&handle, conn) in self.connections.iter_mut() {
+            if conn.policy_denied || !denies(conn.dst, conn.proxy_connect.hostname()) {
+                continue;
+            }
+            sockets.get_mut::<tcp::Socket>(handle).abort();
+            conn.to_proxy = None;
+            conn.from_proxy.close();
+            conn.proxy_channels = None;
+            ended += 1;
+        }
+        ended
     }
 }
 

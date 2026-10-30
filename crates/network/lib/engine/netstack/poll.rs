@@ -30,6 +30,7 @@ use crate::engine::dns::{
 };
 use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
+use crate::policy::handle::PolicyHandle;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
 use crate::ports::PortPublisher;
 use crate::proxy::ResolvedOutboundProxy;
@@ -220,7 +221,7 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `shared` - Stack-wide shared state: `tx_ring` / `rx_ring` for the virtio-net boundary
 ///   and the wake eventfds.
 /// * `config` - Resolved per-sandbox parameters (gateway / guest MAC + IPv4 + IPv6, MTU).
-/// * `network_policy` - User-provided egress policy. Evaluated against the sandbox's
+/// * `policy` - User-provided egress policy, live-swappable. Evaluated against the sandbox's
 ///   gateway IPs (stored on [`SharedState`]) so `DestinationGroup::Host` rules match.
 /// * `platform_policy` - Optional host-owned policy floor. Traffic must pass both policies.
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
@@ -238,7 +239,7 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 pub fn smoltcp_poll_loop(
     shared: Arc<SharedState>,
     config: PollLoopConfig,
-    network_policy: NetworkPolicy,
+    policy: PolicyHandle,
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
@@ -274,7 +275,8 @@ pub fn smoltcp_poll_loop(
     // Gateway IPs must be on SharedState before any egress evaluation runs,
     // so `DestinationGroup::Host` rules can resolve to the right address.
     shared.set_gateway_ips(config.gateway.ipv4, config.gateway.ipv6);
-    let network_policy = Arc::new(network_policy);
+    let network_policy = policy.load();
+    let mut enforced_policy = network_policy.clone();
     let platform_policy = platform_policy.map(Arc::new);
 
     let (mut dns_interceptor, dns_forwarder_handle) = DnsInterceptor::new(
@@ -283,7 +285,7 @@ pub fn smoltcp_poll_loop(
         shared.clone(),
         &tokio_handle,
         gateway_ips,
-        network_policy.clone(),
+        policy.clone(),
         platform_policy.clone(),
         config.gateway,
         config.gateway_mac,
@@ -299,7 +301,7 @@ pub fn smoltcp_poll_loop(
         config.gateway.ipv6,
         config.gateway_mac,
         config.guest_mac,
-        network_policy.clone(),
+        policy.clone(),
         shared.clone(),
         &tokio_handle,
     );
@@ -350,6 +352,26 @@ pub fn smoltcp_poll_loop(
 
     loop {
         let now = smoltcp_now();
+        // A policy set on the running sandbox decides every flow evaluated from here on, and
+        // the open flows it now denies end.
+        let network_policy = policy.load();
+        if !Arc::ptr_eq(&network_policy, &enforced_policy) {
+            conn_tracker.abort_denied(&mut sockets, |dst, hostname| match hostname {
+                Some(name) => matches!(
+                    network_policy.evaluate_egress_with_source(
+                        dst,
+                        Protocol::Tcp,
+                        &shared,
+                        HostnameSource::Sni(name),
+                    ),
+                    EgressEvaluation::Deny
+                ),
+                None => network_policy
+                    .evaluate_egress(dst, Protocol::Tcp, &shared)
+                    .is_deny(),
+            });
+            enforced_policy = network_policy.clone();
+        }
 
         // ── Phase 1: Drain all guest frames with pre-inspection ──────────
         while let Some(frame) = device.stage_next_frame() {
@@ -2059,7 +2081,7 @@ mod tests {
             smoltcp_poll_loop(
                 loop_shared,
                 leak_poll_config(),
-                NetworkPolicy::allow_all(),
+                PolicyHandle::new(NetworkPolicy::allow_all()),
                 None,
                 DnsConfig::default(),
                 None,
@@ -2208,7 +2230,7 @@ mod tests {
             smoltcp_poll_loop(
                 loop_shared,
                 leak_poll_config(),
-                NetworkPolicy::allow_all(),
+                PolicyHandle::new(NetworkPolicy::allow_all()),
                 None,
                 DnsConfig::default(),
                 None,

@@ -27,6 +27,7 @@ use crate::netstack::{
     poll::{self, GatewayIps, PollLoopConfig},
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
+use crate::policy::handle::PolicyHandle;
 use crate::policy::{NetworkPolicy, NetworkProfile};
 use crate::secrets::handle::SecretsHandle;
 
@@ -76,6 +77,8 @@ pub struct SmoltcpNetwork {
 
     // Live-swappable secrets view shared with the poll loop and TLS state.
     secrets: SecretsHandle,
+    // Live-swappable network policy the poll loop and proxies evaluate new flows against.
+    policy: PolicyHandle,
 }
 
 #[derive(Clone, Copy)]
@@ -319,6 +322,7 @@ impl SmoltcpNetwork {
         let backend = SmoltcpBackend::new(shared.clone());
 
         let secrets = SecretsHandle::new(config.secrets.clone());
+        let policy = PolicyHandle::new(config.policy.clone());
         let tls_state = if config.tls.enabled {
             Some(Arc::new(TlsState::new(
                 config.tls.clone(),
@@ -344,6 +348,7 @@ impl SmoltcpNetwork {
             gateway_ipv6,
             tls_state,
             secrets,
+            policy,
         })
     }
 
@@ -397,7 +402,7 @@ impl SmoltcpNetwork {
             mtu: self.mtu as usize,
         };
         let config = self.config.config();
-        let network_policy = config.policy.clone();
+        let policy = self.policy.clone();
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
@@ -421,7 +426,7 @@ impl SmoltcpNetwork {
                     poll::smoltcp_poll_loop(
                         shared,
                         poll_config,
-                        network_policy,
+                        policy,
                         platform_policy,
                         dns_config,
                         tls_state,
@@ -571,6 +576,12 @@ impl SmoltcpNetwork {
         MetricsHandle {
             shared: self.shared.clone(),
         }
+    }
+
+    /// Live-swappable view of the network policy. The runtime control socket
+    /// uses it to change what a running sandbox may reach without restarting it.
+    pub fn policy_handle(&self) -> PolicyHandle {
+        self.policy.clone()
     }
 
     /// Live-swappable view of the secrets configuration. The runtime control
@@ -799,6 +810,10 @@ mod tcp_connect_tests;
 #[cfg(test)]
 #[path = "network/published_ports_tests.rs"]
 mod published_ports_tests;
+
+#[cfg(test)]
+#[path = "network/live_policy_tests.rs"]
+mod live_policy_tests;
 
 #[cfg(test)]
 mod tests {

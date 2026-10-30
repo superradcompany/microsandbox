@@ -3953,6 +3953,7 @@ dependencies = [
  "ciborium",
  "microsandbox-protocol",
  "microsandbox-protocol-client",
+ "microsandbox-types",
  "microsandbox-utils",
  "serde",
  "serde_json",

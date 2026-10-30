@@ -7,6 +7,8 @@
 mod builder;
 #[cfg(feature = "engine")]
 pub use crate::engine::policy::destination;
+#[cfg(feature = "engine")]
+pub use crate::engine::policy::handle;
 mod name;
 mod types;
 
