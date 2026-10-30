@@ -1,6 +1,8 @@
 //! Dedicated snapshot restoration with explicit destination resource choices.
 
 #[cfg(feature = "net")]
+use microsandbox_network::builder::NetworkBuilder;
+#[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
 
 use super::config::SnapshotRestoreMode;
@@ -27,6 +29,10 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation, UnsupportedReason}
 pub struct RestoreBuilder {
     pub(crate) inner: SandboxBuilder,
 }
+
+/// Destination network settings that a restore can change, passed to [`RestoreBuilder::network`].
+#[cfg(feature = "net")]
+pub struct RestoreNetworkBuilder(NetworkBuilder);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -149,6 +155,19 @@ impl RestoreBuilder {
         self.max_tcp_connections(limit)
     }
 
+    /// Set destination network overrides in one scope. It exposes only settings a restore can
+    /// change; omitted settings use destination defaults, not the source sandbox's settings.
+    #[cfg(feature = "net")]
+    pub fn network(
+        mut self,
+        configure: impl FnOnce(RestoreNetworkBuilder) -> RestoreNetworkBuilder,
+    ) -> Self {
+        self.inner = self
+            .inner
+            .network(|network| configure(RestoreNetworkBuilder(network)).0);
+        self
+    }
+
     /// Disable the network device for disk boot. Full restore rejects removal of a captured device.
     #[cfg(feature = "net")]
     pub fn disable_network(mut self) -> Self {
@@ -227,6 +246,30 @@ impl RestoreBuilder {
         tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
     )> {
         self.inner.create_detached_with_progress()
+    }
+}
+
+#[cfg(feature = "net")]
+impl RestoreNetworkBuilder {
+    /// Set the destination host's network policy. See [`RestoreBuilder::network_policy`].
+    pub fn policy(self, policy: NetworkPolicy) -> Self {
+        Self(self.0.policy(policy))
+    }
+
+    /// Set the destination's concurrent TCP connection limit; zero explicitly means unlimited.
+    pub fn max_tcp_connections(self, limit: usize) -> Self {
+        Self(self.0.max_tcp_connections(limit))
+    }
+
+    /// Set the destination's concurrent UDP session limit; zero explicitly means unlimited.
+    pub fn max_udp_connections(self, limit: usize) -> Self {
+        Self(self.0.max_udp_connections(limit))
+    }
+
+    /// Enable or disable DNS rebind protection on the destination host's resolver. With
+    /// protection off, a hostname may resolve to a private address and the policy decides.
+    pub fn dns_rebind_protection(self, enabled: bool) -> Self {
+        Self(self.0.dns(|dns| dns.rebind_protection(enabled)))
     }
 }
 
@@ -489,6 +532,32 @@ mod tests {
                 .unwrap()
                 .max_udp_connections,
             Some(microsandbox_network::config::ConnectionLimit::Unlimited)
+        );
+        let scoped = Sandbox::restore("saved").name("child").network(|network| {
+            network
+                .policy(NetworkPolicy::none())
+                .max_tcp_connections(8)
+                .max_udp_connections(4)
+        });
+        assert_eq!(
+            serde_json::to_value(&config(&scoped).spec.network).unwrap(),
+            serde_json::to_value(&config(&restore).spec.network).unwrap()
+        );
+        let unprotected =
+            Sandbox::restore("saved").network(|network| network.dns_rebind_protection(false));
+        assert!(
+            config(&Sandbox::restore("saved"))
+                .spec
+                .network
+                .dns
+                .is_none()
+        );
+        assert!(
+            !config(&unprotected)
+                .local_network_config()
+                .unwrap()
+                .dns
+                .rebind_protection
         );
         let disabled = Sandbox::restore("saved").name("child").disable_network();
         assert!(!config(&disabled).spec.network.enabled);

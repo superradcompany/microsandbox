@@ -650,6 +650,8 @@ const restored = await Sandbox.restore("saved").name("child")
 
 Omitted restore limits use destination defaults; zero selects unlimited. The same setters work with `restoreWithProgress()`, and `maxConnections()` remains a deprecated TCP-only alias.
 
+`Sandbox.restore(...).network((n) => n.dnsRebindProtection(enabled))` sets DNS rebind protection for the restored sandbox. Omitted uses the default (enabled), not the source sandbox's setting, so pass `false` again when restoring a sandbox that was created without protection.
+
 ```typescript
 maxTcpConnections(max: number): this
 ```

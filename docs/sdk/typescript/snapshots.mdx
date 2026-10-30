@@ -982,6 +982,38 @@ Omitted controls retain destination defaults. Durations are non-negative finite 
 
 </Accordion>
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">network()</span>
+
+```typescript
+network(configure: (n: RestoreNetworkBuilder) => RestoreNetworkBuilder): this
+```
+
+Set destination network overrides in one scope. `RestoreNetworkBuilder` exposes only the settings a restore can change:
+
+```typescript
+policy(policy: NetworkPolicy | NetworkPolicyBuilder): this
+maxTcpConnections(count: number): this
+maxUdpConnections(count: number): this
+dnsRebindProtection(enabled: boolean): this
+```
+
+Omitted settings use destination defaults, not the source sandbox's settings. `networkPolicy()`, `maxTcpConnections()` and `maxUdpConnections()` on `RestoreBuilder` set the same values.
+
+<Accordion title="Example">
+
+```typescript
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+const child = await Sandbox.restore("api:baseline")
+  .name("api-restored")
+  .network((n) => n
+    .policy(NetworkPolicy.fromProfiles(["public", "private"]))
+    .dnsRebindProtection(false))
+  .restore();
+```
+
+</Accordion>
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
 
 ```typescript

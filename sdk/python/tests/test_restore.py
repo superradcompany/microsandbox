@@ -2,11 +2,11 @@
 
 import pytest
 
-from microsandbox import Network, NetworkPolicy, Sandbox, SecurityProfile
+from microsandbox import Network, NetworkPolicy, RestoreNetwork, Sandbox, SecurityProfile
 
 
 @pytest.mark.parametrize(
-    "option", ["image", "network", "cmd", "replace", "detached", "entrypoint"],
+    "option", ["image", "cmd", "replace", "detached", "entrypoint"],
 )
 def test_restore_rejects_create_options(option):
     with pytest.raises(TypeError, match="unexpected restore option"):
@@ -157,6 +157,38 @@ def test_restore_rejects_accept_queue_size_it_cannot_represent(method, value, er
 def test_restore_policy_rejects_broad_network_configuration():
     with pytest.raises(TypeError):
         Sandbox.restore("missing", name="restore-controls", network_policy=Network.none())
+    with pytest.raises(TypeError, match="expected RestoreNetwork"):
+        Sandbox.restore("missing", name="restore-controls", network=Network.none())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+async def test_restore_network_scope_reaches_artifact_validation(tmp_path, method):
+    # A missing artifact proves the scope is accepted and reaches restore, never fresh creation.
+    network = RestoreNetwork(
+        policy=NetworkPolicy.none(), max_tcp_connections=0, max_udp_connections=7,
+        dns_rebind_protection=False,
+    )
+    with pytest.raises(FileNotFoundError):
+        result = getattr(Sandbox, method)(
+            tmp_path / "missing", name="restore-network", network=network,
+        )
+        if method == "restore":
+            await result
+        else:
+            await result.result()
+
+
+@pytest.mark.parametrize("method", ["restore", "restore_with_progress"])
+@pytest.mark.parametrize(("flat", "scoped"), [
+    ({"network_policy": NetworkPolicy.none()}, RestoreNetwork(policy=NetworkPolicy.none())),
+    ({"max_tcp_connections": 0}, RestoreNetwork(max_tcp_connections=8)),
+    ({"max_connections": 0}, RestoreNetwork(max_tcp_connections=8)),
+    ({"max_udp_connections": 0}, RestoreNetwork(max_udp_connections=8)),
+])
+def test_restore_rejects_a_network_setting_given_twice(method, flat, scoped):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        getattr(Sandbox, method)("missing", name="restore-network", network=scoped, **flat)
 
 
 @pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])

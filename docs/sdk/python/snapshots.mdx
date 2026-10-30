@@ -828,6 +828,38 @@ child = await Sandbox.restore(
 
 </Accordion>
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">network</span>
+
+```python
+network: RestoreNetwork | None = None
+
+RestoreNetwork(
+    policy: NetworkPolicy | None = None,
+    max_tcp_connections: int | None = None,
+    max_udp_connections: int | None = None,
+    dns_rebind_protection: bool | None = None,
+)
+```
+
+Keyword option for `Sandbox.restore()` and `restore_with_progress()`. Set destination network overrides in one scope. `RestoreNetwork` holds only the settings a restore can change; `None` leaves a setting unset. Omitted settings use destination defaults, not the source sandbox's settings. `network_policy`, `max_tcp_connections`, `max_connections` and `max_udp_connections` set the same values. Giving a setting both as one of these keywords and in `network` raises `ValueError`.
+
+<Accordion title="Example">
+
+```python
+from microsandbox import NetworkPolicy, NetworkProfile, RestoreNetwork, Sandbox
+
+child = await Sandbox.restore(
+    "api:baseline",
+    name="api-restored",
+    network=RestoreNetwork(
+        policy=NetworkPolicy.from_profiles([NetworkProfile.PUBLIC, NetworkProfile.PRIVATE]),
+        dns_rebind_protection=False,
+    ),
+)
+```
+
+</Accordion>
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">captured_volumes</span>
 
 ```python

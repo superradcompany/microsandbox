@@ -1,5 +1,8 @@
-use microsandbox::sandbox::{LogLevel as RustLogLevel, RestoreBuilder, SecurityProfile};
+use microsandbox::sandbox::{
+    LogLevel as RustLogLevel, RestoreBuilder, RestoreNetworkBuilder, SecurityProfile,
+};
 use microsandbox::size::Mebibytes;
+use microsandbox_network::policy::NetworkPolicy;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -19,6 +22,16 @@ use crate::sandbox_builder::{JsPullProgressCreate, parse_bind_addr};
 #[napi(js_name = "RestoreBuilder")]
 pub struct JsRestoreBuilder {
     inner: Option<RestoreBuilder>,
+}
+
+/// Destination network settings that a restore can change. Unset settings are left unchanged.
+#[napi(js_name = "RestoreNetworkBuilder")]
+#[derive(Default)]
+pub struct JsRestoreNetworkBuilder {
+    policy: Option<NetworkPolicy>,
+    max_tcp_connections: Option<usize>,
+    max_udp_connections: Option<usize>,
+    dns_rebind_protection: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -75,21 +88,7 @@ impl JsRestoreBuilder {
     /// Set only host-side network policy, without DNS, TLS, or guest bootstrap changes.
     #[napi(js_name = "networkPolicyJson")]
     pub fn network_policy_json(&mut self, json: String) -> Result<&Self> {
-        let value: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| napi::Error::from_reason(format!("invalid policy JSON: {e}")))?;
-        let fields = value
-            .as_object()
-            .ok_or_else(|| napi::Error::from_reason("restore network policy must be an object"))?;
-        if fields
-            .keys()
-            .any(|key| !matches!(key.as_str(), "default_egress" | "default_ingress" | "rules"))
-        {
-            return Err(napi::Error::from_reason(
-                "restore network policy accepts only default actions and rules",
-            ));
-        }
-        let policy = serde_json::from_value(value)
-            .map_err(|e| napi::Error::from_reason(format!("invalid policy JSON: {e}")))?;
+        let policy = parse_restore_policy(&json)?;
         self.inner = Some(self.take_inner()?.network_policy(policy));
         Ok(self)
     }
@@ -124,6 +123,26 @@ impl JsRestoreBuilder {
     pub fn max_udp_connections(&mut self, count: f64) -> Result<&Self> {
         let count = crate::numeric::safe_integer(count, "count")?;
         self.inner = Some(self.take_inner()?.max_udp_connections(count as usize));
+        Ok(self)
+    }
+
+    /// Set destination network overrides in one scope. The callback receives a
+    /// `RestoreNetworkBuilder` that exposes only the settings a restore can change.
+    #[napi]
+    pub fn network(
+        &mut self,
+        env: &Env,
+        configure: Function<
+            ClassInstance<JsRestoreNetworkBuilder>,
+            ClassInstance<JsRestoreNetworkBuilder>,
+        >,
+    ) -> Result<&Self> {
+        // Apply the settings only after the callback succeeds, so a throwing callback changes nothing.
+        let initial = JsRestoreNetworkBuilder::default().into_instance(env)?;
+        let mut returned = configure.call(initial)?;
+        let settings = std::mem::take(&mut *returned);
+        let prev = self.take_inner()?;
+        self.inner = Some(prev.network(|network| settings.apply(network)));
         Ok(self)
     }
 
@@ -408,6 +427,70 @@ impl JsRestoreBuilder {
     }
 }
 
+#[napi]
+impl JsRestoreNetworkBuilder {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set only host-side network policy, without DNS, TLS, or guest bootstrap changes.
+    #[napi(js_name = "policyJson")]
+    pub fn policy_json(&mut self, json: String) -> Result<&Self> {
+        self.policy = Some(parse_restore_policy(&json)?);
+        Ok(self)
+    }
+
+    /// Set host-side policy from the existing policy builder.
+    #[napi(js_name = "policyFromBuilder")]
+    pub fn policy_from_builder(&mut self, builder: &JsNetworkPolicyBuilder) -> Result<&Self> {
+        self.policy = Some(builder.build_rust_policy()?);
+        Ok(self)
+    }
+
+    /// Cap destination host-side TCP connections; zero selects unlimited.
+    #[napi(js_name = "maxTcpConnections")]
+    pub fn max_tcp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
+        self.max_tcp_connections = Some(count as usize);
+        Ok(self)
+    }
+
+    /// Cap destination host-side UDP sessions; zero selects unlimited.
+    #[napi(js_name = "maxUdpConnections")]
+    pub fn max_udp_connections(&mut self, count: f64) -> Result<&Self> {
+        let count = crate::numeric::safe_integer(count, "count")?;
+        self.max_udp_connections = Some(count as usize);
+        Ok(self)
+    }
+
+    /// Enable or disable DNS rebind protection on the destination host's resolver.
+    #[napi(js_name = "dnsRebindProtection")]
+    pub fn dns_rebind_protection(&mut self, enabled: bool) -> &Self {
+        self.dns_rebind_protection = Some(enabled);
+        self
+    }
+}
+
+impl JsRestoreNetworkBuilder {
+    /// Apply the settings that were set to the Rust restore network builder.
+    fn apply(self, mut network: RestoreNetworkBuilder) -> RestoreNetworkBuilder {
+        if let Some(policy) = self.policy {
+            network = network.policy(policy);
+        }
+        if let Some(limit) = self.max_tcp_connections {
+            network = network.max_tcp_connections(limit);
+        }
+        if let Some(limit) = self.max_udp_connections {
+            network = network.max_udp_connections(limit);
+        }
+        if let Some(enabled) = self.dns_rebind_protection {
+            network = network.dns_rebind_protection(enabled);
+        }
+        network
+    }
+}
+
 impl JsRestoreBuilder {
     fn take_inner(&mut self) -> Result<RestoreBuilder> {
         self.inner
@@ -419,6 +502,25 @@ impl JsRestoreBuilder {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+/// Parse a restore network policy, which accepts only default actions and rules.
+fn parse_restore_policy(json: &str) -> Result<NetworkPolicy> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| napi::Error::from_reason(format!("invalid policy JSON: {e}")))?;
+    let fields = value
+        .as_object()
+        .ok_or_else(|| napi::Error::from_reason("restore network policy must be an object"))?;
+    if fields
+        .keys()
+        .any(|key| !matches!(key.as_str(), "default_egress" | "default_ingress" | "rules"))
+    {
+        return Err(napi::Error::from_reason(
+            "restore network policy accepts only default actions and rules",
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|e| napi::Error::from_reason(format!("invalid policy JSON: {e}")))
+}
 
 /// Retain explicit zero, but never truncate a positive limit into immediate expiry.
 fn duration_seconds(seconds: f64) -> std::result::Result<u64, &'static str> {

@@ -421,6 +421,8 @@ For dedicated snapshot restore, use `WithRestoreMaxTCPConnections` and `WithRest
 
 `WithRestoreMaxConnections` and `RestoreConfig.MaxConnections` remain deprecated TCP aliases with the same duplicate-alias restriction. These limits are destination resource overrides; `WithRestoreNetworkPolicy` accepts only policy rules and default actions.
 
+`WithRestoreNetwork(RestoreNetworkOptions{DNSRebindProtection: &enabled})` (or `RestoreConfig.DNSRebindProtection`) sets DNS rebind protection for the restored sandbox. Omitted uses the default (enabled), not the source sandbox's setting.
+
 `WithRestoreTCPAcceptQueueSize` (or `RestoreConfig.TCPAcceptQueueSize`) sets the accept-queue depth for the listeners a restored child publishes.
 
 Historical runtime launch contracts reject explicit UDP limits, including zero, with an upgrade-required error. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.

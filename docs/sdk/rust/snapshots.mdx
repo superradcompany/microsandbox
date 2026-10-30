@@ -1109,6 +1109,46 @@ Omitted controls retain destination defaults. Durations are whole seconds. Netwo
 
 </Accordion>
 
+#### <span className="msb-recv">restore.</span><span className="msb-hn">network()</span>
+
+```rust
+fn network(
+    self,
+    configure: impl FnOnce(RestoreNetworkBuilder) -> RestoreNetworkBuilder,
+) -> Self
+```
+
+Set destination network overrides in one scope. `RestoreNetworkBuilder` exposes only the settings a restore can change:
+
+```rust
+fn policy(self, policy: NetworkPolicy) -> Self
+fn max_tcp_connections(self, limit: usize) -> Self
+fn max_udp_connections(self, limit: usize) -> Self
+fn dns_rebind_protection(self, enabled: bool) -> Self
+```
+
+Omitted settings use destination defaults, not the source sandbox's settings. `network_policy()`, `max_tcp_connections()` and `max_udp_connections()` on `RestoreBuilder` set the same values.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
+
+let child = Sandbox::restore("api:baseline")
+    .name("api-restored")
+    .network(|n| {
+        n.policy(NetworkPolicy::from_profiles([
+            NetworkProfile::Public,
+            NetworkProfile::Private,
+        ]))
+        .dns_rebind_protection(false)
+    })
+    .restore()
+    .await?;
+```
+
+</Accordion>
+
 #### <span className="msb-recv">restore.</span><span className="msb-hn">volume()</span>
 
 ```rust

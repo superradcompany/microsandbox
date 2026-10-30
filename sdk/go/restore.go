@@ -27,6 +27,8 @@ type RestoreConfig struct {
 	// MaxUDPConnections caps destination UDP relay sessions; zero means unlimited.
 	MaxUDPConnections *uint
 	DisableNetwork    bool
+	// DNSRebindProtection overrides the destination resolver's rebind protection; nil keeps the default (enabled).
+	DNSRebindProtection *bool
 	// Explicit guest security requires disk scope or SnapshotDiskOnly.
 	SecurityProfile SecurityProfile
 	// Nil omits a lifetime override; explicit zero requests immediate expiry.
@@ -54,6 +56,20 @@ type RestoreConfig struct {
 	// MaxInboundTCPConnections caps active inbound TCP connections; zero is unlimited. Nil uses the runtime default.
 	MaxInboundTCPConnections *uint
 	Vsock                    []VsockRoute
+}
+
+// RestoreNetworkOptions groups the destination network settings a restore can change.
+// Omitted settings use destination defaults, not the source sandbox's settings.
+type RestoreNetworkOptions struct {
+	// Policy accepts only Rules, DefaultEgress, and DefaultIngress.
+	Policy *NetworkConfig
+	// MaxTCPConnections caps destination TCP connections; zero means unlimited.
+	MaxTCPConnections *uint
+	// MaxUDPConnections caps destination UDP relay sessions; zero means unlimited.
+	MaxUDPConnections *uint
+	// DNSRebindProtection enables or disables rebind protection on the destination resolver.
+	// Disable it to let hostnames resolve to private addresses, with the policy deciding.
+	DNSRebindProtection *bool
 }
 
 // RestoreSandbox restores an installed snapshot or archive into a detached sandbox.
@@ -108,6 +124,25 @@ func WithRestoreMaxTCPConnections(count uint) RestoreOption {
 // WithRestoreMaxUDPConnections caps destination UDP relay sessions. Zero means unlimited.
 func WithRestoreMaxUDPConnections(count uint) RestoreOption {
 	return func(o *RestoreConfig) { o.MaxUDPConnections = &count }
+}
+
+// WithRestoreNetwork sets destination network overrides in one scope.
+// Nil fields leave the matching setting unchanged.
+func WithRestoreNetwork(network RestoreNetworkOptions) RestoreOption {
+	return func(o *RestoreConfig) {
+		if network.Policy != nil {
+			o.NetworkPolicy = network.Policy
+		}
+		if network.MaxTCPConnections != nil {
+			o.MaxTCPConnections = network.MaxTCPConnections
+		}
+		if network.MaxUDPConnections != nil {
+			o.MaxUDPConnections = network.MaxUDPConnections
+		}
+		if network.DNSRebindProtection != nil {
+			o.DNSRebindProtection = network.DNSRebindProtection
+		}
+	}
 }
 
 // WithRestoreMaxInboundTCPConnections caps active inbound TCP connections; zero is unlimited.
@@ -211,7 +246,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		Snapshot: reference, SnapshotReferenceKind: referenceKind,
 		CPUs: config.CPUs, MemoryMiB: config.MemoryMiB, NetworkPolicy: policy,
 		MaxConnections: config.MaxConnections, MaxTCPConnections: config.MaxTCPConnections,
-		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork,
+		MaxUDPConnections: config.MaxUDPConnections, DisableNetwork: config.DisableNetwork, DNSRebindProtection: config.DNSRebindProtection,
 		SecurityProfile: string(config.SecurityProfile),
 		MaxDurationSecs: seconds(config.MaxDuration), IdleTimeoutSecs: seconds(config.IdleTimeout),
 		// Keep the native wire spelling stable across SDK/runtime versions.
