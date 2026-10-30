@@ -100,20 +100,26 @@ impl PassthroughFs {
         if self.cfg.owned_checkpoint.is_none() {
             return;
         }
+        let pinned = u64::from(
+            self.quota
+                .as_ref()
+                .is_some_and(|quota| quota.contains(inode)),
+        );
         if let Ok(data) = self.inode(inode) {
             // Renamed `try_update` in Rust 1.99; keep older toolchains building.
             #[allow(deprecated)]
             let _ = data
                 .lookups
                 .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    Some(current.saturating_sub(count))
+                    Some(current.saturating_sub(count).max(pinned))
                 });
         }
+        self.quota_reconcile_inode(inode);
         self.reap_owned_inode(inode);
     }
 
     pub(super) fn reap_owned_inode(&self, inode: u64) {
-        if self.cfg.owned_checkpoint.is_none() || inode <= INIT_INODE {
+        if (self.cfg.owned_checkpoint.is_none() && self.quota.is_none()) || inode <= INIT_INODE {
             return;
         }
         // Directory enumeration holds its snapshot lock while interning names. Do not
