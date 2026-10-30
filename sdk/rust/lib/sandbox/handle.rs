@@ -360,15 +360,7 @@ impl SandboxHandle {
     }
 
     fn ensure_same_identity(&self, current: &SandboxHandle) -> MicrosandboxResult<()> {
-        if self.identity() == current.identity() {
-            return Ok(());
-        }
-
-        Err(MicrosandboxError::SandboxReplaced {
-            name: self.name.clone(),
-            expected: self.id().to_string(),
-            actual: current.id().to_string(),
-        })
+        ensure_identity(&self.name, &self.identity(), current)
     }
 
     /// When this sandbox was first created, if recorded.
@@ -814,38 +806,17 @@ impl SandboxHandle {
         }
     }
 
-    /// Stop and start this exact sandbox using default graceful options.
+    /// Restart this exact sandbox using default graceful options.
     pub async fn restart(&self) -> MicrosandboxResult<Sandbox> {
         self.restart_with(RestartOptions::default()).await
     }
 
-    /// Stop and start this exact sandbox with explicit lifecycle options.
+    /// Restart this exact sandbox with explicit lifecycle options.
     pub async fn restart_with(&self, options: RestartOptions) -> MicrosandboxResult<Sandbox> {
-        let current = loop {
-            let current = self.refresh().await?;
-            match restart_action(current.status_snapshot()) {
-                RestartAction::Start => break current,
-                RestartAction::Wait => {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                RestartAction::StopThenStart => {
-                    stop_for_convergence(&current, options.force, options.timeout).await?;
-                    break current;
-                }
-                RestartAction::RejectPaused => {
-                    return Err(MicrosandboxError::SandboxNotRunning(format!(
-                        "cannot restart paused sandbox '{}': resume support is not available",
-                        current.name
-                    )));
-                }
-            }
-        };
-
-        if options.detached {
-            current.start_detached().await
-        } else {
-            current.start().await
-        }
+        self.backend
+            .sandboxes()
+            .restart_identified(self.backend.clone(), &self.name, self.identity(), options)
+            .await
     }
 
     /// Stop and remove this exact sandbox using default graceful options.
@@ -975,6 +946,69 @@ impl Default for DestroyOptions {
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
+
+pub(crate) async fn get_identified_handle(
+    backend: &Arc<dyn Backend>,
+    name: &str,
+    identity: &SandboxIdentity,
+) -> MicrosandboxResult<SandboxHandle> {
+    let current = backend.sandboxes().get(backend.clone(), name).await?;
+    ensure_identity(name, identity, &current)?;
+    Ok(current)
+}
+
+pub(crate) async fn restart_by_stop_and_start(
+    backend: Arc<dyn Backend>,
+    name: &str,
+    identity: SandboxIdentity,
+    options: RestartOptions,
+) -> MicrosandboxResult<Sandbox> {
+    let current = loop {
+        let current = get_identified_handle(&backend, name, &identity).await?;
+        match restart_action(current.status_snapshot()) {
+            RestartAction::Start => break current,
+            RestartAction::Wait => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            RestartAction::StopThenStart => {
+                stop_for_convergence(&current, options.force, options.timeout).await?;
+                break current;
+            }
+            RestartAction::RejectPaused => {
+                return Err(MicrosandboxError::SandboxNotRunning(format!(
+                    "cannot restart paused sandbox '{}': resume support is not available",
+                    current.name
+                )));
+            }
+        }
+    };
+
+    if options.detached {
+        current.start_detached().await
+    } else {
+        current.start().await
+    }
+}
+
+fn ensure_identity(
+    name: &str,
+    identity: &SandboxIdentity,
+    current: &SandboxHandle,
+) -> MicrosandboxResult<()> {
+    if *identity == current.identity() {
+        return Ok(());
+    }
+
+    let expected = match identity {
+        SandboxIdentity::Local(id) => SandboxId::local(*id),
+        SandboxIdentity::Cloud(id) => SandboxId::cloud(id),
+    };
+    Err(MicrosandboxError::SandboxReplaced {
+        name: name.to_string(),
+        expected: expected.to_string(),
+        actual: current.id().to_string(),
+    })
+}
 
 fn is_local_ephemeral_handle(inner: &SandboxHandleInner) -> bool {
     let SandboxHandleInner::Local(state) = inner else {
