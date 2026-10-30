@@ -160,7 +160,9 @@ async fn check_connect(ipv6: bool, listening: bool) {
         .connect(iface.context(), (gateway, port), (guest, 49152))
         .unwrap();
     let handle = sockets.add(socket);
-    network.start(tokio::runtime::Handle::current());
+    network
+        .start(tokio::runtime::Handle::current())
+        .expect("start network");
     let started = std::time::Instant::now();
     let mut received = Vec::new();
     let mut replied = false;
@@ -300,7 +302,9 @@ async fn check_stalled_ipv6_fallback() {
             (v6.address, 49152),
         )
         .unwrap();
-    network.start(tokio::runtime::Handle::current());
+    network
+        .start(tokio::runtime::Handle::current())
+        .expect("start network");
     let started = std::time::Instant::now();
     let mut fallback_started = false;
     let mut cancelled = false;

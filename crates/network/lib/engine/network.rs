@@ -28,6 +28,7 @@ use crate::netstack::{
     shared::{DEFAULT_QUEUE_CAPACITY, SharedState},
 };
 use crate::policy::{NetworkPolicy, NetworkProfile};
+use crate::ports::PortPublisher;
 use crate::secrets::handle::SecretsHandle;
 
 //--------------------------------------------------------------------------------------------------
@@ -146,15 +147,21 @@ pub struct MetricsHandle {
     shared: Arc<SharedState>,
 }
 
-/// One-shot handle that permits a deferred network stack to publish listeners and process traffic.
+/// One-shot handle that permits a deferred network stack to forward traffic.
 #[derive(Clone)]
 pub struct NetworkActivationHandle {
     gate: Arc<NetworkActivationGate>,
 }
 
 struct NetworkActivationGate {
-    active: Mutex<bool>,
+    state: Mutex<NetworkActivationState>,
     changed: Condvar,
+}
+
+struct NetworkActivationState {
+    active: bool,
+    publisher: Option<(PortPublisher, tokio::runtime::Handle)>,
+    failure: Option<Arc<std::io::Error>>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -347,18 +354,23 @@ impl SmoltcpNetwork {
         })
     }
 
-    /// Hold network processing and published-port creation behind an explicit one-shot gate.
+    /// Hold listener tasks and packet processing behind an explicit one-shot gate.
     ///
-    /// This must be selected before [`start`](Self::start). It is used by checkpoint restore so
-    /// ingress cannot reach the child until guest activation has completed. The gate is consumed
-    /// once at poll-thread startup and adds no checks to steady-state packet processing.
+    /// Host sockets are reserved before the gate is released, so bind failures can be
+    /// reported without enabling traffic. Activation replaces those sockets to discard
+    /// their startup queues before guest traffic can flow. A replacement failure leaves
+    /// the gate closed and is returned to the runtime before its Ready handshake.
     pub fn defer_activation(&mut self) -> NetworkActivationHandle {
         assert!(
             self.poll_handle.is_none(),
             "network activation can only be deferred before start"
         );
         let gate = Arc::new(NetworkActivationGate {
-            active: Mutex::new(false),
+            state: Mutex::new(NetworkActivationState {
+                active: false,
+                publisher: None,
+                failure: None,
+            }),
             changed: Condvar::new(),
         });
         self.activation_gate = Some(Arc::clone(&gate));
@@ -386,7 +398,10 @@ impl SmoltcpNetwork {
     ///
     /// Must be called before VM boot. Requires a tokio runtime handle for
     /// spawning proxy tasks, DNS resolution, and published port listeners.
-    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) {
+    ///
+    /// Reserve every requested host port before starting the thread. Binding failures
+    /// are returned synchronously, including when traffic activation is deferred.
+    pub fn start(&mut self, tokio_handle: tokio::runtime::Handle) -> std::io::Result<()> {
         let shared = self.shared.clone();
         let poll_config = PollLoopConfig {
             gateway_mac: self.gateway_mac,
@@ -397,16 +412,38 @@ impl SmoltcpNetwork {
             mtu: self.mtu as usize,
         };
         let config = self.config.config();
+        let port_publisher = {
+            // Serialize reservation installation with an activation racing start().
+            let mut activation = self
+                .activation_gate
+                .as_ref()
+                .map(|gate| gate.state.lock().unwrap());
+            let publisher = {
+                let _entered = tokio_handle.enter();
+                PortPublisher::new(
+                    &config.ports,
+                    config.tcp_accept_queue_size.unwrap_or_default(),
+                    config.max_inbound_tcp_connections,
+                    self.guest_ipv4,
+                    self.guest_ipv6,
+                    self.gateway_ipv4,
+                    self.gateway_ipv6,
+                )?
+            };
+            if let Some(state) = activation.as_mut() {
+                state.publisher = Some((publisher, tokio_handle.clone()));
+                None
+            } else {
+                Some(publisher)
+            }
+        };
         let network_policy = config.policy.clone();
         let platform_policy = self.platform_policy.clone();
         let dns_config = config.dns.clone();
         let tls_state = self.tls_state.clone();
-        let published_ports = config.ports.clone();
         let strict = config.strict;
         let max_tcp_connections = config.max_tcp_connections.and_then(ConnectionLimit::cap);
         let max_udp_connections = config.max_udp_connections;
-        let max_inbound_tcp_connections = config.max_inbound_tcp_connections;
-        let tcp_accept_queue_size = config.tcp_accept_queue_size.unwrap_or_default();
         let secrets = self.secrets.clone();
         let activation_gate = self.activation_gate.take();
         let outbound_proxy = self.config.outbound_proxy().cloned().map(Arc::new);
@@ -415,9 +452,14 @@ impl SmoltcpNetwork {
             std::thread::Builder::new()
                 .name("smoltcp-poll".into())
                 .spawn(move || {
-                    if let Some(gate) = activation_gate {
-                        gate.wait();
-                    }
+                    let port_publisher = if let Some(gate) = activation_gate {
+                        let Some(publisher) = gate.wait() else {
+                            return;
+                        };
+                        publisher
+                    } else {
+                        port_publisher.expect("cold network owns its reserved ports")
+                    };
                     poll::smoltcp_poll_loop(
                         shared,
                         poll_config,
@@ -425,12 +467,10 @@ impl SmoltcpNetwork {
                         platform_policy,
                         dns_config,
                         tls_state,
-                        published_ports,
+                        port_publisher,
                         strict,
                         max_tcp_connections,
                         max_udp_connections,
-                        tcp_accept_queue_size,
-                        max_inbound_tcp_connections,
                         tokio_handle,
                         secrets,
                         outbound_proxy,
@@ -438,6 +478,7 @@ impl SmoltcpNetwork {
                 })
                 .expect("failed to spawn smoltcp poll thread"),
         );
+        Ok(())
     }
 
     /// Take the `NetBackend` for `VmBuilder::net()`. One-shot.
@@ -582,22 +623,45 @@ impl SmoltcpNetwork {
 }
 
 impl NetworkActivationHandle {
-    /// Release a deferred network exactly once. Repeated calls are harmless.
-    pub fn activate(&self) {
-        let mut active = self.gate.active.lock().unwrap();
-        if !*active {
-            *active = true;
+    /// Replace startup sockets and release a deferred network exactly once.
+    ///
+    /// Repeated successful calls are harmless. Replacement failure releases the
+    /// reservations, keeps traffic disabled, and remains an error on later calls.
+    pub fn activate(&self) -> std::io::Result<()> {
+        let mut state = self.gate.state.lock().unwrap();
+        if let Some(error) = &state.failure {
+            return Err(std::io::Error::new(error.kind(), Arc::clone(error)));
+        }
+        if !state.active {
+            if let Some((publisher, runtime)) = state.publisher.as_mut() {
+                let reset = {
+                    let _entered = runtime.enter();
+                    publisher.reset_reserved_ports()
+                };
+                if let Err(error) = reset {
+                    let error = Arc::new(error);
+                    state.failure = Some(Arc::clone(&error));
+                    self.gate.changed.notify_all();
+                    return Err(std::io::Error::new(error.kind(), error));
+                }
+            }
+            state.active = true;
             self.gate.changed.notify_all();
         }
+        Ok(())
     }
 }
 
 impl NetworkActivationGate {
-    fn wait(&self) {
-        let mut active = self.active.lock().unwrap();
-        while !*active {
-            active = self.changed.wait(active).unwrap();
+    fn wait(&self) -> Option<PortPublisher> {
+        let mut state = self.state.lock().unwrap();
+        while !state.active && state.failure.is_none() {
+            state = self.changed.wait(state).unwrap();
         }
+        state
+            .publisher
+            .take()
+            .and_then(|(publisher, _)| state.failure.is_none().then_some(publisher))
     }
 }
 
@@ -879,7 +943,7 @@ mod tests {
         let gate = Arc::clone(network.activation_gate.as_ref().unwrap());
         let (released_tx, released_rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
-            gate.wait();
+            let _ = gate.wait();
             released_tx.send(()).unwrap();
         });
 
@@ -889,7 +953,7 @@ mod tests {
                 .is_err(),
             "deferred network became active before explicit release"
         );
-        handle.activate();
+        handle.activate().unwrap();
         released_rx
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();

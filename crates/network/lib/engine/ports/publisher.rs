@@ -70,9 +70,9 @@ const UDP_EPHEMERAL_PORT_COUNT: usize =
 
 /// Manages published port listeners and inbound connections.
 ///
-/// Spawns tokio listeners for each published port. When connections arrive,
-/// they are queued for the poll loop to create smoltcp sockets and initiate
-/// connections to the guest.
+/// Reserves host sockets for each published port, then starts Tokio listeners
+/// when network traffic is enabled. Accepted connections are queued for the
+/// poll loop to create smoltcp sockets into the guest.
 pub struct PortPublisher {
     /// Receives accepted connections from listener tasks.
     inbound_rx: mpsc::Receiver<InboundConnection>,
@@ -101,6 +101,34 @@ pub struct PortPublisher {
     last_capacity_warning: Option<Instant>,
     /// UDP published-port routes, keyed by guest-side port.
     udp_routes: PublishedUdpRoutes,
+    /// Sockets reserved before activation, without accepting or forwarding traffic.
+    /// `None` once listeners start or a reservation reset fails.
+    bound_ports: Option<Vec<BoundPort>>,
+}
+
+enum BoundPort {
+    Tcp {
+        address: SocketAddr,
+        guest_port: u16,
+        listener: TcpListener,
+        backlog: TcpAcceptQueueSize,
+    },
+    Udp {
+        address: SocketAddr,
+        guest_port: u16,
+        guest_ip: IpAddr,
+        gateway_ip: IpAddr,
+        socket: UdpSocket,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("publish {protocol} {address}: {source}")]
+struct PortBindError {
+    protocol: &'static str,
+    address: SocketAddr,
+    #[source]
+    source: std::io::Error,
 }
 
 /// An accepted host-side connection waiting to be wired to the guest.
@@ -175,15 +203,10 @@ enum BindExposure {
 //--------------------------------------------------------------------------------------------------
 
 impl PortPublisher {
-    /// Create a new publisher and spawn listeners for all published ports.
+    /// Reserve all requested host sockets without starting traffic processing.
     ///
-    /// Listeners are only spawned when at least one of `guest_ipv4` /
-    /// `guest_ipv6` is `Some`; published ports need a smoltcp dial target.
-    /// Each TCP listener task gates accepted connections through the
-    /// supplied [`NetworkPolicy`]'s `evaluate_ingress` before queuing
-    /// them; rejected connections drop with TCP RST (zero-linger) so
-    /// the peer observes `ECONNRESET`.
-    #[allow(clippy::too_many_arguments)]
+    /// A bind failure releases the complete set. Call [`start`](Self::start) when
+    /// the caller permits packet processing.
     pub fn new(
         ports: &[PublishedPort],
         tcp_accept_queue_size: TcpAcceptQueueSize,
@@ -192,12 +215,7 @@ impl PortPublisher {
         guest_ipv6: Option<Ipv6Addr>,
         gateway_ipv4: Option<Ipv4Addr>,
         gateway_ipv6: Option<Ipv6Addr>,
-        gateway_mac: [u8; 6],
-        guest_mac: [u8; 6],
-        policy: Arc<NetworkPolicy>,
-        shared: Arc<SharedState>,
-        tokio_handle: &tokio::runtime::Handle,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(64);
         let udp_routes = Arc::new(Mutex::new(HashMap::new()));
         let ephemeral_port = Arc::new(AtomicU16::new(49152));
@@ -206,31 +224,25 @@ impl PortPublisher {
             .map(IpAddr::V4)
             .or_else(|| guest_ipv6.map(IpAddr::V6));
 
-        if guest_ip.is_some() {
-            Self::spawn_listeners(
+        let bound_ports = if guest_ip.is_some() {
+            Self::bind_ports(
                 ports,
                 tcp_accept_queue_size,
-                &inbound_tx,
-                udp_routes.clone(),
                 guest_ipv4,
                 guest_ipv6,
                 gateway_ipv4,
                 gateway_ipv6,
-                ephemeral_port.clone(),
-                gateway_mac,
-                guest_mac,
-                policy,
-                shared,
-                tokio_handle,
-            );
+            )?
         } else if !ports.is_empty() {
-            tracing::warn!(
-                count = ports.len(),
-                "skipping published port listeners: guest has no IPv4 or IPv6 address",
-            );
-        }
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "published ports require a guest IP",
+            ));
+        } else {
+            Vec::new()
+        };
 
-        Self {
+        Ok(Self {
             inbound_rx,
             _inbound_tx: inbound_tx,
             connections: Vec::new(),
@@ -245,7 +257,87 @@ impl PortPublisher {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes,
+            bound_ports: Some(bound_ports),
+        })
+    }
+
+    /// Replace reserved sockets so their queued startup traffic cannot be forwarded.
+    ///
+    /// Must run before [`start`](Self::start), with a Tokio runtime entered. Each
+    /// old socket closes before its endpoint is rebound with the original options.
+    /// Any failure releases both the replacement set and all remaining reservations.
+    pub(crate) fn reset_reserved_ports(&mut self) -> std::io::Result<()> {
+        let reserved = self
+            .bound_ports
+            .take()
+            .expect("published ports must still be reserved before resetting");
+        let mut replacement = Vec::with_capacity(reserved.len());
+        for port in reserved {
+            replacement.push(match port {
+                BoundPort::Tcp {
+                    address,
+                    guest_port,
+                    listener,
+                    backlog,
+                } => {
+                    let address = listener
+                        .local_addr()
+                        .map_err(|error| bind_error("TCP", address, error))?;
+                    drop(listener);
+                    BoundPort::Tcp {
+                        address,
+                        guest_port,
+                        listener: bind_listener(address, backlog)
+                            .map_err(|error| bind_error("TCP", address, error))?,
+                        backlog,
+                    }
+                }
+                BoundPort::Udp {
+                    address,
+                    guest_port,
+                    guest_ip,
+                    gateway_ip,
+                    socket,
+                } => {
+                    let address = socket
+                        .local_addr()
+                        .map_err(|error| bind_error("UDP", address, error))?;
+                    drop(socket);
+                    BoundPort::Udp {
+                        address,
+                        guest_port,
+                        guest_ip,
+                        gateway_ip,
+                        socket: bind_udp_socket(address)
+                            .map_err(|error| bind_error("UDP", address, error))?,
+                    }
+                }
+            });
         }
+        self.bound_ports = Some(replacement);
+        Ok(())
+    }
+
+    /// Start listeners after the runtime activation barrier has completed.
+    pub fn start(
+        &mut self,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
+        policy: Arc<NetworkPolicy>,
+        shared: Arc<SharedState>,
+        tokio_handle: &tokio::runtime::Handle,
+    ) {
+        Self::spawn_listeners(
+            self.bound_ports.take().unwrap_or_default(),
+            &self._inbound_tx,
+            self.udp_routes.clone(),
+            self.ephemeral_port.clone(),
+            gateway_mac,
+            guest_mac,
+            policy,
+            shared,
+            tokio_handle,
+        );
     }
 
     /// Accept queued inbound connections: create smoltcp sockets and
@@ -556,17 +648,64 @@ impl PortPublisher {
         self.cleanup_udp_peers();
     }
 
-    /// Spawn one tokio listener task per TCP published port.
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_listeners(
+    fn bind_ports(
         ports: &[PublishedPort],
         tcp_accept_queue_size: TcpAcceptQueueSize,
-        inbound_tx: &mpsc::Sender<InboundConnection>,
-        udp_routes: PublishedUdpRoutes,
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
         gateway_ipv4: Option<Ipv4Addr>,
         gateway_ipv6: Option<Ipv6Addr>,
+    ) -> std::io::Result<Vec<BoundPort>> {
+        // Bind the complete set before spawning tasks. Dropping this vector rolls back
+        // every earlier socket if a later bind or address-family check fails.
+        let mut bound = Vec::with_capacity(ports.len());
+        for port in ports {
+            let address = SocketAddr::new(port.host_bind, port.host_port);
+            match port.protocol {
+                PortProtocol::Tcp => bound.push(BoundPort::Tcp {
+                    address,
+                    guest_port: port.guest_port,
+                    listener: bind_listener(address, tcp_accept_queue_size)
+                        .map_err(|error| bind_error("TCP", address, error))?,
+                    backlog: tcp_accept_queue_size,
+                }),
+                PortProtocol::Udp => {
+                    let (guest_ip, gateway_ip) = udp_ips_for_bind(
+                        port.host_bind,
+                        guest_ipv4,
+                        guest_ipv6,
+                        gateway_ipv4,
+                        gateway_ipv6,
+                    )
+                    .ok_or_else(|| {
+                        bind_error(
+                            "UDP",
+                            address,
+                            std::io::Error::new(
+                                ErrorKind::InvalidInput,
+                                "published UDP port requires a matching guest IP",
+                            ),
+                        )
+                    })?;
+                    bound.push(BoundPort::Udp {
+                        address,
+                        guest_port: port.guest_port,
+                        guest_ip,
+                        gateway_ip,
+                        socket: bind_udp_socket(address)
+                            .map_err(|error| bind_error("UDP", address, error))?,
+                    });
+                }
+            }
+        }
+        Ok(bound)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_listeners(
+        ports: Vec<BoundPort>,
+        inbound_tx: &mpsc::Sender<InboundConnection>,
+        udp_routes: PublishedUdpRoutes,
         ephemeral_port: Arc<AtomicU16>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
@@ -575,24 +714,20 @@ impl PortPublisher {
         tokio_handle: &tokio::runtime::Handle,
     ) {
         for port in ports {
-            let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
-            let guest_port = port.guest_port;
-
-            match port.protocol {
-                PortProtocol::Tcp => {
+            match port {
+                BoundPort::Tcp {
+                    address: bind_addr,
+                    guest_port,
+                    listener,
+                    ..
+                } => {
                     let tx = inbound_tx.clone();
                     let policy = policy.clone();
                     let shared = shared.clone();
                     tokio_handle.spawn(async move {
-                        if let Err(e) = tcp_listener_task(
-                            bind_addr,
-                            tcp_accept_queue_size,
-                            guest_port,
-                            tx,
-                            policy,
-                            shared,
-                        )
-                        .await
+                        if let Err(e) =
+                            tcp_listener_task(bind_addr, listener, guest_port, tx, policy, shared)
+                                .await
                         {
                             tracing::error!(
                                 bind = %bind_addr,
@@ -602,22 +737,13 @@ impl PortPublisher {
                         }
                     });
                 }
-                PortProtocol::Udp => {
-                    let Some((guest_ip, gateway_ip)) = udp_ips_for_bind(
-                        port.host_bind,
-                        guest_ipv4,
-                        guest_ipv6,
-                        gateway_ipv4,
-                        gateway_ipv6,
-                    ) else {
-                        tracing::warn!(
-                            bind = %bind_addr,
-                            guest_port,
-                            "skipping UDP published port: guest has no matching gateway/guest IP family",
-                        );
-                        continue;
-                    };
-
+                BoundPort::Udp {
+                    address: bind_addr,
+                    guest_port,
+                    guest_ip,
+                    gateway_ip,
+                    socket,
+                } => {
                     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
                     let peers = Arc::new(Mutex::new(PublishedUdpPeers::default()));
                     udp_routes
@@ -629,19 +755,19 @@ impl PortPublisher {
                             outbound_tx,
                             peers: peers.clone(),
                         });
-
                     let policy = policy.clone();
                     let shared = shared.clone();
                     let ephemeral_port = ephemeral_port.clone();
                     tokio_handle.spawn(async move {
                         if let Err(e) = udp_listener_task(
                             bind_addr,
+                            socket,
                             guest_ip,
                             gateway_ip,
                             guest_port,
                             outbound_rx,
                             peers,
-                            ephemeral_port.clone(),
+                            ephemeral_port,
                             policy,
                             shared,
                             EthernetAddress(gateway_mac),
@@ -699,6 +825,21 @@ impl PortPublisher {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+fn bind_error(
+    protocol: &'static str,
+    address: SocketAddr,
+    source: std::io::Error,
+) -> std::io::Error {
+    std::io::Error::new(
+        source.kind(),
+        PortBindError {
+            protocol,
+            address,
+            source,
+        },
+    )
+}
+
 /// Set zero-linger on a stream so the kernel sends a TCP RST instead of
 /// the default FIN close when the stream drops. Used for deliberate
 /// rejection paths (policy deny, max-inbound exhaustion,
@@ -741,6 +882,13 @@ fn bind_listener(
     socket.listen(backlog.get())
 }
 
+/// Bind a nonblocking UDP socket using the same options for reservation and reset.
+fn bind_udp_socket(bind_addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = std::net::UdpSocket::bind(bind_addr)?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
+}
+
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues
 /// allowed connections for the publisher's accept loop. Denied
@@ -748,13 +896,12 @@ fn bind_listener(
 /// sees `ECONNRESET` rather than a graceful close.
 async fn tcp_listener_task(
     bind_addr: SocketAddr,
-    backlog: TcpAcceptQueueSize,
+    listener: TcpListener,
     guest_port: u16,
     inbound_tx: mpsc::Sender<InboundConnection>,
     policy: Arc<NetworkPolicy>,
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
-    let listener = bind_listener(bind_addr, backlog)?;
     log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
@@ -787,6 +934,7 @@ async fn tcp_listener_task(
 #[allow(clippy::too_many_arguments)]
 async fn udp_listener_task(
     bind_addr: SocketAddr,
+    socket: UdpSocket,
     guest_ip: IpAddr,
     gateway_ip: IpAddr,
     guest_port: u16,
@@ -798,7 +946,6 @@ async fn udp_listener_task(
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
 ) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(bind_addr).await?;
     log_published_port_listener("UDP", bind_addr, guest_port);
 
     let mut buf = vec![0u8; UDP_RELAY_BUF_SIZE];
@@ -1218,6 +1365,7 @@ mod tests {
                 tcp_ports: HashSet::new(),
                 last_capacity_warning: None,
                 udp_routes: Arc::new(Mutex::new(HashMap::new())),
+                bound_ports: Some(Vec::new()),
             };
 
             Self {
@@ -1376,12 +1524,8 @@ mod tests {
                 None,
                 Some(Ipv4Addr::new(10, 0, 0, 2)),
                 None,
-                [2, 0, 0, 0, 0, 1],
-                [2, 0, 0, 0, 0, 2],
-                Arc::new(NetworkPolicy::default()),
-                Arc::new(SharedState::new(4)),
-                &tokio::runtime::Handle::current(),
-            );
+            )
+            .unwrap();
             let mut socket = tcp::Socket::new(
                 tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_SIZE]),
                 tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_SIZE]),
@@ -1689,12 +1833,8 @@ mod tests {
                 None,
                 None,
                 None,
-                [2, 0, 0, 0, 0, 1],
-                [2, 0, 0, 0, 0, 2],
-                Arc::new(NetworkPolicy::default()),
-                h.shared.clone(),
-                &tokio::runtime::Handle::current(),
-            );
+            )
+            .unwrap();
             let cap = configured.filter(|&value| value != 0);
             let mut clients = Vec::new();
             for i in 0..attempts {
@@ -2094,6 +2234,7 @@ mod tests {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes: routes,
+            bound_ports: Some(Vec::new()),
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
         let frame = construct_udp_response(
@@ -2142,6 +2283,7 @@ mod tests {
             tcp_ports: HashSet::new(),
             last_capacity_warning: None,
             udp_routes: routes,
+            bound_ports: Some(Vec::new()),
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
         let frame = construct_udp_response(
