@@ -988,6 +988,36 @@ func WithAllowMissingResources() RestoreOption
 
 Allow unavailable external filesystems or additional disks. Full restore records warnings; root and owned storage remain required. Disabled by default. This does not relax validation of supplied mappings.
 
+#### <span className="msb-hn">WithRestoreNetwork()</span>
+
+```go
+func WithRestoreNetwork(network RestoreNetworkOptions) RestoreOption
+
+type RestoreNetworkOptions struct {
+    Policy              *NetworkConfig
+    MaxTCPConnections   *uint
+    MaxUDPConnections   *uint
+    DNSRebindProtection *bool
+    Strict              *bool
+}
+```
+
+Set destination network overrides in one scope. `RestoreNetworkOptions` holds only the settings a restore can change. Nil fields leave the matching setting unchanged; omitted settings use destination defaults, not the source sandbox's settings. `WithRestoreNetworkPolicy`, `WithRestoreMaxTCPConnections`, `WithRestoreMaxUDPConnections` and the matching `RestoreConfig` fields set the same values.
+
+<Accordion title="Example">
+
+```go
+disabled := false
+child, err := m.RestoreSandbox(ctx, "api:baseline", "api-restored",
+    m.WithRestoreNetwork(m.RestoreNetworkOptions{
+        Policy:              m.NetworkPolicy.FromProfiles(m.NetworkProfilePublic, m.NetworkProfilePrivate),
+        DNSRebindProtection: &disabled,
+    }),
+)
+```
+
+</Accordion>
+
 
 <span id="disk-maintenance-and-incremental-export" />
 

@@ -72,7 +72,7 @@ describe("native Sandbox lifecycle contract", () => {
     for (const value of [0, -0, 0.5, 1.5, Number.MIN_VALUE]) {
       expect(builder.maxDuration(value).idleTimeout(value)).toBe(builder);
     }
-    for (const method of ["image", "network", "cmd", "entrypoint", "replace", "create"]) {
+    for (const method of ["image", "cmd", "entrypoint", "replace", "create"]) {
       expect((builder as unknown as Record<string, unknown>)[method], method).toBeUndefined();
     }
   });
