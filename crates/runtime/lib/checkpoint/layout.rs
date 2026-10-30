@@ -197,10 +197,10 @@ fn finish_with_checkpoint(
     atomic_write(&runtime_dir.join("root-disk.json"), UPGRADE_GUARD)?;
     checkpoint(1)?;
     let heartbeat = runtime_dir.join("heartbeat.json");
-    if let Ok(metadata) = fs::symlink_metadata(&heartbeat) {
-        if !metadata.is_dir() || metadata_is_link(&metadata) {
-            fs::remove_file(&heartbeat).map_err(|e| e.to_string())?;
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&heartbeat)
+        && (!metadata.is_dir() || metadata_is_link(&metadata))
+    {
+        fs::remove_file(&heartbeat).map_err(|e| e.to_string())?;
     }
     real_directory(&heartbeat, true)?;
     sync_directory(runtime_dir)?;
@@ -231,10 +231,12 @@ fn reject_advanced_legacy_storage(
     binding: Option<&LegacyRootBinding>,
 ) -> Result<(), String> {
     let mut directories = vec![sandbox, runtime_dir];
-    if let Some(parent) = binding.and_then(|root| root.path.parent()) {
-        if !parent.as_os_str().is_empty() && parent != sandbox && parent != runtime_dir {
-            directories.push(parent);
-        }
+    if let Some(parent) = binding.and_then(|root| root.path.parent())
+        && !parent.as_os_str().is_empty()
+        && parent != sandbox
+        && parent != runtime_dir
+    {
+        directories.push(parent);
     }
     let mut budget = 4096;
     for directory in directories {

@@ -620,7 +620,7 @@ mod tests {
             active.stop().await.unwrap();
             crate::Sandbox::remove("catalog-running").await.unwrap();
             // Existing VMs remain usable after catalog migration, but old Linux
-            // x86 runtimes cannot enforce the new SDK's default nesting policy.
+            // x86 runtimes cannot create the required protected sandbox state.
             if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
                 let rejected = crate::Sandbox::builder("catalog-unsupported")
                     .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
@@ -629,17 +629,17 @@ mod tests {
                     Ok(unexpected) => {
                         unexpected.stop().await.unwrap();
                         crate::Sandbox::remove("catalog-unsupported").await.unwrap();
-                        panic!("previous runtime accepted an unenforceable nesting policy");
+                        panic!("previous runtime accepted a launch without protected sandbox state");
                     }
                     Err(error) => error.to_string(),
                 };
-                assert!(error.contains("does not support nested virtualization policy"), "{error}");
+                assert!(error.contains("protected sandbox state"), "{error}");
                 assert!(matches!(crate::Sandbox::get("catalog-unsupported").await,
                     Err(MicrosandboxError::SandboxNotFound(_))));
                 assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());
                 let after = Migrator::get_applied_migrations(pools.write().inner()).await.unwrap();
                 assert_eq!(after.iter().map(|migration| migration.name()).collect::<Vec<_>>(), before.iter().map(|migration| migration.name()).collect::<Vec<_>>());
-                println!("previous runtime 0.6.{expected}: existing VM retained; new launch refused without a sandbox or schema change");
+                println!("previous runtime 0.6.{expected}: existing VM retained; new launch refused without a sandbox or schema change because the runtime lacks protected sandbox state");
                 return;
             }
             #[cfg(feature = "net")]
