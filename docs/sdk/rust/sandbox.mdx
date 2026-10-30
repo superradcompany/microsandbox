@@ -368,7 +368,7 @@ Request force termination and return once the request is sent, without waiting f
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 async fn metrics(&self) -> MicrosandboxResult<SandboxMetrics>
@@ -396,7 +396,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn metrics_stream(&self, interval: Duration) -> impl Stream<Item = MicrosandboxResult<SandboxMetrics>>
@@ -2574,7 +2574,7 @@ Read captured `exec.log` (works without starting)
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 metrics()

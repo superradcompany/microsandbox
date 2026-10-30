@@ -154,7 +154,7 @@ Across the docs, no badge means a feature works everywhere. Exceptions use only 
 | Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
 | Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
 | Snapshots | **Limited on cloud** | Capture disk snapshots from stopped persistent sandboxes and restore them into new sandboxes. Live capture, full checkpoints, forking, groups, and local artifact archives remain local-only. |
-| Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
+| Resource metrics | **Limited on cloud** | View cloud metrics in the [dashboard](https://dashboard.microsandbox.dev) or query history through the [REST API](/api-reference/endpoints/sandboxes/get-sandbox-metrics). SDK metrics methods, `msb metrics`, and `msb-metrics` exporters are local-only. |
 | Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
 
 ## REST API
