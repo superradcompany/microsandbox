@@ -591,7 +591,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -807,7 +807,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
 
