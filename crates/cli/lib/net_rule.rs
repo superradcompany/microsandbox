@@ -20,6 +20,7 @@
 //! internal colons don't collide with the `:` field separator. Ports
 //! never live in the target — `example.com:443` is rejected with a
 //! pointer at `example.com:tcp:443`.
+//! For `icmpv4` and `icmpv6`, ports must be omitted or set to `any`.
 //!
 //! Tokens are parsed eagerly. Levenshtein-2 typo suggestions are
 //! emitted for unrecognized keywords. The parser produces fully-formed
@@ -135,6 +136,10 @@ pub enum RuleParseError {
     )]
     IngressDoesNotSupportIcmp,
 
+    /// ICMP protocols have no ports, so a port filter can never match.
+    #[error("ICMP rules do not support ports; omit the port or use `any`")]
+    IcmpDoesNotSupportPorts,
+
     /// Token has trailing fields after `<ports>` (more than 2 colons
     /// on the right of `@`). For IPv6 addresses, the canonical form is
     /// to wrap in `[...]`.
@@ -237,12 +242,16 @@ pub fn parse_rule_token(token: &str) -> Result<Rule, RuleParseError> {
         Some(p) => parse_ports(p)?,
     };
 
-    if matches!(direction, Direction::Ingress | Direction::Any)
-        && protocols
-            .iter()
-            .any(|p| matches!(p, Protocol::Icmpv4 | Protocol::Icmpv6))
-    {
+    let has_icmp = protocols
+        .iter()
+        .any(|p| matches!(p, Protocol::Icmpv4 | Protocol::Icmpv6));
+
+    if matches!(direction, Direction::Ingress | Direction::Any) && has_icmp {
         return Err(RuleParseError::IngressDoesNotSupportIcmp);
+    }
+
+    if has_icmp && !ports.is_empty() {
+        return Err(RuleParseError::IcmpDoesNotSupportPorts);
     }
 
     Ok(Rule {
@@ -655,6 +664,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_network::netstack::shared::SharedState;
+    use microsandbox_network::policy::NetworkPolicy;
+
     use super::*;
 
     #[track_caller]
@@ -922,6 +934,86 @@ mod tests {
     fn icmp_in_egress_is_allowed() {
         let r = parse_rule_token("allow:egress@public:icmpv4").unwrap();
         assert_eq!(r.protocols, vec![Protocol::Icmpv4]);
+    }
+
+    #[test]
+    fn icmp_with_ports_is_rejected() {
+        for token in [
+            "allow@public:icmpv4:80",
+            "deny@public:icmpv4:80",
+            "allow@public:icmpv6:80",
+            "deny@public:icmpv6:80",
+            "allow@public:icmpv4:80-443",
+            "deny@public:icmpv4:80-443",
+            "allow@public:icmpv6:80-443",
+            "deny@public:icmpv6:80-443",
+            "allow@[2001:db8::1]:icmpv6:80",
+        ] {
+            let err = parse_rule_token(token).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "ICMP rules do not support ports; omit the port or use `any`",
+                "{token}"
+            );
+        }
+    }
+
+    #[test]
+    fn icmp_without_ports_is_allowed() {
+        for (token, action, protocol) in [
+            ("allow@public:icmpv4", Action::Allow, Protocol::Icmpv4),
+            ("deny@public:icmpv4", Action::Deny, Protocol::Icmpv4),
+            ("allow@public:icmpv6", Action::Allow, Protocol::Icmpv6),
+            ("deny@public:icmpv6", Action::Deny, Protocol::Icmpv6),
+            ("allow@public:icmpv4:any", Action::Allow, Protocol::Icmpv4),
+            ("deny@public:icmpv4:any", Action::Deny, Protocol::Icmpv4),
+            ("allow@public:icmpv6:any", Action::Allow, Protocol::Icmpv6),
+            ("deny@public:icmpv6:any", Action::Deny, Protocol::Icmpv6),
+        ] {
+            let r = parse_rule_token(token).unwrap();
+
+            assert_eq!(r.action, action, "{token}");
+            assert_eq!(r.direction, Direction::Egress, "{token}");
+            assert_eq!(r.protocols, vec![protocol], "{token}");
+            assert!(r.ports.is_empty(), "{token}");
+        }
+    }
+
+    #[test]
+    fn transport_port_filters_are_preserved() {
+        for (token, protocols, port) in [
+            ("allow@public:tcp:443", vec![Protocol::Tcp], 443),
+            ("deny@public:tcp:443", vec![Protocol::Tcp], 443),
+            ("allow@public:udp:53", vec![Protocol::Udp], 53),
+            ("deny@public:udp:53", vec![Protocol::Udp], 53),
+            ("allow@public:any:443", vec![], 443),
+            ("deny@public:any:443", vec![], 443),
+        ] {
+            let r = parse_rule_token(token).unwrap();
+
+            assert_eq!(r.protocols, protocols, "{token}");
+            assert_eq!(r.ports, vec![PortRange::single(port)], "{token}");
+        }
+    }
+
+    #[test]
+    fn icmp_without_ports_matches_policy() {
+        let shared = SharedState::new(1);
+
+        for (token, destination, protocol) in [
+            ("allow@any:icmpv4", "198.51.100.1", Protocol::Icmpv4),
+            ("allow@any:icmpv6", "2001:db8::1", Protocol::Icmpv6),
+        ] {
+            let mut policy = NetworkPolicy::none();
+            policy.rules.push(parse_rule_token(token).unwrap());
+
+            assert_eq!(
+                policy.evaluate_egress_ip(destination.parse().unwrap(), protocol, &shared),
+                Action::Allow,
+                "{token}"
+            );
+        }
     }
 
     #[test]
