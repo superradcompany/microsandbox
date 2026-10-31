@@ -14,7 +14,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 
-use super::exec::{InputWindow, Rlimit};
+use super::exec::{InputWindow, Rlimit, validate_env};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -195,9 +195,11 @@ impl AttachOptionsBuilder {
 
     /// Finalize the options. Called automatically when using the closure form.
     ///
-    /// Returns an error if any rlimit entry has `soft > hard`.
+    /// Returns an error if an environment key is empty or contains `=` or NUL,
+    /// an environment value contains NUL, or any rlimit entry has `soft > hard`.
     pub fn build(self) -> MicrosandboxResult<AttachOptions> {
         super::exec::validate_rlimits(&self.options.rlimits)?;
+        validate_env(&self.options.env)?;
         Ok(self.options)
     }
 }

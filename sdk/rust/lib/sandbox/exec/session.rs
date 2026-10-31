@@ -16,7 +16,7 @@ use microsandbox_protocol::{
 
 use microsandbox_types::EnvVar;
 
-use crate::{MicrosandboxResult, agent::AgentClient};
+use crate::{MicrosandboxResult, agent::AgentClient, sandbox::init::validate_env_pair};
 
 use super::io::{self, EventReceiver, InputWindow};
 
@@ -285,9 +285,11 @@ impl ExecOptionsBuilder {
 
     /// Finalize the options. Called automatically when using the closure form.
     ///
-    /// Returns an error if any rlimit entry has `soft > hard`.
+    /// Returns an error if an environment key is empty or contains `=` or NUL,
+    /// an environment value contains NUL, or any rlimit entry has `soft > hard`.
     pub fn build(self) -> MicrosandboxResult<ExecOptions> {
         validate_rlimits(&self.options.rlimits)?;
+        validate_env(&self.options.env)?;
         Ok(self.options)
     }
 }
@@ -638,6 +640,7 @@ pub(crate) mod agent {
         ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
         StreamTimeout,
         io::{self, EventReceiver},
+        validate_env,
     };
 
     pub(crate) async fn exec_stream(
@@ -659,6 +662,8 @@ pub(crate) mod agent {
         rows: u16,
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
+        validate_env(&opts.env)?;
+
         let client = Arc::new(connect_agent(backend, name).await?);
         let policy = client.ready()?.exec_limits;
 
@@ -1563,6 +1568,18 @@ pub(crate) mod agent {
             );
         }
     }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+/// Validate per-exec environment pairs without reserving sandbox-level names.
+pub(crate) fn validate_env(env: &[EnvVar]) -> MicrosandboxResult<()> {
+    for var in env {
+        validate_env_pair("exec environment variable", &var.key, &var.value)?;
+    }
+    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------

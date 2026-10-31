@@ -708,7 +708,7 @@ Set a resource limit with different soft and hard values. [`build()`](#exec_opti
 fn build(self) -> MicrosandboxResult<ExecOptions>
 ```
 
-Finalize the options. Called automatically by the `*_with` methods when you use the closure form. Returns an error if any rlimit has `soft > hard`.
+Finalize the options. Called automatically by the `*_with` methods when you use the closure form. Returns an error if an environment key is empty or contains `=` or NUL, an environment value contains NUL, or any rlimit has `soft > hard`.
 
 <p className="msb-label">Returns</p>
 
@@ -901,7 +901,7 @@ Set a resource limit with different soft and hard values for the attached proces
 fn build(self) -> MicrosandboxResult<AttachOptions>
 ```
 
-Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with). Returns an error if any rlimit has `soft > hard`.
+Finalize the options. Called automatically by [`attach_with()`](#sb-attach_with). Returns an error if an environment key is empty or contains `=` or NUL, an environment value contains NUL, or any rlimit has `soft > hard`.
 
 <p className="msb-label">Returns</p>
 

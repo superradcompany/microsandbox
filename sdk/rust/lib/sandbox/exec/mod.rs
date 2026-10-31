@@ -1,5 +1,7 @@
 //! Execution types for running commands inside sandboxes.
 
+#[cfg(test)]
+mod env_tests;
 mod io;
 mod session;
 
@@ -12,4 +14,4 @@ pub use session::{
     ExecControl, ExecEvent, ExecHandle, ExecOptions, ExecOptionsBuilder, ExecOutput, ExecSink,
     ExitStatus, Rlimit, RlimitResource, StdinMode,
 };
-pub(crate) use session::{agent, validate_rlimits};
+pub(crate) use session::{agent, validate_env, validate_rlimits};
