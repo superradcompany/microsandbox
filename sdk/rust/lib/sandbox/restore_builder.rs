@@ -1,7 +1,11 @@
 //! Dedicated snapshot restoration with explicit destination resource choices.
 
 #[cfg(feature = "net")]
+use microsandbox_network::builder::SecretBuilder;
+#[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
+#[cfg(feature = "net")]
+use microsandbox_types::{SecretEntry, SecretViolationAction};
 
 use super::config::SnapshotRestoreMode;
 use super::{ExternalMountRestorePolicy, MountBuilder, Sandbox, SandboxBuilder, SecurityProfile};
@@ -119,6 +123,31 @@ impl RestoreBuilder {
     #[cfg(feature = "net")]
     pub fn network_policy(mut self, policy: NetworkPolicy) -> Self {
         self.inner = self.inner.network(|network| network.policy(policy));
+        self
+    }
+
+    /// Bind a protected secret in the destination, as [`SandboxBuilder::secret`] does at creation.
+    ///
+    /// The value is resolved on the destination host; snapshots never store it. A full restore
+    /// resumes a guest that already holds its placeholders, so bind the same name and placeholder
+    /// the source used. Enables TLS interception, which a sandbox started with secrets relied on.
+    #[cfg(feature = "net")]
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        self.inner = self.inner.secret(f);
+        self
+    }
+
+    /// Bind a materialized secret entry in the destination; see [`Self::secret`].
+    #[cfg(feature = "net")]
+    pub fn secret_entry(mut self, entry: SecretEntry) -> Self {
+        self.inner = self.inner.secret_entry(entry);
+        self
+    }
+
+    /// Set the destination's default action for blocked secret placeholders.
+    #[cfg(feature = "net")]
+    pub fn secret_violation_action(mut self, action: SecretViolationAction) -> Self {
+        self.inner = self.inner.secret_violation_action(action);
         self
     }
 
@@ -450,6 +479,33 @@ mod tests {
         assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));
         assert_eq!(config(&restore).spec.lifecycle.idle_timeout_secs, Some(120));
         assert!(restore.inner.config.spec.security_profile.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_secrets_rebind_captured_placeholders_with_interception() {
+        let restore = Sandbox::restore("saved")
+            .name("child")
+            .secret(|s| {
+                s.env("GKEY")
+                    .source(crate::sandbox::SecretSource::Env { var: "GKEY".into() })
+                    .placeholder("captured-placeholder")
+                    .allow("gate.test")
+            })
+            .secret_violation_action(SecretViolationAction::BlockAndLog);
+
+        let network = config(&restore).local_network_config().unwrap();
+
+        assert!(network.tls.enabled);
+        assert_eq!(network.secrets.secrets.len(), 1);
+        let entry = &network.secrets.secrets[0];
+        assert_eq!(entry.env_var, "GKEY");
+        assert_eq!(entry.placeholder, "captured-placeholder");
+        assert!(entry.value.is_empty());
+        assert_eq!(
+            network.secrets.violation_action,
+            SecretViolationAction::BlockAndLog
+        );
     }
 
     #[cfg(feature = "net")]
