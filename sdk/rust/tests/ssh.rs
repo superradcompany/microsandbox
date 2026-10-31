@@ -89,8 +89,10 @@ async fn ssh_sftp_exercises_handles_offsets_metadata_and_links() {
 
     sftp.create_dir(dir).await.expect("create SFTP dir");
 
-    let mut attrs = FileAttributes::default();
-    attrs.permissions = Some(0o600);
+    let attrs = FileAttributes {
+        permissions: Some(0o600),
+        ..Default::default()
+    };
     let mut file = sftp
         .open_with_flags_and_attributes(
             &file_path,

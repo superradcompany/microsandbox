@@ -1,3 +1,11 @@
+// Guest-visible metadata is platform-wide: `mode_t` is `u32` on Linux and `u16`
+// on macOS, and the `statvfs64` counters are `u64` on Linux but `u32` on macOS.
+// These tests widen those fields to the type they assert in, so the cast is
+// redundant on whichever platform already has the wider type. The allow spans
+// the tree, so normalize new assertions through
+// `crate::backends::shared::platform::mode_u32` instead.
+#![allow(clippy::unnecessary_cast)]
+
 mod test_bootstrap;
 mod test_capacity;
 mod test_concurrency;

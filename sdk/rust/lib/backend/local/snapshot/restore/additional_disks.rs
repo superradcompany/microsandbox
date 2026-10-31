@@ -415,7 +415,7 @@ mod tests {
                 std::slice::from_ref(&resource),
                 &source,
                 &crate::backend::local::creation::CreationStorage::for_test(
-                    &temporary.path().join("bad")
+                    temporary.path().join("bad")
                 ),
                 Some("vdb"),
                 &choices
@@ -464,7 +464,7 @@ mod tests {
                 std::slice::from_ref(&resource),
                 &source,
                 &crate::backend::local::creation::CreationStorage::for_test(
-                    &temporary.path().join(label),
+                    temporary.path().join(label),
                 ),
                 Some("vdb"),
                 &choices,

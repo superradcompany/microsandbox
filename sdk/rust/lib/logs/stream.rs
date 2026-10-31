@@ -985,9 +985,7 @@ mod tests {
             collect_with_timeout(Box::pin(state.into_stream()), Duration::from_secs(2)).await;
         let entries: Vec<_> = items.into_iter().map(|r| r.unwrap()).collect();
         assert!(
-            entries
-                .iter()
-                .any(|e| e.data == Bytes::from("user-output".as_bytes())),
+            entries.iter().any(|e| e.data == "user-output".as_bytes()),
             "missing user-output entry: {entries:?}"
         );
         assert!(

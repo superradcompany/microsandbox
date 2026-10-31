@@ -165,7 +165,7 @@ jobs:
         if: inputs.os == 'linux'
         run: |
           rustup target add --toolchain stable ${{ inputs.agentd_target }}
-          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} -- -D warnings
+          cargo +stable clippy --manifest-path crates/agentd/Cargo.toml --target ${{ inputs.agentd_target }} --all-targets -- -D warnings
 
       - name: Set up mold (Linux host link)
         if: inputs.os == 'linux'

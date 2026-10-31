@@ -29,11 +29,11 @@ async fn shutdown_control_id_zero_stops_sandbox() {
 
     let stop_result = tokio::time::timeout(Duration::from_secs(30), sandbox.stop()).await;
 
-    if stop_result.is_err() {
-        if let Ok(h) = Sandbox::get(name).await {
-            let _ = h.kill().await;
-            let _ = h.remove().await;
-        }
+    if stop_result.is_err()
+        && let Ok(h) = Sandbox::get(name).await
+    {
+        let _ = h.kill().await;
+        let _ = h.remove().await;
     }
     Sandbox::remove(name).await.ok();
 

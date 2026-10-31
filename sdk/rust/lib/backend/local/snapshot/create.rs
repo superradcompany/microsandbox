@@ -3399,7 +3399,7 @@ mod tests {
                         &sources,
                         file.virtual_size,
                         &CreationStorage::for_test(
-                            &temp.path().join(format!("child-{}", loaded.id())),
+                            temp.path().join(format!("child-{}", loaded.id())),
                         ),
                         &root_disk,
                     )
