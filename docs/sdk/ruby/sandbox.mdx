@@ -1978,6 +1978,35 @@ Return the metrics sample as a hash with string keys.
   </div>
 </div>
 
+## Exec output and logs
+
+`sandbox.exec` and `sandbox.shell` record their output to the sandbox's `exec.log`, where `sandbox.logs` reads it, only when asked. An exec or shell session is not recorded by default: its output, a shell's above all, can carry anything typed or printed, and would otherwise reach the host's disk.
+
+<Accordion title="Example">
+
+```ruby
+sandbox.shell("./migrate.sh", capture: true)          # recorded
+sandbox.exec("env")                                   # not recorded (the default)
+```
+
+</Accordion>
+
+`capture:` accepts `true`, `false`, or `nil`; `nil` or omitting it keeps the default. Omit it rather than passing `false`: an explicit `false` is refused by a runtime too old to honour it, while the default works everywhere.
+
+<Tooltip tip="Applies to local sandboxes; microsandbox cloud does not accept this setting."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+To record nothing at all, not even the workload's output, create the sandbox with `disable_exec_log: true` (or `.disable_exec_log` on the builder). `sandbox.logs` then returns nothing.
+
+<Accordion title="Example">
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("private", image: "alpine", disable_exec_log: true)
+```
+
+</Accordion>
+
+See [Logs](/sandboxes/logs) for what is recorded across SDKs.
+
 ## Identity errors
 
 Stale handles raise `Microsandbox::SandboxReplacedError` rather than acting on a replacement with the same name. See [Error handling](/sdk/errors#when-a-sandbox-object-is-stale).
