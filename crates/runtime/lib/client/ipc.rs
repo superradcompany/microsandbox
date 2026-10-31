@@ -14,8 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -98,6 +97,79 @@ pub struct SandboxLifecycleGuard {
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl SandboxLifecycleGuard {
+    /// Try to acquire exclusive lifecycle ownership without waiting for its current owner.
+    /// Returns `None` when another process still owns the lock.
+    pub fn try_acquire(run_dir: &Path, name: &str) -> std::io::Result<Option<Self>> {
+        #[cfg(unix)]
+        {
+            acquire_lifecycle_guard_unix(run_dir, name, true)
+        }
+
+        #[cfg(windows)]
+        {
+            let path = lifecycle_lock_path(run_dir, name);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("lifecycle lock has no parent: {}", path.display()),
+                )
+            })?;
+            std::fs::create_dir_all(parent)?;
+            let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
+            if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
+                Ok(Some(SandboxLifecycleGuard { _file: file }))
+            } else {
+                Ok(None)
+            }
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (run_dir, name);
+            Ok(Some(SandboxLifecycleGuard {}))
+        }
+    }
+
+    /// Wait for exclusive lifecycle ownership, polling at 50 ms intervals.
+    ///
+    /// Returns `None` if ownership is still held when the timeout is checked.
+    /// A zero timeout makes one acquisition attempt. Filesystem errors are returned unchanged.
+    pub async fn acquire(
+        run_dir: &Path,
+        name: &str,
+        timeout: Duration,
+    ) -> std::io::Result<Option<Self>> {
+        let started = Instant::now();
+
+        loop {
+            if let Some(guard) = Self::try_acquire(run_dir, name)? {
+                return Ok(Some(guard));
+            }
+
+            if started.elapsed() >= timeout {
+                return Ok(None);
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Adopt a descriptor that already owns the sandbox lifecycle lock.
+    ///
+    /// This is used only for the descriptor inherited from the SDK launcher.
+    #[cfg(unix)]
+    pub fn from_inherited_file(file: File) -> Self {
+        Self { file }
+    }
+
+    /// Return the descriptor to duplicate into a sandbox child process.
+    #[cfg(unix)]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+}
 
 impl RuntimeSocketPaths {
     /// Derive the canonical and flat legacy paths within a host run directory.
@@ -479,53 +551,13 @@ pub fn try_acquire_snapshot_lineage_guard(
 }
 
 /// Try to acquire exclusive lifecycle ownership without blocking.
+///
+/// Delegates to [`SandboxLifecycleGuard::try_acquire`].
 pub fn try_acquire_lifecycle_guard(
     run_dir: &Path,
     name: &str,
 ) -> std::io::Result<Option<SandboxLifecycleGuard>> {
-    #[cfg(unix)]
-    {
-        acquire_lifecycle_guard_unix(run_dir, name, true)
-    }
-
-    #[cfg(windows)]
-    {
-        let path = lifecycle_lock_path(run_dir, name);
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("lifecycle lock has no parent: {}", path.display()),
-            )
-        })?;
-        std::fs::create_dir_all(parent)?;
-        let file = microsandbox_utils::process_lock::open_lock_file(&path)?;
-        if microsandbox_utils::process_lock::try_lock_exclusive(&file)? {
-            Ok(Some(SandboxLifecycleGuard { _file: file }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (run_dir, name);
-        Ok(Some(SandboxLifecycleGuard {}))
-    }
-}
-
-#[cfg(unix)]
-impl SandboxLifecycleGuard {
-    /// Adopt a descriptor that already owns the sandbox lifecycle lock.
-    ///
-    /// This is used only for the descriptor inherited from the SDK launcher.
-    pub fn from_inherited_file(file: File) -> Self {
-        Self { file }
-    }
-
-    /// Return the descriptor to duplicate into a sandbox child process.
-    pub fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
-    }
+    SandboxLifecycleGuard::try_acquire(run_dir, name)
 }
 
 /// Derive the control endpoint belonging to an agent endpoint.
@@ -985,6 +1017,11 @@ fn unix_socket_path_capacity() -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(unix, windows))]
+    use std::future::{Future, poll_fn};
+    #[cfg(any(unix, windows))]
+    use std::task::Poll;
+
     use super::*;
 
     // Keep a task runnable so Tokio does not advance the paused clock while
@@ -1225,6 +1262,57 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "dropping the runtime owner must release lifecycle ownership"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(any(unix, windows))]
+    async fn lifecycle_guard_waits_for_release_and_reports_timeout_separately_from_io_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let run_dir = temp.path().join("run");
+        let owner = SandboxLifecycleGuard::acquire(&run_dir, "worker", Duration::ZERO)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            SandboxLifecycleGuard::acquire(&run_dir, "worker", Duration::ZERO)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let waiter = SandboxLifecycleGuard::acquire(&run_dir, "worker", Duration::from_secs(2));
+        tokio::pin!(waiter);
+        poll_fn(|cx| {
+            assert!(waiter.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        drop(owner);
+        let acquired = waiter
+            .await
+            .unwrap()
+            .expect("released lock must become available");
+        assert!(
+            try_acquire_lifecycle_guard(&run_dir, "worker")
+                .unwrap()
+                .is_none()
+        );
+        drop(acquired);
+        assert!(
+            SandboxLifecycleGuard::try_acquire(&run_dir, "worker")
+                .unwrap()
+                .is_some()
+        );
+
+        let blocked = temp.path().join("file");
+        std::fs::write(&blocked, []).unwrap();
+        assert!(
+            SandboxLifecycleGuard::acquire(&blocked, "worker", Duration::ZERO)
+                .await
+                .is_err()
         );
     }
 

@@ -986,7 +986,7 @@ mod unix {
         crate::backend::with_backend(backend, async {
             let stale = local.control_session(&name).await.unwrap().unwrap();
             let previous = stale.entry.key;
-            let endpoints = crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name);
+            let endpoints = local.agent_socket_paths(&name);
             crate::Sandbox::get(&name)
                 .await
                 .unwrap()
@@ -1004,10 +1004,7 @@ mod unix {
                 assert_ne!(previous, current.entry.key);
                 assert_ne!(previous.run_id, current.entry.key.run_id);
                 assert!(!Arc::ptr_eq(&stale.entry, &current.entry));
-                assert_eq!(
-                    endpoints,
-                    crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name)
-                );
+                assert_eq!(endpoints, local.agent_socket_paths(&name));
                 let before = current
                     .request(&microsandbox_control_client::GetCpuState)
                     .await

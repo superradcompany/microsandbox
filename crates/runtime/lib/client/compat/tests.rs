@@ -131,6 +131,10 @@ fn legacy_bootstrap_preserves_every_setting_and_derives_lease_paths() {
 fn explicit_bootstrap_remains_authoritative_and_modern_fields_stay_required() {
     let mut value = serde_json::to_value(LaunchConfig::default()).unwrap();
     value.as_object_mut().unwrap().remove("execution");
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("protected_guest_state");
     value["env"] = json!(["MSB_SECURITY_PROFILE=restricted", "SECRET=old"]);
     value["workdir"] = json!("/old");
     assert_eq!(decode(&value).unwrap().bootstrap, GuestBootstrap::default());

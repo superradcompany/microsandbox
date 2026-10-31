@@ -6,6 +6,9 @@ mod host;
 #[path = "copy/host_windows.rs"]
 mod host;
 
+#[cfg(test)]
+mod destination_tests;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -183,7 +186,10 @@ async fn copy_sandbox_to_local_unix(
     dst: &Path,
     metadata: FsMetadata,
 ) -> anyhow::Result<()> {
-    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let parent = dst
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     if metadata.kind == FsEntryKind::Directory {
         // `cp` historically created missing parents for a directory target.
         // This path is entirely operator supplied; guest-derived traversal
@@ -230,7 +236,10 @@ async fn copy_sandbox_to_local_windows(
     dst: &Path,
     metadata: FsMetadata,
 ) -> anyhow::Result<()> {
-    let parent = dst.parent().unwrap_or_else(|| Path::new("."));
+    let parent = dst
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     if metadata.kind == FsEntryKind::Directory {
         // Only the operator-selected parent is resolved through normal Win32
         // path handling. Sandbox-derived names below the pinned handle are

@@ -31,7 +31,6 @@ use crate::vm::{UpperLayerSpec, UpperSpec, VmConfig};
 
 const ROOT_DISK_STATE_FILE: &str = "root-disk.json";
 const ROOT_DISK_STATE_SCHEMA: &str = "microsandbox.runtime-root-disk/1";
-const MAX_ROOT_DISK_STATE_BYTES: u64 = 1024 * 1024;
 const MANAGED_ROOT_DEVICE_ID: &str = "vdb";
 const FLAT_ROOT_DEVICE_ID: &str = "vda";
 
@@ -146,7 +145,7 @@ pub(super) struct RetiredRootDisk {
 
 impl RuntimeOwnedRootDisk {
     pub(super) fn read(runtime_dir: &Path) -> Result<Option<Self>, String> {
-        let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+        let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
         if !state_path.exists() {
             return Ok(None);
         }
@@ -226,7 +225,7 @@ impl RuntimeOwnedRootDisk {
         let Some(layout) = configured_layout(vm) else {
             return Ok(None);
         };
-        let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+        let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
         let state = if state_path.exists() {
             read_state(&state_path)?
         } else {
@@ -662,10 +661,16 @@ impl RootDiskCompaction {
 
 impl RetiredRootDisk {
     pub(super) fn cleanup(self) {
-        // Same ownership boundary as before: only this root journal's directory entries.
-        // Snapshots and children retain their own hardlinks; unlink errors merely retain data.
+        // Moving the journal to the sandbox root must not broaden retirement to original
+        // host-configured disks. Only private compaction/growth staging owns removable links.
         for path in self.paths {
-            if path.starts_with(&self.parent) {
+            let private_stage = path
+                .strip_prefix(&self.parent)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .and_then(|component| component.as_os_str().to_str())
+                .is_some_and(|name| name.starts_with(".compact-") || name.starts_with(".grow-"));
+            if private_stage {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -850,7 +855,7 @@ pub(crate) fn recover_runtime_owned_root(
     runtime_dir: &Path,
     vm: &mut VmConfig,
 ) -> Result<(), String> {
-    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
     if !state_path.exists() {
         return Ok(());
     }
@@ -888,7 +893,7 @@ pub(crate) fn recover_runtime_owned_root(
 pub fn load_runtime_owned_root_chain(
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeOwnedRootChain>, String> {
-    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
     if !state_path.exists() {
         return Ok(None);
     }
@@ -935,7 +940,7 @@ pub fn load_runtime_owned_root_chain(
 /// Grow a stopped journal-backed root using a private staging head. Returns false without a journal.
 /// The caller must hold the sandbox lifecycle lock and prove all VM writers have stopped.
 pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String> {
-    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
     if !state_path.exists() {
         return Ok(false);
     }
@@ -969,7 +974,7 @@ pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String
     }
     let stage = tempfile::Builder::new()
         .prefix(".grow-")
-        .tempdir_in(runtime_dir)
+        .tempdir_in(super::layout::host_root(runtime_dir)?)
         .map_err(|e| e.to_string())?;
     let mut next = state.clone();
     if next.launch_base.is_none() {
@@ -1011,7 +1016,7 @@ pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String
 
 /// Finish a previously recorded online growth before cold boot, under the stopped lifecycle lock.
 pub fn recover_stopped_root_growth(runtime_dir: &Path) -> Result<(), String> {
-    let path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    let path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
     if path.exists()
         && let Some(target) = read_state(&path)?.growth_target
     {
@@ -1027,7 +1032,7 @@ pub fn compact_stopped_root(
     layers: Option<usize>,
     dry_run: bool,
 ) -> Result<DiskCompactionResult, String> {
-    let state_path = runtime_dir.join(ROOT_DISK_STATE_FILE);
+    let state_path = super::layout::host_root(runtime_dir)?.join(ROOT_DISK_STATE_FILE);
     if !state_path.exists() {
         let plan = DiskCompactionPlan::new(1, layers).map_err(|error| error.to_string())?;
         return Ok(DiskCompactionResult {
@@ -1271,15 +1276,64 @@ fn publish_sealed_layer(
 }
 
 fn read_state(path: &Path) -> Result<RootDiskState, String> {
-    let metadata = path.metadata().map_err(|error| error.to_string())?;
-    if metadata.len() > MAX_ROOT_DISK_STATE_BYTES {
-        return Err("runtime-owned root-disk state exceeds its size bound".into());
-    }
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = super::layout::read_optional(path)?.ok_or("root disk journal is missing")?;
     let state: RootDiskState = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse root-disk state: {error}"))?;
     state.validate()?;
     Ok(state)
+}
+
+/// Admit only a simple legacy journal whose entire chain is independently named by host config.
+/// The journal is evidence of ambiguity, never authority to open or mutate a disk.
+pub(super) fn admit_legacy_root(
+    runtime_dir: &Path,
+    binding: Option<&super::layout::LegacyRootBinding>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(bytes) = super::layout::read_optional(&runtime_dir.join(ROOT_DISK_STATE_FILE))? else {
+        return Ok(None);
+    };
+    let legacy: RootDiskState = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("migration/recovery required: invalid legacy root journal: {e}"))?;
+    let expected = binding
+        .ok_or("migration/recovery required: legacy journal has no configured root binding")?;
+    let layout = if expected.flat {
+        RootDiskLayout::FlatRoot
+    } else {
+        RootDiskLayout::ManagedUpper
+    };
+    if legacy.schema != ROOT_DISK_STATE_SCHEMA
+        || legacy.layout != layout
+        || legacy.device_id != layout.device_id()
+        || legacy.published_generation != 0
+        || legacy.growth_target.is_some()
+        || legacy.layers.len() != 1
+        || legacy
+            .launch_base
+            .as_ref()
+            .is_some_and(|p| p != &expected.path)
+        || legacy.layers[0].path != expected.path
+        || legacy.layers[0].format.as_str() != expected.format
+    {
+        return Err("migration/recovery required: legacy root chain cannot be authenticated from host configuration".into());
+    }
+    let state = RootDiskState {
+        schema: ROOT_DISK_STATE_SCHEMA.into(),
+        volume_id: new_id("vol"),
+        device_id: layout.device_id().into(),
+        layout,
+        published_generation: 0,
+        launch_base: None,
+        growth_target: None,
+        layers: vec![RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: expected.path.clone(),
+            format: legacy.layers[0].format,
+            integrity_root: None,
+        }],
+    };
+    serde_json::to_value(state)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 fn write_state(path: &Path, state: &RootDiskState) -> Result<(), String> {
@@ -1557,7 +1611,7 @@ mod tests {
             );
             seed_local_root_disk(&runtime, &vm, &admitted).unwrap();
             assert_eq!(
-                read_state(&runtime.join(ROOT_DISK_STATE_FILE))
+                read_state(&runtime.parent().unwrap().join(ROOT_DISK_STATE_FILE))
                     .unwrap()
                     .layers[0]
                     .integrity_root
@@ -1752,7 +1806,7 @@ mod tests {
         .unwrap_err();
         assert!(error.keep_paused);
         assert_eq!(read_state(&path).unwrap().published_generation, 1);
-        let recovered = load_runtime_owned_root_chain(directory.path())
+        let recovered = load_runtime_owned_root_chain(&directory.path().join("runtime"))
             .unwrap()
             .unwrap();
         assert_eq!(recovered.layers.len(), 2);
@@ -1879,6 +1933,7 @@ mod tests {
         let mut vm = super::VmConfig {
             libkrunfw_path: Default::default(),
             thp: Default::default(),
+            nested_virt: false,
             guest_clock: Default::default(),
             memory_cache_dir: None,
             vcpus: 1,
@@ -1976,7 +2031,7 @@ mod tests {
                 ],
             );
             seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
-            let journal = runtime.join(ROOT_DISK_STATE_FILE);
+            let journal = runtime.parent().unwrap().join(ROOT_DISK_STATE_FILE);
             let first = std::fs::read(&journal).unwrap();
             let state = read_state(&journal).unwrap();
             assert_eq!(state.layers[0].integrity_root.as_ref(), Some(&expected));
@@ -2057,7 +2112,7 @@ mod tests {
                     // Disk-only restore does not invoke the execution-admission seed helper.
                     RuntimeOwnedRootDisk::open(&runtime, &vm).unwrap().unwrap();
                 }
-                let journal = runtime.join(ROOT_DISK_STATE_FILE);
+                let journal = runtime.parent().unwrap().join(ROOT_DISK_STATE_FILE);
                 let original = std::fs::read(&journal).unwrap();
                 let nominal = directory.path().join(ordinary);
                 assert!(
@@ -2202,7 +2257,7 @@ mod tests {
             ],
         );
         seed_restored_root_disk(&runtime, &vm, &admitted).unwrap();
-        let state = read_state(&runtime.join(ROOT_DISK_STATE_FILE)).unwrap();
+        let state = read_state(&runtime.parent().unwrap().join(ROOT_DISK_STATE_FILE)).unwrap();
         // A physical copy/header rewrite loses hash reuse, but does not opt startup into hashing.
         assert!(state.layers[0].integrity_root.is_none());
         assert!(state.layers[1].integrity_root.is_none());
@@ -2264,7 +2319,7 @@ mod tests {
                     },
                 ],
             };
-            let journal = root.join(ROOT_DISK_STATE_FILE);
+            let journal = root.parent().unwrap().join(ROOT_DISK_STATE_FILE);
             write_state(&journal, &state).unwrap();
             assert!(load_runtime_owned_root_chain(&root).is_err());
             assert!(compact_stopped_root(&root, None, false).is_err());
@@ -2333,7 +2388,7 @@ mod tests {
             let retained = dir.path().join("published-layer.qcow2");
             std::fs::hard_link(&layers[1].path, &retained).unwrap();
             let retained_bytes = std::fs::read(&retained).unwrap();
-            let journal = root.join(ROOT_DISK_STATE_FILE);
+            let journal = root.parent().unwrap().join(ROOT_DISK_STATE_FILE);
             write_state(
                 &journal,
                 &RootDiskState {
@@ -2456,6 +2511,158 @@ mod tests {
     }
 
     #[test]
+    fn guest_journal_cannot_select_host_metadata_inside_its_sandbox() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let canary = directory.path().join("external-mounts.json");
+        std::fs::write(&canary, b"host-only authority canary").unwrap();
+        let forged = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: MANAGED_ROOT_DEVICE_ID.into(),
+            layout: RootDiskLayout::ManagedUpper,
+            published_generation: 0,
+            launch_base: None,
+            growth_target: None,
+            layers: vec![RootDiskLayer {
+                layer_id: new_id("layer"),
+                path: canary.clone(),
+                format: RootDiskFormat::Raw,
+                integrity_root: None,
+            }],
+        };
+        write_state(&runtime.join(ROOT_DISK_STATE_FILE), &forged).unwrap();
+
+        // A stopped snapshot consumer must never obtain host metadata from a guest journal.
+        let chain = load_runtime_owned_root_chain(&runtime);
+        assert!(
+            chain.is_err() || chain.unwrap().is_none(),
+            "guest journal became host authority"
+        );
+        assert_eq!(
+            std::fs::read(canary).unwrap(),
+            b"host-only authority canary"
+        );
+    }
+
+    #[test]
+    fn guest_root_journal_cannot_select_a_sibling_sandbox_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let sandbox = directory.path().join("probe");
+        let runtime = sandbox.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let target = directory.path().join("target").join("upper.ext4");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"target disk").unwrap();
+
+        let journal = runtime.join(ROOT_DISK_STATE_FILE);
+        write_state(
+            &journal,
+            &RootDiskState {
+                schema: ROOT_DISK_STATE_SCHEMA.into(),
+                volume_id: new_id("vol"),
+                device_id: MANAGED_ROOT_DEVICE_ID.into(),
+                layout: RootDiskLayout::ManagedUpper,
+                published_generation: 0,
+                launch_base: None,
+                growth_target: None,
+                layers: vec![RootDiskLayer {
+                    layer_id: new_id("layer"),
+                    path: target,
+                    format: RootDiskFormat::Raw,
+                    integrity_root: None,
+                }],
+            },
+        )
+        .unwrap();
+
+        let expected = super::super::layout::LegacyRootBinding {
+            path: sandbox.join("upper.ext4"),
+            format: "raw".into(),
+            flat: false,
+        };
+        let error = admit_legacy_root(&runtime, Some(&expected)).unwrap_err();
+        assert!(
+            error.contains("cannot be authenticated"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_root_journal_cannot_follow_a_layer_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let sandbox = directory.path().join("probe");
+        let runtime = sandbox.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let target = sandbox.join("target.ext4");
+        let link = sandbox.join("link.ext4");
+        std::fs::write(&target, b"target disk").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let journal = runtime.join(ROOT_DISK_STATE_FILE);
+        write_state(
+            &journal,
+            &RootDiskState {
+                schema: ROOT_DISK_STATE_SCHEMA.into(),
+                volume_id: new_id("vol"),
+                device_id: MANAGED_ROOT_DEVICE_ID.into(),
+                layout: RootDiskLayout::ManagedUpper,
+                published_generation: 0,
+                launch_base: None,
+                growth_target: None,
+                layers: vec![RootDiskLayer {
+                    layer_id: new_id("layer"),
+                    path: link,
+                    format: RootDiskFormat::Raw,
+                    integrity_root: None,
+                }],
+            },
+        )
+        .unwrap();
+
+        let expected = super::super::layout::LegacyRootBinding {
+            path: sandbox.join("upper.ext4"),
+            format: "raw".into(),
+            flat: false,
+        };
+        let error = admit_legacy_root(&runtime, Some(&expected)).unwrap_err();
+        assert!(
+            error.contains("cannot be authenticated"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_root_journal_must_be_a_regular_file() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let sandbox = directory.path().join("probe");
+        let runtime = sandbox.join("runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let target = directory.path().join("target-root-disk.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let journal = runtime.join(ROOT_DISK_STATE_FILE);
+        symlink(&target, &journal).unwrap();
+
+        let expected = super::super::layout::LegacyRootBinding {
+            path: sandbox.join("upper.ext4"),
+            format: "raw".into(),
+            flat: false,
+        };
+        let error = admit_legacy_root(&runtime, Some(&expected)).unwrap_err();
+        assert!(
+            error.contains("migration/recovery required"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     #[cfg(feature = "runner")]
     fn flat_journal_uses_root_device_and_root_overlay_names() {
         let directory = tempfile::tempdir().unwrap();
@@ -2491,7 +2698,7 @@ mod tests {
             next.extension().and_then(|value| value.to_str()),
             Some("qcow2")
         );
-        let loaded = load_runtime_owned_root_chain(directory.path())
+        let loaded = load_runtime_owned_root_chain(&directory.path().join("runtime"))
             .unwrap()
             .unwrap();
         assert_eq!(loaded.device_id, FLAT_ROOT_DEVICE_ID);

@@ -178,6 +178,7 @@ fn build(config: &mut Config) -> RuntimeResult<VmBuildOutput> {
 }
 
 fn config(directory: &Path) -> Config {
+    crate::checkpoint::layout::initialize_new(&directory.join("runtime")).unwrap();
     Config {
         agent_transport: AgentTransportProfile::Combined,
         sandbox_name: "custom-backends".into(),
@@ -186,7 +187,7 @@ fn config(directory: &Path) -> Config {
         sandbox_db_path: directory.join("unused.db"),
         sandbox_db_connect_timeout_secs: 1,
         log_dir: directory.into(),
-        runtime_dir: directory.into(),
+        runtime_dir: directory.join("runtime"),
         sandboxes_dir: directory.into(),
         run_dir: directory.into(),
         lifecycle_guard: acquire_lifecycle_guard(directory, "custom-backends").unwrap(),
@@ -209,6 +210,7 @@ fn config(directory: &Path) -> Config {
         vm: VmConfig {
             libkrunfw_path: Default::default(),
             thp: Default::default(),
+            nested_virt: false,
             guest_clock: Default::default(),
             memory_cache_dir: None,
             vcpus: 1,

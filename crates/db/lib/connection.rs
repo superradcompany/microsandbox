@@ -80,8 +80,12 @@ impl DbReadConnection {
         connect_timeout: Duration,
         busy_timeout: Duration,
     ) -> Result<Self, sqlx::Error> {
+        // Read-only callers can be the first process to inspect an existing catalog (for
+        // example, storage-usage queries), so tighten legacy files before opening SQLite.
+        let db_path = crate::private_storage::prepare_database_file(db_path, false)
+            .map_err(sqlx::Error::Io)?;
         let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(db_path)
+            .filename(&db_path)
             .read_only(true)
             .create_if_missing(false)
             .busy_timeout(busy_timeout);
@@ -290,6 +294,46 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn strict_reader_tightens_legacy_catalog_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let writer = DbWriteConnection::open(&path, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        writer
+            .execute_unprepared("CREATE TABLE permission_test (value INTEGER)")
+            .await
+            .unwrap();
+        drop(writer);
+
+        let wal_path = path.with_file_name("catalog.db-wal");
+        let shm_path = path.with_file_name("catalog.db-shm");
+        std::fs::write(&wal_path, b"legacy wal").unwrap();
+        std::fs::write(&shm_path, b"legacy shm").unwrap();
+        for candidate in [&path, &wal_path, &shm_path] {
+            std::fs::set_permissions(candidate, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let reader = DbReadConnection::open_read_only(&path, TIMEOUT, TIMEOUT)
+            .await
+            .unwrap();
+        drop(reader);
+
+        for candidate in [&path, &wal_path, &shm_path] {
+            if !candidate.exists() {
+                continue;
+            }
+            assert_eq!(
+                std::fs::metadata(candidate).unwrap().permissions().mode() & 0o777,
+                crate::pool::PRIVATE_DATABASE_FILE_MODE
+            );
+        }
+    }
+
     #[tokio::test]
     async fn read_open_does_not_create_db() {
         // Existing directory, missing DB file.
@@ -317,5 +361,14 @@ mod tests {
             db_path.exists(),
             "write open should create the catalog db file"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+                crate::pool::PRIVATE_DATABASE_FILE_MODE
+            );
+        }
     }
 }

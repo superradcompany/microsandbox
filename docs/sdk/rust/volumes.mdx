@@ -184,7 +184,7 @@ Volume::remove("pip-cache").await?;
 
 </Accordion>
 
-Delete a named volume and its contents from disk. Locally the database record is deleted first, then the directory, so an orphaned directory is easier to detect than an orphaned record. Fails with `VolumeNotFound` if the volume does not exist.
+Delete a named volume and its contents from disk. Locally, files are deleted before the database record so interrupted removal can be retried. Fails with `VolumeNotFound` if the volume does not exist.
 
 <p className="msb-label">Parameters</p>
 

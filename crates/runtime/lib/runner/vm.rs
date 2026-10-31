@@ -290,6 +290,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Expose hardware virtualization capabilities to the guest.
+    pub nested_virt: bool,
+
     /// Host control over the guest wall clock during boot, restore, and resume.
     pub guest_clock: microsandbox_types::GuestClockPolicy,
 
@@ -764,17 +767,21 @@ fn run(
         None => Arc::new(|_| {}),
     };
 
-    // Set up runtime directory.
-    std::fs::create_dir_all(&config.runtime_dir)?;
-    std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    // The launcher must complete admission while holding lifecycle ownership. Direct runtime
+    // entry points enforce the same boundary; there is no legacy export fallback.
+    crate::checkpoint::layout::require_ready(&config.runtime_dir).map_err(RuntimeError::Custom)?;
+    let guest_dir =
+        crate::checkpoint::layout::guest_root(&config.runtime_dir).map_err(RuntimeError::Custom)?;
+    crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
+        .map_err(RuntimeError::Custom)?;
     crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
         |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
     )?;
     recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
-    heartbeat::clear_stale(&config.runtime_dir)?;
+    heartbeat::clear_stale(&guest_dir)?;
     if config.vm.checkpoint_restore.is_some() {
-        prepare_runtime_restore_namespace(&config.runtime_dir, config.vm.rootfs_vmdk.is_some())?;
+        prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
     }
 
     let socket_paths = RuntimeSocketPaths::new(&config.run_dir, &config.sandbox_name);
@@ -1560,7 +1567,7 @@ fn run(
     // heartbeat is NOT treated as a failure here — a busy agent is still healthy,
     // and a guest that never boots is reclaimed by the relay's wait_ready path.
     {
-        let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
+        let mut heartbeat_reader = HeartbeatReader::new(&guest_dir);
         let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
         let heartbeat_exit_handle = exit_handle.clone();
         let heartbeat_reason = Arc::clone(&exit_reason);
@@ -2003,7 +2010,8 @@ fn build_vm(
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
-                .balloon_stats_interval(balloon_stats_interval);
+                .balloon_stats_interval(balloon_stats_interval)
+                .nested_virt(vm.nested_virt);
             if let Some(targets) = host_placement.vcpu_targets {
                 let affinity = targets
                     .iter()
@@ -2164,7 +2172,10 @@ fn build_vm(
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
             max_state_bytes: vm.fs_state_limit(),
-            root_dir: canonicalize_owned_mount_root(&config.runtime_dir)?,
+            root_dir: canonicalize_owned_mount_root(
+                &crate::checkpoint::layout::guest_root(&config.runtime_dir)
+                    .map_err(RuntimeError::Custom)?,
+            )?,
             inject_init: false,
             quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
             no_symlink_root: true,
@@ -2720,13 +2731,26 @@ fn build_vm(
         let net_backend = network.take_backend();
 
         {
-            let tls_dir = config.runtime_dir.join("tls");
-            let _ = std::fs::create_dir_all(&tls_dir);
+            let tls_dir = crate::checkpoint::layout::guest_root(&config.runtime_dir)
+                .map_err(RuntimeError::Custom)?
+                .join("tls");
+            // A direct runtime start can encounter files left by a previous guest. Validate
+            // the parent and replace final names atomically instead of following guest links.
+            crate::checkpoint::layout::real_directory(&tls_dir, true)
+                .map_err(RuntimeError::Custom)?;
             if let Some(ca_pem) = network.ca_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+                crate::checkpoint::layout::write_guest_certificate(
+                    &tls_dir.join("ca.pem"),
+                    ca_pem.as_ref(),
+                )
+                .map_err(RuntimeError::Custom)?;
             }
             if let Some(host_cas_pem) = network.host_cas_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+                crate::checkpoint::layout::write_guest_certificate(
+                    &tls_dir.join("host-cas.pem"),
+                    host_cas_pem.as_ref(),
+                )
+                .map_err(RuntimeError::Custom)?;
             }
         }
 
@@ -3131,12 +3155,14 @@ fn trampoline_rootfs_cleanup_on_exit(
 /// atomically published heartbeat pathname. Existing heartbeat contents are never truncated.
 fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
     if oci_root {
-        for directory in ["rootfs/lower", "rootfs/upperfs"] {
-            std::fs::create_dir_all(runtime_dir.join(directory)).map_err(|error| {
-                RuntimeError::Custom(format!(
-                    "create restored runtime mountpoint {directory}: {error}"
-                ))
-            })?;
+        for directory in ["rootfs", "rootfs/lower", "rootfs/upperfs"] {
+            crate::checkpoint::layout::real_directory(&runtime_dir.join(directory), true).map_err(
+                |error| {
+                    RuntimeError::Custom(format!(
+                        "create restored runtime mountpoint {directory}: {error}"
+                    ))
+                },
+            )?;
         }
     }
 
@@ -4352,6 +4378,7 @@ mod tests {
         let mut vm = VmConfig {
             libkrunfw_path: std::path::PathBuf::from("/nonexistent/libkrunfw.so"),
             thp: Default::default(),
+            nested_virt: false,
             guest_clock: Default::default(),
             memory_cache_dir: None,
             vcpus: 1,
@@ -4523,7 +4550,7 @@ mod tests {
             rootfs_dirs: Vec::new(),
         };
         std::fs::create_dir_all(scratch.path().join("runtime")).unwrap();
-        std::fs::create_dir_all(scratch.path().join("runtime").join("scripts")).unwrap();
+        crate::checkpoint::layout::initialize_new(&scratch.path().join("runtime")).unwrap();
         let mut config = build_vm_test_config(scratch.path(), |vm| {
             vm.rootfs_vmdk = Some(scratch.path().join("rootfs.vmdk"));
             vm.rootfs_upper_spec = Some(UpperSpec {

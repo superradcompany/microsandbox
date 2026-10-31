@@ -373,9 +373,10 @@ impl CheckpointCoordinator {
         workload_control: Arc<WorkloadControl>,
         owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     ) -> Result<Self, String> {
-        let root = runtime_dir.join("checkpoints");
+        let host = super::layout::host_root(runtime_dir)?;
+        let root = host.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-        let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
+        let store = LocalObjectStore::open(host.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
         let additional_disks =
@@ -721,7 +722,7 @@ impl CheckpointCoordinator {
             .map_err(CheckpointFailure::before_pause)?;
         // The SDK reserves a fresh child directory under this same backend. Never accept
         // caller-selected host paths, symlinked children, or an existing handoff destination.
-        let source = self.root.parent().and_then(Path::parent).ok_or_else(|| {
+        let source = self.root.parent().ok_or_else(|| {
             CheckpointFailure::before_pause("source storage has no sandbox parent")
         })?;
         let parent = source
@@ -775,6 +776,11 @@ impl CheckpointCoordinator {
         record_integrity: bool,
         guest_flush: Option<microsandbox_types::GuestFlush>,
     ) -> Result<CheckpointResult, CheckpointFailure> {
+        // The backend owns execution-state support. Refuse unsupported captures
+        // before preparing storage, flushing the guest, or pausing the source.
+        vm.validate_execution_state_capture()
+            .map_err(CheckpointFailure::before_pause)?;
+
         // All RAM captures pass through this executor-owned method. Consume the construction
         // handoff before either durable or local capture can publish a newer token. Dirty
         // tracking has run since the pristine mapping was installed, not since this adoption.
@@ -1359,7 +1365,7 @@ impl CheckpointCoordinator {
         checkpoint_id: &str,
         intent: CaptureIntent,
         inventory: &[(u32, String)],
-        resources: Vec<ResourceDescriptor>,
+        mut resources: Vec<ResourceDescriptor>,
         pause_generation: u64,
         staging: &Path,
         final_path: &Path,
@@ -1565,6 +1571,9 @@ impl CheckpointCoordinator {
             ));
         }
         let execution_bytes = execution.encode().map_err(CheckpointFailure::resumable)?;
+        if execution.nested_enabled() {
+            resources.push(super::execution::nested_execution_resource());
+        }
         let execution_id = if local {
             put_local_object(staging, &execution_bytes).map_err(CheckpointFailure::resumable)?
         } else {

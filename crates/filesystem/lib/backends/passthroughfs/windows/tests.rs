@@ -685,6 +685,289 @@ fn directory_rename_preserves_cached_descendants() {
 }
 
 #[test]
+fn host_side_rename_keeps_directory_listable() {
+    // Renamed by the host (not through FUSE): same file identity, new name.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("sub")).unwrap();
+    std::fs::write(temp.path.join("sub/a.txt"), b"a").unwrap();
+    std::fs::write(temp.path.join("f.txt"), b"f").unwrap();
+    let fs = fs_for(&temp.path);
+    let sub = fs.lookup(context(), ROOT_INODE, c"sub").unwrap();
+    fs.dir_entries(ROOT_INODE).unwrap();
+    fs.dir_entries(sub.inode).unwrap();
+
+    // Moved into another directory, then renamed in place.
+    std::fs::rename(temp.path.join("f.txt"), temp.path.join("sub/g.txt")).unwrap();
+    std::fs::rename(temp.path.join("sub/a.txt"), temp.path.join("sub/b.txt")).unwrap();
+
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(sub.inode)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"g.txt".to_vec()), "{names:?}");
+    assert!(names.contains(&b"b.txt".to_vec()), "{names:?}");
+    let g = fs.lookup(context(), sub.inode, c"g.txt").unwrap();
+    let (stat, _) = fs.getattr(context(), g.inode, None).unwrap();
+    assert_eq!(stat.st_size, 1);
+    let (handle, _) = fs.open(context(), g.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, g.inode, handle), b"f");
+    fs.release(context(), g.inode, 0, handle, false, false, None)
+        .unwrap();
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"f.txt"), LINUX_ENOENT);
+}
+
+#[test]
+fn host_hard_link_keeps_both_names() {
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("a.txt"), b"a").unwrap();
+    let fs = fs_for(&temp.path);
+    let a = fs.lookup(context(), ROOT_INODE, c"a.txt").unwrap();
+    std::fs::hard_link(temp.path.join("a.txt"), temp.path.join("b.txt")).unwrap();
+    let b = fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+    assert_eq!(a.inode, b.inode);
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(ROOT_INODE)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"a.txt".to_vec()) && names.contains(&b"b.txt".to_vec()));
+    fs.getattr(context(), a.inode, None).unwrap();
+}
+
+#[test]
+fn host_rename_of_cached_hard_link_keeps_alias_usable() {
+    // Both names cached, then the canonical name is renamed on the host.
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("a.txt"), b"a").unwrap();
+    std::fs::hard_link(temp.path.join("a.txt"), temp.path.join("b.txt")).unwrap();
+    let fs = fs_for(&temp.path);
+    let a = fs.lookup(context(), ROOT_INODE, c"a.txt").unwrap();
+    let b = fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+    assert_eq!(a.inode, b.inode);
+
+    std::fs::rename(temp.path.join("a.txt"), temp.path.join("c.txt")).unwrap();
+
+    // Through the cached alias first, then by listing (b.txt sorts before c.txt).
+    let again = fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+    assert_eq!(again.inode, a.inode);
+    let (stat, _) = fs.getattr(context(), a.inode, None).unwrap();
+    assert_eq!(stat.st_size, 1);
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(ROOT_INODE)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"b.txt".to_vec()), "{names:?}");
+    assert!(names.contains(&b"c.txt".to_vec()), "{names:?}");
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"a.txt"), LINUX_ENOENT);
+}
+
+#[test]
+fn host_rename_of_cached_hard_link_repairs_during_listing() {
+    // Same, but the first access after the rename is a directory listing.
+    let temp = TempDir::new();
+    std::fs::write(temp.path.join("a.txt"), b"a").unwrap();
+    std::fs::hard_link(temp.path.join("a.txt"), temp.path.join("b.txt")).unwrap();
+    let fs = fs_for(&temp.path);
+    fs.lookup(context(), ROOT_INODE, c"a.txt").unwrap();
+    fs.lookup(context(), ROOT_INODE, c"b.txt").unwrap();
+
+    std::fs::rename(temp.path.join("a.txt"), temp.path.join("c.txt")).unwrap();
+
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(ROOT_INODE)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"b.txt".to_vec()), "{names:?}");
+    assert!(names.contains(&b"c.txt".to_vec()), "{names:?}");
+}
+
+#[test]
+fn host_directory_rename_moves_cached_descendants() {
+    // `dir/nested/file.txt` cached, then `dir` renamed on the host.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("dir/nested")).unwrap();
+    std::fs::write(temp.path.join("dir/nested/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    let nested = fs.lookup(context(), dir.inode, c"nested").unwrap();
+    let file = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("dir"), temp.path.join("moved")).unwrap();
+
+    let moved = fs.lookup(context(), ROOT_INODE, c"moved").unwrap();
+    assert_eq!(moved.inode, dir.inode);
+    // Cached descendants, used directly (no new lookup on them).
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    let (handle, _) = fs.open(context(), file.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, file.inode, handle), b"abc");
+    fs.release(context(), file.inode, 0, handle, false, false, None)
+        .unwrap();
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(nested.inode)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"file.txt".to_vec()), "{names:?}");
+    // Lookups under the new name return the cached inodes.
+    let nested_again = fs.lookup(context(), moved.inode, c"nested").unwrap();
+    assert_eq!(nested_again.inode, nested.inode);
+    let file_again = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+    assert_eq!(file_again.inode, file.inode);
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"dir"), LINUX_ENOENT);
+}
+
+#[test]
+fn host_move_into_recreated_parent_path_repairs_once() {
+    // Host: `dir` -> `temp`, new `dir`, `temp` -> `dir/moved`. The new
+    // location lies beneath the old path: the repair must not apply twice.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("dir/nested")).unwrap();
+    std::fs::write(temp.path.join("dir/nested/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    let nested = fs.lookup(context(), dir.inode, c"nested").unwrap();
+    let file = fs.lookup(context(), nested.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("dir"), temp.path.join("temp")).unwrap();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::rename(temp.path.join("temp"), temp.path.join("dir/moved")).unwrap();
+
+    let moved = fs.lookup(context(), dir.inode, c"moved").unwrap();
+    assert_eq!(moved.inode, dir.inode);
+    // Repaired once: `…\dir\moved`, not `…\dir\moved\moved`.
+    let tail = |inode: u64| {
+        let path = fs.inode(inode).unwrap().path();
+        let parts: Vec<String> = path
+            .components()
+            .rev()
+            .take(4)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        parts.into_iter().rev().collect::<Vec<_>>().join("/")
+    };
+    assert!(
+        tail(dir.inode).ends_with("/dir/moved"),
+        "{}",
+        tail(dir.inode)
+    );
+    assert_eq!(tail(file.inode), "dir/moved/nested/file.txt");
+    let names: Vec<Vec<u8>> = fs
+        .dir_entries(moved.inode)
+        .unwrap()
+        .into_iter()
+        .map(|(entry, _)| entry.name.to_vec())
+        .collect();
+    assert!(names.contains(&b"nested".to_vec()), "{names:?}");
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    fs.getattr(context(), moved.inode, None).unwrap();
+}
+
+#[test]
+fn host_move_up_to_former_parent_path_moves_children() {
+    // Host: `parent/child` -> `temp`; guest removes the empty `parent`;
+    // host: `temp` -> `parent`. The new location is an ancestor of the old.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("parent/child")).unwrap();
+    std::fs::write(temp.path.join("parent/child/file.txt"), b"abc").unwrap();
+    let fs = fs_for(&temp.path);
+    let parent = fs.lookup(context(), ROOT_INODE, c"parent").unwrap();
+    let child = fs.lookup(context(), parent.inode, c"child").unwrap();
+    let file = fs.lookup(context(), child.inode, c"file.txt").unwrap();
+
+    std::fs::rename(temp.path.join("parent/child"), temp.path.join("temp")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"parent").unwrap();
+    std::fs::rename(temp.path.join("temp"), temp.path.join("parent")).unwrap();
+
+    let moved = fs.lookup(context(), ROOT_INODE, c"parent").unwrap();
+    assert_eq!(moved.inode, child.inode);
+    let (stat, _) = fs.getattr(context(), file.inode, None).unwrap();
+    assert_eq!(stat.st_size, 3);
+    let (handle, _) = fs.open(context(), file.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, file.inode, handle), b"abc");
+    fs.release(context(), file.inode, 0, handle, false, false, None)
+        .unwrap();
+    let again = fs.lookup(context(), moved.inode, c"file.txt").unwrap();
+    assert_eq!(again.inode, file.inode);
+}
+
+#[test]
+fn host_move_up_keeps_aliases_of_repeated_directory_names() {
+    // `p/c/f.txt` and `p/c/c/f.txt` cached; host moves `p/c` up to `p`.
+    // `p/c/c/f.txt` lands on the key `p/c/f.txt` still held by the other file.
+    let temp = TempDir::new();
+    std::fs::create_dir_all(temp.path.join("p/c/c")).unwrap();
+    std::fs::write(temp.path.join("p/c/f.txt"), b"outer").unwrap();
+    std::fs::write(temp.path.join("p/c/c/f.txt"), b"inner!").unwrap();
+    let fs = fs_for(&temp.path);
+    let p = fs.lookup(context(), ROOT_INODE, c"p").unwrap();
+    let c = fs.lookup(context(), p.inode, c"c").unwrap();
+    let outer = fs.lookup(context(), c.inode, c"f.txt").unwrap();
+    let cc = fs.lookup(context(), c.inode, c"c").unwrap();
+    let inner = fs.lookup(context(), cc.inode, c"f.txt").unwrap();
+
+    std::fs::rename(temp.path.join("p/c"), temp.path.join("temp")).unwrap();
+    fs.rmdir(context(), ROOT_INODE, c"p").unwrap();
+    std::fs::rename(temp.path.join("temp"), temp.path.join("p")).unwrap();
+    let moved = fs.lookup(context(), ROOT_INODE, c"p").unwrap();
+    assert_eq!(moved.inode, c.inode);
+
+    // A later guest rename only follows aliases: both files must still have one.
+    fs.rename(context(), ROOT_INODE, c"p", ROOT_INODE, c"q", 0)
+        .unwrap();
+    let (stat, _) = fs.getattr(context(), outer.inode, None).unwrap();
+    assert_eq!(stat.st_size, 5);
+    let (stat, _) = fs.getattr(context(), inner.inode, None).unwrap();
+    assert_eq!(stat.st_size, 6);
+    let (handle, _) = fs.open(context(), inner.inode, false, 0).unwrap();
+    let handle = handle.unwrap();
+    assert_eq!(owned_read(&fs, inner.inode, handle), b"inner!");
+    fs.release(context(), inner.inode, 0, handle, false, false, None)
+        .unwrap();
+}
+
+#[test]
+fn host_rename_leaves_entries_of_the_new_occupant_in_place() {
+    // Host: `dir` -> `moved`, then a new `dir` with `x.txt`. Before the repair
+    // the guest reaches `x.txt` through the stale `dir` inode: that entry
+    // belongs to the new `dir` and must not follow the move.
+    let temp = TempDir::new();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::write(temp.path.join("dir/a.txt"), b"a").unwrap();
+    let fs = fs_for(&temp.path);
+    let dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    let a = fs.lookup(context(), dir.inode, c"a.txt").unwrap();
+
+    std::fs::rename(temp.path.join("dir"), temp.path.join("moved")).unwrap();
+    std::fs::create_dir(temp.path.join("dir")).unwrap();
+    std::fs::write(temp.path.join("dir/x.txt"), b"xx").unwrap();
+    let x = fs.lookup(context(), dir.inode, c"x.txt").unwrap();
+
+    let moved = fs.lookup(context(), ROOT_INODE, c"moved").unwrap();
+    assert_eq!(moved.inode, dir.inode);
+    let (stat, _) = fs.getattr(context(), a.inode, None).unwrap();
+    assert_eq!(stat.st_size, 1);
+    let (stat, _) = fs.getattr(context(), x.inode, None).unwrap();
+    assert_eq!(stat.st_size, 2);
+    let new_dir = fs.lookup(context(), ROOT_INODE, c"dir").unwrap();
+    assert_ne!(new_dir.inode, dir.inode);
+    let x_again = fs.lookup(context(), new_dir.inode, c"x.txt").unwrap();
+    assert_eq!(x_again.inode, x.inode);
+}
+
+#[test]
 fn heartbeat_style_rename_keeps_source_inode_usable() {
     let temp = TempDir::new();
     std::fs::write(temp.path.join("heartbeat.json"), b"old").unwrap();

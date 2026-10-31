@@ -112,9 +112,19 @@ jobs:
           compression-level: 0
 
   firmware-x86_64:
-    name: Firmware (x86_64)
+    name: Firmware (${{ matrix.host }} x86_64)
     needs: kernel-sources
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host: Linux
+            artifact: firmware-x86_64
+            make_args: ""
+          - host: Windows
+            artifact: firmware-windows-x86_64
+            make_args: OS=Windows kernel.c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -128,7 +138,7 @@ jobs:
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
-          key: release-firmware-x86_64-${{ hashFiles('vendor/libkrunfw/**') }}
+          key: release-${{ matrix.artifact }}-${{ hashFiles('vendor/libkrunfw/**') }}
 
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
@@ -144,12 +154,12 @@ jobs:
       - name: Build firmware
         if: steps.cache-firmware.outputs.cache-hit != 'true'
         working-directory: vendor/libkrunfw
-        run: make -j$(nproc)
+        run: make -j$(nproc) ${{ matrix.make_args }}
 
       - name: Upload firmware
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: firmware-x86_64
+          name: ${{ matrix.artifact }}
           path: |
             vendor/libkrunfw/kernel.c
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
@@ -167,7 +177,7 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -196,7 +206,7 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
           cache-targets: true
@@ -280,7 +290,7 @@ jobs:
       target: windows-x86_64
       runner: windows-latest
       rust_target: x86_64-pc-windows-msvc
-      firmware_artifact: firmware-x86_64
+      firmware_artifact: firmware-windows-x86_64
       agentd_artifact: agentd-x86_64-linux-musl
       vs_arch: amd64
       vs_host_arch: amd64
@@ -407,7 +417,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -438,7 +448,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -508,7 +518,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -581,7 +591,7 @@ jobs:
       # -- msb --
       - name: Build msb
         run: |
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli
           mkdir -p build
           cp target/release/msb build/msb
 
@@ -638,7 +648,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -759,7 +769,7 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
 
@@ -797,7 +807,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
           Set-MsvcEnvironment -Architecture ${{ matrix.vs_arch }} -HostArchitecture ${{ matrix.vs_host_arch }}
-          cargo build --release --no-default-features --features embed-binaries,net,ssh -p microsandbox-cli --target ${{ matrix.rust_target }}
+          cargo build --release --no-default-features --features embed-binaries,net,ssh,keyring -p microsandbox-cli --target ${{ matrix.rust_target }}
           New-Item -ItemType Directory -Force -Path build | Out-Null
           Copy-Item target\${{ matrix.rust_target }}\release\msb.exe build\msb.exe -Force
 
@@ -861,7 +871,7 @@ jobs:
             sdk/node-ts/npm/${{ matrix.npm_dir }}/lib/*
 
       # -- Python SDK --
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "sdk/python/uv.lock"
@@ -1539,7 +1549,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
 
       - name: Download Python SDK wheels
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1673,7 +1683,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1717,7 +1727,7 @@ jobs:
           pattern: docker-digest-*
           merge-multiple: true
 
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

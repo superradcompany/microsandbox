@@ -14,17 +14,23 @@ use crate::snapshot::cloud_manifest::{
     SnapshotFormat, SnapshotScope, SnapshotState, UpperIntegrity, UpperLayer,
 };
 use crate::{
-    Action, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
-    CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar, HandoffInit,
-    HostPermissions, MountOptions, NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule,
-    SandboxLogLevel, SandboxPolicy, SecretSubstitution, SecurityProfile, StatVirtualization,
+    Action, CloudChangeKind, CloudConfigPlannedChange, CloudCreateSandboxRequest,
+    CloudCreateSandboxResponse, CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody,
+    CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudModificationConflict,
+    CloudModificationDisposition, CloudModificationWarning, CloudNetworkSpec, CloudPaginated,
+    CloudPatch, CloudPlannedChange, CloudPullPolicy, CloudResourceConvergenceState,
+    CloudResourceKind, CloudResourceResizeStatus, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxComputeResources, CloudSandboxModificationApplyRequest,
+    CloudSandboxModificationPlan, CloudSandboxModificationPlanRequest, CloudSandboxResources,
+    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudSecretApplyEntry, CloudSecretChangeKind, CloudSecretEntry, CloudSecretMaterial,
+    CloudSecretPlanEntry, CloudSecretPlannedChange, CloudSecretSource, CloudSecretValue,
+    CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
+    CloudViolationAction, CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar,
+    HandoffInit, HostPermissions, ModificationPolicy, MountOptions, NetworkPolicy,
+    OwnedVolumeStorage, PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy,
+    SecretSubstitution, SecurityProfile, StatVirtualization,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -55,6 +61,7 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "SecretSubstitution",
     "SecurityProfile",
     "StatVirtualization",
+    "ModificationPolicy",
 ];
 
 /// Snapshot schema type names the cloud twins may reference. Filtered into the
@@ -160,6 +167,7 @@ pub fn domain_declarations() -> Vec<String> {
         Destination::decl(&cfg),
         DestinationGroup::decl(&cfg),
         PortRange::decl(&cfg),
+        ModificationPolicy::decl(&cfg),
     ]
 }
 
@@ -215,6 +223,24 @@ pub fn cloud_declarations() -> Vec<String> {
         CloudSnapshotOperation::decl(&cfg),
         CloudSnapshotOperationStatus::decl(&cfg),
         CloudSnapshotKind::decl(&cfg),
+        CloudSandboxModificationPlanRequest::decl(&cfg),
+        CloudSecretPlanEntry::decl(&cfg),
+        CloudSecretMaterial::decl(&cfg),
+        CloudSandboxModificationApplyRequest::decl(&cfg),
+        CloudSecretApplyEntry::decl(&cfg),
+        CloudSecretValue::decl(&cfg),
+        CloudSandboxModificationPlan::decl(&cfg),
+        CloudPlannedChange::decl(&cfg),
+        CloudConfigPlannedChange::decl(&cfg),
+        CloudSecretPlannedChange::decl(&cfg),
+        CloudChangeKind::decl(&cfg),
+        CloudSecretChangeKind::decl(&cfg),
+        CloudModificationDisposition::decl(&cfg),
+        CloudModificationConflict::decl(&cfg),
+        CloudModificationWarning::decl(&cfg),
+        CloudResourceResizeStatus::decl(&cfg),
+        CloudResourceKind::decl(&cfg),
+        CloudResourceConvergenceState::decl(&cfg),
         CloudPaginated::<CloudCreateSandboxResponse>::decl(&cfg),
         CloudMessageResponse::decl(&cfg),
         CloudErrorBody::decl(&cfg),
@@ -318,6 +344,10 @@ mod tests {
         }
         assert!(cloud.contains("export type CloudSandboxSpec"));
         assert!(cloud.contains("export type CloudSandboxComputeResources"));
+        // Both modification routes answer with the Cloud plan, in snake_case.
+        assert!(cloud.contains("export type CloudSandboxModificationPlan"));
+        assert!(cloud.contains("\"requires_restart\""));
+        assert!(!cloud.contains("requires restart"));
         assert!(cloud.contains("import type {"));
         assert!(cloud.contains("EnvVar"));
         assert!(cloud.contains("export type * from \"./domain.js\""));
@@ -339,5 +369,28 @@ mod tests {
         assert!(snapshot.contains("export type SnapshotManifest"));
         assert!(snapshot.contains("export type SnapshotState"));
         assert!(!snapshot.contains("export type Manifest"));
+    }
+
+    #[test]
+    fn secret_plan_is_not_user_api() {
+        for (file, rendered) in [
+            ("domain.ts", render_domain()),
+            ("snapshot.ts", render_snapshot()),
+            ("cloud.ts", render_cloud()),
+        ] {
+            for name in [
+                "SecretPlanInput",
+                "SecretPlanOutput",
+                "SecretPlanStatus",
+                "SecretPlanCapability",
+                "SecretSettings",
+                "RunningSecret",
+                "DesiredSecret",
+                "DesiredMaterial",
+                "SecretAspect",
+            ] {
+                assert!(!rendered.contains(name), "{file} names {name}");
+            }
+        }
     }
 }

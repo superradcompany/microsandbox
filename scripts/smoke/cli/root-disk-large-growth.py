@@ -55,7 +55,7 @@ def guest(label, name, script):
 
 
 def state(name):
-    return json.loads((TEST_HOME / "sandboxes" / name / "runtime" / "root-disk.json").read_text())
+    return json.loads((TEST_HOME / "sandboxes" / name / "root-disk.json").read_text())
 
 
 def capacity(layer):

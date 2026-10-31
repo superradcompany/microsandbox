@@ -459,7 +459,15 @@ mod tests {
             .iter()
             .map(|mount| {
                 let id = microsandbox_types::owned_volume_mount_id(mount.guest());
-                std::fs::read(runtime.join("owned-disks").join(id).join("disk.json")).unwrap()
+                std::fs::read(
+                    runtime
+                        .parent()
+                        .unwrap()
+                        .join("owned-disks")
+                        .join(id)
+                        .join("disk.json"),
+                )
+                .unwrap()
             })
             .collect();
         let dry = compact_stopped_disks(
@@ -478,7 +486,15 @@ mod tests {
         for (mount, before) in mounts.iter().zip(before) {
             let id = microsandbox_types::owned_volume_mount_id(mount.guest());
             assert_eq!(
-                std::fs::read(runtime.join("owned-disks").join(id).join("disk.json")).unwrap(),
+                std::fs::read(
+                    runtime
+                        .parent()
+                        .unwrap()
+                        .join("owned-disks")
+                        .join(id)
+                        .join("disk.json")
+                )
+                .unwrap(),
                 before
             );
         }
@@ -613,8 +629,12 @@ mod tests {
         second_plan.validate_stopped(executor.handle()).unwrap();
         let retired = first_plan.commit(&mut first).unwrap();
         // Inject failure in the second journal's destination, after the first has committed.
-        let second_journal_dir = directory.join("owned-disks").join(&second_id);
-        let saved = directory.join("saved-second-journal");
+        let second_journal_dir = directory
+            .parent()
+            .unwrap()
+            .join("owned-disks")
+            .join(&second_id);
+        let saved = directory.parent().unwrap().join("saved-second-journal");
         std::fs::rename(&second_journal_dir, &saved).unwrap();
         std::fs::write(&second_journal_dir, b"injected destination failure").unwrap();
         assert!(second_plan.commit(&mut second).is_err());

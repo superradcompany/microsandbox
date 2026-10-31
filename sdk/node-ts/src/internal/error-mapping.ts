@@ -16,6 +16,7 @@ import {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -74,6 +75,7 @@ const CTORS = new Map<string, (msg: string, raw: Error) => MicrosandboxError>([
   ["MetricsUnavailable", (m, c) => new MetricsUnavailableError(m, { cause: c })],
   ["UnsupportedOperation", (m, c) => new UnsupportedOperationError(m, { cause: c })],
   ["Unsupported", (m, c) => new UnsupportedError(m, { cause: c })],
+  ["ModificationNotConfirmed", (m, c) => new ModificationNotConfirmedError(m, { cause: c })],
   ["Custom", (m, c) => new CustomError(m, { cause: c })],
 ]);
 

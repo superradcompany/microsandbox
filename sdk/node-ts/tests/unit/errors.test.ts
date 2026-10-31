@@ -5,6 +5,7 @@ import {
   ImageNotFoundError,
   MetricsDisabledError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NoDefaultCommandError,
   SandboxNotFoundError,
   SandboxReplacedError,
@@ -137,6 +138,20 @@ describe("mapNapiError", () => {
     const mapped = mapNapiError(raw);
     expect(mapped).toBeInstanceOf(SandboxReplacedError);
     expect((mapped as SandboxReplacedError).code).toBe("sandboxReplaced");
+    expect((mapped as MicrosandboxError).cause).toBe(raw);
+  });
+
+  it("maps an unconfirmed modification without changing its message", () => {
+    const message =
+      "the change did not complete as asked: the running sandbox does not hold the secret";
+    const raw = new Error(`[ModificationNotConfirmed] ${message}`);
+    const mapped = mapNapiError(raw);
+
+    expect(mapped).toBeInstanceOf(ModificationNotConfirmedError);
+    expect((mapped as ModificationNotConfirmedError).code).toBe(
+      "modificationNotConfirmed",
+    );
+    expect((mapped as ModificationNotConfirmedError).message).toBe(message);
     expect((mapped as MicrosandboxError).cause).toBe(raw);
   });
 });

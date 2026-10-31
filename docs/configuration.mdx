@@ -248,6 +248,7 @@ For workload effects, host requirements, filesystem expectations, and verificati
 | `memory_mib` | `512` | Guest memory in MiB |
 | `cpu_placement` | `"inherit"` | Host vCPU placement: `inherit`, `auto`, `spread`, or `compact` |
 | `placement_profile` | `null` | Name of a host-defined entry in `runtime.placement_profiles` |
+| `nested_virt` | unset | Enable nested virtualization for local sandboxes. Off by default. Requires host support and guest KVM. |
 | `thp` | `"madvise"` | Guest transparent huge-page policy: `always`, `madvise`, or `never` |
 | `oci` | [reference](#sandbox_defaults-oci) | Defaults for OCI-rooted sandboxes |
 | `shell` | `"/bin/sh"` | Shell for interactive sessions and scripts |
@@ -292,6 +293,18 @@ Only an environment `password` source is supported, and the variable name is sto
 Proxy defaults do not enable disabled networking or route host downloads. Cloud creation fails if the final configuration contains a proxy, including one supplied by managed policy.
 
 </Accordion>
+
+Enable nesting by default for local sandboxes:
+
+```json
+{
+  "sandbox_defaults": {
+    "nested_virt": true
+  }
+}
+```
+
+Per-sandbox settings override this user default; managed overrides take precedence. See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for host requirements and restore limits.
 
 ### `sandbox_defaults.oci`
 

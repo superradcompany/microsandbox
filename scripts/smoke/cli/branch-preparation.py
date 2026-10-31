@@ -237,7 +237,7 @@ class PreparationSmoke(BASE.Smoke):
         self.remember(child)
         self.run("branch-" + child, "branch", source, "--name", child,
                  "--port", self.port_option(child))
-        journal = json.loads((self.home / "sandboxes" / child / "runtime" / "root-disk.json").read_text())
+        journal = json.loads((self.home / "sandboxes" / child / "root-disk.json").read_text())
         assert len(journal["layers"]) >= 2, journal
         assert all(bool(layer["integrity_root"]) == getattr(self.args, "integrity", False)
                    for layer in journal["layers"][:-1]), journal
@@ -309,7 +309,7 @@ class PreparationSmoke(BASE.Smoke):
         if tool is None:
             self.report["backing_chains"].append(dict(case=label, skipped="qemu-img unavailable"))
             return
-        journal = json.loads((self.home / "sandboxes" / name / "runtime" / "root-disk.json").read_text())
+        journal = json.loads((self.home / "sandboxes" / name / "root-disk.json").read_text())
         head = journal["layers"][-1]["path"]
         started_at, started = utc_now(), time.monotonic()
         result = subprocess.run([tool, "info", "--backing-chain", "--output=json", head],

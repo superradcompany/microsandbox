@@ -29,7 +29,7 @@ pub(crate) mod identity;
 pub mod init;
 pub mod jobs;
 pub(crate) mod metrics;
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
@@ -73,6 +73,8 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 #[cfg(feature = "local")]
 use microsandbox_image::progress_channel;
 
+#[cfg(feature = "local")]
+use crate::backend::local::creation::{CreationStorage, RemovalMode};
 use crate::{MicrosandboxResult, agent::AgentClient, backend::sandbox::SandboxIdentity};
 #[cfg(feature = "local")]
 use crate::{
@@ -206,7 +208,7 @@ pub(crate) use external_mounts::{
     external_bind_guest_paths, require_guest_mounts, require_recorded_mounts,
     resolve_external_mounts,
 };
-#[cfg(feature = "local")]
+#[cfg(any(feature = "local", feature = "cloud"))]
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,
     ModificationPolicy, ModificationWarning, PlannedChange, PublishedPortKey,
@@ -442,12 +444,24 @@ impl Sandbox {
     /// Reuses the serialized sandbox config and pinned rootfs state without
     /// re-resolving the original OCI reference. Routes through the ambient
     /// [`default_backend`](crate::backend::default_backend).
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start(name: &str) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         backend.sandboxes().start(backend.clone(), name).await
     }
 
     /// Start an existing sandbox in detached/background mode.
+    ///
+    /// On a Cloud sandbox, a start is refused with
+    /// [`MicrosandboxError::CloudHttp`](crate::MicrosandboxError::CloudHttp) (409) while a
+    /// secret change to it is being saved, or while its result is not yet known after
+    /// [`MicrosandboxError::ModificationNotConfirmed`](crate::MicrosandboxError::ModificationNotConfirmed);
+    /// this usually clears within seconds. Start again after a short wait.
     pub async fn start_detached(name: &str) -> MicrosandboxResult<Self> {
         let backend = crate::backend::default_backend();
         backend
@@ -682,14 +696,13 @@ impl Sandbox {
         &self.config
     }
 
-    /// Start planning a sandbox modification.
+    /// Start a sandbox modification.
     ///
-    /// The returned builder owns the canonical SDK patch and dry-run
-    /// classification logic. It does not apply changes until later modify
-    /// phases wire the same plan model into persistence and runtime control.
-    #[cfg(feature = "local")]
+    /// Returns a builder; `dry_run` plans the patch, `apply` applies it.
+    #[cfg(any(feature = "local", feature = "cloud"))]
     pub fn modify(&self) -> SandboxModificationBuilder {
         SandboxModificationBuilder::new(self.backend.clone(), self.name.clone())
+            .bound_to(self.identity())
     }
 
     /// Explicitly compact sealed backing layers of the root and sandbox-owned data disks.
@@ -1810,7 +1823,14 @@ pub(super) async fn remove_local_persisted_sandbox(
     // The runtime lock is the authoritative ownership proof. A numeric PID can remain visible
     // while an exited Unix child is waiting to be reaped, or can already identify an unrelated
     // process after PID reuse, so it must not override successful lock acquisition.
-    crate::runtime::remove_sandbox_socket_artifacts_for(local_backend, name)?;
+    if crate::backend::local::creation::pending(pools.write(), expected_id).await? {
+        return local_backend
+            .remove_incomplete_sandbox(expected_id, name, RemovalMode::Recovery)
+            .await;
+    }
+
+    let _storage = CreationStorage::acquire(local_backend, name)?;
+    local_backend.remove_socket_artifacts(name)?;
     remove_dir_if_exists(&local_backend.sandboxes_dir().join(name))?;
     sandbox_entity::Entity::delete_by_id(expected_id)
         .exec(pools.write())

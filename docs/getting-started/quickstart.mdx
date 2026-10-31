@@ -45,7 +45,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
 
 <Steps>
   <Step title="Install microsandbox">
-    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. To run on cloud, set `MSB_BACKEND=cloud` and `MSB_API_KEY`, choose a cloud profile, or select cloud in code in supported SDKs. See [Local or cloud](/operations/backends).
 
     <CodeGroup>
     ```bash TypeScript
@@ -90,13 +90,18 @@ Having trouble with a local installation? Choose your platform for setup checks 
     ```typescript TypeScript
     import { Sandbox } from "microsandbox";
 
-    await using sb = await Sandbox.builder("hello")
+    const sb = await Sandbox.builder("hello")
         .image("python")
         .memory(512)
         .create();
 
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
+    try {
+        const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+        console.log(output.stdout()); // Hello from a microVM!
+    } finally {
+        await sb.stop();
+        await Sandbox.remove("hello");
+    }
     ```
 
     ```rust Rust
@@ -116,6 +121,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
         println!("{}", output.stdout()?); // Hello from a microVM!
 
         sb.stop().await?;
+        Sandbox::remove("hello").await?;
         Ok(())
     }
     ```
@@ -135,6 +141,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
         print(output.stdout_text)  # Hello from a microVM!
 
         await sb.stop()
+        await Sandbox.remove("hello")
 
     asyncio.run(main())
     ```
@@ -147,7 +154,10 @@ Having trouble with a local installation? Choose your platform for setup checks 
     if err != nil {
         return err
     }
-    defer sb.Stop(ctx)
+    defer func() {
+        _ = sb.Stop(ctx)
+        _ = m.RemoveSandbox(ctx, "hello")
+    }()
 
     output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
     if err != nil {
@@ -165,6 +175,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
       output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
       puts output.stdout
     end
+    Microsandbox::Sandbox.remove("hello")
     ```
 
     ```bash CLI

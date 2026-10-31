@@ -78,9 +78,14 @@ impl AgentBootstrapFs {
         init_file.write_all(agentd_bytes())?;
         init_file.sync_data()?;
 
+        // The kernel mounts devtmpfs before executing PID 1. Rust may need
+        // /dev/null before main when the console has not supplied stdio yet.
+        let mut dirs = DirState::new();
+        dirs.mkdir(ROOT_INODE, b"dev")?;
+
         Ok(Self {
             init_file: Mutex::new(init_file),
-            dirs: Mutex::new(DirState::new()),
+            dirs: Mutex::new(dirs),
             max_state_bytes: MAX_MOBILITY_STATE_BYTES,
         })
     }
@@ -644,6 +649,15 @@ mod tests {
             gid: 0,
             pid: 0,
         }
+    }
+
+    #[test]
+    fn provides_devtmpfs_mountpoint_before_agent_startup() {
+        let fs = AgentBootstrapFs::new().unwrap();
+
+        let entry = fs.lookup(context(), ROOT_INODE, c"dev").unwrap();
+
+        assert_eq!(entry.attr.st_mode & 0o170000, S_IFDIR);
     }
 
     #[test]

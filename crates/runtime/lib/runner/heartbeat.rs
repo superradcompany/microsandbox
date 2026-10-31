@@ -114,7 +114,8 @@ impl HeartbeatReader {
     /// Returns `None` if the file doesn't exist or can't be parsed
     /// (e.g., agentd hasn't started writing yet).
     fn read(&self) -> Option<HeartbeatSnapshot> {
-        let content = std::fs::read(&self.path).ok()?;
+        // Guest files are data, not trusted host paths: refuse links, FIFOs and oversized input.
+        let content = crate::checkpoint::layout::read_optional(&self.path).ok()??;
         serde_json::from_slice(&content).ok()
     }
 

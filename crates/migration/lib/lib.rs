@@ -30,6 +30,9 @@ mod m20260910_000001_snapshot_groups;
 mod m20260922_000001_migrate_secret_config;
 mod m20261001_000001_guest_clock_config;
 mod m20261022_000001_sandbox_caller_config_overrides;
+mod m20261024_000001_sandbox_creation;
+mod m20261029_000001_volume_creation;
+mod m20261030_000001_protected_sandbox_state;
 pub mod schema_metadata;
 
 use sea_orm_migration::prelude::*;
@@ -89,6 +92,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260922_000001_migrate_secret_config::Migration),
             Box::new(m20261001_000001_guest_clock_config::Migration),
             Box::new(m20261022_000001_sandbox_caller_config_overrides::Migration),
+            Box::new(m20261024_000001_sandbox_creation::Migration),
+            Box::new(m20261029_000001_volume_creation::Migration),
+            Box::new(m20261030_000001_protected_sandbox_state::Migration),
         ]
     }
 }

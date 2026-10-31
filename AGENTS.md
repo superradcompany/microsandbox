@@ -99,6 +99,12 @@ Repository layout:
 - For public APIs, keep the Rust SDK, CLI, Python SDK, Node SDK, Go SDK, docs, and examples consistent when they describe the same capability.
 - Prefer explicit errors with useful context over silent fallbacks.
 
+## Protected Sandbox Storage
+
+Only `sbx/guest-state/` is exported as `/.msb`. Keep host journals, checkpoint stores, disk staging, and launch credentials outside that subtree. Guest-state contents remain untrusted: host readers must be bounded and reject symlinks/reparse points; host writers must not reuse guest-controlled links. Never add a compatibility alias that exposes host authority to the guest.
+
+The protected-layout security exception requires patched SDKs/CLIs and a runtime advertising `protected_guest_state`. Preserve catalog admission, lifecycle ownership, migration recovery records, and downgrade refusal; do not restore insecure legacy fallback behavior.
+
 ## Host Path Handling
 
 - For every path input, identify whether it belongs to the local host, a remote backend, or the guest before resolving it. Never resolve cloud or guest paths against the SDK client's working directory.

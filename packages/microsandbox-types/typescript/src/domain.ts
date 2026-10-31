@@ -220,3 +220,5 @@ export type PortRange = {
    */
   end: number;
 };
+
+export type ModificationPolicy = "no_restart" | "next_start" | "restart";

@@ -528,6 +528,14 @@ For a local sandbox, removal deletes sandbox-owned state while leaving independe
 
 Removing a sandbox does not undo writes made to a named volume, bind mount, or user-supplied disk image. On cloud, removal deletes the remote sandbox resource; the local disk details above do not apply.
 
+### Recover an interrupted local create
+
+If the creating process crashes, an incomplete sandbox stays recorded and cannot be started. Remove it with `msb rm <name>`, or recreate it with `--replace`. An ordinary create retry leaves the incomplete sandbox intact.
+
+Recovery removes partial sandbox files and any named volumes newly created by that attempt. Preexisting named volumes and bind-mounted files are preserved. The database records are deleted together only after file cleanup succeeds; if cleanup fails, fix the reported problem and retry removal.
+
+If preparation is still finishing, retry removal after its filesystem work completes. Background formatters retain a preparation lock even when the creating task is cancelled; the lock is released when their work finishes or the process exits. You do not need to close a long-running application after its workers finish.
+
 ## Automatic lifecycle policies
 
 For production workloads, configure a maximum lifetime or idle timeout so sandboxes shut down automatically.
