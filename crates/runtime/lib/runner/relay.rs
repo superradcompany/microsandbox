@@ -51,6 +51,7 @@ use microsandbox_protocol::exec_control::{
     EXEC_CONTROL_VERSION, ExecControlAdvertisement, ExecControlReady,
 };
 use microsandbox_protocol::fs::{FsRequest, FsResponse};
+use microsandbox_protocol::isolation::IsolatedExecRequest;
 use microsandbox_protocol::message::{
     FLAG_BULK, FLAG_SESSION_START, FLAG_SHUTDOWN, FLAG_TERMINAL, FRAME_HEADER_SIZE, Message,
     MessageType,
@@ -2679,6 +2680,20 @@ fn decode_frame(buf: &[u8]) -> RuntimeResult<Message> {
     codec::decode_message_frame(buf).map_err(|e| RuntimeError::Custom(format!("decode frame: {e}")))
 }
 
+fn exec_uses_pty(message: &Message) -> Option<bool> {
+    match message.t {
+        MessageType::ExecIsolated => message
+            .payload::<IsolatedExecRequest>()
+            .ok()
+            .map(|request| request.process.tty),
+        MessageType::ExecRequest => message
+            .payload::<ExecRequest>()
+            .ok()
+            .map(|request| request.tty),
+        _ => None,
+    }
+}
+
 /// Drain one client's priority local commands and ordinary frame batches through one writer.
 async fn client_writer_task<W>(
     slot: u32,
@@ -4830,7 +4845,10 @@ async fn client_reader_task(
                 break;
             };
             response.v = request.v;
-            if message_type == Some(MessageType::ExecRequest) {
+            if matches!(
+                message_type,
+                Some(MessageType::ExecRequest | MessageType::ExecIsolated)
+            ) {
                 let map = clients.lock().await;
                 if let Some(connection) = map
                     .get(&slot)
@@ -4847,7 +4865,10 @@ async fn client_reader_task(
 
         let mut input_len = None;
         if let Some(message) = decoded_message.as_ref() {
-            if message.t == MessageType::ExecRequest {
+            if matches!(
+                message.t,
+                MessageType::ExecRequest | MessageType::ExecIsolated
+            ) {
                 match agent_tx.execution_tracker.admit(message) {
                     Ok(exec_admission::Admission::Full) => {
                         let failure = ExecFailed {
@@ -4939,7 +4960,12 @@ async fn client_reader_task(
         if bulk_tx.is_some()
             && matches!(
                 message_type,
-                Some(MessageType::ExecRequest | MessageType::FsRequest | MessageType::TcpConnect)
+                Some(
+                    MessageType::ExecRequest
+                        | MessageType::ExecIsolated
+                        | MessageType::FsRequest
+                        | MessageType::TcpConnect
+                )
             )
         {
             let incarnation = incarnation.expect("dual-port client has an incarnation");
@@ -5089,12 +5115,16 @@ async fn client_reader_task(
         // FLAG_SESSION_START is set on both ExecRequest and FsRequest,
         // so we decode the type to disambiguate.
         let mut is_exec_session_start = false;
-        if is_session_start && message_type == Some(MessageType::ExecRequest) {
+        if is_session_start
+            && matches!(
+                message_type,
+                Some(MessageType::ExecRequest | MessageType::ExecIsolated)
+            )
+        {
             is_exec_session_start = true;
             let pty = decode_frame(frame.data.as_ref())
                 .ok()
-                .and_then(|msg| msg.payload::<ExecRequest>().ok())
-                .map(|request| request.tty)
+                .and_then(|msg| exec_uses_pty(&msg))
                 .unwrap_or(false);
             let session_id = next_session_id.fetch_add(1, Ordering::SeqCst);
             if let Ok(mut registry) = session_registry.lock() {
@@ -5768,6 +5798,29 @@ mod tests {
             }
 
             result
+        }
+    }
+
+    #[test]
+    fn isolated_exec_preserves_terminal_classification() {
+        for tty in [false, true] {
+            let process: ExecRequest = serde_json::from_value(serde_json::json!({
+                "cmd": "/bin/sh", "args": [], "env": [], "tty": tty,
+                "rows": 24, "cols": 80
+            }))
+            .unwrap();
+            let ordinary = Message::with_payload(MessageType::ExecRequest, 1, &process).unwrap();
+            let isolated = Message::with_payload(
+                MessageType::ExecIsolated,
+                2,
+                &IsolatedExecRequest {
+                    process,
+                    isolation: Default::default(),
+                },
+            )
+            .unwrap();
+            assert_eq!(exec_uses_pty(&ordinary), Some(tty));
+            assert_eq!(exec_uses_pty(&isolated), Some(tty));
         }
     }
 

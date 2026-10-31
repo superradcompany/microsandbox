@@ -6,7 +6,7 @@ use ciborium::Value;
 use microsandbox_protocol::{
     codec::{self, MAX_FRAME_SIZE},
     control::*,
-    message::{Message, MessageType},
+    message::{Message, MessageType, PROTOCOL_VERSION},
     wire::{self, Envelope, WireError},
 };
 use serde_json::{Value as JsonValue, json};
@@ -315,6 +315,10 @@ fn neutral_envelope_preserves_existing_agent_encoding() {
     )
     .unwrap();
     assert_eq!(agent_bytes, neutral_bytes);
+    assert_eq!(
+        PROTOCOL_VERSION, 11,
+        "agent generation includes isolated execution, independently of control"
+    );
 }
 
 #[test]

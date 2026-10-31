@@ -27,6 +27,10 @@ use super::io::{self, EventReceiver, InputWindow};
 /// Options for command execution (everything except the command itself).
 #[derive(Debug, Clone, Default)]
 pub struct ExecOptions {
+    /// OCI guest workload restrictions. Requires matching host and guest builds.
+    #[cfg(feature = "oci-runtime")]
+    pub security: Option<microsandbox_protocol::exec::ExecSecurity>,
+
     /// Arguments.
     pub args: Vec<String>,
 
@@ -183,6 +187,13 @@ pub struct ExecSink {
 //--------------------------------------------------------------------------------------------------
 
 impl ExecOptionsBuilder {
+    /// Apply OCI security settings to this guest command.
+    #[cfg(feature = "oci-runtime")]
+    pub fn oci_security(mut self, security: microsandbox_protocol::exec::ExecSecurity) -> Self {
+        self.options.security = Some(security);
+        self
+    }
+
     /// Prepend arguments resolved by a higher-level execution helper.
     pub(crate) fn prepend_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.options.args.splice(0..0, args);
@@ -602,6 +613,23 @@ impl ExecSink {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
+pub(crate) fn initial_stdin_messages(stdin_mode: &StdinMode, tty: bool) -> Vec<ExecStdin> {
+    match stdin_mode {
+        StdinMode::Null if tty => Vec::new(),
+        StdinMode::Null => vec![ExecStdin { data: Vec::new() }],
+        StdinMode::Pipe => Vec::new(),
+        StdinMode::Bytes(data) if data.is_empty() => vec![ExecStdin { data: Vec::new() }],
+        StdinMode::Bytes(data) => vec![
+            ExecStdin { data: data.clone() },
+            ExecStdin { data: Vec::new() },
+        ],
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
 
@@ -636,7 +664,7 @@ pub(crate) mod agent {
 
     use super::{
         ExecEvent, ExecHandle, ExecOptions, ExecOutput, ExecSink, ExitStatus, StdinMode,
-        StreamTimeout,
+        StreamTimeout, initial_stdin_messages,
         io::{self, EventReceiver},
     };
 
@@ -678,6 +706,8 @@ pub(crate) mod agent {
         }
 
         let ExecOptions {
+            #[cfg(feature = "oci-runtime")]
+            security,
             args,
             cwd,
             user,
@@ -722,6 +752,8 @@ pub(crate) mod agent {
         let input_window = policy.filter(|_| controlled).map(|policy| {
             io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)
         });
+        #[cfg(feature = "oci-runtime")]
+        let req = microsandbox_protocol::exec::ExecRequest { security, ..req };
         let (id, rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         let stdin = match &stdin_mode {
@@ -729,20 +761,17 @@ pub(crate) mod agent {
             _ => None,
         };
 
-        let finite_input = match stdin_mode {
-            // A pipe with no caller-owned writer still needs an explicit guest EOF.
-            // PTYs have no independent stdin half; retain their existing terminal semantics.
-            StdinMode::Null if !tty => Some(Vec::new()),
-            StdinMode::Bytes(data) => Some(data),
-            _ => None,
-        };
-        if let Some(data) = finite_input {
+        let initial_stdin = initial_stdin_messages(&stdin_mode, tty);
+        if !initial_stdin.is_empty() {
             let sink = ExecSink::new(id, Arc::clone(&client), input_window.clone());
             tokio::spawn(async move {
-                if !data.is_empty() {
-                    let _ = sink.write(data).await;
+                for payload in initial_stdin {
+                    if payload.data.is_empty() {
+                        let _ = sink.close().await;
+                    } else if sink.write(payload.data).await.is_err() {
+                        break;
+                    }
                 }
-                let _ = sink.close().await;
             });
         }
 
@@ -1561,6 +1590,54 @@ pub(crate) mod agent {
                     .unwrap()
                     .contains("process exit is unconfirmed")
             );
+        }
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_stdin_sends_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Null, false);
+
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].data.is_empty());
+    }
+
+    #[test]
+    fn pipe_stdin_leaves_stdin_open_for_caller() {
+        for tty in [false, true] {
+            assert!(initial_stdin_messages(&StdinMode::Pipe, tty).is_empty());
+        }
+    }
+
+    #[test]
+    fn byte_stdin_sends_data_then_eof() {
+        let messages = initial_stdin_messages(&StdinMode::Bytes(b"hello".to_vec()), false);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].data, b"hello");
+        assert!(messages[1].data.is_empty());
+    }
+
+    #[test]
+    fn null_stdin_preserves_terminal_input() {
+        assert!(initial_stdin_messages(&StdinMode::Null, true).is_empty());
+    }
+
+    #[test]
+    fn empty_byte_stdin_sends_exactly_one_eof() {
+        for tty in [false, true] {
+            let messages = initial_stdin_messages(&StdinMode::Bytes(Vec::new()), tty);
+
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].data.is_empty());
         }
     }
 }

@@ -9,6 +9,7 @@ members = [
     "crates/image",
     "crates/metrics",
     "crates/metrics-collector",
+    "crates/oci-runtime",
     "packages/agent-client/rust",
     "packages/control-client/rust",
     "packages/protocol-client/rust",
@@ -141,6 +142,7 @@ rayon = "1.11"
 reflink-copy = "0.1"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 resolv-conf = "0.7"
+rustix = "1.1"
 object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 semver = "1.0.27"
 scopeguard = "1.2"

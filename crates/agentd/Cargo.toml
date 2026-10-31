@@ -44,3 +44,6 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 typed-path.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["fs", "mount"] }

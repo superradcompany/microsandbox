@@ -39,6 +39,7 @@ use microsandbox_protocol::exec::{
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
+use microsandbox_protocol::isolation::IsolatedExecRequest;
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
@@ -556,6 +557,7 @@ pub async fn run(
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
             exec_limits: config.exec_limits,
+            workload_user_namespace: Some(true),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -2836,9 +2838,34 @@ async fn handle_message_with_charge(
             }
         }
 
-        MessageType::ExecRequest => {
-            let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
-                return Ok(());
+        MessageType::ExecRequest | MessageType::ExecIsolated => {
+            let mut req = if msg.t == MessageType::ExecIsolated {
+                let Some(request) =
+                    decode_payload_or_core_error::<IsolatedExecRequest>(&msg, out_buf)?
+                else {
+                    return Ok(());
+                };
+                if let Err(error) = workload.configure_isolation(request.isolation) {
+                    encode_exec_failed(
+                        msg.id,
+                        ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: error.to_string(),
+                            stage: Some("workload_isolation".into()),
+                        },
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+                request.process
+            } else {
+                let Some(request) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)?
+                else {
+                    return Ok(());
+                };
+                request
             };
             // Released peers do not acknowledge execution output. Preserve their legacy path.
             let policy = (msg.v >= 10).then_some(config.exec_limits).flatten();
@@ -5921,6 +5948,7 @@ mod tests {
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
             let request = ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
@@ -6128,6 +6156,7 @@ mod tests {
                 default_env: Vec::new(),
             };
             let request = ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), "printf retained".into()],
                 env: vec![],
@@ -6209,6 +6238,7 @@ mod tests {
             )
             .unwrap();
             let request = |script: &str| ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 env: vec![],
@@ -6530,6 +6560,7 @@ mod tests {
     #[test]
     fn scripts_dir_goes_on_the_last_path_entry() {
         let mut req = ExecRequest {
+            security: None,
             cmd: "/bin/true".into(),
             args: vec![],
             env: vec!["PATH=/first".into(), "PATH=/last".into()],

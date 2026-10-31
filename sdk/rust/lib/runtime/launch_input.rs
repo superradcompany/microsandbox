@@ -65,6 +65,9 @@ pub(super) fn legacy_env(bootstrap: &GuestBootstrap) -> MicrosandboxResult<Vec<S
     let mut push = |key: &str, value: String| env.push(format!("{key}={value}"));
     if let Some(root) = &bootstrap.block_root {
         let value = match root {
+            BootstrapBlockRoot::ReadOnlyVirtiofs => {
+                return unsupported("read-only virtiofs root");
+            }
             BootstrapBlockRoot::DiskImage { device, fstype } => {
                 let mut value = format!("kind=disk-image,device={device}");
                 if let Some(fstype) = fstype {

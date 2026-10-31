@@ -83,6 +83,10 @@ pub struct Ready {
     /// Runtime-authorized sandbox execution policy, absent on released older peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_limits: Option<ExecLimits>,
+
+    /// Guest application user-namespace support. Absent on older agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_user_namespace: Option<bool>,
 }
 
 /// Payload for `core.clock.sync` messages.
@@ -413,6 +417,7 @@ mod tests {
         };
         let current = Ready {
             exec_limits: None,
+            workload_user_namespace: None,
             boot_time_ns: legacy.boot_time_ns,
             init_time_ns: legacy.init_time_ns,
             ready_time_ns: legacy.ready_time_ns,
@@ -434,9 +439,11 @@ mod tests {
         assert!(decoded.local_transport.is_none());
         assert!(decoded.workload_transport_barrier_version.is_none());
         assert!(decoded.exec_limits.is_none());
+        assert!(decoded.workload_user_namespace.is_none());
 
         let advertised = Ready {
             exec_limits: Some(ExecLimits::default()),
+            workload_user_namespace: Some(true),
             ..current
         };
         let mut advertised_bytes = Vec::new();

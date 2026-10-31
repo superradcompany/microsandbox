@@ -9,7 +9,7 @@ use crate::error::ProtocolResult;
 //--------------------------------------------------------------------------------------------------
 
 /// Current protocol version.
-pub const PROTOCOL_VERSION: u8 = 10;
+pub const PROTOCOL_VERSION: u8 = 11;
 
 /// Frame flag: this is the last message for the given correlation ID.
 ///
@@ -194,6 +194,10 @@ pub enum MessageType {
     #[strum(serialize = "core.exec.request")]
     ExecRequest,
 
+    /// Create the OCI workload isolation domain and start its init process.
+    #[strum(serialize = "core.exec.isolated")]
+    ExecIsolated,
+
     /// Guest confirms command started.
     #[strum(serialize = "core.exec.started")]
     ExecStarted,
@@ -364,7 +368,9 @@ impl MessageType {
             | Self::FsResponse
             | Self::TcpClosed
             | Self::TcpFailed => FLAG_TERMINAL,
-            Self::ExecRequest | Self::FsRequest | Self::TcpConnect => FLAG_SESSION_START,
+            Self::ExecRequest | Self::ExecIsolated | Self::FsRequest | Self::TcpConnect => {
+                FLAG_SESSION_START
+            }
             Self::Shutdown => FLAG_SHUTDOWN,
             _ => 0,
         }
@@ -419,6 +425,7 @@ impl MessageType {
             | Self::WorkloadThawed
             | Self::WorkloadTransportCredit => 9,
             Self::RootDiskPrepare | Self::RootDiskGrow | Self::RootDiskState => 9,
+            Self::ExecIsolated => 11,
             Self::BulkAccepted | Self::BulkCredit | Self::BulkFinish | Self::BulkCancel => 8,
             Self::TcpConnect
             | Self::TcpConnected
@@ -728,6 +735,10 @@ mod tests {
 
     #[test]
     fn test_is_available_at() {
+        assert!(MessageType::ExecOutputAck.is_available_at(10));
+        assert!(MessageType::ExecStdinAck.is_available_at(10));
+        assert!(!MessageType::ExecIsolated.is_available_at(10));
+        assert!(MessageType::ExecIsolated.is_available_at(11));
         // Exec is in the generation-1 baseline: available to every peer.
         assert!(MessageType::ExecRequest.is_available_at(1));
         assert!(MessageType::ExecRequest.is_available_at(2));

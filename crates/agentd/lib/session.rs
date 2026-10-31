@@ -23,10 +23,12 @@ use microsandbox_protocol::transport::ClientIncarnation;
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
 use crate::exec_output::OutputWindow;
+use crate::exec_security::PreparedSecurity;
 use crate::process::{ProcessExitWatcher, ProcessIdentity, ProcessManager};
 use crate::rlimit;
 use crate::serial::InputCharge;
 use crate::workload::WorkloadPlacement;
+use crate::workload_namespace::{NamespaceChild, NamespaceParent};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -1067,6 +1069,7 @@ impl ExecSession {
             .map_err(|e| AgentdError::ExecSession(format!("invalid cwd: {e}")))?;
 
         let resolved_user = resolve_requested_user(req, default_user)?;
+        validate_namespace_user(workload_placement.as_ref(), resolved_user.as_ref())?;
         let default_home = default_home_dir(req, resolved_user.as_ref())?;
         let home_key = default_home
             .as_ref()
@@ -1078,6 +1081,9 @@ impl ExecSession {
 
         // Pre-parse rlimits before fork (no allocations in child).
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let security = PreparedSecurity::new(req.security.as_ref(), security_profile)?;
+
+        let (namespace_parent, namespace_child) = prepare_namespaces(workload_placement.as_ref())?;
 
         // Prevent the central reaper from observing this child before its PID
         // and generation are registered.
@@ -1098,9 +1104,19 @@ impl ExecSession {
             drop(pty.master);
             drop(err_pipe.read_end);
 
+            if let Some(namespace) = &namespace_child
+                && let Err(error) = namespace.enter(workload_placement.as_ref().unwrap())
+            {
+                write_exec_errno_and_exit(
+                    err_pipe.write_end.as_raw_fd(),
+                    error.raw_os_error().unwrap_or(libc::EIO),
+                );
+            }
+
             // Join the workload cgroup before any user code can execute. This
             // closes the post-spawn PID-assignment race with checkpoint freeze.
-            if let Some(ref placement) = workload_placement
+            if namespace_child.is_none()
+                && let Some(ref placement) = workload_placement
                 && placement.place_current().is_err()
             {
                 write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
@@ -1147,7 +1163,13 @@ impl ExecSession {
             }
 
             if apply_exec_security_profile(security_profile).is_err() {
-                unsafe { libc::_exit(1) };
+                write_exec_error_and_exit(err_pipe.write_end.as_raw_fd());
+            }
+            if let Err(error) = security.before_user() {
+                write_exec_errno_and_exit(
+                    err_pipe.write_end.as_raw_fd(),
+                    error.raw_os_error().unwrap_or(libc::EPERM),
+                );
             }
 
             // Group lookup can open /etc/group; finish it before restrictive limits.
@@ -1176,6 +1198,13 @@ impl ExecSession {
                 }
             }
 
+            if let Err(error) = security.after_user() {
+                write_exec_errno_and_exit(
+                    err_pipe.write_end.as_raw_fd(),
+                    error.raw_os_error().unwrap_or(libc::EPERM),
+                );
+            }
+
             // execvp — on success this never returns.
             unsafe {
                 libc::execvp(argv_ptrs[0], argv_ptrs.as_ptr());
@@ -1188,6 +1217,23 @@ impl ExecSession {
         // Parent process.
         drop(pty.slave);
         drop(err_pipe.write_end);
+        drop(namespace_child);
+        let pid = match namespace_parent {
+            Some(parent) => match parent.finish(Some(pid), true) {
+                Ok(pid) => pid,
+                Err(error) => {
+                    let error = read_exec_error(err_pipe.read_end.as_raw_fd())?
+                        .map(std::io::Error::from_raw_os_error)
+                        .unwrap_or(error);
+                    return Err(AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
+                        &error,
+                        &req.cmd,
+                        "namespace setup",
+                    )));
+                }
+            },
+            None => pid,
+        };
         let exit_watcher = spawn_guard.track(pid)?;
         let process_identity = exit_watcher.identity();
 
@@ -1277,22 +1323,43 @@ impl ExecSession {
             }
         }
 
-        if let Some(ref dir) = req.cwd {
-            cmd.current_dir(dir);
-        }
-
         let resolved_user = resolve_requested_user(req, default_user)?;
+        validate_namespace_user(workload_placement.as_ref(), resolved_user.as_ref())?;
         if let Some(home) = default_home_dir(req, resolved_user.as_ref())? {
             cmd.env("HOME", home.to_string_lossy().into_owned());
         }
 
         // Apply the security profile and resource limits in the child before exec.
         let parsed_rlimits = rlimit::to_libc(&req.rlimits);
+        let security = PreparedSecurity::new(req.security.as_ref(), security_profile)?;
+        let (namespace_parent, namespace_child) = prepare_namespaces(workload_placement.as_ref())?;
+        // An exec working directory may exist only in the workload's mount namespace.
+        if namespace_child.is_none()
+            && let Some(ref dir) = req.cwd
+        {
+            cmd.current_dir(dir);
+        }
+        let namespace_cwd = req
+            .cwd
+            .as_deref()
+            .map(CString::new)
+            .transpose()
+            .map_err(|error| AgentdError::ExecSession(format!("invalid cwd: {error}")))?;
         unsafe {
             cmd.pre_exec(move || {
+                if let Some(namespace) = &namespace_child {
+                    namespace.enter(workload_placement.as_ref().unwrap())?;
+                    if let Some(cwd) = &namespace_cwd
+                        && libc::chdir(cwd.as_ptr()) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
                 // This uses only write(2) in the child and therefore remains
                 // safe in the fork-to-exec window.
-                if let Some(ref placement) = workload_placement {
+                if namespace_child.is_none()
+                    && let Some(ref placement) = workload_placement
+                {
                     placement.place_current()?;
                 }
                 // Become a session (and process-group) leader so signals sent
@@ -1302,11 +1369,12 @@ impl ExecSession {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                apply_exec_security_profile(security_profile).map_err(agentd_to_io_error)?;
+                apply_exec_security_profile(security_profile).map_err(agentd_to_pre_exec_error)?;
+                security.before_user()?;
 
                 // Group lookup must finish before limits can prevent opening /etc/group.
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_groups(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_groups(user).map_err(agentd_to_pre_exec_error)?;
                 }
 
                 // Apply limits before dropping the privilege needed to raise hard limits.
@@ -1317,8 +1385,9 @@ impl ExecSession {
                 }
 
                 if let Some(ref user) = resolved_user {
-                    apply_resolved_user(user).map_err(agentd_to_io_error)?;
+                    apply_resolved_user(user).map_err(agentd_to_pre_exec_error)?;
                 }
+                security.after_user()?;
                 Ok(())
             });
         }
@@ -1328,7 +1397,7 @@ impl ExecSession {
             stdout,
             stderr,
             exit_watcher,
-        } = spawn_piped_process(cmd, process_manager)?;
+        } = spawn_piped_process_isolated(cmd, process_manager, namespace_parent)?;
         let process_identity = exit_watcher.identity();
         let stdin = stdin
             .map(|input| input.into_owned_fd().and_then(nonblocking_input))
@@ -1390,23 +1459,64 @@ impl Drop for ExecSession {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+#[cfg(test)]
 fn spawn_piped_process(
+    command: Command,
+    process_manager: &ProcessManager,
+) -> AgentdResult<PipedProcess> {
+    spawn_piped_process_isolated(command, process_manager, None)
+}
+
+fn prepare_namespaces(
+    placement: Option<&WorkloadPlacement>,
+) -> std::io::Result<(Option<NamespaceParent>, Option<NamespaceChild>)> {
+    match placement.and_then(|placement| placement.isolation.as_ref()) {
+        Some(domain) => domain
+            .prepare()
+            .map(|(parent, child)| (Some(parent), Some(child))),
+        None => Ok((None, None)),
+    }
+}
+
+fn validate_namespace_user(
+    placement: Option<&WorkloadPlacement>,
+    user: Option<&ResolvedUser>,
+) -> std::io::Result<()> {
+    if let Some(domain) = placement.and_then(|placement| placement.isolation.as_ref()) {
+        domain.validate_user(
+            user.map_or(0, |user| user.uid),
+            user.map_or(0, |user| user.gid),
+        )?;
+    }
+    Ok(())
+}
+
+fn spawn_piped_process_isolated(
     mut command: Command,
     process_manager: &ProcessManager,
+    namespace_parent: Option<NamespaceParent>,
 ) -> AgentdResult<PipedProcess> {
     let cmd_label = command.get_program().to_string_lossy().into_owned();
 
     // Prevent the central reaper from observing this child before its PID and
     // generation are registered.
     let spawn_guard = process_manager.spawn_guard()?;
-    let mut child = command.spawn().map_err(|error| {
+    let result = command.spawn();
+    drop(command);
+    let actual_pid = namespace_parent.map(|parent| {
+        parent.finish(
+            result.as_ref().ok().map(|child| child.id() as i32),
+            result.is_ok(),
+        )
+    });
+    let mut child = result.map_err(|error| {
         AgentdError::ExecSpawnFailed(exec_failed_from_io_error(
             &error,
             &cmd_label,
             "Command::spawn",
         ))
     })?;
-    let pid = child.id() as i32;
+    let pid = actual_pid.transpose()?.unwrap_or(child.id() as i32);
     let exit_watcher = spawn_guard.track(pid)?;
     let process_identity = exit_watcher.identity();
 
@@ -1469,6 +1579,10 @@ fn new_exec_error_pipe() -> AgentdResult<ExecErrorPipe> {
 
 fn write_exec_error_and_exit(err_fd: RawFd) -> ! {
     let errno = unsafe { *libc::__errno_location() };
+    write_exec_errno_and_exit(err_fd, errno)
+}
+
+fn write_exec_errno_and_exit(err_fd: RawFd, errno: i32) -> ! {
     let bytes = errno.to_ne_bytes();
     let _ = unsafe { libc::write(err_fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
     unsafe { libc::_exit(127) }
@@ -1738,6 +1852,9 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
         )
     };
     if rc != 0 {
+        if passwd_lookup_errno_means_missing(rc) {
+            return Ok(ResolvedUserLookup::Numeric(uid));
+        }
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
@@ -1796,6 +1913,10 @@ fn lookup_buffer_len() -> usize {
     if size > 0 { size as usize } else { 16 * 1024 }
 }
 
+fn passwd_lookup_errno_means_missing(errno: libc::c_int) -> bool {
+    matches!(errno, libc::ENOENT | libc::ESRCH)
+}
+
 fn apply_resolved_groups(user: &ResolvedUser) -> AgentdResult<()> {
     if let Some(ref name) = user.initgroups_user {
         if unsafe { libc::initgroups(name.as_ptr(), user.gid) } != 0 {
@@ -1843,8 +1964,12 @@ fn env_contains_key(env: &[String], key: &str) -> bool {
     })
 }
 
-fn agentd_to_io_error(err: AgentdError) -> std::io::Error {
-    std::io::Error::other(err.to_string())
+fn agentd_to_pre_exec_error(err: AgentdError) -> std::io::Error {
+    match err {
+        AgentdError::Io(err) => err,
+        AgentdError::Nix(err) => std::io::Error::from_raw_os_error(err as i32),
+        _ => std::io::Error::from_raw_os_error(libc::EINVAL),
+    }
 }
 
 /// Keep one owned descriptor across readiness waits; cancellation cannot leave a blocking task
@@ -2066,13 +2191,20 @@ async fn pipe_reader_task(
 mod tests {
     use microsandbox_protocol::exec::EXEC_OUTPUT_EVENT_OVERHEAD;
     use std::collections::HashMap;
+    use std::fs;
     use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+    use std::path::Path;
     use std::process::{Command as StdCommand, Stdio as StdStdio};
     use std::time::Duration;
 
     use tokio::time;
 
     use microsandbox_protocol::exec::ExecRequest;
+    use microsandbox_protocol::isolation::{
+        WorkloadIdMapping, WorkloadIsolation, WorkloadTimeNamespace, WorkloadTimeOffset,
+        WorkloadUserNamespace,
+    };
 
     use super::*;
 
@@ -2261,6 +2393,7 @@ mod tests {
 
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "sleep 30 & echo $!".to_string()],
             env: Vec::new(),
@@ -2405,6 +2538,7 @@ mod tests {
                 let _runtime = handle.enter();
                 let code = 20 + offset as i32;
                 let req = ExecRequest {
+                    security: None,
                     cmd: "/bin/sh".to_string(),
                     args: vec!["-c".to_string(), format!("exit {code}")],
                     env: Vec::new(),
@@ -2499,9 +2633,501 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn isolated_pipe_and_pty_preserve_exit_and_output() {
+        for tty in [false, true] {
+            let domain =
+                crate::workload_namespace::NamespaceDomain::new(Default::default()).unwrap();
+            let req = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo ISOLATED_OK; exit 42".into()],
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: None,
+            };
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let session = ExecSession::spawn(
+                1,
+                &req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(WorkloadPlacement::for_namespace_test(domain)),
+                None,
+            )
+            .unwrap();
+            assert!(session.pid() > 0);
+            let mut output = Vec::new();
+            let code = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match rx.recv().await.unwrap().output {
+                        SessionOutput::Stdout(bytes) => output.extend_from_slice(&bytes),
+                        SessionOutput::Exited(code) => break code,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(code, 42);
+            assert!(String::from_utf8_lossy(&output).contains("ISOLATED_OK"));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run inside unshare -Urmpf --mount-proc for private guest-like namespaces"]
+    async fn isolated_init_and_exec_share_namespaces() {
+        let inherited_offsets = fs::read_to_string("/proc/self/timens_offsets").unwrap();
+        for (tty, with_offsets) in [(false, false), (true, false), (false, true), (true, true)] {
+            let domain = crate::workload_namespace::NamespaceDomain::new(
+                microsandbox_protocol::isolation::WorkloadIsolation {
+                    pid: true,
+                    mount: true,
+                    ipc: true,
+                    uts: true,
+                    cgroup: true,
+                    time: Some(if with_offsets {
+                        WorkloadTimeNamespace {
+                            monotonic: Some(WorkloadTimeOffset {
+                                seconds: 12,
+                                nanoseconds: 345,
+                            }),
+                            boottime: Some(WorkloadTimeOffset {
+                                seconds: 34,
+                                nanoseconds: 567,
+                            }),
+                        }
+                    } else {
+                        WorkloadTimeNamespace::default()
+                    }),
+                    hostname: Some("isolated-test".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let req = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo INIT_PID=$$; read line; exit 23".into()],
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: None,
+            };
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let init = ExecSession::spawn(
+                1,
+                &req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(WorkloadPlacement::for_namespace_test(Arc::clone(&domain))),
+                None,
+            )
+            .unwrap();
+            for kind in ["pid", "mnt", "ipc", "uts", "cgroup", "time"] {
+                let workload = fs::read_link(format!("/proc/{}/ns/{kind}", init.pid())).unwrap();
+                let agent = fs::read_link(format!("/proc/self/ns/{kind}")).unwrap();
+                assert_ne!(workload, agent, "agent must stay outside {kind} namespace");
+            }
+            let offsets =
+                fs::read_to_string(format!("/proc/{}/timens_offsets", init.pid())).unwrap();
+            let expected = if with_offsets {
+                "monotonic 12 345 boottime 34 567"
+            } else {
+                &inherited_offsets
+            };
+            assert_eq!(
+                offsets.split_whitespace().collect::<Vec<_>>(),
+                expected.split_whitespace().collect::<Vec<_>>()
+            );
+            let initial = time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let SessionOutput::Stdout(bytes) = initial.output else {
+                panic!("missing init output");
+            };
+            assert!(String::from_utf8_lossy(&bytes).contains("INIT_PID=1"));
+            let mut req = req.clone();
+            req.cwd = Some("/tmp".into());
+            req.args = vec!["-exc".into(), "test \"$PWD\" = /tmp; test \"$(cat /proc/sys/kernel/hostname)\" = isolated-test; for kind in pid mnt ipc uts cgroup time; do test \"$(readlink /proc/self/ns/$kind)\" = \"$(readlink /proc/1/ns/$kind)\"; done; test \"$(cat /proc/self/timens_offsets)\" = \"$(cat /proc/1/timens_offsets)\"; test \"$(cat /proc/1/comm)\" = sh; test \"$(cat /proc/self/cgroup)\" = '0::/'; if (echo $ > /sys/fs/cgroup/cgroup.procs) 2>/dev/null; then exit 93; fi; exit 37".into()];
+            let (tx, mut exec_rx) = SessionOutputSender::channel();
+            let _exec = ExecSession::spawn(
+                2,
+                &req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(WorkloadPlacement::for_namespace_test(Arc::clone(&domain))),
+                None,
+            )
+            .unwrap();
+            let mut exec_output = Vec::new();
+            let code = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match exec_rx.recv().await.unwrap().output {
+                        SessionOutput::Exited(code) => break code,
+                        SessionOutput::Stdout(bytes) | SessionOutput::Stderr(bytes) => {
+                            exec_output.extend_from_slice(&bytes)
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(code, 37, "{}", String::from_utf8_lossy(&exec_output));
+            init.write_stdin(b"done\n").await.unwrap();
+            let code = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionOutput::Exited(code) = rx.recv().await.unwrap().output {
+                        break code;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(code, 23);
+            let (tx, _) = SessionOutputSender::channel();
+            assert!(
+                ExecSession::spawn(
+                    3,
+                    &req,
+                    tx,
+                    None,
+                    SecurityProfile::Default,
+                    Some(WorkloadPlacement::for_namespace_test(domain)),
+                    None,
+                )
+                .is_err(),
+                "cannot enter dead init's PID namespace"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run inside a private privileged mount/PID namespace with UID/GID map permissions"]
+    async fn isolated_user_namespace_is_shared_by_init_and_exec() {
+        for (tty, guest_id) in [(false, 0), (true, 0), (false, 100000), (true, 100000)] {
+            let directory = std::env::temp_dir().join(format!(
+                "msb-userns-{}-{tty}-{guest_id}",
+                std::process::id()
+            ));
+            fs::create_dir(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+            let application_file = directory.join("application");
+            let management_file = directory.join("management");
+            for path in [&application_file, &management_file] {
+                fs::write(path, "unchanged\n").unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            chown(&application_file, Some(guest_id), Some(guest_id)).unwrap();
+
+            let domain = crate::workload_namespace::NamespaceDomain::new(WorkloadIsolation {
+                pid: true,
+                mount: true,
+                ipc: true,
+                uts: true,
+                cgroup: true,
+                hostname: Some("userns-test".into()),
+                user: Some(WorkloadUserNamespace {
+                    uid_mappings: vec![WorkloadIdMapping {
+                        container_id: 0,
+                        guest_id,
+                        size: 1,
+                    }],
+                    gid_mappings: vec![WorkloadIdMapping {
+                        container_id: 0,
+                        guest_id,
+                        size: 1,
+                    }],
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+            let mut request = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo READY; read line; exit 23".into()],
+                env: Vec::new(),
+                cwd: None,
+                user: Some("0:0".into()),
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: None,
+            };
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let init = ExecSession::spawn(
+                1,
+                &request,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(WorkloadPlacement::for_namespace_test(Arc::clone(&domain))),
+                None,
+            )
+            .unwrap();
+            let init_user = fs::read_link(format!("/proc/{}/ns/user", init.pid())).unwrap();
+            assert_ne!(init_user, fs::read_link("/proc/self/ns/user").unwrap());
+            let output = time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(output.output, SessionOutput::Stdout(_)));
+
+            request.args = vec![
+                "-exc".into(),
+                r#"
+                    test "$(id -u)" = 0
+                    test "$(id -g)" = 0
+                    test "$(readlink /proc/self/ns/user)" = "$(readlink /proc/1/ns/user)"
+                    test "$(cat /proc/1/comm)" = sh
+                    test "$(cat /proc/sys/kernel/hostname)" = userns-test
+                    test "$(cat /proc/self/cgroup)" = '0::/'
+                    if (echo $$ > /sys/fs/cgroup/cgroup.procs) 2>/dev/null; then exit 93; fi
+                    echo APP_WRITE_OK > "$1/application"
+                    if [ "$2" != 0 ]; then
+                        if cat "$1/management" >/dev/null 2>&1; then exit 91; fi
+                        if (echo FORBIDDEN >> "$1/management") 2>/dev/null; then exit 92; fi
+                    fi
+                    exit 37
+                "#
+                .into(),
+                "userns-test".into(),
+                directory.to_string_lossy().into_owned(),
+                guest_id.to_string(),
+            ];
+            let (tx, mut exec_rx) = SessionOutputSender::channel();
+            let exec = ExecSession::spawn(
+                2,
+                &request,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(WorkloadPlacement::for_namespace_test(Arc::clone(&domain))),
+                None,
+            )
+            .unwrap();
+            let mut output = Vec::new();
+            let code = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match exec_rx.recv().await.unwrap().output {
+                        SessionOutput::Exited(code) => break code,
+                        SessionOutput::Stdout(bytes) | SessionOutput::Stderr(bytes) => {
+                            output.extend(bytes)
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                code,
+                37,
+                "tty={tty}, guest_id={guest_id}: {}",
+                String::from_utf8_lossy(&output)
+            );
+            assert_eq!(
+                fs::read_to_string(&application_file).unwrap(),
+                "APP_WRITE_OK\n"
+            );
+            assert_eq!(fs::metadata(&application_file).unwrap().uid(), guest_id);
+            assert_eq!(fs::read_to_string(&management_file).unwrap(), "unchanged\n");
+            assert_eq!(fs::metadata(&management_file).unwrap().uid(), 0);
+            drop(exec);
+
+            request.user = Some("1234:1234".into());
+            let (tx, _) = SessionOutputSender::channel();
+            assert!(
+                ExecSession::spawn(
+                    3,
+                    &request,
+                    tx,
+                    None,
+                    SecurityProfile::Default,
+                    Some(WorkloadPlacement::for_namespace_test(domain)),
+                    None
+                )
+                .is_err(),
+                "unmapped exec IDs must not run with agentd credentials"
+            );
+            init.write_stdin(b"done\n").await.unwrap();
+            let code = time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionOutput::Exited(code) = rx.recv().await.unwrap().output {
+                        break code;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(code, 23);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires unshare -Urm inside a private delegated systemd scope and MSB_TEST_DELEGATED_CGROUP=1"]
+    async fn isolated_exec_cannot_bypass_task_limit() {
+        assert_eq!(
+            std::env::var("MSB_TEST_DELEGATED_CGROUP").as_deref(),
+            Ok("1")
+        );
+        let memberships = fs::read_to_string("/proc/self/cgroup").unwrap();
+        let relative = memberships
+            .lines()
+            .find_map(|line| line.strip_prefix("0::"))
+            .unwrap();
+        assert!(relative.ends_with(".scope"));
+        let parent = Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/'));
+        assert_eq!(
+            fs::read_to_string(parent.join("cgroup.procs"))
+                .unwrap()
+                .trim(),
+            std::process::id().to_string()
+        );
+        fs::create_dir(parent.join("manager")).unwrap();
+        fs::write(parent.join("manager/cgroup.procs"), "0").unwrap();
+        let workload = parent.join("workload");
+        fs::create_dir(&workload).unwrap();
+        crate::workload_resources::configure(
+            &workload,
+            &microsandbox_protocol::isolation::WorkloadResources {
+                pids_max: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        for (tty, user_namespace) in [(false, false), (true, false), (false, true), (true, true)] {
+            let domain = crate::workload_namespace::NamespaceDomain::new(
+                microsandbox_protocol::isolation::WorkloadIsolation {
+                    mount: true,
+                    pid: user_namespace,
+                    cgroup: true,
+                    user: user_namespace.then(|| WorkloadUserNamespace {
+                        uid_mappings: vec![WorkloadIdMapping {
+                            container_id: 0,
+                            guest_id: 100000,
+                            size: 1,
+                        }],
+                        gid_mappings: vec![WorkloadIdMapping {
+                            container_id: 0,
+                            guest_id: 100000,
+                            size: 1,
+                        }],
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let placement = || {
+                let mut placement = WorkloadPlacement::for_namespace_test(Arc::clone(&domain));
+                placement.cgroup_directory = Some(fs::File::open(&workload).unwrap().into());
+                placement
+            };
+            let req = ExecRequest {
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo READY; read line".into()],
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: None,
+            };
+            let (tx, mut rx) = SessionOutputSender::channel();
+            let init = ExecSession::spawn(
+                1,
+                &req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(placement()),
+                None,
+            )
+            .unwrap();
+            time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(workload.join("pids.current"))
+                    .unwrap()
+                    .trim(),
+                "1"
+            );
+            let mut exec_req = req.clone();
+            exec_req.args = vec!["-c".into(), "exit 37".into()];
+            let (tx, mut exec_rx) = SessionOutputSender::channel();
+            let _exec = ExecSession::spawn(
+                2,
+                &exec_req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(placement()),
+                None,
+            )
+            .expect("exec must enter the cgroup before joining its nsdelegate namespace");
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionOutput::Exited(code) = exec_rx.recv().await.unwrap().output {
+                        assert_eq!(code, 37);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            fs::write(workload.join("pids.max"), "1").unwrap();
+            let (tx, _) = SessionOutputSender::channel();
+            let result = ExecSession::spawn(
+                2,
+                &req,
+                tx,
+                None,
+                SecurityProfile::Default,
+                Some(placement()),
+                None,
+            );
+            let Err(AgentdError::ExecSpawnFailed(error)) = result else {
+                panic!("exec bypassed pids.max or lost its typed failure");
+            };
+            assert_eq!(error.errno, Some(libc::EAGAIN));
+            init.write_stdin(b"done\n").await.unwrap();
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionOutput::Exited(code) = rx.recv().await.unwrap().output {
+                        assert_eq!(code, 0);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            fs::write(workload.join("pids.max"), "2").unwrap();
+        }
+        fs::remove_dir(workload).unwrap();
+    }
+
     async fn run_single_pipe_spawn(id: u32, code: i32) {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), format!("exit {code}")],
             env: Vec::new(),
@@ -2664,9 +3290,24 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            for profile in [SecurityProfile::Default, SecurityProfile::Restricted] {
+            for (profile, security) in [SecurityProfile::Default, SecurityProfile::Restricted]
+                .into_iter()
+                .flat_map(|profile| {
+                    [
+                        (profile, None),
+                        (
+                            profile,
+                            Some(microsandbox_protocol::exec::ExecSecurity {
+                                no_new_privileges: true,
+                                capabilities: Some(Default::default()),
+                            }),
+                        ),
+                    ]
+                })
+            {
                 let (tx, mut rx) = SessionOutputSender::channel();
                 let req = ExecRequest {
+                    security,
                     cmd: std::env::current_exe().unwrap().to_str().unwrap().into(),
                     args: vec![
                         "--exact".into(),
@@ -2800,6 +3441,7 @@ mod tests {
     async fn test_pty_reader_drains_ready_fd() {
         let (tx, mut rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
@@ -2856,6 +3498,199 @@ mod tests {
         );
     }
 
+    async fn security_status(
+        tty: bool,
+        security: microsandbox_protocol::exec::ExecSecurity,
+        user: Option<&str>,
+    ) -> String {
+        let (tx, mut rx) = SessionOutputSender::channel();
+        let req = ExecRequest {
+            cmd: "/bin/cat".into(),
+            args: vec!["/proc/self/status".into()],
+            env: Vec::new(),
+            cwd: None,
+            user: user.map(str::to_owned),
+            tty,
+            rows: 24,
+            cols: 80,
+            rlimits: Vec::new(),
+            security: Some(security),
+        };
+        let session = ExecSession::spawn(80, &req, tx, None, SecurityProfile::Default, None, None)
+            .expect("security session must start");
+        let mut output = Vec::new();
+        let result = time::timeout(Duration::from_secs(5), async {
+            while let Some(envelope) = rx.recv().await {
+                match envelope.output {
+                    SessionOutput::Stdout(data) => output.extend_from_slice(&data),
+                    SessionOutput::Exited(code) => {
+                        assert_eq!(code, 0);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            panic!("security session ended without an exit event");
+        })
+        .await;
+        if result.is_err() {
+            let _ = session.send_signal(libc::SIGKILL);
+        }
+        result.expect("security session timeout");
+        String::from_utf8(output).unwrap()
+    }
+
+    #[tokio::test]
+    async fn security_no_new_privileges_pipe_and_pty() {
+        let before = std::fs::read_to_string("/proc/self/status").unwrap();
+        for tty in [false, true] {
+            let status = security_status(
+                tty,
+                microsandbox_protocol::exec::ExecSecurity {
+                    no_new_privileges: true,
+                    capabilities: None,
+                },
+                None,
+            )
+            .await;
+            assert!(
+                status.lines().any(|line| line.trim() == "NoNewPrivs:\t1"),
+                "{status}"
+            );
+        }
+        let after = std::fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(
+            before.lines().find(|l| l.starts_with("NoNewPrivs:")),
+            after.lines().find(|l| l.starts_with("NoNewPrivs:"))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root with CAP_SETPCAP, CAP_SETUID and CAP_SETGID"]
+    async fn security_drop_all_pipe_pty_and_nonroot() {
+        for tty in [false, true] {
+            for user in [None, Some("1234:1234")] {
+                let status = security_status(
+                    tty,
+                    microsandbox_protocol::exec::ExecSecurity {
+                        no_new_privileges: false,
+                        capabilities: Some(Default::default()),
+                    },
+                    user,
+                )
+                .await;
+                for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+                    let line = status
+                        .lines()
+                        .find(|line| line.starts_with(&format!("{name}:")))
+                        .unwrap();
+                    assert_eq!(
+                        line.split_whitespace().nth(1),
+                        Some("0000000000000000"),
+                        "{status}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn security_invalid_capability_rejects_before_workload() {
+        for tty in [false, true] {
+            let (tx, _rx) = SessionOutputSender::channel();
+            let req = ExecRequest {
+                cmd: "/bin/true".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: Some(microsandbox_protocol::exec::ExecSecurity {
+                    capabilities: Some(microsandbox_protocol::exec::ExecCapabilities {
+                        bounding: vec!["CAP_UNKNOWN".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            };
+            let result =
+                ExecSession::spawn(81, &req, tx, None, SecurityProfile::Default, None, None);
+            assert!(matches!(result, Err(error) if error.to_string().contains("CAP_UNKNOWN")));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires root with CAP_SETPCAP, CAP_SETUID and CAP_SETGID"]
+    async fn security_ambient_capability_survives_nonroot_exec() {
+        use microsandbox_protocol::exec::{ExecCapabilities, ExecSecurity};
+        for tty in [false, true] {
+            let status = security_status(
+                tty,
+                ExecSecurity {
+                    no_new_privileges: true,
+                    capabilities: Some(ExecCapabilities {
+                        bounding: vec!["CAP_CHOWN".into()],
+                        permitted: vec!["CAP_CHOWN".into()],
+                        effective: vec!["CAP_CHOWN".into()],
+                        inheritable: vec!["CAP_CHOWN".into()],
+                        ambient: vec!["CAP_CHOWN".into()],
+                    }),
+                },
+                Some("1234:1234"),
+            )
+            .await;
+            for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
+                let line = status
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{name}:")))
+                    .unwrap();
+                assert_eq!(
+                    line.split_whitespace().nth(1),
+                    Some("0000000000000001"),
+                    "{status}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a container with CAP_SYS_ADMIN absent from its bounding set"]
+    async fn security_unavailable_capability_reports_spawn_failure() {
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_CAPBSET_READ, 21, 0, 0, 0) },
+            0
+        );
+        for tty in [false, true] {
+            let (tx, _rx) = SessionOutputSender::channel();
+            let req = ExecRequest {
+                cmd: "/bin/true".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+                security: Some(microsandbox_protocol::exec::ExecSecurity {
+                    capabilities: Some(microsandbox_protocol::exec::ExecCapabilities {
+                        bounding: vec!["CAP_SYS_ADMIN".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            };
+            let result =
+                ExecSession::spawn(82, &req, tx, None, SecurityProfile::Default, None, None);
+            assert!(
+                matches!(result, Err(AgentdError::ExecSpawnFailed(error)) if error.errno == Some(libc::EPERM))
+            );
+        }
+    }
+
     #[test]
     fn test_resolve_user_spec_for_current_uid_gid() {
         let uid = unsafe { libc::getuid() };
@@ -2868,6 +3703,7 @@ mod tests {
     #[test]
     fn test_request_user_overrides_config_default() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2886,6 +3722,7 @@ mod tests {
     #[test]
     fn test_config_default_user_used_when_request_has_none() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2909,6 +3746,7 @@ mod tests {
     #[test]
     fn test_request_without_user_does_not_apply_user_switch() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2933,6 +3771,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_resolved_user_home() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2962,6 +3801,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_uses_root_when_user_absent() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: Vec::new(),
@@ -2986,6 +3826,7 @@ mod tests {
     #[test]
     fn test_default_home_dir_respects_explicit_home_env() {
         let req = ExecRequest {
+            security: None,
             cmd: "/bin/true".to_string(),
             args: Vec::new(),
             env: vec!["HOME=/tmp/custom".to_string()],
@@ -3014,6 +3855,7 @@ mod tests {
     async fn test_spawn_pipe_error_does_not_include_probe_details() {
         let (tx, _rx) = SessionOutputSender::channel();
         let req = ExecRequest {
+            security: None,
             cmd: "/definitely/not/a/real/binary".to_string(),
             args: Vec::new(),
             env: Vec::new(),

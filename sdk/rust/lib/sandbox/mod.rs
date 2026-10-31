@@ -1562,6 +1562,7 @@ pub(crate) fn build_exec_request(
         .collect();
 
     ExecRequest {
+        security: None,
         cmd,
         args,
         env,

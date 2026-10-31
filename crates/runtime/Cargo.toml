@@ -35,8 +35,10 @@ runner = [
 download-binaries = ["runner", "microsandbox-filesystem/download-binaries"]
 embed-binaries = ["runner", "microsandbox-filesystem/embed-binaries"]
 net = ["dep:microsandbox-network", "msb_krun?/net"]
+oci-runtime = ["runner", "nix/net", "dep:anyhow", "dep:zbus"]
 
 [dependencies]
+anyhow = { workspace = true, optional = true }
 base64.workspace = true
 cap-primitives.workspace = true
 ciborium-ll.workspace = true
@@ -58,6 +60,7 @@ microsandbox-utils.workspace = true
 microsandbox-vsock = { workspace = true, optional = true }
 msb_krun = { workspace = true, features = ["blk"], optional = true }
 nix = { workspace = true, features = ["process", "signal"] }
+oci-spec.workspace = true
 rand = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 sea-orm.workspace = true
@@ -76,6 +79,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 
 [target.'cfg(unix)'.dependencies]
 microsandbox-agent-client = { workspace = true, features = ["uds"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "4.4.0", default-features = false, features = ["tokio"], optional = true }
 
 [target.'cfg(windows)'.dependencies.microsandbox-agent-client]
 workspace = true

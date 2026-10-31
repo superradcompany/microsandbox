@@ -357,7 +357,10 @@ impl ExecutionTracker {
             MessageType::CoreError => {
                 let error = message.payload::<CoreError>().map_err(|e| e.to_string())?;
                 if session.started
-                    || error.offending_type.as_deref() != Some(MessageType::ExecRequest.as_str())
+                    || !matches!(
+                        error.offending_type.as_deref(),
+                        Some("core.exec.request" | "core.exec.isolated")
+                    )
                 {
                     // Other errors do not prove this request failed. Retain its reservation
                     // until disconnect cleanup confirms that no guest process remains.
@@ -443,6 +446,43 @@ mod tests {
     use microsandbox_protocol::exec::{ExecStderr, ExecStdout};
 
     use super::*;
+
+    #[test]
+    fn isolated_requests_share_execution_admission_and_release_on_rejection() {
+        use microsandbox_protocol::core::CoreErrorKind;
+
+        let flows = ExecutionTracker::default();
+        flows
+            .install(Some(ExecLimits {
+                max_executions: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        let isolated = Message::with_payload(MessageType::ExecIsolated, 1, &()).unwrap();
+        let ordinary = Message::with_payload(MessageType::ExecRequest, 2, &()).unwrap();
+        assert!(matches!(
+            flows.admit(&isolated).unwrap(),
+            Admission::Accepted
+        ));
+        assert!(matches!(flows.admit(&ordinary).unwrap(), Admission::Full));
+        let rejected = Message::with_payload(
+            MessageType::CoreError,
+            1,
+            &CoreError {
+                kind: CoreErrorKind::InvalidPayload,
+                message: "invalid isolated request".into(),
+                offending_type: Some(MessageType::ExecIsolated.as_str().into()),
+                init_failure: None,
+                workload_failure: None,
+            },
+        )
+        .unwrap();
+        flows.guest_message(&rejected, 0).unwrap();
+        assert!(matches!(
+            flows.admit(&ordinary).unwrap(),
+            Admission::Accepted
+        ));
+    }
 
     #[test]
     fn rejected_request_releases_capacity_but_running_errors_require_cleanup() {

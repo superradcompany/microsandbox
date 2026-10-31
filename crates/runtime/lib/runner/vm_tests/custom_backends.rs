@@ -198,6 +198,8 @@ fn config(directory: &Path) -> Config {
         startup_command: None,
         #[cfg(unix)]
         startup_fd: None,
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        startup_console: None,
         #[cfg(windows)]
         startup_pipe: None,
         #[cfg(unix)]

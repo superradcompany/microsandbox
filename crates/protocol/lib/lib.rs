@@ -450,6 +450,7 @@ pub mod exec;
 pub mod exec_control;
 pub mod fs;
 pub mod heartbeat;
+pub mod isolation;
 pub mod message;
 pub mod tcp;
 #[doc(hidden)]

@@ -3892,6 +3892,7 @@ dependencies = [
  "libc",
  "microsandbox-protocol",
  "nix 0.31.3",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -4212,6 +4213,7 @@ dependencies = [
 name = "microsandbox-runtime"
 version = "0.7.11"
 dependencies = [
+ "anyhow",
  "base64 0.23.1",
  "bytes",
  "cap-primitives",
@@ -4237,6 +4239,7 @@ dependencies = [
  "msb_krun",
  "msb_krun_utils",
  "nix 0.31.3",
+ "oci-spec",
  "rand 0.10.3",
  "rustls",
  "sea-orm",
@@ -4249,6 +4252,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "windows-sys 0.61.2",
+ "zbus",
  "zeroize",
 ]
 
@@ -6244,6 +6248,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "runmsb"
+version = "0.7.11"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "libc",
+ "microsandbox",
+ "microsandbox-protocol",
+ "microsandbox-runtime",
+ "nix 0.31.3",
+ "oci-spec",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "russh"
 version = "0.65.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7965,6 +7989,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -9362,6 +9387,7 @@ dependencies = [
  "serde_repr",
  "sha1 0.10.6",
  "static_assertions",
+ "tokio",
  "tracing",
  "uds_windows",
  "windows-sys 0.52.0",

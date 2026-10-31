@@ -4,7 +4,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use microsandbox_protocol::isolation::WorkloadIsolation;
+
+use crate::workload_namespace::NamespaceDomain;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -29,6 +35,9 @@ pub(crate) struct WorkloadLatch {
     freezer: Option<Box<dyn FreezerControl>>,
     unavailable_reason: Option<String>,
     state: LatchState,
+    isolation: Option<Arc<NamespaceDomain>>,
+    isolation_attempted: bool,
+    execution_attempted: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +54,7 @@ trait FreezerControl: Send {
 
 struct CgroupFreezer {
     root: PathBuf,
+    directory: File,
     cgroup_procs: File,
     cgroup_events: File,
 }
@@ -55,6 +65,8 @@ struct CgroupFreezer {
 /// fork-to-exec window used by both agentd spawn paths.
 pub(crate) struct WorkloadPlacement {
     cgroup_procs: OwnedFd,
+    pub(crate) cgroup_directory: Option<OwnedFd>,
+    pub(crate) isolation: Option<Arc<NamespaceDomain>>,
 }
 
 /// A workload-latch operation failure.
@@ -91,6 +103,9 @@ impl WorkloadLatch {
                 freezer: None,
                 unavailable_reason: Some(error.to_string()),
                 state: LatchState::Running { last_thawed: None },
+                isolation: None,
+                isolation_attempted: false,
+                execution_attempted: AtomicBool::new(false),
             },
         }
     }
@@ -101,6 +116,9 @@ impl WorkloadLatch {
             freezer: None,
             unavailable_reason: Some(reason.into()),
             state: LatchState::Running { last_thawed: None },
+            isolation: None,
+            isolation_attempted: false,
+            execution_attempted: AtomicBool::new(false),
         }
     }
 
@@ -114,10 +132,42 @@ impl WorkloadLatch {
     /// `None` deliberately means the freezer was unavailable at boot; normal
     /// exec remains usable in that case.
     pub(crate) fn placement(&self) -> Result<Option<WorkloadPlacement>, WorkloadLatchError> {
-        self.freezer
+        self.execution_attempted.store(true, Ordering::Relaxed);
+        let mut placement = self
+            .freezer
             .as_ref()
             .map(|freezer| freezer.placement().map_err(WorkloadLatchError::Io))
-            .transpose()
+            .transpose()?;
+        if self.isolation_attempted && self.isolation.is_none() {
+            return Err(WorkloadLatchError::Unavailable(
+                "workload isolation setup failed".into(),
+            ));
+        }
+        if let Some(placement) = &mut placement {
+            placement.isolation = self.isolation.clone();
+        }
+        Ok(placement)
+    }
+
+    /// Establish one workload domain before the first OCI command executes.
+    pub(crate) fn configure_isolation(
+        &mut self,
+        policy: WorkloadIsolation,
+    ) -> Result<(), WorkloadLatchError> {
+        if self.isolation_attempted || self.execution_attempted.load(Ordering::Relaxed) {
+            return Err(WorkloadLatchError::Conflict(
+                "workload isolation is already configured".into(),
+            ));
+        }
+        self.isolation_attempted = true;
+        self.freezer()?;
+        let domain = NamespaceDomain::new(policy.clone())?;
+        if policy.cgroup {
+            crate::workload_resources::enable_namespace_delegation()?;
+        }
+        crate::workload_resources::configure(Path::new(CGROUP_ROOT), &policy.resources)?;
+        self.isolation = Some(domain);
+        Ok(())
     }
 
     /// Whether an attempt blocks new work, including an uncertain freezer transition.
@@ -218,6 +268,9 @@ impl WorkloadLatch {
             freezer: Some(freezer),
             unavailable_reason: None,
             state: LatchState::Running { last_thawed: None },
+            isolation: None,
+            isolation_attempted: false,
+            execution_attempted: AtomicBool::new(false),
         }
     }
 
@@ -248,6 +301,7 @@ impl CgroupFreezer {
             .open(root.join("cgroup.procs"))?;
         Ok(Self {
             root: root.to_path_buf(),
+            directory: File::open(root)?,
             cgroup_procs,
             cgroup_events: File::open(events)?,
         })
@@ -283,6 +337,19 @@ impl CgroupFreezer {
 }
 
 impl WorkloadPlacement {
+    #[cfg(test)]
+    pub(crate) fn for_namespace_test(domain: Arc<NamespaceDomain>) -> Self {
+        Self {
+            cgroup_procs: OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .unwrap()
+                .into(),
+            isolation: Some(domain),
+            cgroup_directory: None,
+        }
+    }
+
     /// Move the calling child into the workload cgroup before it executes user code.
     pub(crate) fn place_current(&self) -> io::Result<()> {
         let bytes = b"0";
@@ -320,6 +387,8 @@ impl FreezerControl for CgroupFreezer {
     fn placement(&self) -> io::Result<WorkloadPlacement> {
         Ok(WorkloadPlacement {
             cgroup_procs: self.cgroup_procs.try_clone()?.into(),
+            cgroup_directory: Some(self.directory.try_clone()?.into()),
+            isolation: None,
         })
     }
 
@@ -737,6 +806,27 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn failed_isolation_cannot_fall_back_to_ordinary_execution() {
+        let mut latch = WorkloadLatch::unavailable("no cgroup controller");
+        assert!(latch.configure_isolation(Default::default()).is_err());
+        assert!(latch.placement().is_err());
+        assert!(matches!(
+            latch.configure_isolation(Default::default()),
+            Err(WorkloadLatchError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn isolation_cannot_be_added_after_an_execution_attempt() {
+        let mut latch = WorkloadLatch::unavailable("ordinary exec without freezer");
+        assert!(latch.placement().unwrap().is_none());
+        assert!(matches!(
+            latch.configure_isolation(Default::default()),
+            Err(WorkloadLatchError::Conflict(_))
+        ));
+    }
+
     impl FreezerControl for FakeFreezer {
         fn placement(&self) -> io::Result<WorkloadPlacement> {
             Err(io::Error::new(io::ErrorKind::Unsupported, "not needed"))
@@ -777,6 +867,9 @@ pub(crate) mod tests {
             freezer: None,
             unavailable_reason: Some("missing cgroup2".into()),
             state: LatchState::Running { last_thawed: None },
+            isolation: None,
+            isolation_attempted: false,
+            execution_attempted: AtomicBool::new(false),
         };
 
         assert!(latch.placement().unwrap().is_none());

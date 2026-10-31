@@ -49,7 +49,15 @@ There are two related values to preserve:
 | Known-operation availability gate | Minimum of host generation and ready-frame generation | Minimum of generation 1 and ready-frame generation |
 | Generation emitted in native/encoded envelopes | Host's existing `PROTOCOL_VERSION` | Generation 1 |
 
-The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant is 10 (execution acknowledgements) and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
+The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent generation is now 11 for isolated workload execution, retaining generation-10 execution acknowledgements; the standalone TypeScript client retains its existing generation 5. Framed host control does not itself bump either generation or imply that both client packages expose every agent operation.
+
+Generation 11 adds `core.exec.isolated`, a session-start operation carrying an
+ordinary exec request and a required workload namespace/resource policy. The
+agent establishes this policy once, before any workload execution. Subsequent
+ordinary exec requests join that domain. Failed setup poisons the domain instead
+of admitting unrestricted commands. Existing `core.exec.request` fields and
+framing are unchanged. An agent below generation 11 is rejected by the existing
+known-operation gate, without an adapter or fallback to ordinary exec.
 
 Known message types have an introduction generation in `MessageType::min_protocol_version()`. `AgentProtocol::prepare` checks availability before admitting native or encoded sends. An unsupported known operation returns the shared client's unsupported-operation category without sending it or closing unrelated streams. Dynamic names and raw bytes remain available to callers who deliberately own their protocol interpretation.
 
@@ -71,7 +79,26 @@ Generation 10 remains unreleased. Intermediate generation-10 builds are not a co
 
 ### Bootstrap and shutdown
 
+The current OCI implementation adds an optional `security` field to
+`core.exec.request`: `no_new_privileges` plus five named capability sets.
+Absent settings retain ordinary execution; explicit empty sets drop all
+capabilities. This OCI feature targets matching current `runmsb`, `msb`, and
+embedded agentd builds, by explicit contribution scope. It does not add a
+legacy security adapter or claim enforcement by older agents, which can ignore
+the field. Recreate VMs after rebuilding the embedded agent. Existing protocol
+generations, framing, and unrelated compatibility paths are unchanged.
+
 `core.bootstrap` is a one-shot startup frame sent before the ordinary `core.ready` exchange. It configures a newly launched VM with the agent bundled by the selected build. The guest validates its minimum generation and accepts newer bootstrap generations under the existing optional-field rules. This is distinct from connecting a new SDK to an already-running old VM, and it does not prove compatibility of the host SDK/runtime launch JSON or shared database.
+
+OCI read-only roots use the required `block_root.kind = "read-only-virtiofs"`
+variant, not an optional boolean that older agents could ignore. Old agents
+reject this unknown variant rather than booting a writable root. Before using
+it, the SDK requires launch protocol 2 and `oci_readonly_root: true` from the
+selected `msb`'s `__launch-protocol` response. Missing or false capability values
+reject this new workflow. Existing writable-root bootstraps and legacy launch
+encodings are unchanged. The legacy environment encoder explicitly refuses the
+new mode. Rebuild and embed the matching guest agent when enabling this feature;
+the host capability does not certify an externally overridden agent binary.
 
 Graceful shutdown is an existing uncorrelated agent operation. The SDK preserves its zero ID, shutdown flag, selected wire generation, and empty-unit payload through an explicit packet write, awaited before closing the client. It must not use the generic `send` API, which requires a live owned stream ID. A runtime process exiting is insufficient shutdown evidence: PID fallback can exit without the guest sync needed to preserve recent root-disk writes. The [SDK packet regression test](../../sdk/rust/lib/backend/local/sandbox/shutdown_tests.rs) checks the actual current and legacy packets; live SDK stop/restart tests separately check persistence without manual sync.
 

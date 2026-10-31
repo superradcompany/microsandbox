@@ -38,6 +38,7 @@ net = [
     "dep:thiserror",
     "dep:zeroize",
 ]
+oci-runtime = ["microsandbox/oci-runtime", "microsandbox-runtime/oci-runtime"]
 
 [dependencies]
 semver.workspace = true

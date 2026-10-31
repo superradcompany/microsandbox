@@ -1245,6 +1245,8 @@ impl SshSession {
             .clone()
             .or_else(|| self.user.clone());
         let opts = ExecOptions {
+            #[cfg(feature = "oci-runtime")]
+            security: None,
             args,
             cwd: None,
             user,

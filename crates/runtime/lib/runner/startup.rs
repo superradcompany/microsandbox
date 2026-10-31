@@ -37,6 +37,7 @@ pub(crate) async fn run_startup_command(
         .map_err(|err| RuntimeError::Custom(format!("startup command connect: {err}")))?;
 
     let request = ExecRequest {
+        security: None,
         cmd: command.cmd,
         args: command.args,
         env: command.env,

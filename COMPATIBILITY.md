@@ -6,6 +6,42 @@ When a proposed change crosses one of these boundaries, identify the risk before
 
 Public SDK, CLI, and HTTP API compatibility is intentionally outside this map. The focus here is the protocols, transports, durable formats, runtime ABIs, and lifecycle contracts that make existing Microsandbox installations and sandboxes continue to work.
 
+## OCI workload isolation boundary
+
+OCI namespace/resource enforcement requires current matching builds. The SDK
+probes `__launch-protocol` for `oci_isolation` before launching a sandbox with
+the `oci.microsandbox.isolation` or `oci.microsandbox.host_cgroup` label. The
+startup command carries optional guest and host policies, omitted for ordinary
+SDK launches. Host placement occurs before guest RAM allocation; it is not
+a migration of an already-booted VM. Agent generation 11 introduces
+`core.exec.isolated`; the existing client availability gate rejects older agents.
+No adapter or unrestricted fallback is supplied for this new feature.
+
+Application user namespaces additionally require the `oci_user_namespace`
+launch capability and `workload_user_namespace: true` in agent readiness.
+The optional `WorkloadIsolation.user` field is omitted when unused, preserving
+existing isolation payloads. An old host can still use a new agent; a new host
+refuses user-namespace requests to an old runtime or agent before execution.
+UID/GID mapping targets are IDs in the parent guest namespace, not host-kernel
+IDs. Rootfs and host bind-mount ownership is never recursively rewritten.
+
+Existing ordinary exec payloads are unchanged. In an isolated VM they join its
+already configured domain. Agentd rejects reconfiguration after any execution
+attempt and rejects further execution after failed namespace setup. The original
+configuration remains authoritative across all sessions.
+
+The guest requires cgroup v2, the descriptor-based mount API and
+`clone3(CLONE_INTO_CGROUP)`. Host systemd scopes
+use PIDFDs to preserve process identity across D-Bus; the host manager must
+support that property. Cgroupfs placement requires a delegated/writable v2
+hierarchy. Unsupported kernels or managers fail explicitly. These requirements
+apply to the new OCI isolation path, not ordinary SDK sandbox creation.
+
+New cgroupfs state records the owned host group's absolute path and inode for
+cleanup. Older runmsb binaries do not know this record or its cleanup contract;
+do not downgrade a live OCI container. Stop and delete it with its creating
+build first. No persisted catalog or disk-format migration is introduced.
+
 ## Compatibility Directions
 
 Review every direction that applies to the change:
