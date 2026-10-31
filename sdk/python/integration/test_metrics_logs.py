@@ -61,9 +61,9 @@ async def test_metrics_snapshot_stream_and_all_sandbox_metrics(sandbox_factory):
 async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-logs")
 
-    first = await sandbox.shell("echo old-log-line")
+    first = await sandbox.shell("echo old-log-line", capture=True)
     assert first.success is True
-    second = await sandbox.shell("echo recent-log-line; echo err-log-line >&2")
+    second = await sandbox.shell("echo recent-log-line; echo err-log-line >&2", capture=True)
     assert second.success is True
 
     stdout_entries = await sandbox.logs(tail=20, sources=[LogReadSource.STDOUT])
@@ -98,3 +98,16 @@ async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     handle = await Sandbox.get(name)
     stopped_entries = await handle.logs(tail=20, sources=[LogReadSource.STDOUT])
     assert "recent-log-line" in "".join(entry.text() for entry in stopped_entries)
+
+
+@pytest.mark.asyncio
+async def test_logs_do_not_record_an_exec_that_did_not_ask(sandbox_factory):
+    """Capture is opt-in per exec: an ad-hoc shell that does not ask leaves
+    nothing in `exec.log`."""
+    sandbox = await sandbox_factory("py-sdk-logs-uncaptured")
+
+    result = await sandbox.shell("echo uncaptured-log-line")
+    assert result.success is True
+
+    entries = await sandbox.logs(tail=50)
+    assert "uncaptured-log-line" not in "".join(entry.text() for entry in entries)
