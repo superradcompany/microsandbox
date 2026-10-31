@@ -15,11 +15,15 @@ export type MicrosandboxErrorCode =
   | "sandboxNotRunning"
   | "sandboxStopTimedOut"
   | "runtime"
+  | "bootStart"
   | "json"
   | "protocol"
+  | "agentClient"
   | "nix"
+  | "windowsHostSetup"
   | "execTimeout"
   | "stopTimeout"
+  | "execFailed"
   | "terminal"
   | "sandboxFsOps"
   | "imageNotFound"
@@ -27,10 +31,19 @@ export type MicrosandboxErrorCode =
   | "volumeNotFound"
   | "volumeAlreadyExists"
   | "image"
+  | "networkBuilder"
   | "patchFailed"
+  | "snapshotNotFound"
+  | "snapshotAlreadyExists"
+  | "snapshotSandboxRunning"
+  | "snapshotImageMissing"
+  | "snapshotIntegrity"
   | "snapshotSourceRecovery"
+  | "snapshotMigration"
   | "metricsDisabled"
   | "metricsUnavailable"
+  | "missedRotation"
+  | "invalidCursor"
   | "unsupportedOperation"
   | "unsupported"
   | "modificationNotConfirmed"
@@ -142,6 +155,12 @@ export class RuntimeError extends MicrosandboxError {
   }
 }
 
+export class BootStartError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("bootStart", message, options);
+  }
+}
+
 export class JsonError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("json", message, options);
@@ -154,9 +173,21 @@ export class ProtocolError extends MicrosandboxError {
   }
 }
 
+export class AgentClientError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("agentClient", message, options);
+  }
+}
+
 export class NixError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("nix", message, options);
+  }
+}
+
+export class WindowsHostSetupError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("windowsHostSetup", message, options);
   }
 }
 
@@ -173,6 +204,12 @@ export class ExecTimeoutError extends MicrosandboxError {
 export class StopTimeoutError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("stopTimeout", message, options);
+  }
+}
+
+export class ExecFailedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("execFailed", message, options);
   }
 }
 
@@ -218,9 +255,45 @@ export class ImageError extends MicrosandboxError {
   }
 }
 
+export class NetworkBuilderError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("networkBuilder", message, options);
+  }
+}
+
 export class PatchFailedError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("patchFailed", message, options);
+  }
+}
+
+export class SnapshotNotFoundError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotNotFound", message, options);
+  }
+}
+
+export class SnapshotAlreadyExistsError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotAlreadyExists", message, options);
+  }
+}
+
+export class SnapshotSandboxRunningError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotSandboxRunning", message, options);
+  }
+}
+
+export class SnapshotImageMissingError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotImageMissing", message, options);
+  }
+}
+
+export class SnapshotIntegrityError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotIntegrity", message, options);
   }
 }
 
@@ -260,9 +333,27 @@ export class SnapshotSourceRecoveryError extends MicrosandboxError {
   }
 }
 
+export class SnapshotMigrationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("snapshotMigration", message, options);
+  }
+}
+
 export class MetricsUnavailableError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("metricsUnavailable", message, options);
+  }
+}
+
+export class MissedRotationError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("missedRotation", message, options);
+  }
+}
+
+export class InvalidCursorError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("invalidCursor", message, options);
   }
 }
 

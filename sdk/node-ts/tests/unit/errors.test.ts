@@ -1,20 +1,65 @@
 import { describe, expect, it } from "vitest";
 import {
+  AgentClientError,
+  BootStartError,
+  ExecFailedError,
   ExecTimeoutError,
   StopTimeoutError,
   ImageNotFoundError,
+  InvalidCursorError,
   MetricsDisabledError,
   MicrosandboxError,
+  MissedRotationError,
   ModificationNotConfirmedError,
+  NetworkBuilderError,
   NoDefaultCommandError,
+  PatchFailedError,
   SandboxNotFoundError,
   SandboxReplacedError,
+  SnapshotAlreadyExistsError,
+  SnapshotImageMissingError,
+  SnapshotIntegrityError,
+  SnapshotMigrationError,
+  SnapshotNotFoundError,
+  SnapshotSandboxRunningError,
   SnapshotSourceRecoveryError,
   SandboxStopTimedOutError,
+  WindowsHostSetupError,
 } from "../../dist/index.js";
 import { mapNapiError } from "../../dist/internal/error-mapping.js";
 
 describe("mapNapiError", () => {
+  for (const [tag, ctor, code] of [
+    ["BootStart", BootStartError, "bootStart"],
+    ["AgentClient", AgentClientError, "agentClient"],
+    ["WindowsHostSetup", WindowsHostSetupError, "windowsHostSetup"],
+    ["ExecFailed", ExecFailedError, "execFailed"],
+    ["NetworkBuilder", NetworkBuilderError, "networkBuilder"],
+    ["SnapshotNotFound", SnapshotNotFoundError, "snapshotNotFound"],
+    ["SnapshotAlreadyExists", SnapshotAlreadyExistsError, "snapshotAlreadyExists"],
+    ["SnapshotSandboxRunning", SnapshotSandboxRunningError, "snapshotSandboxRunning"],
+    ["SnapshotImageMissing", SnapshotImageMissingError, "snapshotImageMissing"],
+    ["SnapshotIntegrity", SnapshotIntegrityError, "snapshotIntegrity"],
+    ["SnapshotMigration", SnapshotMigrationError, "snapshotMigration"],
+    ["MissedRotation", MissedRotationError, "missedRotation"],
+    ["InvalidCursor", InvalidCursorError, "invalidCursor"],
+  ] as const) {
+    it(`maps ${tag} to its exact public class and SDK code`, () => {
+      const message = "something went wrong\nwith [additional] context";
+      const raw = new Error(`[${tag}] ${message}`);
+
+      const mapped = mapNapiError(raw) as MicrosandboxError;
+
+      expect(mapped).toBeInstanceOf(MicrosandboxError);
+      expect(mapped).toBeInstanceOf(ctor);
+      expect(mapped.constructor).toBe(ctor);
+      expect(mapped.name).toBe(`${tag}Error`);
+      expect(mapped.code).toBe(code);
+      expect(mapped.message).toBe(message);
+      expect(mapped.cause).toBe(raw);
+    });
+  }
+
   it("preserves graceful stop timeout as a distinct error", () => {
     const raw = new Error('[StopTimeout] sandbox "busy" timed out; no kill was requested');
     const mapped = mapNapiError(raw);
@@ -110,6 +155,17 @@ describe("mapNapiError", () => {
     expect(mapNapiError(new Error("[ImageNotFound] python:3.12"))).toBeInstanceOf(
       ImageNotFoundError,
     );
+  });
+
+  it("preserves the PatchFailed mapping", () => {
+    const raw = new Error("[PatchFailed] could not apply patch");
+
+    const mapped = mapNapiError(raw) as PatchFailedError;
+
+    expect(mapped).toBeInstanceOf(PatchFailedError);
+    expect(mapped.code).toBe("patchFailed");
+    expect(mapped.message).toBe("could not apply patch");
+    expect(mapped.cause).toBe(raw);
   });
 
   it("maps MetricsDisabled to MetricsDisabledError", () => {

@@ -12,6 +12,37 @@ function loadPackageRoot(inputType: "commonjs" | "module", source: string): stri
 }
 
 describe("package root exports", () => {
+  for (const inputType of ["module", "commonjs"] as const) {
+    it(`exports the native error subclasses through ${inputType}`, () => {
+      const names = [
+        "BootStartError",
+        "AgentClientError",
+        "WindowsHostSetupError",
+        "ExecFailedError",
+        "NetworkBuilderError",
+        "SnapshotNotFoundError",
+        "SnapshotAlreadyExistsError",
+        "SnapshotSandboxRunningError",
+        "SnapshotImageMissingError",
+        "SnapshotIntegrityError",
+        "SnapshotMigrationError",
+        "MissedRotationError",
+        "InvalidCursorError",
+      ];
+      const loader = inputType === "module"
+        ? 'import * as sdk from "microsandbox";'
+        : 'const sdk = require("microsandbox");';
+
+      const output = loadPackageRoot(
+        inputType,
+        `${loader} const names = ${JSON.stringify(names)};
+         process.stdout.write(JSON.stringify(names.map((name) => typeof sdk[name])));`,
+      );
+
+      expect(JSON.parse(output)).toEqual(names.map(() => "function"));
+    });
+  }
+
   it("loads through ESM import", () => {
     const output = loadPackageRoot(
       "module",
