@@ -11,6 +11,7 @@ pub mod checkpoint;
 #[cfg(feature = "client")]
 mod client;
 mod error;
+pub mod oci;
 #[cfg(feature = "runner")]
 mod runner;
 
