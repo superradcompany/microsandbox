@@ -1,5 +1,8 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
+#[cfg(feature = "net")]
+use std::path::PathBuf;
+
 use clap::Args;
 use microsandbox::{
     MicrosandboxError, RestoreKind,
@@ -136,6 +139,29 @@ pub struct RestoreControlArgs {
     #[cfg(feature = "net")]
     #[arg(long)]
     pub max_udp_connections: Option<usize>,
+    /// Bind a protected secret (`ENV[:OPTIONS]@HOST[,HOST...]`) as create does; repeatable.
+    /// The value is read from the host environment. A full restore must rebind the
+    /// placeholders its source sandbox was started with.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "ENV[:OPTIONS]@HOST[,HOST...]")]
+    pub secret: Vec<String>,
+    /// Load an unwrapped secret-name map as create does; repeatable.
+    #[cfg(feature = "net")]
+    #[arg(long, value_name = "PATH")]
+    pub secret_conf: Vec<PathBuf>,
+    /// Action when a secret placeholder is blocked (block, block-and-log, block-and-terminate).
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub secret_violation_action: Option<String>,
+    /// CA certificate (PEM) for TLS interception. A full restore must use the source's CA,
+    /// because the resumed guest trusts only the CA it installed at boot.
+    #[cfg(feature = "net")]
+    #[arg(long, requires = "tls_intercept_ca_key")]
+    pub tls_intercept_ca_cert: Option<PathBuf>,
+    /// CA private key (PEM) for TLS interception; requires --tls-intercept-ca-cert.
+    #[cfg(feature = "net")]
+    #[arg(long, requires = "tls_intercept_ca_cert")]
+    pub tls_intercept_ca_key: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -180,6 +206,22 @@ impl RestoreControlArgs {
             }
             if let Some(limit) = self.max_udp_connections {
                 builder = builder.max_udp_connections(limit);
+            }
+            for entry in crate::sandbox_config::load_secret_conf(&self.secret_conf)? {
+                builder = builder.secret_entry(entry);
+            }
+            for secret in super::common::merge_secrets(&self.secret, "restore")? {
+                builder = builder.secret(|s| super::common::secret_from_env(s, secret));
+            }
+            if let Some(action) =
+                super::common::parse_violation_action(&self.secret_violation_action)?
+            {
+                builder = builder.secret_violation_action(action);
+            }
+            if let (Some(cert), Some(key)) =
+                (&self.tls_intercept_ca_cert, &self.tls_intercept_ca_key)
+            {
+                builder = builder.tls_intercept_ca(cert, key);
             }
         }
         Ok(builder)
@@ -632,6 +674,87 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_binds_secrets_like_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("secrets.yaml");
+        std::fs::write(
+            &conf,
+            r#"{"GKEY":{"placeholder":"captured-placeholder","allow":["gate.test"]}}"#,
+        )
+        .unwrap();
+
+        let cli = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "worker",
+            "--secret-conf",
+            conf.to_str().unwrap(),
+            "--secret",
+            "OTHER@api.test",
+            "--secret-violation-action",
+            "block-and-log",
+        ])
+        .unwrap();
+        let entries =
+            crate::sandbox_config::load_secret_conf(&cli.args.controls.secret_conf).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].env_var, "GKEY");
+        assert_eq!(entries[0].placeholder, "captured-placeholder");
+        assert!(entries[0].value.is_empty());
+        assert!(cli.args.controls.apply(Sandbox::restore("ready")).is_ok());
+
+        let inline = RestoreControlArgs {
+            secret: vec!["GKEY=plaintext@gate.test".into()],
+            ..Default::default()
+        };
+        let Err(error) = inline.apply(Sandbox::restore("ready")) else {
+            panic!("an inline secret value must be refused");
+        };
+        let error = error.to_string();
+        assert!(error.contains("restore"), "{error}");
+        assert!(!error.contains("plaintext"), "{error}");
+
+        let action = RestoreControlArgs {
+            secret_violation_action: Some("allow".into()),
+            ..Default::default()
+        };
+        assert!(action.apply(Sandbox::restore("ready")).is_err());
+
+        let with_ca = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "worker",
+            "--tls-intercept-ca-cert",
+            "ca.pem",
+            "--tls-intercept-ca-key",
+            "ca.key",
+        ])
+        .unwrap();
+        assert!(
+            with_ca
+                .args
+                .controls
+                .apply(Sandbox::restore("ready"))
+                .is_ok()
+        );
+        assert!(
+            TestCli::try_parse_from([
+                "restore",
+                "ready",
+                "--name",
+                "worker",
+                "--tls-intercept-ca-cert",
+                "ca.pem",
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(feature = "net")]

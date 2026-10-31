@@ -1605,6 +1605,26 @@ fn validate_script_name(name: &str) -> anyhow::Result<()> {
 // Functions: Network
 //--------------------------------------------------------------------------------------------------
 
+/// Load `--secret-conf` maps for a command that binds secrets without a full sandbox
+/// configuration, such as snapshot restore. Later files override earlier ones per name.
+#[cfg(feature = "net")]
+pub(crate) fn load_secret_conf(
+    paths: &[PathBuf],
+) -> anyhow::Result<Vec<microsandbox_types::SecretEntry>> {
+    let mut secrets = BTreeMap::new();
+    for path in paths {
+        reject_scoped_wrapper(path, "secrets", "--secret-conf")?;
+        let higher = load_typed_at::<BTreeMap<String, SecretInput>>(
+            path,
+            "secret config",
+            vec!["secrets".to_string()],
+        )?;
+        merge_secrets(&mut secrets, higher);
+    }
+
+    materialize_secrets(&secrets)
+}
+
 #[cfg(feature = "net")]
 fn materialize_network_patch(
     input: Option<&NetworkInput>,
