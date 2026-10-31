@@ -1095,7 +1095,6 @@ Restore rejects missing external filesystems (and, for full restore, additional 
 | `cpus(), memory()` | CPU count and memory in MiB. Full restore must match capture. |
 | `network_policy()` | Replace host traffic filtering; guest DNS and TLS settings stay unchanged. |
 | `max_connections()` | Concurrent TCP limit; zero means unlimited. |
-| `secret(), secret_entry(), secret_violation_action()` | Bind protected secrets as at creation. Values come from the destination host, never the snapshot. A full restore must rebind the source's placeholders; binding a secret turns TLS interception on. |
 | `disable_network()` | Remove the NIC. Rejected for full snapshots that captured one. |
 | `security()` | Guest security profile. Disk boot only, including an explicit default profile. |
 | `guest_clock()` | Override the snapshot's clock setting with `Sync` or `Off`. Supports full restores. |
@@ -1134,6 +1133,52 @@ let child = Sandbox::restore("api:baseline")
 ```
 
 </Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secret()</span>
+
+```rust
+fn secret(self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self
+```
+
+Bind a protected secret in the destination, as `SandboxBuilder::secret()` does. The value is resolved on the destination host; snapshots never store it. A full restore resumes a guest that already holds its placeholders, so bind the same name and placeholder the source used. Turns TLS interception on.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::Sandbox;
+
+let child = Sandbox::restore("api:baseline")
+    .name("api-restored")
+    .secret(|s| s.env("API_KEY").value(api_key).placeholder("api-key-placeholder").allow("api.example.com"))
+    .restore()
+    .await?;
+```
+
+</Accordion>
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secret_entry()</span>
+
+```rust
+fn secret_entry(self, entry: SecretEntry) -> Self
+```
+
+Bind an already materialized secret entry; same rules as `secret()`.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">secret_violation_action()</span>
+
+```rust
+fn secret_violation_action(self, action: SecretViolationAction) -> Self
+```
+
+Set the destination's default action for blocked placeholders: `Block`, `BlockAndLog`, or `BlockAndTerminate`.
+
+#### <span className="msb-recv">restore.</span><span className="msb-hn">tls_intercept_ca()</span>
+
+```rust
+fn tls_intercept_ca(self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self
+```
+
+Intercept TLS with this CA certificate and private key (PEM files). A full restore does not rerun the guest's trust setup, so the resumed guest trusts only the CA it installed at boot. Pass the source's CA when it used a custom one or when the destination's default CA differs; otherwise intercepted HTTPS fails certificate checks in the guest.
 
 #### <span className="msb-recv">restore.</span><span className="msb-hn">allow_missing_resources()</span>
 

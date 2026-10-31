@@ -153,6 +153,15 @@ pub struct RestoreControlArgs {
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret_violation_action: Option<String>,
+    /// CA certificate (PEM) for TLS interception. A full restore must use the source's CA,
+    /// because the resumed guest trusts only the CA it installed at boot.
+    #[cfg(feature = "net")]
+    #[arg(long, requires = "tls_intercept_ca_key")]
+    pub tls_intercept_ca_cert: Option<PathBuf>,
+    /// CA private key (PEM) for TLS interception; requires --tls-intercept-ca-cert.
+    #[cfg(feature = "net")]
+    #[arg(long, requires = "tls_intercept_ca_cert")]
+    pub tls_intercept_ca_key: Option<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -208,6 +217,11 @@ impl RestoreControlArgs {
                 super::common::parse_violation_action(&self.secret_violation_action)?
             {
                 builder = builder.secret_violation_action(action);
+            }
+            if let (Some(cert), Some(key)) =
+                (&self.tls_intercept_ca_cert, &self.tls_intercept_ca_key)
+            {
+                builder = builder.tls_intercept_ca(cert, key);
             }
         }
         Ok(builder)
@@ -711,6 +725,36 @@ mod tests {
             ..Default::default()
         };
         assert!(action.apply(Sandbox::restore("ready")).is_err());
+
+        let with_ca = TestCli::try_parse_from([
+            "restore",
+            "ready",
+            "--name",
+            "worker",
+            "--tls-intercept-ca-cert",
+            "ca.pem",
+            "--tls-intercept-ca-key",
+            "ca.key",
+        ])
+        .unwrap();
+        assert!(
+            with_ca
+                .args
+                .controls
+                .apply(Sandbox::restore("ready"))
+                .is_ok()
+        );
+        assert!(
+            TestCli::try_parse_from([
+                "restore",
+                "ready",
+                "--name",
+                "worker",
+                "--tls-intercept-ca-cert",
+                "ca.pem",
+            ])
+            .is_err()
+        );
     }
 
     #[cfg(feature = "net")]
