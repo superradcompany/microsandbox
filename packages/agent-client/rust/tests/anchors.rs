@@ -52,6 +52,7 @@ async fn live_anchor_metadata_execution_and_unsupported_ping() {
             rows: 24,
             cols: 80,
             rlimits: vec![],
+            capture: false,
         };
         let stream = client
             .stream(TypedMessage::new(MessageType::ExecRequest, &request))

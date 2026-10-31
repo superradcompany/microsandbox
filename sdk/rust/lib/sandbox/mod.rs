@@ -1584,6 +1584,7 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
+        capture: false,
     }
 }
 
