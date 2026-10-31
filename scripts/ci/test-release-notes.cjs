@@ -46,7 +46,7 @@ function workflow(path) {
 }
 
 function render(script) {
-  const values = { 'github.ref_name': 'v1.0.0', 'github.sha': 'abc123', 'steps.merge.outputs.result': 'clean' };
+  const values = { 'needs.release-context.outputs.tag': 'v1.0.0', 'needs.release-context.outputs.source_sha': 'abc123', 'steps.merge.outputs.result': 'clean' };
   return script.replace(/\$\{\{\s*([^}]+?)\s*\}\}/g, (_, key) => {
     assert.ok(Object.hasOwn(values, key), `Unsupported workflow expression: ${key}`);
     return values[key];
@@ -137,7 +137,7 @@ test('release workflow backfills included PRs before generating and publishing i
       if (step.uses?.startsWith('actions/github-script@')) {
         await new AsyncFunction('require', 'github', 'context', 'process', step.with.script)(
           createRequire(join(root, 'workflow-runner.cjs')), github, { repo, serverUrl },
-          { env: { ...process.env, GITHUB_REF_NAME: 'v1.0.0', RUNNER_TEMP: directory } },
+          { env: { ...process.env, MSB_RELEASE_TAG: 'v1.0.0', RUNNER_TEMP: directory } },
         );
       }
       if (step.run?.includes('gh release create')) {
