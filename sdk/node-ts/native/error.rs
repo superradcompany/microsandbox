@@ -82,6 +82,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::MissedRotation { .. } => "MissedRotation",
         MicrosandboxError::InvalidCursor(_) => "InvalidCursor",
         MicrosandboxError::Unsupported { .. } => "Unsupported",
+        MicrosandboxError::ModificationNotConfirmed { .. } => "ModificationNotConfirmed",
         MicrosandboxError::Custom(_) => "Custom",
     }
 }
@@ -131,5 +132,18 @@ mod tests {
         );
         assert!(payload["recovery"]["artifact"].is_null());
         assert_eq!(payload["recovery"]["publication_error"], "disk full");
+    }
+
+    #[test]
+    fn modification_not_confirmed_preserves_code_and_message() {
+        let error = MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        };
+
+        assert_eq!(error_type_str(&error), "ModificationNotConfirmed");
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
     }
 }

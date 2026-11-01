@@ -123,7 +123,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/release-note-checks"
           "$RUNNER_TEMP/release-note-checks/bin/pip" install PyYAML==6.0.3
-          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs
+          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs scripts/ci/test-release-context.cjs
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
@@ -479,7 +479,7 @@ jobs:
             agentd_target: aarch64-unknown-linux-musl
             libkrunfw_file: libkrunfw.so.5.6.1
           - target: darwin-aarch64
-            runner: macos-14
+            runner: macos-15
             os: darwin
             agentd_target: ""
             libkrunfw_file: libkrunfw.5.dylib
@@ -1248,7 +1248,7 @@ jobs:
             runner: ubuntu-22.04-arm
             agentd: aarch64
           - platform: arm64-darwin
-            runner: macos-14
+            runner: macos-15
             agentd: aarch64
           # RubyInstaller uses MinGW-ucrt, so this needs the windows-gnu Rust
           # target rather than the MSVC target used by the rest of Windows CI.
@@ -1350,7 +1350,7 @@ jobs:
           - platform: aarch64-linux-gnu
             runner: ubuntu-22.04-arm
           - platform: arm64-darwin
-            runner: macos-14
+            runner: macos-15
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
@@ -1425,7 +1425,7 @@ jobs:
           - platform: aarch64-linux-gnu
             runner: ubuntu-22.04-arm
           - platform: arm64-darwin
-            runner: macos-14
+            runner: macos-15
           - platform: x64-mingw-ucrt
             runner: windows-latest
     steps:
