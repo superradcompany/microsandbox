@@ -8,7 +8,7 @@ icon: "book"
 
 Interactive sessions are detected automatically; no `-it` flags are needed.
 
-Set `MSB_BACKEND=cloud` and `MSB_API_KEY` to use [microsandbox cloud](/cloud/overview), or select a saved cloud profile with `msb context use <name>`. Each reference page marks local-only commands and cloud limitations.
+Use `--cloud` with `MSB_API_KEY` to use [microsandbox cloud](/cloud/overview), use `--local` to select the local runtime, or select a saved cloud profile with `msb context use <name>`. Each reference page marks local-only commands and cloud limitations.
 
 ## Install
 
@@ -108,6 +108,8 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 
 | Flag | Description |
 |------|-------------|
+| `--cloud` | Select cloud for this invocation; requires credentials and conflicts with `--local` |
+| `--local` | Select the local runtime for this invocation; conflicts with `--cloud` |
 | `--tree` | Display the complete command tree with descriptions |
 | `-L, --levels <N>` | Limit tree depth, counting the selected root as level 0 (requires `--tree`) |
 | `-C, --commands` | Hide flags and arguments in the command tree (requires `--tree`) |
@@ -117,6 +119,8 @@ Omit `--full` to save disk state for a fresh boot. The group defaults to the sou
 | `--info` | Show info, warnings, and errors |
 | `--debug` | Show debug output |
 | `--trace` | Show all output including trace |
+
+Backend flags work before or after subcommands: `msb --cloud sandbox ls`, `msb sandbox --cloud ls`, and `msb sandbox ls --cloud` are equivalent. Arguments after the guest-command separator `--` belong to the guest. With neither flag, existing environment and profile selection applies. Flags do not save a preference; managed restrictions still apply. See [Local or cloud](/operations/backends#cli-flags).
 
 ## Output formatting
 

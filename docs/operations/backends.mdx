@@ -10,9 +10,29 @@ Use the simplest selector that matches who owns the decision:
 
 | Selector | Best for |
 | --- | --- |
+| CLI `--cloud` / `--local` | Explicit selection for one CLI invocation |
 | `MSB_BACKEND` | One command, a shell, CI, or deployment configuration |
 | SDK | Applications that must choose independently of their environment |
 | Named profile | Regular switching or shared environment defaults |
+
+## CLI flags
+
+Use `--cloud` or `--local` before or after a subcommand:
+
+<CodeGroup>
+```bash Shell
+export MSB_API_KEY="msb_..."
+msb --cloud ls
+msb sandbox ls --local
+msb --cloud run python:3.12 -- python -V
+```
+</CodeGroup>
+
+The flags are mutually exclusive and override `MSB_BACKEND` for this invocation without changing your saved profile or parent shell. With neither flag, selection is unchanged. Cloud uses `MSB_API_KEY` and optional `MSB_API_URL`, or a selected cloud profile when no API key is supplied. Missing credentials produce an error; cloud never falls back to local execution.
+
+Managed backend restrictions still apply. If a managed active profile selects the opposite backend, the command reports a conflict instead of silently using that backend. `msb context` reports this selection through the existing `MSB_BACKEND` source.
+
+Keep the backend flag before the guest-command separator `--`. In `msb run --cloud python:3.12 -- python script.py --local`, `--local` is an argument to `script.py`.
 
 ## Environment
 
