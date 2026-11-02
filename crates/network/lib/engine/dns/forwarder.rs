@@ -42,7 +42,9 @@ use hickory_net::proto::rr::{Name, RData, Record, RecordType};
 use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_net::xfer::DnsHandle;
 #[cfg(not(windows))]
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
+#[cfg(not(windows))]
+use tokio::sync::Mutex;
 use tokio::sync::{OnceCell, watch};
 
 use super::client::{Client, build_direct_client, build_tcp_client, build_udp_client};
@@ -170,7 +172,9 @@ struct HostUpstreams {
     /// Upstreams from the latest read of the host's DNS servers. Queries
     /// clone the `Arc` and release the lock before sending.
     current: RwLock<Arc<Vec<ConfiguredUpstream>>>,
-    /// When the host's servers were last re-read.
+    /// When the host's servers were last re-read. Held for the whole
+    /// re-read, so a query that fails meanwhile waits and then uses the
+    /// servers that re-read installed.
     last_reread: Mutex<Option<Instant>>,
     /// Minimum time between re-reads.
     reread_interval: Duration,
@@ -207,6 +211,10 @@ enum UpstreamDecision {
     /// an NXDOMAIN denial.
     PolicyDenied,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
 
 impl DnsForwarder {
     /// Process a single raw DNS query: parse, apply block list, select
@@ -834,15 +842,19 @@ impl HostUpstreams {
         failed: &Arc<Vec<ConfiguredUpstream>>,
         query_timeout: Duration,
     ) -> Option<Arc<Vec<ConfiguredUpstream>>> {
+        let mut last_reread = self.last_reread.lock().await;
+
         // Another query already replaced the list this one used.
         let current = self.current();
         if !Arc::ptr_eq(&current, failed) {
             return Some(current);
         }
 
-        if !self.claim_reread() {
+        let now = Instant::now();
+        if last_reread.is_some_and(|last| now.duration_since(last) < self.reread_interval) {
             return None;
         }
+        *last_reread = Some(now);
 
         let servers = match (self.read_servers)().await {
             Ok(servers) if !servers.is_empty() => servers,
@@ -869,19 +881,6 @@ impl HostUpstreams {
             Arc::new(DnsForwarder::build_direct_upstreams(servers, query_timeout).await?);
         *self.current.write() = Arc::clone(&upstreams);
         Some(upstreams)
-    }
-
-    /// Record a re-read starting now, unless one started less than
-    /// `reread_interval` ago.
-    fn claim_reread(&self) -> bool {
-        let now = Instant::now();
-        let mut last_reread = self.last_reread.lock();
-        if last_reread.is_some_and(|last| now.duration_since(last) < self.reread_interval) {
-            return false;
-        }
-
-        *last_reread = Some(now);
-        true
     }
 }
 
@@ -1163,6 +1162,8 @@ mod tests {
     use hickory_net::proto::rr::{DNSClass, Name, RecordType};
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(not(windows))]
+    use tokio::sync::Notify;
 
     /// Per-query timeout for test upstreams; short so dead servers fail fast.
     const TEST_QUERY_TIMEOUT: Duration = Duration::from_millis(300);
@@ -1716,6 +1717,64 @@ mod tests {
         assert_eq!(resolve_via_gateway(&forwarder).await, None);
         assert_eq!(resolve_via_gateway(&forwarder).await, None);
         assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    /// A query that fails while another query is re-reading the host must
+    /// retry with the servers that read installs, not give up.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn concurrent_failure_uses_the_servers_from_an_inflight_reread() {
+        let old = blackhole_udp().await;
+        let new = blackhole_udp().await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let read_servers: HostDnsReader = {
+            let reads = Arc::clone(&reads);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::new(move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(vec![new])
+                })
+            })
+        };
+        let host = Arc::new(HostUpstreams {
+            current: RwLock::new(Arc::new(test_upstreams(&[old]).await)),
+            last_reread: Mutex::new(None),
+            reread_interval: HOST_DNS_REREAD_INTERVAL,
+            read_servers,
+        });
+        let failed = host.current();
+
+        let first = tokio::spawn({
+            let host = Arc::clone(&host);
+            let failed = Arc::clone(&failed);
+            async move { host.refresh(&failed, TEST_QUERY_TIMEOUT).await }
+        });
+        entered.notified().await;
+        let second = tokio::spawn({
+            let host = Arc::clone(&host);
+            let failed = Arc::clone(&failed);
+            async move { host.refresh(&failed, TEST_QUERY_TIMEOUT).await }
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        for refreshed in [first.await.unwrap(), second.await.unwrap()] {
+            let addrs: Vec<SocketAddr> = refreshed
+                .expect("both queries get the new servers")
+                .iter()
+                .map(|upstream| upstream.addr)
+                .collect();
+            assert_eq!(addrs, [new]);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
     /// Explicitly configured nameservers are the operator's choice and are
