@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Args;
 use futures::{FutureExt, StreamExt};
 use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
-use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
+use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox, SandboxTerminationReason};
 
 use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
@@ -119,9 +119,8 @@ pub async fn run(args: RunArgs, log_level: Option<microsandbox::LogLevel>) -> an
 /// Run in an existing named sandbox — start if stopped, connect if running.
 async fn run_existing(name: String, args: RunArgs) -> anyhow::Result<()> {
     if let Some(ignored) = ignored_existing_inputs(&args) {
-        ui::warn(&format!(
-            "sandbox '{name}' already exists; {ignored} ignored (use --replace to recreate)"
-        ));
+        let last_run_failed = last_run_failed(&name).await;
+        ui::warn(&existing_reuse_warning(&name, ignored, last_run_failed));
     }
 
     let sandbox = super::resolve_and_start(&name, args.sandbox.quiet).await?;
@@ -432,6 +431,31 @@ fn ignored_existing_inputs(args: &RunArgs) -> Option<&'static str> {
     args.sandbox
         .has_creation_flags()
         .then_some("creation flags")
+}
+
+/// Whether the latest run of an existing sandbox ended in failure, including
+/// a create that failed after boot and left the sandbox stopped.
+async fn last_run_failed(name: &str) -> bool {
+    // The result only refines a warning, so a failed lookup must not stop the run.
+    let Ok(handle) = Sandbox::get(name).await else {
+        return false;
+    };
+
+    matches!(
+        handle.terminal_exit().await,
+        Ok(Some(exit)) if exit.reason == Some(SandboxTerminationReason::Failed)
+    )
+}
+
+/// Build the warning shown when a named run reuses an existing sandbox.
+fn existing_reuse_warning(name: &str, ignored: &str, last_run_failed: bool) -> String {
+    let state = if last_run_failed {
+        " and its last run failed"
+    } else {
+        ""
+    };
+
+    format!("sandbox '{name}' already exists{state}; {ignored} ignored (use --replace to recreate)")
 }
 
 /// Warn when a detached run reuses an existing sandbox and includes a command.
@@ -839,5 +863,25 @@ mod tests {
         let args = parse_run_args(&["--name", "box", "--memory", "1G"]);
 
         assert_eq!(ignored_existing_inputs(&args), Some("creation flags"));
+    }
+
+    #[test]
+    fn existing_reuse_warning_keeps_wording_without_failed_run() {
+        let warning = existing_reuse_warning("box", "creation flags", false);
+
+        assert_eq!(
+            warning,
+            "sandbox 'box' already exists; creation flags ignored (use --replace to recreate)"
+        );
+    }
+
+    #[test]
+    fn existing_reuse_warning_mentions_failed_last_run() {
+        let warning = existing_reuse_warning("box", "creation flags", true);
+
+        assert_eq!(
+            warning,
+            "sandbox 'box' already exists and its last run failed; creation flags ignored (use --replace to recreate)"
+        );
     }
 }
