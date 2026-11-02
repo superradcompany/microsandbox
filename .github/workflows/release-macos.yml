@@ -123,7 +123,10 @@ jobs:
         if: inputs.os == 'darwin'
         run: |
           mkdir -p build
+          # Homebrew rewrites the dylib ID when relocating its bottle. Reserve
+          # load-command space so its longer cellar path fits without relinking.
           cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared \
+            -Wl,-headerpad_max_install_names \
             -o build/${{ inputs.libkrunfw_file }} firmware/kernel.c
           ln -sf ${{ inputs.libkrunfw_file }} build/libkrunfw.dylib
 

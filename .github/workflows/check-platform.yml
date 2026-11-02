@@ -101,7 +101,9 @@ jobs:
         if: steps.cache-libkrunfw.outputs.cache-hit != 'true' && inputs.os == 'darwin'
         run: |
           cd vendor/libkrunfw
-          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
+          # Homebrew rewrites the dylib ID when relocating its bottle. Reserve
+          # load-command space so its longer cellar path fits without relinking.
+          cc -fPIC -DABI_VERSION=${{ env.LIBKRUNFW_ABI }} -shared -Wl,-headerpad_max_install_names -o libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib kernel.c
           cd ../..
           mkdir -p build
           cp vendor/libkrunfw/libkrunfw.${{ env.LIBKRUNFW_ABI }}.dylib build/
