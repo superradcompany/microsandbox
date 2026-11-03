@@ -1,4 +1,5 @@
 const { execFileSync } = require('node:child_process');
+const { releaseChannel } = require('./release-channel.cjs');
 
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 
@@ -15,6 +16,7 @@ async function resolveReleaseContext({ context, github, releaseTag = '', runGit 
   if (tag !== tag.trim() || !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(tag)) {
     throw new Error('Expected a version tag such as v0.7.12');
   }
+  releaseChannel(tag.slice(1));
   // Full tag refs prevent branch-name ambiguity; ^{commit} also peels signed tags.
   const sourceSha = runGit('rev-parse', '--verify', `refs/tags/${tag}^{commit}`);
   if (!/^[0-9a-f]{40}$/.test(sourceSha)) throw new Error('Invalid release commit');
@@ -40,7 +42,7 @@ function checkedContext(sourceSha, tag, runGit) {
     'import sys,tomllib; print(tomllib.loads(sys.stdin.read())["workspace"]["package"]["version"])',
   ], { input: manifest, encoding: 'utf8' }).trim();
   if (tag !== `v${version}`) throw new Error('Tag does not match the workspace version');
-  return { source_sha: sourceSha, tag, publish: 'true' };
+  return { source_sha: sourceSha, tag, publish: 'true', ...releaseChannel(version) };
 }
 
 module.exports = { resolveReleaseContext };

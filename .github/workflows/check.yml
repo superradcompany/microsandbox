@@ -123,7 +123,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/release-note-checks"
           "$RUNNER_TEMP/release-note-checks/bin/pip" install PyYAML==6.0.3
-          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs scripts/ci/test-release-context.cjs
+          PYTHON="$RUNNER_TEMP/release-note-checks/bin/python" node --test scripts/ci/test-release-notes.cjs scripts/ci/test-release-context.cjs scripts/ci/test-release-channel.mjs
 
   # ---------------------------------------------------------------------------
   # Build kernel.c on Linux for macOS libkrunfw linking
