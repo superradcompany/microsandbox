@@ -462,18 +462,32 @@ pub(super) async fn dry_run(
     }
 
     // Check the disks a restart would take without keeping them; apply reserves them.
-    if restart_required {
+    // Otherwise check added named volumes against their backing, as apply does when it
+    // locks them; a restart resolves them while reserving disks.
+    let adds_named = builder
+        .patch
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount, VolumeMount::Named { .. }));
+    let backing_check = if restart_required {
         let running = active.as_ref().unwrap_or(&config);
-        match reserve_added_disks(local, running, &prospective).await {
-            Ok(_) => {}
-            Err(MicrosandboxError::InvalidConfig(message)) => {
-                plan.conflicts.push(ModificationConflict {
-                    field: MOUNT_FIELD.to_string(),
-                    message,
-                });
-            }
-            Err(error) => return Err(error),
+        reserve_added_disks(local, running, &prospective)
+            .await
+            .map(|_| ())
+    } else if adds_named {
+        local.resolve_named_volumes(&prospective).await.map(|_| ())
+    } else {
+        Ok(())
+    };
+    match backing_check {
+        Ok(()) => {}
+        Err(MicrosandboxError::InvalidConfig(message)) => {
+            plan.conflicts.push(ModificationConflict {
+                field: MOUNT_FIELD.to_string(),
+                message,
+            });
         }
+        Err(error) => return Err(error),
     }
 
     Ok(plan)
@@ -7158,6 +7172,65 @@ mod tests {
         assert!(error.contains("already attached"), "{error}");
         assert_eq!(handle.status_snapshot(), SandboxStatus::Running);
         assert!(handle.config().unwrap().spec.mounts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn next_start_plans_check_named_disk_volume_options() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        // Mount owners need launch contract patch 15.
+        let backend = backend_with_runtime(&base, 15).await;
+        let local = backend.as_local().unwrap();
+        let current = config(2, 1024);
+        insert_stopped_sandbox(&backend, &current).await;
+
+        volume_entity::ActiveModel {
+            name: Set("shared".to_string()),
+            kind: Set("disk".to_string()),
+            disk_format: Set(Some("raw".to_string())),
+            created_at: Set(Some(chrono::Utc::now().naive_utc())),
+            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
+            ..Default::default()
+        }
+        .insert(local.db().await.unwrap().write())
+        .await
+        .unwrap();
+        let volume_dir = local.volume_path("shared");
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        std::fs::write(volume_dir.join("disk.raw"), b"disk").unwrap();
+
+        // A mount owner is only valid for directory-backed volumes.
+        let owned_by_user = MountBuilder::new("/shared")
+            .named("shared")
+            .owner(1000, 1000)
+            .build()
+            .unwrap();
+        let builder = || {
+            SandboxModificationBuilder::new(backend.clone(), current.spec.name.clone())
+                .next_start()
+                .with_patch(SandboxModificationPatch {
+                    mounts: vec![owned_by_user.clone()],
+                    ..SandboxModificationPatch::default()
+                })
+        };
+
+        let plan = builder().dry_run().await.unwrap();
+        let error = builder().apply().await.unwrap_err().to_string();
+
+        assert_eq!(plan.conflicts.len(), 1, "{:?}", plan.conflicts);
+        assert_eq!(plan.conflicts[0].field, MOUNT_FIELD, "{:?}", plan.conflicts);
+        assert!(
+            plan.conflicts[0]
+                .message
+                .contains("mount owner is only valid for directory named volumes"),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(
+            error.contains("mount owner is only valid for directory named volumes"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]
