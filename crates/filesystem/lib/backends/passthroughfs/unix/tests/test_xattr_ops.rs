@@ -56,6 +56,28 @@ fn test_getxattr_size_query() {
 }
 
 #[test]
+fn test_getxattr_buffer_too_small() {
+    let sb = TestSandbox::new();
+    let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+    sb.fs
+        .setxattr(
+            sb.ctx(),
+            entry.inode,
+            &TestSandbox::cstr("user.test"),
+            b"hello_xattr",
+            0,
+        )
+        .unwrap();
+
+    // Guests retry with a larger buffer only on ERANGE.
+    let result = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, &TestSandbox::cstr("user.test"), 4);
+
+    TestSandbox::assert_errno(result, LINUX_ERANGE);
+}
+
+#[test]
 fn test_getxattr_nonexistent_key() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
