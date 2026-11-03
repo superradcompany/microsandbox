@@ -174,6 +174,8 @@ Sandbox-wide action when a secret placeholder reaches a disallowed host
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">http</span>
 
+<Tooltip tip="Not configurable on microsandbox cloud, which always returns the default JSON responses."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 `HttpConfig | None` · Default: `None`
 
 Denial responses default to JSON `403` errors. Set `HttpConfig(deny_response=False)` to disable them. `network_deny_message` and `secret_deny_message` customize the respective messages. Requires a supporting local runtime. See [HTTP denial responses](/networking/overview#http-denial-responses).

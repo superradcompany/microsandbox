@@ -826,6 +826,8 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">http()</span>
 
+<Tooltip tip="Not configurable on microsandbox cloud, which always returns the default JSON responses."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```rust
 fn http(self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self
 ```

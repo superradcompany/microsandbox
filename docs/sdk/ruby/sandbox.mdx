@@ -1415,6 +1415,8 @@ Create or reuse the configured sandbox, with the same behavior as `Microsandbox:
 
 #### <span className="msb-recv">builder.</span><span className="msb-hn">http()</span>
 
+<Tooltip tip="Not configurable on microsandbox cloud, which always returns the default JSON responses."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```ruby
 builder.http { |h| h.deny_response(true).deny_response_format("json").network_deny_message(message) } # => SandboxBuilder
 ```
