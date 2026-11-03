@@ -840,6 +840,23 @@ Permanently invalid captured node IDs; empty when the whole export is unavailabl
 
 Builder for configuring a sandbox before creation. Obtained via [`Sandbox::builder(name)`](#sandboxbuilder). Every setter returns `Self`, so calls chain. Examples are shown on the methods where usage is non-obvious.
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">exec()</span>
+
+```rust
+fn exec(self, limits: ExecConfigPatch) -> Self
+```
+
+Override execution limits and chunk sizes for this sandbox. Unset fields inherit [global execution settings](/configuration#exec). The resolved limits apply across every connection to the sandbox. Values that differ from the built-in defaults require a runtime with execution-limit support; the cloud backend does not accept custom limits yet. On a full-memory restore, explicit values must match the captured limits; use a disk-only restore to change them.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limits</code><a className="msb-type" href="#execconfigpatch">ExecConfigPatch</a></div>
+    <div className="msb-param-desc">Execution limits and chunk sizes to override.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">slug()</span>
 
 <Tooltip tip="Globally unique sandbox slugs are assigned by microsandbox cloud; the local backend ignores this setting."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
@@ -3006,6 +3023,18 @@ let report = sandbox_metrics_report_local(&local, "my-app").await?;
 </Accordion>
 
 ## Types
+
+### ExecConfigPatch
+
+`microsandbox::config::ExecConfigPatch`; construct with `new()` and chain setters named below. See [execution settings](/configuration#exec) for defaults and validation.
+
+| Field | Meaning |
+|-------|---------|
+| `max_executions` | Maximum active or retained executions |
+| `input_limit` | Outstanding stdin bytes per execution |
+| `output_limit` | Unread stdout/stderr allowance per execution |
+| `stdin_chunk_size` | Maximum stdin payload per message |
+| `output_chunk_size` | Maximum stdout/stderr payload per message |
 
 ### LogEntry
 

@@ -103,6 +103,9 @@ impl RestoreResources {
                 ));
             }
         }
+        if let Some(ready) = &self.agent_ready {
+            requested.exec.validate_captured(ready.exec_limits)?;
+        }
         Ok(())
     }
 }

@@ -16,6 +16,7 @@ use crate::snapshot::{PySnapshot, PySnapshotHandle};
 /// Kwargs accepted by `Sandbox.create` / `Sandbox.create_with_progress`.
 /// `detached` is consumed by the callers in `sandbox.rs`, not here.
 const KNOWN_CREATE_KWARGS: &[&str] = &[
+    "exec",
     "image",
     "memory",
     "cpus",
@@ -419,6 +420,27 @@ pub fn sandbox_builder_from_args(
         ));
     }
     let mut builder = microsandbox::Sandbox::builder(name);
+    if let Some(value) = kwargs.get_item("exec")?.filter(|value| !value.is_none()) {
+        let config = value.cast::<PyDict>()?;
+        let mut patch = microsandbox::config::ExecConfigPatch::new();
+        for (key, value) in config.iter() {
+            let key: String = key.extract()?;
+            let value: u32 = value.extract()?;
+            patch = match key.as_str() {
+                "max_executions" => patch.max_executions(value),
+                "input_limit" => patch.input_limit(value),
+                "output_limit" => patch.output_limit(value),
+                "stdin_chunk_size" => patch.stdin_chunk_size(value),
+                "output_chunk_size" => patch.output_chunk_size(value),
+                _ => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown exec setting: {key}"
+                    )));
+                }
+            };
+        }
+        builder = builder.exec(patch);
+    }
 
     {
         let image_obj = kwargs.get_item("image")?.unwrap();

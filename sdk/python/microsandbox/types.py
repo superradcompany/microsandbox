@@ -505,6 +505,25 @@ class SandboxModificationPlan(_SandboxModificationPlanRequired, total=False):
     resize_status: list[ResourceResizeStatus]
 
 
+class ExecConfig(TypedDict, total=False):
+    """Per-sandbox execution limits.
+
+    Unset fields inherit the global execution settings. Custom limits are not
+    supported by the cloud backend yet.
+    """
+
+    # Maximum active executions, including exited streams with unread output.
+    max_executions: int
+    # Maximum stdin payload bytes awaiting delivery to the command.
+    input_limit: int
+    # Combined unread stdout/stderr allowance in bytes, including per-chunk overhead.
+    output_limit: int
+    # Maximum stdin payload bytes per message.
+    stdin_chunk_size: int
+    # Maximum stdout or stderr payload bytes per message.
+    output_chunk_size: int
+
+
 class ExecOptions(TypedDict, total=False):
     """Options accepted in the second positional argument to exec methods."""
 

@@ -15,9 +15,10 @@ pub const EXEC_OUTPUT_EVENT_OVERHEAD: u32 = 256;
 
 /// Effective policy shared by every execution in one sandbox.
 ///
-/// The values are fixed defaults chosen by the runtime; a resumed memory snapshot keeps its
-/// captured policy. Connected clients discover the effective policy in Ready; execution
-/// requests cannot change it.
+/// Resolved from built-in defaults, global configuration, and sandbox settings
+/// at creation; a resumed memory snapshot keeps its captured policy. Connected
+/// clients discover the effective policy in Ready; execution requests cannot
+/// change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -35,9 +36,50 @@ pub struct ExecLimits {
     pub output_chunk_size: u32,
 }
 
+/// Sparse execution-limit overrides; omitted fields inherit the surrounding defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct ExecLimitsPatch {
+    /// Override `max_executions` when provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_executions: Option<u32>,
+    /// Override `input_limit` when provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_limit: Option<u32>,
+    /// Override `output_limit` when provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_limit: Option<u32>,
+    /// Override `stdin_chunk_size` when provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdin_chunk_size: Option<u32>,
+    /// Override `output_chunk_size` when provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_chunk_size: Option<u32>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl ExecLimitsPatch {
+    /// Fill omitted fields from the surrounding defaults before validating the result.
+    pub fn resolve(self, defaults: ExecLimits) -> ExecLimits {
+        ExecLimits {
+            max_executions: self.max_executions.unwrap_or(defaults.max_executions),
+            input_limit: self.input_limit.unwrap_or(defaults.input_limit),
+            output_limit: self.output_limit.unwrap_or(defaults.output_limit),
+            stdin_chunk_size: self.stdin_chunk_size.unwrap_or(defaults.stdin_chunk_size),
+            output_chunk_size: self.output_chunk_size.unwrap_or(defaults.output_chunk_size),
+        }
+    }
+
+    /// Whether no field is overridden.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 impl ExecLimits {
     /// Reject policies whose chunks cannot make progress within their allowances.

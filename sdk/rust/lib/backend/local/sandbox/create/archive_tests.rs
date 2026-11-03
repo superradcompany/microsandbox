@@ -621,6 +621,23 @@ async fn archive_settings_resolve_without_extracting_payloads() {
         assert_eq!(reused.exec_limits().max_executions, 7);
         assert!(reused.checkpoint_restore.is_none());
     }
+
+    // Explicit execution settings must match the captured limits exactly.
+    for (limit, accepted) in [(7, true), (99, false)] {
+        let mut builder = SandboxBuilder::new("restore")
+            .with_snapshot_reference(SnapshotReference::path(source.to_string_lossy()))
+            .exec(crate::config::ExecConfigPatch::new().max_executions(limit))
+            .max_cpus(1)
+            .max_memory(128);
+        builder.prepare(local.clone()).await.unwrap();
+        let result = builder.finish_local(local.config_sources(), None);
+        if accepted {
+            assert_eq!(result.unwrap().exec_limits().max_executions, 7);
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("execution"), "{error}");
+        }
+    }
 }
 
 #[tokio::test]

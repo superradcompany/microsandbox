@@ -1203,6 +1203,23 @@ Use a disk image as the root filesystem and optionally provide the inner filesys
 ---
 
 
+#### <span className="msb-recv"></span><span className="msb-hn">WithExecConfig()</span>
+
+```go
+func WithExecConfig(config SandboxExecConfig) SandboxOption
+```
+
+Override execution limits and chunk sizes for this sandbox. Unset fields inherit [global execution settings](/configuration#exec). Values that differ from the built-in defaults require a runtime with execution-limit support; the cloud backend does not accept custom limits yet.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>config</code><a className="msb-type" href="#sandboxexecconfig">SandboxExecConfig</a></div>
+    <div className="msb-param-desc">Execution limits and chunk sizes to override.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv"></span><span className="msb-hn">WithMemory()</span>
 
 ```go
@@ -2772,6 +2789,18 @@ Stop the stream and release Rust-side resources
 `error`
 
 ## Types
+
+### SandboxExecConfig
+
+All fields are optional `*uint32` values; `nil` inherits the configured value. See [execution settings](/configuration#exec) for defaults and validation.
+
+| Field | Meaning |
+|-------|---------|
+| `MaxExecutions` | Maximum active or retained executions |
+| `InputLimit` | Outstanding stdin bytes per execution |
+| `OutputLimit` | Unread stdout/stderr allowance per execution |
+| `StdinChunkSize` | Maximum stdin payload per message |
+| `OutputChunkSize` | Maximum stdout/stderr payload per message |
 
 ### SandboxPingResult
 

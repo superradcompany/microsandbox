@@ -5,7 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
+
+// SandboxExecConfig overrides execution limits for a sandbox. Unset fields
+// inherit the global execution settings. Custom limits are not supported by
+// the cloud backend yet.
+type SandboxExecConfig = ffi.ExecConfig
 
 // SandboxConfig holds configuration for creating a sandbox.
 //
@@ -52,6 +59,7 @@ type SandboxConfig struct {
 	Ephemeral          bool
 	Entrypoint         []string
 	Cmd                []string
+	Exec               *SandboxExecConfig
 	Init               *InitConfig
 	LogLevel           LogLevel
 	QuietLogs          bool
@@ -110,6 +118,7 @@ const (
 )
 
 type persistedSandboxConfig struct {
+	Exec              *SandboxExecConfig   `json:"exec"`
 	Name              string               `json:"name"`
 	Image             json.RawMessage      `json:"image"`
 	ImageFstype       string               `json:"image_fstype"`
@@ -219,6 +228,7 @@ func (c *SandboxConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	*c = SandboxConfig{
+		Exec:              raw.Exec,
 		Name:              raw.Name,
 		Image:             image,
 		ImageFstype:       imageFstype,
@@ -2078,4 +2088,11 @@ func WithVolumeLabels(labels map[string]string) VolumeOption {
 			o.Labels[k] = v
 		}
 	}
+}
+
+// WithExecConfig overrides execution limits and chunk sizes for the sandbox.
+// Unset fields inherit the global execution settings. Custom limits are not
+// supported by the cloud backend yet.
+func WithExecConfig(config SandboxExecConfig) SandboxOption {
+	return func(o *SandboxConfig) { o.Exec = &config }
 }

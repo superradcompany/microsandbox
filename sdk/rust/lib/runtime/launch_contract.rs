@@ -697,17 +697,19 @@ pub(crate) async fn validate_http_deny_response(
     Ok(())
 }
 
-/// A memory snapshot with a captured execution policy needs a runtime that can honor it.
+/// Execution limits that differ from the built-in defaults, and memory snapshots
+/// with captured limits, both need a runtime that can honor them. Default limits
+/// keep working on released runtimes through the legacy path.
 pub(crate) async fn validate_exec_limits(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    let captured_policy = config
+    let captured = config
         .restore_resources
         .agent_ready
         .as_ref()
         .and_then(|ready| ready.exec_limits);
-    if captured_policy.is_none() {
+    if captured.is_none() && config.exec.limits() == microsandbox_types::ExecLimits::default() {
         return Ok(());
     }
     require_capability(path, |capabilities| capabilities.exec_limits, "exec").await
@@ -1328,6 +1330,18 @@ mod tests {
 
         // A captured guest without an advertised policy keeps the legacy path.
         config.restore_resources.agent_ready = Some(Ready::default());
+        validate_exec_limits(&old, &config).await.unwrap();
+
+        // Configured limits that differ from the defaults need a capable runtime,
+        // whether they came from global configuration or sandbox settings.
+        config.restore_resources.agent_ready = None;
+        config.exec.max_executions = 7;
+        assert!(validate_exec_limits(&old, &config).await.is_err());
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // Settings spelled out at their default values keep the legacy path:
+        // the launch encoder omits defaults, so nothing is silently dropped.
+        config.exec = Default::default();
         validate_exec_limits(&old, &config).await.unwrap();
     }
 

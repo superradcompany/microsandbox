@@ -1271,6 +1271,12 @@ export declare class SandboxBuilder {
    * ```
    */
   rootDisk(sizeMibOrConfigure: number | ((d: RootDiskBuilder) => RootDiskBuilder)): this
+  /**
+   * Override execution limits and chunk sizes for this sandbox.
+   * Unset fields inherit the global execution settings. Custom
+   * limits are not supported by the cloud backend yet.
+   */
+  exec(config: ExecConfig): this
   /** Number of virtual CPUs. */
   cpus(count: number): this
   /** Boot-time maximum possible virtual CPUs. */
@@ -2069,6 +2075,24 @@ export interface DnsConfig {
 
 /** Reuse a resolved pair and install only when it is wholly absent. */
 export declare function ensureRuntime(configJson: string, optionsJson: string): Promise<string>
+
+/**
+ * Sandbox-wide execution limits. Unset fields inherit the global
+ * execution settings. Custom limits are not supported by the cloud
+ * backend yet.
+ */
+export interface ExecConfig {
+  /** Maximum active executions, including exited streams with unread output. */
+  maxExecutions?: number
+  /** Maximum stdin payload bytes awaiting delivery to the command. */
+  inputLimit?: number
+  /** Combined unread stdout/stderr allowance in bytes, including per-chunk overhead. */
+  outputLimit?: number
+  /** Maximum stdin payload bytes per message. */
+  stdinChunkSize?: number
+  /** Maximum stdout or stderr payload bytes per message. */
+  outputChunkSize?: number
+}
 
 /** Execution event emitted by `ExecHandle.recv()`. */
 export interface ExecEvent {

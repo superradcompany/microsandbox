@@ -174,6 +174,17 @@ export type NapiSnapshotSeed =
       readonly referenceKind: "id" | "path";
     };
 
+/** Sandbox-wide execution limits. Unset fields inherit the global
+ * execution settings. Custom limits are not supported by the cloud
+ * backend yet. */
+export interface ExecConfig {
+  maxExecutions?: number;
+  inputLimit?: number;
+  outputLimit?: number;
+  stdinChunkSize?: number;
+  outputChunkSize?: number;
+}
+
 /** The auto-generated native SandboxBuilder class. Each setter mutates
  * in place and returns `this`; closure-callback sub-builders are typed
  * loosely as `(b: any) => any` here because their full type is the
@@ -186,6 +197,7 @@ export type NapiSnapshotSeed =
  * the wrapper type through chained calls — `Omit<...> & {...}` would
  * not preserve `this` correctly. */
 export interface NapiSandboxBuilderSetters {
+  exec(config: ExecConfig): this;
   image(s: string): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   imageWith(configure: (b: any) => any): this;

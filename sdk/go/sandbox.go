@@ -169,6 +169,7 @@ func resolveRegistryCACertPaths(o *SandboxConfig) error {
 // Extracted so tests can assert the JSON envelope without booting the runtime.
 func buildFFICreateOptions(o SandboxConfig) ffi.CreateOptions {
 	ffiOpts := ffi.CreateOptions{
+		Exec:              o.Exec,
 		Image:             o.Image,
 		ImageFstype:       o.ImageFstype,
 		ImageBind:         o.ImageBind,

@@ -158,6 +158,7 @@ See [Managed deployment](/enterprise/managed-configuration) for deployment, prec
 | `sandbox_defaults` | [reference](#sandbox_defaults) | Defaults applied to new sandboxes, subject to backend support |
 | `runtime` | [reference](#runtime) | Host runtime performance policy |
 | `registries` | [reference](#registries) | Container registry authentication |
+| `exec` | [reference](#exec) | Execution limits and chunk sizes |
 | `ssh` | [reference](#ssh) | Host-side SSH session defaults |
 | `metrics` | [reference](#metrics) | Live metrics shared-memory registry settings |
 | `snapshots` | [reference](#snapshots) | Full snapshot capture and restore limits |
@@ -219,6 +220,26 @@ Runtime path settings are captured during local backend construction, with manag
 <span id="rust-sdk-path-helpers" />
 
 For programmatic access, see the [Rust configuration reference](/sdk/rust/configuration#runtime-paths).
+
+## `exec`
+
+<Tooltip tip="Local runtime only; the cloud backend does not accept custom execution limits yet."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+| Field | Default | Description |
+|---|---|---|
+| `max_executions` | `128` | Executions per sandbox, including exited commands with unread output. Shared across connections. |
+| `input_limit` | `65536` (64 KiB) | Stdin payload bytes per execution awaiting delivery into the command's pipe. |
+| `output_limit` | `1048576` (1 MiB) | Unread stdout/stderr allowance per execution, including 256 bytes per output chunk. |
+| `stdin_chunk_size` | `16384` (16 KiB) | Maximum stdin payload per message. Must fit within `input_limit`. |
+| `output_chunk_size` | `16384` (16 KiB) | Maximum stdout/stderr payload per message. Must fit within `output_limit`, including chunk overhead. |
+
+All values must be positive integers; `null` and unlimited allowances are not supported. Chunk sizes must also fit within the protocol frame ceiling. These limits bound outstanding data, not transfer totals or total process memory. Raising them increases possible memory and concurrency demand; large numbers of PTY executions can also exhaust the guest blocking-thread pool.
+
+Limits are resolved at sandbox creation: built-in defaults, global configuration, then SDK sandbox settings. Connected clients discover the effective limits from the runtime. Existing sandboxes keep their limits. A full execution count rejects new commands; an exited command holds its slot until output is drained or its stream is closed and cleaned up.
+
+Full-memory restores keep the guest's captured execution limits; global configuration yields to them, and explicit SDK settings must match them or the restore is rejected. Older memory snapshots without captured limits reject explicit execution settings. Disk-only restores start a fresh guest using current global configuration and SDK settings.
+
+Limits that differ from the built-in defaults require a runtime with execution-limit support (msb v0.7.10 or newer). Default limits work with any supported runtime. Stdin writes wait for allowance and send directly from the caller's buffer; send input and read output concurrently for commands that do both; see [Output and stdin buffering](/sandboxes/commands#output-and-stdin-buffering).
 
 ## `ssh`
 

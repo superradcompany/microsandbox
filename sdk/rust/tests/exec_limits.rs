@@ -28,19 +28,33 @@ fn request(command: &str) -> ExecRequest {
 #[msb_test]
 async fn policy_duplex_large_input_keeps_output_and_controls_moving() {
     let name = "exec-limits-duplex";
+    // Configured limits exercise the full override path: tight output with a
+    // generous input window, advertised back to every client in Ready.
+    let configured = ExecLimits {
+        max_executions: 4,
+        input_limit: 8 * 1024 * 1024,
+        output_limit: 64 * 1024,
+        stdin_chunk_size: 16 * 1024,
+        output_chunk_size: 4096,
+    };
     let sandbox = Sandbox::builder(name)
         .image("mirror.gcr.io/library/alpine")
         .cpus(2)
         .memory(512)
         .replace()
+        .exec(
+            microsandbox::config::ExecConfigPatch::new()
+                .max_executions(configured.max_executions)
+                .input_limit(configured.input_limit)
+                .output_limit(configured.output_limit)
+                .stdin_chunk_size(configured.stdin_chunk_size)
+                .output_chunk_size(configured.output_chunk_size),
+        )
         .create()
         .await
         .unwrap();
     let probe = AgentClient::connect_sandbox(name).await.unwrap();
-    assert_eq!(
-        probe.ready().unwrap().exec_limits.unwrap(),
-        ExecLimits::default()
-    );
+    assert_eq!(probe.ready().unwrap().exec_limits.unwrap(), configured);
     let mut stream = sandbox
         .exec_stream_with("sh", |e| {
             e.args(["-c", "head -c 2097152 /dev/zero; cat"])

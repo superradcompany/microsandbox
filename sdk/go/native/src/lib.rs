@@ -60,7 +60,9 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
-    UpperVerifyStatus, default_backend,
+    UpperVerifyStatus,
+    config::ExecConfigPatch,
+    default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
@@ -1089,6 +1091,7 @@ struct RootDiskOpts {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SandboxCreateOpts {
+    exec: Option<ExecConfigPatch>,
     creation_progress: Option<u64>,
     image: Option<String>,
     image_fstype: Option<String>,
@@ -2453,6 +2456,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
                 builder = builder.root_disk(size_mib);
             }
 
+            if let Some(exec) = opts.exec {
+                builder = builder.exec(exec);
+            }
             if let Some(m) = opts.memory_mib {
                 builder = builder.memory(m);
             }

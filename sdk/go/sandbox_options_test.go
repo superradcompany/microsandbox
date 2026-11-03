@@ -1236,3 +1236,21 @@ func TestInvalidConfigRejectedBeforeCreate(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutionLimitsWireOptions(t *testing.T) {
+	max, input, output, stdinChunk, outputChunk := uint32(16), uint32(131072), uint32(2097152), uint32(8192), uint32(2048)
+	wire := marshalCreateOptions(t, WithExecConfig(SandboxExecConfig{
+		MaxExecutions: &max, InputLimit: &input, OutputLimit: &output,
+		StdinChunkSize: &stdinChunk, OutputChunkSize: &outputChunk,
+	}))
+	exec := mustField(t, wire, "exec").(map[string]any)
+	expected := map[string]uint32{"max_executions": max, "input_limit": input, "output_limit": output, "stdin_chunk_size": stdinChunk, "output_chunk_size": outputChunk}
+	for key, value := range expected {
+		if exec[key] != float64(value) {
+			t.Fatalf("%s: got %v, want %d", key, exec[key], value)
+		}
+	}
+	if value := marshalCreateOptions(t)["exec"]; value != nil {
+		t.Fatalf("default limits should remain omitted: %v", value)
+	}
+}

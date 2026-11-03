@@ -5,6 +5,16 @@ import { remapKeysToCamel } from "../../dist/internal/config.js";
 const invalidNumbers = [-1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1];
 
 describe("adapter security regressions", () => {
+  it("preserves execution limits through the native builder", async () => {
+    const exec = { maxExecutions: 16, inputLimit: 131072, outputLimit: 2097152,
+      stdinChunkSize: 8192, outputChunkSize: 2048 };
+    const config = await Sandbox.builder("exec-limits").image("alpine").exec(exec).build();
+    expect(config.exec).toEqual(exec);
+    for (const value of invalidNumbers) {
+      expect(() => Sandbox.builder("exec-limits").exec({ inputLimit: value })).toThrow();
+    }
+  });
+
   it("preserves accumulated network restrictions across callbacks", async () => {
     const config = await Sandbox.builder("adapter-network").image("alpine")
       .network(n => n.policy(NetworkPolicy.none()).maxTcpConnections(12)

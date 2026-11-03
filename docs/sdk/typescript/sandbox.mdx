@@ -897,6 +897,23 @@ Permanently invalid captured node IDs; empty when the whole export is unavailabl
 
 Fluent builder for configuring a sandbox before creation. Obtained via [`Sandbox.builder(name)`](#sandbox-builder). Every setter returns the same builder so calls chain. Examples are shown on the methods where usage is non-obvious.
 
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">exec()</span>
+
+```typescript
+exec(config: ExecConfig): this
+```
+
+Override execution limits and chunk sizes for this sandbox. Unset fields inherit [global execution settings](/configuration#exec). Values that differ from the built-in defaults require a runtime with execution-limit support; the cloud backend does not accept custom limits yet.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>config</code><a className="msb-type" href="#execconfig">ExecConfig</a></div>
+    <div className="msb-param-desc">Execution limits and chunk sizes to override.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">build()</span>
 
 ```typescript
@@ -2783,6 +2800,18 @@ Snapshot the accumulated registry configuration.
 [`RegistryConfig`](#registryconfig)
 
 ## Types
+
+### ExecConfig
+
+All fields are optional numbers. See [execution settings](/configuration#exec) for defaults and validation.
+
+| Field | Meaning |
+|-------|---------|
+| `maxExecutions` | Maximum active or retained executions |
+| `inputLimit` | Outstanding stdin bytes per execution |
+| `outputLimit` | Unread stdout/stderr allowance per execution |
+| `stdinChunkSize` | Maximum stdin payload per message |
+| `outputChunkSize` | Maximum stdout/stderr payload per message |
 
 ### LogLevel
 

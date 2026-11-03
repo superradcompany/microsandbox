@@ -39,7 +39,7 @@ use crate::UnsupportedReason;
 use crate::backend::default_backend;
 use crate::config::layers::BackendConfig;
 #[cfg(feature = "local")]
-use crate::config::{GlobalConfig, GlobalConfigPatch};
+use crate::config::{ExecConfigPatch, GlobalConfig, GlobalConfigPatch};
 #[cfg(feature = "local")]
 use crate::runtime::SpawnMode;
 use crate::snapshot::SnapshotReference;
@@ -1151,6 +1151,16 @@ impl SandboxBuilder {
         self
     }
 
+    /// Override execution limits and chunk sizes for this sandbox.
+    ///
+    /// Unset fields inherit global execution settings. The resolved limits are
+    /// advertised to every client connecting to the sandbox. A full-memory
+    /// restore keeps its captured limits; explicit values must match them, or
+    /// use a disk-only restore to change them.
+    pub fn exec(self, limits: ExecConfigPatch) -> Self {
+        self.overlay(SandboxConfigPatch::new().exec(limits))
+    }
+
     /// Set the in-guest security profile.
     pub fn security(mut self, profile: SecurityProfile) -> Self {
         self.config.spec.security_profile = Some(profile);
@@ -1413,6 +1423,7 @@ impl SandboxBuilder {
             } else {
                 prepared.spec.resources = self.config.spec.resources.clone();
                 prepared.spec.deployment_profile = self.config.spec.deployment_profile;
+                prepared.exec = self.config.exec.clone();
             }
             prepared
         } else {
@@ -1603,6 +1614,7 @@ impl SandboxBuilder {
         };
 
         inspection.spec.resources = Default::default();
+        inspection.exec = Default::default();
         inspection.apply_to(&mut config);
         config.caller_config_overrides = Some(Box::new(self.config.clone()));
         config.snapshot_reference = snapshot_ref.clone();
@@ -2562,7 +2574,7 @@ mod tests {
         BackendConfig, ConfigSource, SandboxBuilder, SandboxConfig, SandboxConfigPatch,
         checkpoint_network_override_conflicts,
     };
-    use crate::config::GlobalConfigPatch;
+    use crate::config::{ExecConfigPatch, GlobalConfigPatch};
     #[cfg(feature = "local")]
     use crate::sandbox::{GuestClockPolicy, require_recorded_mounts};
     use crate::sandbox::{MAX_HOSTNAME_BYTES, MAX_SANDBOX_NAME_BYTES, RlimitResource};
@@ -3546,6 +3558,7 @@ mod tests {
         let builder = SandboxBuilder::new("layers").image("alpine");
         let global = serde_json::from_str(
             r#"{
+            "exec": {"input_limit": 131072, "max_executions": 32},
             "sandbox_defaults": {"cpus": 3, "memory_mib": 768,
                 "shell": "/bin/sh", "workdir": "/global"}
         }"#,
@@ -3570,6 +3583,11 @@ mod tests {
         .unwrap();
         let config = builder
             .overlay(sparse)
+            .exec(
+                ExecConfigPatch::new()
+                    .max_executions(64)
+                    .output_chunk_size(8192),
+            )
             .cpus(6)
             .memory(1024_u32)
             .env("SDK", "yes")
@@ -3584,6 +3602,10 @@ mod tests {
             )
             .finish(Some(&BackendConfig::new(global, managed)), None)
             .unwrap();
+        assert_eq!(config.exec.max_executions, 64);
+        assert_eq!(config.exec.input_limit, 131072);
+        assert_eq!(config.exec.output_chunk_size, 8192);
+        assert_eq!(config.exec.output_limit, 1048576);
         assert_eq!(config.spec.resources.cpus, 2);
         assert_eq!(config.spec.resources.max_cpus, 2);
         assert_eq!(config.spec.resources.memory_mib, 1024);
@@ -4538,6 +4560,37 @@ mod tests {
         assert_eq!(config.exec_limits(), ExecLimits::default());
         config.restore_resources.agent_ready = None;
         assert_eq!(config.exec_limits(), ExecLimits::default());
+
+        // Explicit settings must match the captured limits. Omitted settings
+        // adopt them, so persisted and reused configs stay consistent.
+        let sources = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        for (requested, accepted) in [
+            (ExecConfigPatch::new(), true),
+            (ExecConfigPatch::new().max_executions(7), true),
+            (ExecConfigPatch::new().max_executions(99), false),
+            (ExecConfigPatch::new().output_limit(2097152), false),
+        ] {
+            let mut config = SandboxConfig::default();
+            config.restore_resources.agent_ready = Some(Ready {
+                exec_limits: Some(captured),
+                ..Default::default()
+            });
+            config.resumed_from_full_snapshot = true;
+            config.spec.name = "restored".into();
+            config.spec.image = super::RootfsSource::oci("alpine");
+            let caller = SandboxConfigPatch::new().exec(requested);
+            let result = finish_prepared_restore(config, caller, &sources);
+            if accepted {
+                let resolved = result.unwrap();
+                assert_eq!(resolved.exec.limits(), captured);
+                assert_eq!(resolved.exec_limits(), captured);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("execution"), "{error}");
+            }
+        }
     }
 
     #[cfg(feature = "local")]

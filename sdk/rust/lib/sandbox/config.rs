@@ -24,7 +24,7 @@ use typed_path::Utf8UnixPath;
 
 use crate::MicrosandboxResult;
 use crate::config::{
-    GlobalConfigPatch, OciSandboxDefaultsPatch, SandboxDefaultsPatch,
+    ExecConfig, ExecConfigPatch, GlobalConfigPatch, OciSandboxDefaultsPatch, SandboxDefaultsPatch,
     layers::{BackendConfig, ConfigLayers, Overlay},
 };
 
@@ -130,6 +130,11 @@ pub(crate) enum SnapshotRestoreMode {
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
 #[config_patch(serde_lossless)]
 pub struct SandboxConfig {
+    /// Sandbox-owned execution limits, resolved from global defaults and SDK overrides.
+    #[serde(default)]
+    #[config_patch(nested)]
+    pub exec: ExecConfig,
+
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -344,6 +349,7 @@ impl SandboxConfigPatch {
             sandbox_defaults,
             log_level,
             deployment_profile,
+            exec,
             ..
         } = global;
         let SandboxDefaultsPatch {
@@ -406,7 +412,7 @@ impl SandboxConfigPatch {
         if let Some(deployment_profile) = deployment_profile.flatten() {
             spec.deployment_profile_mut(deployment_profile);
         }
-        SandboxConfigPatch::new().spec(spec)
+        SandboxConfigPatch::new().spec(spec).exec(exec.clone())
     }
 
     /// Resolve the rootfs choice needed before pulling an image.
@@ -585,6 +591,17 @@ impl SandboxConfig {
         };
         let mut patch = layers().base(image_defaults).options(options).build();
 
+        // A resumed guest keeps its captured limits rather than cold-boot
+        // configuration, so persisted and reused configs stay consistent with
+        // what the guest actually enforces.
+        if let Some(limits) = patch
+            .restore_resources
+            .as_ref()
+            .and_then(|state| state.agent_ready.as_ref())
+            .and_then(|ready| ready.exec_limits)
+        {
+            patch.exec = ExecConfigPatch::from_present_fields(limits.into());
+        }
         #[cfg(feature = "local")]
         if let Some(geometry) = patch
             .restore_resources
@@ -737,14 +754,14 @@ impl SandboxConfig {
         self.resumed_from_full_snapshot
     }
 
-    /// Effective execution policy: a resumed guest keeps its captured policy,
-    /// everything else uses the built-in defaults.
+    /// Effective execution limits: a resumed guest keeps its captured limits,
+    /// everything else uses the resolved configuration.
     pub(crate) fn exec_limits(&self) -> microsandbox_types::ExecLimits {
         self.restore_resources
             .agent_ready
             .as_ref()
             .and_then(|ready| ready.exec_limits)
-            .unwrap_or_default()
+            .unwrap_or_else(|| self.exec.limits())
     }
 
     /// Apply OCI image config as defaults. User-provided values take precedence.
@@ -1140,6 +1157,7 @@ impl From<SandboxSpec> for SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            exec: Default::default(),
             spec: SandboxSpec {
                 resources: SandboxResources {
                     cpus: default_cpus(),
@@ -2766,6 +2784,7 @@ mod layering_tests {
             ssh: _,
             metrics: _,
             snapshots: _,
+            exec: _,
         } = crate::config::GlobalConfig::default();
         // Every global field is mapped here, excluded below, or handled separately.
         // Each mapped field has its own null semantics; omission always stays sparse.

@@ -1752,10 +1752,25 @@ type SandboxPage struct {
 	NextCursor *string              `json:"next_cursor"`
 }
 
+// ExecConfig overrides sandbox execution settings. Nil fields inherit defaults.
+type ExecConfig struct {
+	// Maximum active executions, including exited streams with unread output.
+	MaxExecutions *uint32 `json:"max_executions,omitempty"`
+	// Maximum stdin payload bytes awaiting delivery to the command.
+	InputLimit *uint32 `json:"input_limit,omitempty"`
+	// Combined unread stdout/stderr allowance in bytes, including per-chunk overhead.
+	OutputLimit *uint32 `json:"output_limit,omitempty"`
+	// Maximum stdin payload bytes per message.
+	StdinChunkSize *uint32 `json:"stdin_chunk_size,omitempty"`
+	// Maximum stdout or stderr payload bytes per message.
+	OutputChunkSize *uint32 `json:"output_chunk_size,omitempty"`
+}
+
 // CreateOptions matches the JSON payload shape expected by msb_sandbox_create.
 // Zero-valued scalar fields are omitted; pointer fields preserve explicit zero.
 // The Rust side applies defaults when optional fields are absent.
 type CreateOptions struct {
+	Exec                 *ExecConfig          `json:"exec,omitempty"`
 	CreationProgress     uint64               `json:"creation_progress,omitempty"`
 	Image                string               `json:"image,omitempty"`
 	ImageFstype          string               `json:"image_fstype,omitempty"`

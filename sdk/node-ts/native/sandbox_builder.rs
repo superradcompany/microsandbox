@@ -30,6 +30,7 @@ use crate::root_disk_builder::JsRootDiskBuilder;
 use crate::sandbox::Sandbox;
 use crate::secret_builder::JsSecretBuilder;
 use crate::tls_builder::JsTlsBuilder;
+use crate::types::ExecConfig;
 
 // Hint to the napi codegen so `dns/tls/secret` callbacks below also
 // re-emit references to these classes (otherwise they'd appear as
@@ -141,6 +142,33 @@ impl JsSandboxBuilder {
                 self.inner = Some(prev.root_disk_with(|_default| disk_builder));
             }
         }
+        Ok(self)
+    }
+
+    /// Override execution limits and chunk sizes for this sandbox.
+    /// Unset fields inherit the global execution settings. Custom
+    /// limits are not supported by the cloud backend yet.
+    #[napi]
+    pub fn exec(&mut self, config: ExecConfig) -> Result<&Self> {
+        let mut patch = microsandbox::config::ExecConfigPatch::new();
+        if let Some(value) = config.max_executions {
+            patch = patch.max_executions(crate::numeric::uint32(value, "exec.maxExecutions")?);
+        }
+        if let Some(value) = config.input_limit {
+            patch = patch.input_limit(crate::numeric::uint32(value, "exec.inputLimit")?);
+        }
+        if let Some(value) = config.output_limit {
+            patch = patch.output_limit(crate::numeric::uint32(value, "exec.outputLimit")?);
+        }
+        if let Some(value) = config.stdin_chunk_size {
+            patch = patch.stdin_chunk_size(crate::numeric::uint32(value, "exec.stdinChunkSize")?);
+        }
+        if let Some(value) = config.output_chunk_size {
+            patch = patch.output_chunk_size(crate::numeric::uint32(value, "exec.outputChunkSize")?);
+        }
+
+        let prev = self.take_inner();
+        self.inner = Some(prev.exec(patch));
         Ok(self)
     }
 

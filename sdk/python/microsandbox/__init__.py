@@ -132,6 +132,7 @@ from microsandbox.types import (
     DiskCompactionDiskResult,
     DiskCompactionResult,
     DiskImageFormat,
+    ExecConfig,
     ExecEventType,
     ExecOptions,
     ExitStatus,
@@ -275,6 +276,7 @@ __all__ = [
     "FLAG_SHUTDOWN",
     # Execution (native)
     "ExecHandle",
+    "ExecConfig",
     "ExecOptions",
     "ExecOutput",
     "ExecSink",

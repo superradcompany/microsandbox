@@ -29,3 +29,12 @@ def test_restore_rejects_invalid_policy_ports(port):
 def test_create_rejects_invalid_durations(option, value):
     with pytest.raises(ValueError):
         Sandbox.create("invalid-duration", image="alpine", **{option: value})
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [{"unknown": 1}, {"input_limit": None}, {"input_limit": -1}, {"input_limit": 2**32}],
+)
+def test_create_rejects_invalid_execution_limits_before_launch(limits):
+    with pytest.raises((ValueError, TypeError, OverflowError)):
+        Sandbox.create("invalid-exec-limits", image="alpine", exec=limits)

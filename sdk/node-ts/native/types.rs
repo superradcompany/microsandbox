@@ -6,6 +6,23 @@ use napi_derive::napi;
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Sandbox-wide execution limits. Unset fields inherit the global
+/// execution settings. Custom limits are not supported by the cloud
+/// backend yet.
+#[napi(object)]
+pub struct ExecConfig {
+    /// Maximum active executions, including exited streams with unread output.
+    pub max_executions: Option<f64>,
+    /// Maximum stdin payload bytes awaiting delivery to the command.
+    pub input_limit: Option<f64>,
+    /// Combined unread stdout/stderr allowance in bytes, including per-chunk overhead.
+    pub output_limit: Option<f64>,
+    /// Maximum stdin payload bytes per message.
+    pub stdin_chunk_size: Option<f64>,
+    /// Maximum stdout or stderr payload bytes per message.
+    pub output_chunk_size: Option<f64>,
+}
+
 /// Result of observing a sandbox in a terminal state.
 #[napi(object)]
 pub struct SandboxStopResult {

@@ -1793,6 +1793,18 @@ async with session:
 
 ## Types
 
+### ExecConfig
+
+Pass `exec={"max_executions": 64}` to `Sandbox.create(...)` to override execution limits and chunk sizes at creation. Unset fields inherit [global execution settings](/configuration#exec). Values that differ from the built-in defaults require a runtime with execution-limit support; the cloud backend does not accept custom limits yet. All fields are optional integers.
+
+| Field | Meaning |
+|-------|---------|
+| `max_executions` | Maximum active or retained executions |
+| `input_limit` | Outstanding stdin bytes per execution |
+| `output_limit` | Unread stdout/stderr allowance per execution |
+| `stdin_chunk_size` | Maximum stdin payload per message |
+| `output_chunk_size` | Maximum stdout/stderr payload per message |
+
 ### SandboxConfig
 
 <p className="msb-backref">Used by <a href="#sandbox-create">create()</a> · <a href="#sandbox-create_with_progress">create_with_progress()</a></p>
@@ -1803,6 +1815,7 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| exec | [`ExecConfig`](#execconfig) | Inherited | Sandbox execution limits and chunk sizes |
 | image | `str \| os.PathLike[str] \| `[`ImageSource`](/sdk/python/images) | - | OCI image, local path, or disk image. Required; use `Sandbox.restore()` for snapshots. Use `Image.oci("python:3.12", root_disk=RootDisk.managed(8192))` to set a managed OCI root-disk size |
 | cpus | `int` | `1` | Virtual CPUs. This is a limit, not a reservation |
 | max_cpus | `int` | same as `cpus` | Boot-time maximum possible virtual CPUs |

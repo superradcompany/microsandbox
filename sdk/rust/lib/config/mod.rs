@@ -14,6 +14,7 @@
 //! one resolved `msb` binary).
 
 pub(crate) mod backend;
+mod execution;
 pub(crate) mod layers;
 mod persistence;
 mod registry;
@@ -43,6 +44,8 @@ use crate::{MicrosandboxError, MicrosandboxResult};
 use std::path::Path;
 
 pub(crate) mod runtime_paths;
+
+pub use execution::{ExecConfig, ExecConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -196,6 +199,10 @@ pub struct GlobalConfig {
     /// Registry authentication configuration.
     #[config_patch(nested)]
     pub registries: RegistriesConfig,
+
+    /// Execution limits and chunk sizes shared by CLI and SDK commands.
+    #[config_patch(nested)]
+    pub exec: ExecConfig,
 
     /// SSH session defaults.
     #[config_patch(nested)]
@@ -825,6 +832,31 @@ mod tests {
     }
 
     #[test]
+    fn saving_unrelated_patch_preserves_execution_omission_and_explicit_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        for exec in [
+            ExecConfigPatch::default(),
+            ExecConfigPatch::new().input_limit(65536),
+        ] {
+            let mut saved = GlobalConfigPatch::new().exec(exec.clone());
+            saved.save_to(&path).unwrap();
+
+            saved = GlobalConfigPatch::load_from(&path).unwrap();
+            saved.ssh.inactivity_timeout_secs = Some(45);
+            saved.save_to(&path).unwrap();
+
+            let reloaded = GlobalConfigPatch::load_from(&path).unwrap();
+            assert_eq!(reloaded.ssh.inactivity_timeout_secs, Some(45));
+            assert_eq!(
+                serde_json::to_value(reloaded.exec).unwrap(),
+                serde_json::to_value(exec).unwrap(),
+            );
+        }
+    }
+
+    #[test]
     fn test_saved_patch_preserves_values_across_all_sections() {
         let expected = serde_json::json!({
             "allowed_backends": ["local", "cloud"],
@@ -892,6 +924,13 @@ mod tests {
                     },
                     "insecure": true
                 }}
+            },
+            "exec": {
+                "max_executions": 64,
+                "input_limit": 32768,
+                "output_limit": 1048576,
+                "stdin_chunk_size": 16384,
+                "output_chunk_size": 8192
             },
             "ssh": {"inactivity_timeout_secs": 45},
             "metrics": {"capacity": 128},

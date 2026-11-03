@@ -65,7 +65,7 @@ pub use domain::{
     canonicalize_volume_mounts, owned_volume_mount_id,
 };
 pub use error::{SnapshotManifestError, SnapshotManifestResult, TypesError, TypesResult};
-pub use exec::{EXEC_OUTPUT_EVENT_OVERHEAD, ExecLimits};
+pub use exec::{EXEC_OUTPUT_EVENT_OVERHEAD, ExecLimits, ExecLimitsPatch};
 pub use guest_flush::GuestFlush;
 pub use modify::{
     ChangeKind, ConfigPlannedChange, ModificationConflict, ModificationDisposition,

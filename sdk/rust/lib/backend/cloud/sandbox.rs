@@ -112,7 +112,18 @@ impl CloudBackend {
         builder.prepare(Arc::new(self.clone())).await?;
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
-        builder.finish_cloud(self.config_sources())
+        let config = builder.finish_cloud(self.config_sources())?;
+        // The create wire does not carry execution limits yet; never claim a
+        // setting was applied when the service cannot enforce it.
+        if config.exec.limits() != microsandbox_types::ExecLimits::default() {
+            return Err(MicrosandboxError::unsupported(
+                Operation::SandboxCreate,
+                UnsupportedReason::NotAvailable(
+                    "custom execution limits are not supported by the cloud backend yet".into(),
+                ),
+            ));
+        }
+        Ok(config)
     }
 }
 
@@ -958,6 +969,30 @@ mod tests {
             assert_eq!(body["runtime"]["workdir"], "/managed", "entry {entry}");
             assert_eq!(body["runtime"]["shell"], "/bin/admin", "entry {entry}");
         }
+    }
+
+    #[tokio::test]
+    async fn custom_execution_limits_fail_before_any_cloud_request() {
+        let backend = CloudBackend::builder()
+            .url("http://127.0.0.1:1")
+            .api_key("test-key")
+            .build()
+            .unwrap();
+        let error = backend
+            .build_sandbox_config(
+                SandboxBuilder::new("limits")
+                    .image("alpine")
+                    .exec(crate::config::ExecConfigPatch::new().max_executions(16)),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("execution limits"), "{error}");
+
+        // Default limits remain creatable; only explicit custom values are refused.
+        backend
+            .build_sandbox_config(SandboxBuilder::new("defaults").image("alpine"))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -59,7 +59,7 @@ Generation labels must be checked against actual historical agents. The current 
 
 ### Execution acknowledgements (generation 10)
 
-The runtime supplies sandbox execution limits through trusted bootstrap. The guest advertises them in `Ready.exec_limits`: maximum executions, input and output allowances, and stdin and output chunk sizes. `ExecRequest` cannot override these settings. Defaults are 128 executions, 64 KiB input, 1 MiB combined output, and 16 KiB stdin and output chunks.
+The runtime supplies sandbox execution limits through trusted bootstrap, resolved from built-in defaults, global configuration, and sandbox settings. The guest advertises them in `Ready.exec_limits`: maximum executions, input and output allowances, and stdin and output chunk sizes. `ExecRequest` cannot override these settings. Defaults are 128 executions, 64 KiB input, 1 MiB combined output, and 16 KiB stdin and output chunks.
 
 `core.exec.stdin.ack` reports cumulative bytes written into the child's stdin pipe. `core.exec.output.ack` reports output consumed by the application, charging payload bytes plus 256 bytes per stdout/stderr chunk. These acknowledgements replenish allowance; they do not trigger retransmission. Duplicate totals grant no additional capacity, and backwards or unsent offsets are invalid.
 
