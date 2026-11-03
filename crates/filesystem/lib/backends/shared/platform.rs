@@ -270,6 +270,7 @@ fn linux_errno_raw(errno: i32) -> i32 {
         libc::EMLINK => LINUX_EMLINK,
         libc::EPIPE => LINUX_EPIPE,
         libc::EDOM => LINUX_EDOM,
+        libc::ERANGE => LINUX_ERANGE,
         libc::EAGAIN => LINUX_EAGAIN,
         libc::EINPROGRESS => LINUX_EINPROGRESS,
         libc::EALREADY => LINUX_EALREADY,
