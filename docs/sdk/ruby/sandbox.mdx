@@ -1419,7 +1419,7 @@ Create or reuse the configured sandbox, with the same behavior as `Microsandbox:
 builder.http { |h| h.deny_response(true).deny_response_format("json").network_deny_message(message) } # => SandboxBuilder
 ```
 
-Local denial responses default to JSON `403` errors. Call `h.deny_response(false)` to disable them. `network_deny_message` and `secret_deny_message` customize the respective messages. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+Denial responses default to JSON `403` errors. Call `h.deny_response(false)` to disable them. `network_deny_message` and `secret_deny_message` customize the respective messages. Requires a supporting local runtime. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 <Accordion title="Example">
 ```ruby

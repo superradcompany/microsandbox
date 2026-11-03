@@ -1190,13 +1190,13 @@ Create HTTP settings with JSON denial responses enabled. [`network.http()`](#net
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">deny_response()</span>
 
-<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not configurable on microsandbox cloud, which always returns the default JSON responses."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
 fn deny_response(self, enabled: bool) -> Self
 ```
 
-Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime. See [HTTP denial responses](/networking/overview#http-denial-responses).
 
 #### <span className="msb-recv">http.</span><span className="msb-hn">deny_response_format()</span>
 
