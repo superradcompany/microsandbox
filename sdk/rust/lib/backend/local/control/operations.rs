@@ -177,7 +177,7 @@ impl ControlSession {
             ));
         }
         let response = self
-            .request(&CreateCheckpoint(request))
+            .capture(&CreateCheckpoint(request))
             .await
             .map_err(crate::MicrosandboxError::ControlClient)?;
         CheckpointCaptureOutcome::from_response(response)
@@ -199,7 +199,7 @@ impl ControlSession {
             guest_flush: Self::capture_flush_policy(Some(capabilities), guest_flush, true)?,
         };
         let response = self
-            .request(&CreateDiskCheckpoint(request))
+            .capture(&CreateDiskCheckpoint(request))
             .await
             .map_err(crate::MicrosandboxError::ControlClient)?;
         Ok(microsandbox_runtime::control::DiskCheckpointControlState {

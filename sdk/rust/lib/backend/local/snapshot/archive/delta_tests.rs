@@ -1,6 +1,7 @@
 //! Local backend: Archive-level fixtures exercise transport and staging, not hypervisor execution codecs.
 
 use super::*;
+use crate::backend::local::creation::CreationStorage;
 use crate::test_support::DEFAULT_FS_STATE_LIMIT;
 use microsandbox_image::checkpoint::{
     CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
@@ -1021,7 +1022,7 @@ async fn owned_delta_reuses_bytes_and_restores_private_renamed_namespace_after_s
         let mounts = crate::snapshot::materialize_owned_volumes(
             &volumes,
             &source,
-            child,
+            &CreationStorage::for_test(child),
             &Default::default(),
         )
         .await
@@ -1070,7 +1071,9 @@ async fn owned_delta_reuses_bytes_and_restores_private_renamed_namespace_after_s
         crate::snapshot::materialize_owned_volumes(
             &volumes,
             &source,
-            &temp.path().join("conflict"),
+            &crate::backend::local::creation::CreationStorage::for_test(
+                &temp.path().join("conflict")
+            ),
             &conflict
         )
         .await

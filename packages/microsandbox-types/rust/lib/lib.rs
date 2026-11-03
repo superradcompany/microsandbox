@@ -18,6 +18,8 @@ pub mod helpers;
 pub mod modify;
 mod registry;
 mod secret;
+#[doc(hidden)]
+pub mod secret_plan;
 pub mod snapshot;
 mod validation;
 
@@ -31,15 +33,22 @@ pub mod typescript;
 pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
+    CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudConfigPlannedChange,
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateSnapshotRequest,
     CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails, CloudHostPattern,
-    CloudMessageResponse, CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPullPolicy,
-    CloudRlimit, CloudRlimitResource, CloudRootfsSource, CloudSandboxComputeResources,
-    CloudSandboxResources, CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus,
-    CloudSandboxStatusReason, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig,
-    CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind, CloudSnapshotLocation,
-    CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec, CloudViolationAction,
-    CloudVolumeMount,
+    CloudMessageResponse, CloudModificationConflict, CloudModificationDisposition,
+    CloudModificationRejection, CloudModificationWarning, CloudNetworkSpec, CloudPaginated,
+    CloudPatch, CloudPlannedChange, CloudPullPolicy, CloudResourceConvergenceState,
+    CloudResourceKind, CloudResourceResizeStatus, CloudRlimit, CloudRlimitResource,
+    CloudRootfsSource, CloudSandboxComputeResources, CloudSandboxModificationApplyRequest,
+    CloudSandboxModificationPlan, CloudSandboxModificationPlanRequest, CloudSandboxResources,
+    CloudSandboxRuntimeOptions, CloudSandboxSpec, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudSecretApplyEntry, CloudSecretChangeKind, CloudSecretEntry, CloudSecretMaterial,
+    CloudSecretPlanEntry, CloudSecretPlannedChange, CloudSecretSource, CloudSecretValue,
+    CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
+    CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
+    CloudViolationAction, CloudVolumeMount,
 };
 #[doc(hidden)]
 pub use command::{CommandResolutionError, ResolvedCommand, resolve_default_command};

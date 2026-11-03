@@ -79,7 +79,7 @@ async fn live_replacement_before_discovery_and_between_probe_and_hello() {
                 let stale = local.control_session(&name).await.unwrap().unwrap();
                 let previous = stale.entry.key;
                 let endpoints =
-                    crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name);
+                    local.agent_socket_paths(&name);
                 let gate = Arc::new(PausedOwner {
                     owner: stale.entry.connector.clone(),
                     pause_at,
@@ -118,7 +118,7 @@ async fn live_replacement_before_discovery_and_between_probe_and_hello() {
                 assert_ne!(previous.pid, current.entry.key.pid);
                 assert_eq!(
                     endpoints,
-                    crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name)
+                    local.agent_socket_paths(&name)
                 );
                 let before = current.request(&GetCpuState).await.unwrap();
                 assert_eq!(before.requested_online, 1, "fixture must start with one CPU");
@@ -194,7 +194,7 @@ async fn live_historical_json_replacement_before_a_fresh_send() {
             assert_eq!(stale.mode(), ControlMode::Json);
             let previous = stale.entry.key;
             let old_endpoint =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(&local, &name)
+                local.agent_socket_paths(&name)
                     .iter()
                     .map(|path| microsandbox_runtime::control::control_socket_path_for(path))
                     .find(|path| path.exists())

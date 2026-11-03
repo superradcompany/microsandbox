@@ -6,6 +6,7 @@ use std::path::Path;
 use microsandbox_image::checkpoint::{DiskGenerationManifest, ResourceDescriptor};
 use microsandbox_types::{DiskImageFormat, MountOptions, VolumeMount};
 
+use crate::backend::local::creation::CreationStorage;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -16,7 +17,7 @@ pub(crate) async fn materialize_additional_disks(
     disks: &[DiskGenerationManifest],
     resources: &[ResourceDescriptor],
     source: &Path,
-    child: &Path,
+    child: &CreationStorage,
     root_device: Option<&str>,
     choices: &crate::sandbox::restore_resources::RestoreResources,
 ) -> MicrosandboxResult<Vec<VolumeMount>> {
@@ -121,26 +122,29 @@ pub(crate) async fn materialize_additional_disks(
         let source = source
             .join("layers")
             .join(format!("{}.{}", layer.layer_id, layer.format));
-        // A blocking task can outlive its cancelled async caller. Give it only a unique
-        // sibling staging namespace, never the deterministic child/replacement path.
-        let staging_parent = child
-            .parent()
-            .ok_or_else(|| invalid("additional disk child has no storage parent"))?
-            .to_path_buf();
+        // Staging belongs to the durable child and the worker retains its live owner.
+        let staging_parent = child.to_path_buf();
         let expected_integrity = layer.integrity_root.clone();
         let expected_size = layer.file_size;
         let qcow2 = layer.format == "qcow2";
         let pin = super::super::lease::pin_source(&source)?;
-        let worker = tokio::task::spawn_blocking(move || {
-            let _pin = pin;
-            stage_additional_disk(
-                &source,
-                &staging_parent,
-                expected_integrity.as_deref(),
-                expected_size,
-                qcow2,
-            )
-        });
+        let worker = {
+            let worker_storage = child.clone();
+            tokio::task::spawn_blocking(move || {
+                let _storage = worker_storage;
+
+                let _pin = pin;
+                std::fs::create_dir_all(&staging_parent)?;
+                let stage = stage_additional_disk(
+                    &source,
+                    &staging_parent,
+                    expected_integrity.as_deref(),
+                    expected_size,
+                    qcow2,
+                )?;
+                Ok(stage)
+            })
+        };
         publish_staged_additional_disk(worker, &target).await?;
         mounts.push(VolumeMount::DiskImage {
             host: target,
@@ -258,6 +262,8 @@ fn invalid(message: &str) -> MicrosandboxError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use microsandbox_image::checkpoint::{DiskLayerRef, ResourceTreatment};
     use std::collections::BTreeMap;
@@ -296,7 +302,7 @@ mod tests {
         publisher.abort();
         assert!(publisher.await.unwrap_err().is_cancelled());
 
-        // Model ChildStageGuard cleanup followed by another creation of the same name.
+        // Model staging cleanup followed by another creation of the same name.
         std::fs::remove_dir_all(&child).unwrap();
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(&target, b"replacement child data").unwrap();
@@ -317,7 +323,8 @@ mod tests {
 
     #[tokio::test]
     async fn additional_disks_are_private_and_require_exact_guest_identity() {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = Arc::new(tempfile::tempdir().unwrap());
+        let preparation = CreationStorage::temporary(temporary.clone());
         let source = temporary.path().join("capture");
         std::fs::create_dir_all(source.join("layers")).unwrap();
         let path = source.join("layers/layer_0123456789abcdef0123456789abcdef.raw");
@@ -374,7 +381,7 @@ mod tests {
                 std::slice::from_ref(&disk),
                 std::slice::from_ref(&resource),
                 &temporary.path().join("no-source"),
-                &untouched,
+                &crate::backend::local::creation::CreationStorage::for_test(&untouched),
                 Some("vdb"),
                 &selection,
             )
@@ -387,7 +394,7 @@ mod tests {
             std::slice::from_ref(&disk),
             std::slice::from_ref(&resource),
             &source,
-            &child,
+            &preparation.at(&child),
             Some("vdb"),
             &choices,
         )
@@ -407,9 +414,11 @@ mod tests {
                 std::slice::from_ref(&disk),
                 std::slice::from_ref(&resource),
                 &source,
-                &temporary.path().join("bad"),
+                &crate::backend::local::creation::CreationStorage::for_test(
+                    &temporary.path().join("bad")
+                ),
                 Some("vdb"),
-                &choices,
+                &choices
             )
             .await
             .is_err()
@@ -454,7 +463,9 @@ mod tests {
                 &[disk],
                 std::slice::from_ref(&resource),
                 &source,
-                &temporary.path().join(label),
+                &crate::backend::local::creation::CreationStorage::for_test(
+                    &temporary.path().join(label),
+                ),
                 Some("vdb"),
                 &choices,
             )

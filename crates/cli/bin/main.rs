@@ -298,6 +298,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
                     tcp_accept_queue_size: true,
@@ -308,6 +309,9 @@ fn main() {
                     http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    nested_virt: Some(
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                    ),
                     exec_limits: true,
                 })
                 .expect("serialize capabilities")
@@ -833,6 +837,20 @@ mod command_tests {
         assert!(message.contains("/saved/snapshot.tar"));
         assert!(message.contains("requires recovery"));
         assert!(message.contains("thaw acknowledgement timed out"));
+    }
+
+    #[test]
+    fn unconfirmed_modification_prints_display_and_exits_one() {
+        let error: anyhow::Error = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        }
+        .into();
+
+        assert_eq!(render_anyhow_error(&error), 1);
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
     }
 
     #[test]

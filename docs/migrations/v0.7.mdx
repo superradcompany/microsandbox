@@ -23,7 +23,7 @@ Use **v0.7.3 or a later compatible patch release**. Earlier v0.7 releases have c
 | Older SDK applications and CLI jobs sharing `MSB_HOME` | Stop and upgrade them together. Older processes can write incompatible records or fail to read the upgraded database. |
 | Running sandbox VMs | Can remain running during migration. They keep their runtime and guest code until restarted. |
 
-Supported older runtimes remain usable for existing operations; newer features may require an upgrade. Selecting an older runtime does not restore older SDK access to an upgraded database.
+Local starts now require a runtime supporting protected sandbox state, including restarts and restores. Selecting an older runtime does not restore older SDK access to an upgraded database. Restart already-running older VMs with the patched runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available.
 
 Cloud users do not run this local migration. Cloud compatibility is handled by the service and requires server support, not just an updated SDK.
 
@@ -41,6 +41,12 @@ python -m pip install --upgrade 'microsandbox>=0.7.3,<0.8'
 ```
 
 Use your package manager for other SDKs. For an installed runtime, [`msb self update`](/cli/management#msb-self) installs the latest release; it cannot select a specific version.
+
+## Protected sandbox state
+
+Update both the SDK/CLI and runtime, then retry the operation. An upgrade-required error identifies the selected runtime; update an explicitly pinned runtime too. `msb self update` updates binaries, while the next stopped-state operation or start validates and migrates eligible sandbox storage automatically. Existing VMs must restart to gain the protection.
+
+Migration refuses legacy disk chains or checkpoints whose authority cannot be established safely. Preserve that sandbox and recover from a verified backup or an independently verified disk chain; do not delete journals or guards to bypass the error. Downgrade is unavailable while protected or migrating sandboxes remain.
 
 ## Later v0.7 releases
 

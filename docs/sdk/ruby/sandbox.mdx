@@ -549,6 +549,8 @@ Record activity to refresh the sandbox idle timer.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```ruby
 sandbox.metrics # => SandboxMetrics
 ```
@@ -1596,6 +1598,8 @@ Record activity to refresh the sandbox idle timer.
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
 ```ruby
 handle.metrics # => SandboxMetrics
 ```
@@ -2191,3 +2195,11 @@ stream.close # => nil
 ```
 
 Stop observing logs. This does not stop the job.
+
+## Nested virtualization
+
+`nested_virt: true | false` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```ruby
+sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
+```

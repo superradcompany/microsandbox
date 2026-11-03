@@ -34,8 +34,9 @@ use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
-use super::LocalBackend;
+use super::{LocalBackend, creation};
 use crate::MicrosandboxResult;
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::{
     Backend,
     sandbox::{LogStream, MetricsStream, SandboxBackend, SandboxIdentity},
@@ -197,6 +198,7 @@ impl LocalBackend {
             }
         }
 
+        creation::require_complete(write_db, model.id, name).await?;
         let mut config =
             SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
         // Also cover starts after crashes or a stop performed by an older SDK. Lifecycle
@@ -258,10 +260,15 @@ impl LocalBackend {
         #[cfg(windows)]
         let lifecycle_guard = None;
 
-        match self
-            .create_sandbox_inner(config, model.id, mode, lifecycle_guard, disk_reservations)
-            .await
-        {
+        let started = async {
+            let storage = CreationStorage::acquire(self, name)?;
+            self.prepare_sandbox_launch(&config, &storage).await?;
+            self.create_sandbox_inner(config, model.id, mode, lifecycle_guard, disk_reservations)
+                .await
+        }
+        .await;
+
+        match started {
             Ok((local_state, returned_config)) => {
                 let mut sandbox =
                     Sandbox::from_local(backend.clone(), local_state, returned_config);
@@ -607,8 +614,7 @@ impl LocalBackend {
             let process = owner.process.as_ref().ok_or_else(|| {
                 crate::MicrosandboxError::Runtime("runtime exited before shutdown dispatch".into())
             })?;
-            let path =
-                crate::runtime::sandbox_agent_socket_path_candidates_for(self, name).remove(0);
+            let path = self.agent_socket_paths(name).remove(0);
             process
                 .connect_agent(&path, AGENT_SHUTDOWN_CONNECT_TIMEOUT)
                 .await?
@@ -849,7 +855,7 @@ impl LocalBackend {
                 || (sandbox.status == SandboxStatus::Starting && socket_roots.is_some())
             {
                 if let Some((run_dir, sandboxes_dir)) = socket_roots {
-                    crate::runtime::remove_sandbox_socket_artifacts_at(
+                    crate::runtime::remove_socket_artifacts_at(
                         run_dir,
                         sandboxes_dir,
                         &sandbox.name,
@@ -897,11 +903,7 @@ impl LocalBackend {
         }
 
         if let Some((run_dir, sandboxes_dir)) = socket_roots {
-            crate::runtime::remove_sandbox_socket_artifacts_at(
-                run_dir,
-                sandboxes_dir,
-                &sandbox.name,
-            )?;
+            crate::runtime::remove_socket_artifacts_at(run_dir, sandboxes_dir, &sandbox.name)?;
         }
         let (terminal_status, reason) = Self::stale_runtime_terminal_state(sandbox.status);
         Self::mark_sandbox_runtime_stale(
@@ -1724,8 +1726,7 @@ mod tests {
         .exec(pools.write())
         .await
         .unwrap();
-        let agent =
-            crate::runtime::sandbox_agent_socket_path_candidates_for(&backend, name).remove(0);
+        let agent = backend.agent_socket_paths(name).remove(0);
         let path = microsandbox_runtime::control::control_socket_path_for(&agent);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
