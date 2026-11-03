@@ -409,6 +409,18 @@ impl JsBuiltVolumeMount {
                 builder.bind(self.host.clone().ok_or_else(|| missing("host"))?);
             }
             "named" => {
+                // In existing mode the builder drops creation settings, so the core
+                // could not refuse them; refuse them here with the core's message.
+                let existing = matches!(self.named_mode.as_deref(), None | Some("existing"));
+                let configures = self.named_kind.as_deref() == Some("disk")
+                    || self.size_mib.is_some()
+                    || self.quota_mib.is_some();
+                if existing && configures {
+                    return Err(napi::Error::from_reason(format!(
+                        "{}: modify does not create or configure named volumes; create the volume first",
+                        self.guest
+                    )));
+                }
                 builder.named_with(
                     self.name.clone().ok_or_else(|| missing("name"))?,
                     self.named_mode.clone(),
@@ -915,5 +927,17 @@ mod tests {
         let rebuilt = named.into_core().unwrap();
         let quota_mib = rebuilt.named_create().and_then(|create| create.quota_mib());
         assert_eq!(quota_mib, Some(64));
+
+        // In existing mode the builder would drop them, so they are refused here instead.
+        for mode in [None, Some("existing")] {
+            let mut named = built(RustMountBuilder::new("/data").named("shared"));
+            named.named_mode = mode.map(Into::into);
+            named.quota_mib = Some(64);
+            let reason = named.into_core().unwrap_err().reason;
+            assert!(
+                reason.contains("modify does not create or configure named volumes"),
+                "{reason}"
+            );
+        }
     }
 }
