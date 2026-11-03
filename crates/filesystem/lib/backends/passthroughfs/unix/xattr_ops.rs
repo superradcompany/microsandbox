@@ -10,12 +10,14 @@
 //! All error paths capture `io::Error::last_os_error()` *before* calling `libc::close(fd)`,
 //! since `close()` may clobber errno on some systems. The captured error is then returned.
 //!
-//! ## listxattr size=0
+//! ## listxattr sizing
 //!
-//! When `size=0` (query byte count), the response is computed by doing a full listxattr,
-//! filtering out the hidden key, and returning the filtered byte count. Returning the raw
+//! Both the size query (`size=0`) and the sized read do a full host listxattr and filter
+//! out the hidden key. The size query returns the filtered byte count. Returning the raw
 //! kernel count would leak the hidden xattr's existence (the guest could compare the
-//! unfiltered count with the filtered list to infer the xattr exists).
+//! unfiltered count with the filtered list to infer the xattr exists). The sized read
+//! checks the guest buffer against the filtered list, not the raw host list, so a buffer
+//! sized by the count query fits.
 
 use std::{ffi::CStr, io};
 
@@ -197,99 +199,21 @@ pub(crate) fn do_listxattr(
     }
 
     let fd = open_xattr_fd(fs, ino)?;
+    let names = read_filtered_xattr_names(fd);
+    unsafe { libc::close(fd) };
+    let names = names?;
 
+    // Size every reply from the filtered list. The host list also holds the
+    // hidden key, so a guest buffer sized by the count query is too small for
+    // a raw host call.
     if size == 0 {
-        // Do a full listxattr, filter, and return the filtered byte count.
-        // Returning the raw kernel count would leak the hidden xattr's existence.
-        #[cfg(target_os = "linux")]
-        let raw_size = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    std::ptr::null_mut(),
-                    0,
-                )
-            }
-        };
-
-        #[cfg(target_os = "macos")]
-        let raw_size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
-
-        if raw_size < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-
-        if raw_size == 0 {
-            unsafe { libc::close(fd) };
-            return Ok(ListxattrReply::Count(0));
-        }
-
-        // Read the full list to compute filtered size.
-        let mut buf = vec![0u8; raw_size as usize];
-
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            }
-        };
-
-        #[cfg(target_os = "macos")]
-        let ret =
-            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
-
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-        unsafe { libc::close(fd) };
-        buf.truncate(ret as usize);
-
-        let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
-        let filtered = filter_xattr_names(&buf, hidden_key);
-        Ok(ListxattrReply::Count(filtered.len() as u32))
-    } else {
-        let mut buf = vec![0u8; size as usize];
-
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            }
-        };
-
-        #[cfg(target_os = "macos")]
-        let ret =
-            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
-
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-        unsafe { libc::close(fd) };
-        buf.truncate(ret as usize);
-
-        // Filter out the override xattr key from the list.
-        let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
-        let filtered = filter_xattr_names(&buf, hidden_key);
-
-        Ok(ListxattrReply::Names(filtered))
+        return Ok(ListxattrReply::Count(names.len() as u32));
     }
+    if names.len() > size as usize {
+        return Err(platform::erange());
+    }
+
+    Ok(ListxattrReply::Names(names))
 }
 
 /// Remove an extended attribute.
@@ -342,6 +266,55 @@ pub(crate) fn do_removexattr(
 //--------------------------------------------------------------------------------------------------
 // Functions: Helpers
 //--------------------------------------------------------------------------------------------------
+
+/// Read the full host xattr name list for `fd` without the hidden override key.
+///
+/// Leaves `fd` open; the caller closes it after taking the result.
+fn read_filtered_xattr_names(fd: i32) -> io::Result<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    let path = format!("/proc/self/fd/{fd}\0");
+
+    #[cfg(target_os = "linux")]
+    let raw_size = unsafe {
+        libc::listxattr(
+            path.as_ptr() as *const libc::c_char,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+
+    #[cfg(target_os = "macos")]
+    let raw_size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
+
+    if raw_size < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    if raw_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut buf = vec![0u8; raw_size as usize];
+
+    #[cfg(target_os = "linux")]
+    let ret = unsafe {
+        libc::listxattr(
+            path.as_ptr() as *const libc::c_char,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+
+    #[cfg(target_os = "macos")]
+    let ret = unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
+
+    if ret < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    buf.truncate(ret as usize);
+
+    let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
+    Ok(filter_xattr_names(&buf, hidden_key))
+}
 
 /// Filter a nul-separated xattr name list, removing any entry matching `hidden`.
 fn filter_xattr_names(names: &[u8], hidden: &[u8]) -> Vec<u8> {
