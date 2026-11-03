@@ -98,7 +98,13 @@ impl PassthroughFs {
             validate_component(name)?;
 
             let path = entry.path();
-            let metadata = self.safe_metadata(&path)?;
+            // A rejected reparse point must not hide its ordinary siblings.
+            // Direct lookup and access still enforce the same reparse guard.
+            let metadata = match self.safe_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.raw_os_error() == Some(LINUX_ELOOP) => continue,
+                Err(error) => return Err(error),
+            };
             let child = self.intern_path(path)?;
             let full_entry = self.entry_from_metadata(&metadata, child.as_ref())?;
             let dir_entry = DirEntry {
