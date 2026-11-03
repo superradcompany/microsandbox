@@ -424,6 +424,8 @@ Sources: [`crates/vsock/lib/stream.rs`](crates/vsock/lib/stream.rs), [`crates/vs
 
 Use standards-compliant clients in tests and exercise connections against older running agentd versions when changing the adapter-to-agent mapping.
 
+The SDK-hosted SSH adapter maps negative agent exec codes, including the existing `-1` signal-termination sentinel, to SSH exit status `1`. Nonnegative codes are preserved. SDK SSH clients map standard exit signals to `128 +` the Linux signal number and reject exec channels closed without a termination outcome. These corrections require no agent payload, version, or runtime capability change and apply to existing running guests. They do not identify an unknown signal or prove OOM, and the separately deployed cloud SSH gateway requires its own fix.
+
 ## 15. Metrics Shared-Memory ABI
 
 Metrics use a binary shared-memory structure across independently executing processes. The header and slots have fixed sizes, magic, registry version, ABI, atomics, seqlock ordering, generation counters, lifecycle states, and reserved bytes.

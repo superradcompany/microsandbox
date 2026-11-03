@@ -302,6 +302,8 @@ println!("exit {}: {}", out.status, String::from_utf8_lossy(&out.stdout));
 
 Run an SSH exec request and collect stdout, stderr, and the exit status. The command is run through the sandbox's configured shell (default `/bin/sh -c`). No PTY is requested.
 
+Returns an error if the channel closes without an exit status or signal. Known SSH signals produce `128 +` the Linux signal number; unknown signal names produce `128`.
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">
