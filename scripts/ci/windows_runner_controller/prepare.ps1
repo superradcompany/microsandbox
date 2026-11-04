@@ -50,6 +50,7 @@ if ($ImagePlatform) {
     Stop-Service sshd -ErrorAction Stop
     # Host keys and operator access belong to the new VM, never the template.
     Remove-Item C:\ProgramData\ssh\ssh_host_* -Force -ErrorAction SilentlyContinue
+    if (Test-Path C:\ProgramData\ssh\ssh_host_*) { throw 'Old SSH host keys could not be removed' }
     [IO.File]::WriteAllText('C:\ProgramData\ssh\administrators_authorized_keys',$PublicKey.Trim()+"`n",[Text.UTF8Encoding]::new($false))
     & icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'SSH key ACL failed' }

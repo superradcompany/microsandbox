@@ -32,6 +32,10 @@ Set-Service sshd -StartupType Manual
 Get-NetFirewallRule -Name WindowsCiSsh -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 Remove-Item C:\ProgramData\ssh\ssh_host_* -Force -ErrorAction SilentlyContinue
 Remove-Item C:\ProgramData\ssh\administrators_authorized_keys -Force -ErrorAction SilentlyContinue
+if ((Test-Path C:\ProgramData\ssh\ssh_host_*) -or
+    (Test-Path C:\ProgramData\ssh\administrators_authorized_keys)) {
+    throw 'Image builder SSH keys could not be removed'
+}
 Get-ChildItem C:\ci-private -Force | Remove-Item -Force -Recurse
 New-Item -ItemType Directory -Force -Path C:\ci-image | Out-Null
 Set-Acl -LiteralPath C:\ci-image -AclObject (Get-Acl C:\ci-private)
