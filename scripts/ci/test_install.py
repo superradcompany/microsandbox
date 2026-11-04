@@ -16,7 +16,7 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 
 @unittest.skipUnless(platform.system() in ("Linux", "Darwin"), "Unix installer only")
 class InstallTests(unittest.TestCase):
-    def run_case(self, case):
+    def run_case(self, case, *, umask=0o022, existing_mode=None):
         system = platform.system()
         machine = platform.machine()
         if system == "Darwin" and machine != "arm64":
@@ -91,9 +91,34 @@ else:
                                            target_is_directory=True)
                 env["MSB_HOME"] = "alias/../custom-home"
                 target = root / "physical" / "custom-home"
+            if case == "existing-symlink":
+                physical = root / "shared home"
+                physical.mkdir()
+                target.symlink_to(physical, target_is_directory=True)
+            if existing_mode is not None:
+                target.mkdir(parents=True, exist_ok=True)
+                target.chmod(existing_mode)
+                # Upgrades must keep existing user data and its permissions intact.
+                sentinel = target / "existing-data"
+                sentinel.write_text("keep me")
+                sentinel.chmod(0o640)
             process = subprocess.run(["/bin/sh", str(INSTALLER)], cwd=cwd, env=env,
-                                     text=True, capture_output=True, timeout=10)
+                                     text=True, capture_output=True, timeout=10, umask=umask)
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            expected_mode = 0o700 if existing_mode is None else existing_mode
+            self.assertEqual(target.stat().st_mode & 0o777, expected_mode)
+            if existing_mode is not None:
+                self.assertEqual(sentinel.read_text(), "keep me")
+                self.assertEqual(sentinel.stat().st_mode & 0o777, 0o640)
+            if existing_mode is not None and existing_mode & 0o022:
+                self.assertIn("group or world writable", process.stdout)
+                warning = next(line for line in process.stdout.splitlines()
+                               if " is group or world writable" in line)
+                warned_path = warning.removeprefix("warn ").split(" is group or world writable", 1)[0]
+                self.assertTrue(Path(warned_path).samefile(target))
+                self.assertIn("chmod 700", process.stdout)
+            else:
+                self.assertNotIn("group or world writable", process.stdout)
             self.assertEqual(list(temp.iterdir()), [], "installer temporary directory leaked")
             self.assertEqual(INSTALLER.read_bytes(), source, "installer source changed")
             for path, expected in ((target / "bin/msb", binary_bytes),
@@ -115,6 +140,21 @@ else:
                 self.assertTrue(Path(os.readlink(link)).is_absolute(), str(link))
                 self.assertEqual(link.resolve(strict=True), (target / "bin/msb").resolve())
                 self.assertEqual(link.read_bytes(), binary_bytes)
+
+    def test_fresh_home_is_private_under_each_umask(self):
+        for case in ("default", "absolute", "relative-spaces"):
+            for mask in (0o000, 0o002, 0o022, 0o077):
+                with self.subTest(case=case, umask=oct(mask)):
+                    self.run_case(case, umask=mask)
+
+    def test_existing_home_permissions_and_data_are_preserved(self):
+        for case in ("default", "absolute", "relative-spaces"):
+            for mode in (0o700, 0o755, 0o775, 0o777):
+                with self.subTest(case=case, mode=oct(mode)):
+                    self.run_case(case, umask=0o002, existing_mode=mode)
+
+    def test_existing_symlink_target_is_not_chmodded(self):
+        self.run_case("existing-symlink", umask=0o002, existing_mode=0o775)
 
     def test_default_home(self):
         self.run_case("default")

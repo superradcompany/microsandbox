@@ -70,6 +70,19 @@ need_cmd() {
     fi
 }
 
+prepare_install_dir() {
+    # The install root also contains the private catalog. Do not let the
+    # caller's umask make a new root writable by other accounts.
+    (umask 077; mkdir -p "$INSTALL_DIR")
+
+    # Existing roots may be shared or symlinked custom locations. Leave their
+    # permissions alone and explain the repair instead of silently chmod'ing them.
+    if [ -n "$(find -H "$INSTALL_DIR" -prune \( -perm -0020 -o -perm -0002 \) -print)" ]; then
+        warn "$INSTALL_DIR is group or world writable; msb may reject it as a catalog ancestor that permits path substitution."
+        warn "If this is your private MSB_HOME, run chmod 700 on this directory; otherwise choose a private MSB_HOME."
+    fi
+}
+
 resolve_libkrunfw_artifact() {
     if [ "$OS" = "linux" ]; then
         # The full version belongs to the release artifact, so discover it
@@ -327,6 +340,7 @@ main() {
     need_cmd curl
     need_cmd tar
     need_cmd uname
+    need_cmd find
     if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
         error "required command not found: sha256sum or shasum"
     fi
@@ -374,6 +388,8 @@ main() {
     info "Extracting..."
     tar -xzf "$_bundle"
     resolve_libkrunfw_artifact
+
+    prepare_install_dir
 
     # Install binaries.
     # install(1) unlinks the target first, so the binary gets a fresh inode
