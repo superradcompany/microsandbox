@@ -2314,8 +2314,9 @@ impl AsyncWrite for SshStdioStream {
 
 /// Complete an SSH command without turning an unknown abnormal guest exit into success.
 async fn send_exec_exit(session: &SshServerHandle, channel: ChannelId, code: i32) {
-    // Agentd reports -1 when the supervised process dies by signal. It does not yet report
-    // which signal, so use a generic failure rather than inventing a signal or OOM cause.
+    // Agentd reports -1 when it has no exit code: the process died by a signal it does not
+    // report, or its exit notification was lost. Use a generic failure rather than inventing
+    // a signal or OOM cause.
     let status = u32::try_from(code).unwrap_or(1);
     let _ = session.exit_status_request(channel, status).await;
     let _ = session.eof(channel).await;
@@ -3329,7 +3330,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             let client = exit_test_client().await;
 
-            // -1 is the existing agentd representation of signal termination, including
+            // Agentd emits -1 for signal termination or a lost exit notification, including
             // older running guests. The adapter must preserve failure without a wire change.
             for (guest_code, expected) in [(0, 0), (17, 17), (127, 127), (137, 137), (-1, 1)] {
                 let output = client.exec(format!("exit:{guest_code}")).await.unwrap();
