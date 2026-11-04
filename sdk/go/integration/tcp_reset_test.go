@@ -39,7 +39,8 @@ func guestResetLine(t *testing.T, ctx context.Context, process *microsandbox.Exe
 	}
 }
 
-func TestGuestSocketResetEndsBlockedTCPReadAndWrite(t *testing.T) {
+func guestSocketResetFixture(t *testing.T) (context.Context, *microsandbox.Sandbox, *microsandbox.ExecHandle, *microsandbox.TCPConn) {
+	t.Helper()
 	ctx := integrationCtx(t)
 	fixture := filepath.Join(t.TempDir(), "tcp-reset")
 	build := exec.CommandContext(ctx, "go", "build", "-o", fixture, "./testdata/tcp-reset")
@@ -80,7 +81,7 @@ func TestGuestSocketResetEndsBlockedTCPReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	t.Cleanup(func() { _ = process.Close() })
 	host, service, err := net.SplitHostPort(guestResetLine(t, ctx, process))
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +94,12 @@ func TestGuestSocketResetEndsBlockedTCPReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Abort()
+	t.Cleanup(func() { _ = conn.Abort() })
+	return ctx, sb, process, conn
+}
+
+func TestGuestSocketResetEndsBlockedTCPReadAndWrite(t *testing.T) {
+	ctx, sb, process, conn := guestSocketResetFixture(t)
 	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -142,5 +148,37 @@ func TestGuestSocketResetEndsBlockedTCPReadAndWrite(t *testing.T) {
 	}
 	if _, err := sb.FS().ReadString(ctx, "/proc/1/net/tcp"); err != nil {
 		t.Fatalf("agent filesystem after reset: %v", err)
+	}
+}
+
+func TestGuestSocketResetReadFailurePreventsLaterWrite(t *testing.T) {
+	ctx, sb, process, conn := guestSocketResetFixture(t)
+	if err := conn.SetDeadline(time.Now().Add(3 * microsandboxIdleBound)); err != nil {
+		t.Fatal(err)
+	}
+	// Do not fill credit: an idle input has room to accept a later write unless the
+	// failed output closes both directions before Read reports the guest's failure.
+	stdin := process.TakeStdin()
+	if stdin == nil {
+		t.Fatal("fixture stdin unavailable")
+	}
+	defer stdin.Close()
+	if _, err := stdin.WriteCtx(ctx, []byte("reset\n")); err != nil {
+		t.Fatal(err)
+	}
+	if line := guestResetLine(t, ctx, process); line != "reset" {
+		t.Fatalf("reset not confirmed: %q", line)
+	}
+	if n, err := conn.Read(make([]byte, 1)); n != 0 || err == nil || !strings.Contains(err.Error(), "guest TCP read:") {
+		t.Fatalf("guest reset did not report its read failure: n=%d err=%v", n, err)
+	}
+	if n, err := conn.Write([]byte("after failure")); n != 0 || err == nil {
+		t.Fatalf("write after reported guest failure: n=%d err=%v", n, err)
+	}
+	if err := conn.Abort(); err != nil {
+		t.Fatalf("guest reset cleanup: %v", err)
+	}
+	if output, err := sb.Exec(ctx, "true", nil); err != nil || output.ExitCode() != 0 {
+		t.Fatalf("agent control after reset: %v", err)
 	}
 }

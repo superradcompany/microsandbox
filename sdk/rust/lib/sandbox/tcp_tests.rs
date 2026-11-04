@@ -97,6 +97,95 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
+/// The writer has sent the finish, but its acknowledgement becomes observable only when the
+/// guest terminal future completes. This forces the supervisor to select the terminal before
+/// it can select input completion, independently of Tokio's randomized branch order.
+async fn terminal_before_input_completion(input_result: Option<bool>) -> TcpRelayEnd {
+    let sender = TcpBulkSender::new(
+        BulkSendState::new(
+            BulkKind::Tcp,
+            BulkFlow::HostToGuest,
+            64 * 1024,
+            AGENT_CREDIT,
+        )
+        .unwrap(),
+    );
+    sender.state.lock().await.admit(1).unwrap();
+    let (written, completion) = tokio::sync::oneshot::channel();
+    let (reply, terminal) = tokio::sync::oneshot::channel();
+    let input = async {
+        completion.await.unwrap();
+        match input_result {
+            Some(result) => result,
+            None => std::future::pending().await,
+        }
+    };
+    let output = std::future::pending();
+    let guest = async {
+        terminal.await.unwrap();
+        sender
+            .apply_credit(BulkCredit {
+                kind: BulkKind::Tcp,
+                flow: BulkFlow::HostToGuest,
+                consumed_offset: 1,
+                credit_limit: AGENT_CREDIT,
+            })
+            .await
+            .unwrap();
+        written.send(()).unwrap();
+        sender.close();
+        true
+    };
+    tokio::pin!(input, output, guest);
+    let stop = watch::Sender::new(true);
+    let mut stopped = stop.subscribe();
+    let supervision = supervise_tcp(
+        &sender,
+        input.as_mut(),
+        output.as_mut(),
+        guest.as_mut(),
+        &mut stopped,
+        std::future::pending(),
+    );
+    tokio::pin!(supervision);
+    // Only stop is initially ready. Drive the supervisor into its closing loop before
+    // making the terminal ready; the input cannot complete until that terminal is polled.
+    assert!(futures::poll!(&mut supervision).is_pending());
+    reply.send(()).unwrap();
+    tokio::time::timeout(3 * GUEST_TCP_CLOSE_IDLE_TIMEOUT, supervision)
+        .await
+        .expect("close supervision must stay bounded")
+}
+
+#[tokio::test]
+async fn terminal_reply_does_not_overtake_successful_input_completion() {
+    let end = terminal_before_input_completion(Some(true)).await;
+    assert!(end.terminated, "guest acknowledged cleanup");
+    assert!(end.guest_done);
+    assert_eq!(end.finished, Some(true), "finish completion was lost");
+}
+
+#[tokio::test]
+async fn terminal_reply_does_not_certify_failed_input_completion() {
+    let end = terminal_before_input_completion(Some(false)).await;
+    assert!(
+        end.terminated,
+        "input failure cannot undo acknowledged cleanup"
+    );
+    assert!(end.guest_done);
+    assert_eq!(end.finished, Some(false));
+}
+
+#[tokio::test]
+async fn terminal_reply_does_not_wait_forever_for_input_completion() {
+    let start = tokio::time::Instant::now();
+    let end = terminal_before_input_completion(None).await;
+    assert!(start.elapsed() >= GUEST_TCP_CLOSE_IDLE_TIMEOUT);
+    assert!(end.terminated, "timeout cannot undo acknowledged cleanup");
+    assert!(end.guest_done);
+    assert_eq!(end.finished, None, "unconfirmed finish is not delivery");
+}
+
 /// Read the destination to its end; a reset is an error.
 async fn read_peer(mut peer: TcpStream) -> std::io::Result<Vec<u8>> {
     let mut received = Vec::new();
@@ -447,6 +536,28 @@ async fn guest_reset_ends_blocked_read_and_write_and_acknowledges_cleanup() {
             .unwrap(),
         GuestTcpCleanup::Acknowledged
     );
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn guest_reset_read_failure_prevents_a_subsequent_write() {
+    let fixture = Fixture::new(Guest::Prompt).await;
+    let (mut stream, peer) = fixture.dial().await;
+    // No host input is pending: the input relay is waiting on its reader, not guest credit.
+    // A failure exposed by Read must already have stopped this otherwise-writable input.
+    peer.set_zero_linger().unwrap();
+    drop(peer);
+    let mut byte = [0];
+    let read = tokio::time::timeout(3 * GUEST_TCP_CLOSE_IDLE_TIMEOUT, stream.read(&mut byte))
+        .await
+        .expect("guest reset must end Read");
+    assert!(read.is_err(), "reset must not become EOF: {read:?}");
+    let write = stream.write(b"after failure").await;
+    assert!(
+        write.is_err(),
+        "write after reported guest failure: {write:?}"
+    );
+    assert_eq!(stream.abort().await, GuestTcpCleanup::Acknowledged);
     fixture.finish().await;
 }
 

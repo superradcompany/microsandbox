@@ -184,6 +184,41 @@ func TestTCPConnGuestResetDoesNotHangClose(t *testing.T) {
 	}
 }
 
+func TestTCPConnReportedReadFailurePreventsLaterWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event uint8
+	}{
+		{"guest-socket-failure", ffi.TCPTestGuestFailureWithoutCancel},
+		{"invalid-control", ffi.TCPTestUnexpectedControl},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, ctx := tcpTestConn(t)
+			defer conn.Abort()
+			if err := conn.SetDeadline(time.Now().Add(tcpTestBound)); err != nil {
+				t.Fatal(err)
+			}
+			// Leave input idle, with capacity in the Unix socket pair. A failed Read must
+			// fence later input, not just writers already blocked on guest credit.
+			if err := conn.native.TestEvent(ctx, tc.event); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.Read(make([]byte, 1)); err == nil || !strings.Contains(err.Error(), "guest TCP read:") {
+				t.Fatalf("guest failure did not report its read error: %v", err)
+			}
+			if n, err := conn.Write([]byte("after failure")); n != 0 || err == nil {
+				t.Fatalf("write after reported guest failure: n=%d err=%v", n, err)
+			}
+			if err := conn.Abort(); err != nil {
+				t.Fatalf("guest cleanup: %v", err)
+			}
+			if err := conn.native.TestEvent(ctx, ffi.TCPTestWaitDisconnect); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestTCPConnOrderedGuestEOFRemainsReadableAfterHalfClose(t *testing.T) {
 	conn, ctx := tcpTestConn(t)
 	defer conn.Abort()

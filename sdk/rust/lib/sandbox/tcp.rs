@@ -640,12 +640,15 @@ where
     }
     let mut deadline = tokio::time::Instant::now() + GUEST_TCP_CLOSE_IDLE_TIMEOUT;
     let mut last_consumed = 0;
-    let acknowledged = loop {
-        if let Some(terminal) = terminated {
-            break terminal;
+    loop {
+        // The guest can reply before the writer's finish acknowledgement is polled. Cleanup
+        // does not certify input completion: retain the reply and join input within the idle
+        // bound before deciding whether every byte was delivered.
+        if terminated == Some(false) || (terminated.is_some() && finished.is_some()) {
+            break;
         }
         if finished == Some(false) {
-            break false;
+            break;
         }
         // Create the waiter before reading the state a grant changes: a `Notified` receives
         // `notify_waiters` from its creation on, so a grant in between still wakes it.
@@ -659,7 +662,7 @@ where
             }
         };
         tokio::select! {
-            () = &mut abort => break false,
+            () = &mut abort => break,
             delivered = &mut input, if finished.is_none() => {
                 finished = Some(delivered);
                 deadline = tokio::time::Instant::now() + GUEST_TCP_CLOSE_IDLE_TIMEOUT;
@@ -673,12 +676,12 @@ where
                 }
                 last_consumed = consumed;
             }
-            () = tokio::time::sleep_until(deadline) => break false,
+            () = tokio::time::sleep_until(deadline) => break,
         }
-    };
+    }
     TcpRelayEnd {
         finished,
-        terminated: acknowledged,
+        terminated: terminated.unwrap_or(false),
         guest_done: terminated.is_some(),
         output_done,
     }
@@ -925,12 +928,13 @@ async fn run_relay<R, W>(
     let output_state = Arc::clone(&state);
     let output_client = Arc::clone(&client);
     let output_receiver = Arc::clone(&receiver);
+    let mut writer = writer;
+    let output_writer = &mut writer;
     let mut output = Box::pin(async move {
-        let mut writer = writer;
         let eof = relay_tcp_output(
             id,
             output_rx,
-            &mut writer,
+            output_writer,
             output_client,
             output_receiver,
             output_stop,
@@ -943,9 +947,7 @@ async fn run_relay<R, W>(
                 "guest TCP stream ended before the destination finished",
             );
         }
-        // The owner sees the end only now, with its cause already recorded.
-        let _ = writer.shutdown().await;
-        // Both directions are over: start the close sequence, as a closed SSH channel does.
+        // Output ended: start closing even if input is still waiting for bytes.
         output_state.stop.send_replace(true);
     });
     let mut guest = Box::pin(pump_tcp(frames, output_tx, Arc::clone(&sender), receiver));
@@ -976,8 +978,12 @@ async fn run_relay<R, W>(
             "guest TCP output was closed before delivery finished",
         );
     }
-    drop(output);
+    // Stop input before exposing a failed output's end to the owner. Otherwise Read can
+    // report failure while the socket pair or duplex pipe still accepts a later Write.
+    // Ordered guest EOF already half-closed output in relay_tcp_output and leaves input usable.
     drop(input);
+    drop(output);
+    drop(writer);
     let terminated = end.terminated || {
         let released = async {
             cancel_tcp(&client, id, &sender, "guest TCP connection released").await;

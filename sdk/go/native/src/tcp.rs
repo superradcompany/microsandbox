@@ -92,6 +92,22 @@ impl AsyncWrite for SocketWriter {
     }
 }
 
+impl Drop for SocketWriter {
+    fn drop(&mut self) {
+        // OwnedWriteHalf shuts output down before closing its descriptor. Stop peer writes
+        // first, so that interval cannot expose a failed Read while still accepting input.
+        // Ordinary half-close uses poll_shutdown instead and leaves input usable.
+        let socket = self.0.as_ref();
+        // SAFETY: the owned write half keeps this connected Unix socket open through shutdown.
+        if unsafe { libc::shutdown(socket.as_raw_fd(), libc::SHUT_RD) } != 0 {
+            eprintln!(
+                "microsandbox: failed to shut down released guest TCP input: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
 impl Drop for ReleaseGuard {
     fn drop(&mut self) {
         self.relay.request_abort();
@@ -298,4 +314,38 @@ pub unsafe extern "C" fn msb_tcp_conn_request_abort(
         }
         Ok(r#"{"ok":true}"#.into())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn socket_writer_drop_stops_input_before_output_eof() {
+        let (native, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let (reader, writer) = native.into_split();
+        // Retain the read half so descriptor close cannot hide the interval between
+        // OwnedWriteHalf's write shutdown and the underlying UnixStream's close.
+        drop(SocketWriter(writer));
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+        let write = peer.write(b"after failure").await;
+        assert!(write.is_err(), "write after released output: {write:?}");
+        drop(reader);
+    }
+
+    #[tokio::test]
+    async fn socket_writer_half_close_keeps_input_readable() {
+        let (native, mut peer) = tokio::net::UnixStream::pair().unwrap();
+        let (mut reader, writer) = native.into_split();
+        let mut writer = SocketWriter(writer);
+        writer.shutdown().await.unwrap();
+        let mut byte = [0];
+        assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+        peer.write_all(b"after EOF").await.unwrap();
+        let mut input = [0; 9];
+        reader.read_exact(&mut input).await.unwrap();
+        assert_eq!(&input, b"after EOF");
+    }
 }
