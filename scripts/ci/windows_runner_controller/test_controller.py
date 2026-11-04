@@ -146,6 +146,102 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(set(store.items), {100, 101})
         self.assertEqual({item.platform for item in store.items.values()}, {'win10', 'win11'})
 
+    def test_discovery_finds_older_jobs_on_both_states_later_pages(self):
+        first, second = lease(), lease(job_id=101, run_id=51, platform='win11')
+        run, job = job_run(first)
+        run.update(status='queued', conclusion=None, head_repository={'full_name': CFG.repository})
+        other_run = {**run, 'id': second.run_id, 'status': 'in_progress'}
+        other_job = {**job, 'id': second.job_id, 'run_id': second.run_id,
+                     'name': 'Windows WHP (11)', 'labels': second.labels}
+        batches = {
+            'queued': [{**run, 'id': index} for index in range(1000, 1100)],
+            'in_progress': [{**other_run, 'id': index} for index in range(2000, 2100)],
+        }
+        # Overlap can occur within pages and across the two state snapshots.
+        batches['queued'] += [batches['queued'][-1], run]
+        batches['in_progress'] += [other_run, {**run, 'status': 'in_progress'}]
+        api, pages, inspected = GitHub(CFG, lambda: 'synthetic-token'), [], []
+
+        def response(method, path, *args, **kwargs):
+            self.assertEqual(method, 'GET')
+            if path.endswith('fork-pr-contributor-approval'):
+                return {'approval_policy': 'all_external_contributors'}
+            query = parse_qs(urlsplit(path).query)
+            if '/workflows/' in path:
+                state, page = query['status'][0], int(query.get('page', ['1'])[0])
+                size = int(query['per_page'][0])
+                pages.append((state, page))
+                return {'workflow_runs': batches[state][(page - 1) * size:page * size]}
+            run_id = int(urlsplit(path).path.split('/')[3])
+            inspected.append(run_id)
+            return {'jobs': {50: [job], 51: [other_job]}.get(run_id, [])}
+
+        with patch.object(api, 'call', side_effect=response):
+            candidates = list(api.queued())
+        self.assertEqual([entry[1]['id'] for entry in candidates], [100, 101])
+        self.assertEqual(pages, [('queued', 1), ('queued', 2), ('in_progress', 1), ('in_progress', 2)])
+        self.assertEqual(inspected, [50, 51, *range(1000, 1100), *range(2000, 2100)])
+
+        # A later-page job must reach both normal admission and the deadline
+        # path; simply listing it without enforcing its timeout is not enough.
+        for age in (0, CFG.queue_timeout):
+            with self.subTest(age=age):
+                pending = [(r, {**j, 'created_at': utc(NOW - age)}, policy) for r, j, policy in candidates]
+                github, store = FakeGitHub(queued=pending), MemoryLeases()
+                Controller(replace(CFG, enabled=True), FakeAzure(), github, store, lambda: NOW).tick()
+                if age:
+                    self.assertFalse(store.items)
+                    self.assertEqual(github.cancelled, [50, 51])
+                    self.assertEqual([item.conclusion for item in github.completed], ['timed_out', 'timed_out'])
+                else:
+                    self.assertEqual(set(store.items), {100, 101})
+                    self.assertFalse(github.cancelled)
+
+    def test_discovery_checks_the_page_after_an_exactly_full_page(self):
+        run, _ = job_run()
+        run['head_repository'] = {'full_name': CFG.repository}
+        records = [{**run, 'id': index} for index in range(100)]
+        api, pages = GitHub(CFG, lambda: 'synthetic-token'), []
+
+        def response(method, path, *args, **kwargs):
+            if path.endswith('fork-pr-contributor-approval'):
+                return {'approval_policy': 'all_external_contributors'}
+            if '/workflows/' in path:
+                query = parse_qs(urlsplit(path).query)
+                state, page = query['status'][0], int(query.get('page', ['1'])[0])
+                pages.append((state, page))
+                return {'workflow_runs': records if state == 'queued' and page == 1 else []}
+            return {'jobs': []}
+
+        with patch.object(api, 'call', side_effect=response):
+            self.assertEqual(list(api.queued()), [])
+        self.assertEqual(pages, [('queued', 1), ('queued', 2), ('in_progress', 1)])
+
+    def test_discovery_does_not_admit_jobs_from_an_incomplete_workflow_scan(self):
+        run, _ = job_run()
+        for state in ('queued', 'in_progress'):
+            for failure in ('api', 'limit'):
+                with self.subTest(state=state, failure=failure):
+                    api, pages = GitHub(CFG, lambda: 'synthetic-token'), []
+
+                    def response(method, path, *args, **kwargs):
+                        if path.endswith('fork-pr-contributor-approval'):
+                            return {'approval_policy': 'all_external_contributors'}
+                        self.assertIn('/workflows/', path)  # No job is inspected before the scan completes.
+                        query = parse_qs(urlsplit(path).query)
+                        if query['status'][0] != state:
+                            return {'workflow_runs': []}
+                        page = int(query.get('page', ['1'])[0])
+                        pages.append(page)
+                        if failure == 'api' and page == 2:
+                            raise ApiError(503)
+                        return {'workflow_runs': [{**run, 'id': page * 100 + index} for index in range(100)]}
+
+                    error = ApiError if failure == 'api' else RuntimeError
+                    with patch.object(api, 'call', side_effect=response), self.assertRaises(error):
+                        next(api.queued())
+                    self.assertEqual(pages, [1, 2] if failure == 'api' else list(range(1, 11)))
+
     def test_queued_admission_rejects_approval_waits_and_invalid_identity(self):
         run, job = job_run()
         run.update(status='queued', conclusion=None)

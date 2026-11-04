@@ -92,8 +92,16 @@ class GitHub:
         # runners. Poll both states, deduplicating transitions between requests.
         runs = {}
         for status in ("queued", "in_progress"):
-            batch = self.call("GET", f"/actions/workflows/{self.cfg.workflow_id}/runs?status={status}&per_page=100")["workflow_runs"]
-            runs.update({run["id"]: run for run in batch})
+            for page in range(1, 11):
+                batch = self.call("GET", f"/actions/workflows/{self.cfg.workflow_id}/runs?status={status}&per_page=100&page={page}")["workflow_runs"]
+                runs.update({run["id"]: run for run in batch})
+                if len(batch) < 100:
+                    break
+            else:
+                # Filtered workflow searches expose at most 1,000 results.
+                # Refuse an incomplete scan instead of silently starving older
+                # jobs; existing lease progress and cleanup run before discovery.
+                raise RuntimeError("Could not inspect every workflow run")
         for run in sorted(runs.values(), key=lambda item: item["id"]):
             jobs = attempt_jobs(self.call, run["id"], run["run_attempt"])
             fork = (run.get("head_repository") or {}).get("full_name") != self.cfg.repository
