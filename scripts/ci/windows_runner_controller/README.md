@@ -1,0 +1,63 @@
+# Disposable Windows WHP runners
+
+The Check workflow builds one Windows x86_64 test bundle from its checked-out revision, then tests it on fresh Windows 10 and Windows 11 VMs. Each job runs a real WHP guest preflight, the complete Windows filesystem unit suite, and CLI and Rust SDK tests for boot, exec, file access, bind mounts, junction confinement, read-only mounts, stop, and removal. Networking inspection and snapshot regressions can be added when their fixes land.
+
+## Lifecycle and trust
+
+A private Azure Functions timer polls only the configured Check workflow. It admits evaluated, queued jobs with the expected name and exact platform/run/attempt label. Runners have no generic platform or default labels that unrelated jobs could request. Labels route jobs; they do not authorize untrusted code. Fork PRs require GitHub's `all_external_contributors` approval policy. Maintainers must review the exact revision before approving a fork run, including changes to workflows and test scripts. A new revision or rerun has a different run identity and cannot reuse an old lease.
+
+The controller never checks out or executes PR code. It creates each VM from a pinned Marketplace image with a new OS disk, enables Hyper-V/WHP, reboots, and executes a small HLT guest before registering a runner. Builds happen on GitHub-hosted machines. Workers have no compiler checkout, managed identity, cloud credential, App key, signing key, or repository secret. Their job token has only `contents: read`.
+
+The GitHub App is installed on this repository only, with Administration write for runner registration, Actions write for monitoring and cancelling stranded runs, and Checks write for lifecycle results. Administration permission also allows broad repository administration; this credential must stay in the private control plane. The App key is a Key Vault reference in the Function configuration. Short-lived installation tokens never enter a worker. Only a single-job JIT configuration is staged through protected Azure Run Command parameters, and that command is deleted before the listener starts.
+
+The listener runs as NetworkService with Hyper-V Administrators membership. The service executable and Azure agent state are outside job-writable storage. A job can modify its own machine, so the underlying VM is always destroyed. No disk, runner directory, build cache, or image made from a used worker is reused. The dedicated worker subnet denies inbound access except operator SSH from one configured IPv4 `/32`, denies peer traffic, and blocks Azure metadata access. Workers have no route to production networks. Use only the operator's public SSH key in configuration.
+
+The timer stores credential-free leases in a private blob container. Completed, failed, cancelled, and expired jobs enter cleanup. Cleanup removes the exact runner registration, VM, OS disk, NIC, and public IP, retries partial failures, and reports success only after all four Azure resource IDs return 404. A separate tag-based pass runs before lease storage and GitHub access, so expired resources can still be deleted when either dependency is unavailable. Keep the timer running when disabling new admissions.
+
+## Limits and results
+
+- At most two allocated job leases, including orphaned tagged resources. Capacity can be reduced to one.
+- A 20-minute GitHub job limit, a maximum 60-minute lease from allocation through cleanup, and a maximum 90-minute admission deadline. Provisioning time counts against the lease. Azure outages can delay deletion, so these limits are not a billing guarantee.
+- No warm pool. Idle workers scale to zero; the private Function, storage, and Key Vault have their own ongoing usage costs.
+- Setup failure, expired leases, and admission timeout cancel the affected workflow run. Test failure is reported by the Windows job and does not cancel the other Windows lane.
+- The App publishes a separate infrastructure check for each OS. A hosted cleanup job verifies both checks belong to the configured App and exact run attempt before Check Summary can pass.
+- Public test output contains only allowlisted stage results, OS version, revision, and test counts. Raw runtime diagnostics remain on the disposable disk and are deleted with it. Do not upload them automatically. Inspect failures privately, then share only redacted, relevant details.
+
+## Private deployment
+
+Provision a dedicated worker resource group and subnet with the isolation above, plus a separate control-plane resource group. The Function's system-assigned identity needs Virtual Machine Contributor and Network Contributor only on the worker group, Key Vault Secrets User only on its vault, and access to its own private lease storage. Workers receive no identity. Do not grant the Function permissions over unrelated VMs or production networks.
+
+Use Python 3.12, Functions v4, a monitored timer, and `host.json` from this folder. There is no HTTP trigger. Dependencies and installer hashes are pinned; update them through review before GitHub retires the runner version. Create a source package with:
+
+```sh
+python3 scripts/ci/windows_runner_controller/package.py /tmp/windows-ci-controller.zip
+az functionapp deployment source config-zip --resource-group "$CONTROL_GROUP" --name "$FUNCTION_APP" --src /tmp/windows-ci-controller.zip --build-remote true
+```
+
+Configure these settings privately, never in a workflow, issue, PR, or checked-in file:
+
+| Setting | Purpose |
+| --- | --- |
+| `WINDOWS_CI_CONFIG` | JSON configuration described below |
+| `WINDOWS_CI_REPOSITORY` | Exact `owner/repository`, matching the JSON configuration |
+| `GITHUB_APP_ID` | Approved repository-scoped App ID |
+| `GITHUB_INSTALLATION_ID` | Installation selected for this repository |
+| `GITHUB_APP_PRIVATE_KEY` | Azure Key Vault secret reference containing the PEM |
+| `AzureWebJobsStorage` | Private Functions/lease-storage connection string |
+
+`WINDOWS_CI_CONFIG` requires `repository`, numeric `workflow_id`, `subscription`, `resource_group`, `location`, `subnet_id`, `public_key`, `ssh_source`, and `images`. The `images` object has `win10` and `win11` entries, each containing pinned `publisher`, `offer`, `sku`, and `version` fields. Workers use `Standard_D4s_v5` and a fresh 256-GiB Standard SSD. Optional settings are `capacity` (2), `lifetime` (3600 seconds), `queue_timeout` (5400 seconds), `runner_group_id` (1), and `enabled` (false). The subnet must belong to the dedicated worker group. Verify quota, pinned images, client-OS licensing, and runner group availability in the selected subscription before enabling admission.
+
+Deploy with `enabled: false`. Verify the Key Vault reference resolves, the App is installed only on the intended repository, and the timer can read storage and list the worker group. Monitor sanitized control-plane errors and alert on timer failures or tagged resources that survive expiry. The expiry pass is independent of runners, lease storage, and GitHub, but still depends on the Function host and Azure control plane being available.
+
+Before enabling normal runs, exercise both OS lanes, a failing job, cancellation, expiry with an unavailable runner, and a subsequent fresh allocation. Check that the previous runner registration and all four job resources are gone and that a marker from the previous disk is absent. Validate that the job identity cannot read administrator bootstrap/agent files or contact metadata or peers. Unit tests cover the control decisions; these deployment checks verify Azure and Windows behavior.
+
+Set repository variable `WINDOWS_CI_APP_ID` to the approved App ID and `WINDOWS_WHP_CI_ENABLED` to `true` only after qualification. Set private `enabled` to true to admit jobs. To stop new work, set both gates false while leaving the timer deployed for existing cleanup. Roll out controller changes explicitly from a reviewed revision; a PR must never deploy its own privileged controller.
+
+## Local validation
+
+```sh
+python3 -m unittest discover -s scripts/ci/windows_runner_controller -v
+python3 scripts/ci/windows_runner_controller/package.py /tmp/windows-ci-controller.zip
+```
+
+Parse the PowerShell scripts and compile `RunnerLauncher.cs` on Windows. Run the test bundle on both qualified OS versions with its exact revision in `revision.json`. Keep private diagnostics and deployment values outside the repository.
