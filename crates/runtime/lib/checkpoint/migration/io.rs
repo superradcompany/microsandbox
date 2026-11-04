@@ -431,7 +431,7 @@ pub(super) fn capture(source: &File, destination: &Path) -> Result<(), String> {
         // rename; a read-only inspection pin must never be used for FlushFileBuffers.
         let (file, temporary) = staging.keep().map_err(|error| error.to_string())?;
         drop(file);
-        return publish(&temporary, destination);
+        publish(&temporary, destination)
     }
     #[cfg(unix)]
     capture_unix(source, destination)
