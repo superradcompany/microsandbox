@@ -76,15 +76,35 @@ class GitHub:
 
     def queued(self):
         policy = self.call("GET", "/actions/permissions/fork-pr-contributor-approval")["approval_policy"]
-        runs = self.call("GET", f"/actions/workflows/{self.cfg.workflow_id}/runs?status=in_progress&per_page=100")["workflow_runs"]
-        for run in reversed(runs):
+        # GitHub returns the workflow to queued when all remaining jobs await
+        # runners. Poll both states, deduplicating transitions between requests.
+        runs = {}
+        for status in ("queued", "in_progress"):
+            batch = self.call("GET", f"/actions/workflows/{self.cfg.workflow_id}/runs?status={status}&per_page=100")["workflow_runs"]
+            runs.update({run["id"]: run for run in batch})
+        for run in sorted(runs.values(), key=lambda item: item["id"]):
+            jobs = []
             for page in range(1, 11):
-                jobs = self.call("GET", f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100&page={page}')["jobs"]
-                for job in jobs:
-                    if job["status"] == "queued":
-                        yield run, job, policy
-                if len(jobs) < 100:
+                batch = self.call("GET", f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100&page={page}')["jobs"]
+                jobs.extend(batch)
+                if len(batch) < 100:
                     break
+            fork = (run.get("head_repository") or {}).get("full_name") != self.cfg.repository
+            if fork and not any(
+                job.get("name") == "Build Windows CLI (windows-x86_64)"
+                and job.get("status") == "completed" and job.get("conclusion") == "success"
+                and job.get("run_id") == run["id"] and job.get("head_sha") == run["head_sha"]
+                and job.get("runner_id", 0) > 0 and job.get("labels") == ["windows-latest"]
+                for job in jobs
+            ):
+                # An unapproved fork must not acquire a VM just because a job
+                # appears queued. Its hosted prerequisite must have run first.
+                # The attempt-specific endpoint also prevents borrowing evidence
+                # from a different run or revision.
+                continue
+            for job in jobs:
+                if job["status"] == "queued":
+                    yield run, job, policy
 
     def create_check(self, lease):
         name = f"Windows {lease.platform[3:]} WHP infrastructure"

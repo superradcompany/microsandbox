@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from clients import ApiError, GitHub
 from controller import Controller, reap_expired_resources
@@ -94,6 +95,83 @@ class FakeGitHub:
 
 
 class ControllerTests(unittest.TestCase):
+    def test_discovery_reserves_both_queued_platforms_and_deduplicates_runs(self):
+        first, second = lease(), lease(job_id=101, platform='win11')
+        run, job = job_run(first)
+        run.update(status='queued', conclusion=None, head_repository={'full_name': CFG.repository})
+        other_job = {**job, 'id': second.job_id, 'name': 'Windows WHP (11)', 'labels': second.labels}
+        api, queried_states = GitHub(CFG, lambda: 'synthetic-token'), []
+
+        def response(method, path, *args, **kwargs):
+            self.assertEqual(method, 'GET')
+            if path.endswith('fork-pr-contributor-approval'):
+                return {'approval_policy': 'all_external_contributors'}
+            if '/workflows/' in path:
+                state = parse_qs(urlsplit(path).query)['status'][0]
+                queried_states.append(state)
+                # The same run may appear in both snapshots during a transition.
+                return {'workflow_runs': [{**run, 'status': state}]}
+            self.assertIn('/runs/50/attempts/2/jobs?', path)
+            return {'jobs': [job, other_job]}
+
+        with patch.object(api, 'call', side_effect=response):
+            candidates = list(api.queued())
+        self.assertEqual(set(queried_states), {'queued', 'in_progress'})
+        self.assertEqual([entry[1]['id'] for entry in candidates], [100, 101])
+
+        # Reproduce the actual stall: the only workflow snapshot is queued,
+        # with both Windows jobs waiting and no existing runner lease.
+        def queued_only(method, path, *args, **kwargs):
+            if '/workflows/' in path and 'status=in_progress' in path:
+                return {'workflow_runs': []}
+            return response(method, path, *args, **kwargs)
+
+        store = MemoryLeases()
+        with patch.object(api, 'call', side_effect=queued_only):
+            Controller(replace(CFG, enabled=True), FakeAzure(), api, store, lambda: NOW).tick()
+        self.assertEqual(set(store.items), {100, 101})
+        self.assertEqual({item.platform for item in store.items.values()}, {'win10', 'win11'})
+
+    def test_queued_admission_rejects_approval_waits_and_invalid_identity(self):
+        run, job = job_run()
+        run.update(status='queued', conclusion=None)
+        self.assertIsNotNone(candidate(CFG, run, job, 'all_external_contributors', NOW))
+        for status in ('action_required', 'waiting', 'requested', 'pending', 'completed'):
+            with self.subTest(status=status):
+                self.assertIsNone(candidate(CFG, {**run, 'status': status}, job, 'all_external_contributors', NOW))
+        for key, value in [('conclusion', 'action_required'), ('conclusion', 'cancelled'),
+                           ('workflow_id', 43), ('event', 'pull_request_target'), ('run_attempt', 3)]:
+            with self.subTest(key=key, value=value):
+                self.assertIsNone(candidate(CFG, {**run, key: value}, job, 'all_external_contributors', NOW))
+        self.assertIsNone(candidate(CFG, run, job, 'first_time_contributors', NOW))
+        self.assertIsNone(candidate(CFG, run, {**job, 'labels': ['self-hosted']}, 'all_external_contributors', NOW))
+
+    def test_fork_discovery_requires_the_same_attempts_successful_hosted_build(self):
+        run, job = job_run()
+        run.update(status='queued', conclusion=None)
+        build = {'name': 'Build Windows CLI (windows-x86_64)', 'status': 'completed', 'conclusion': 'success',
+                 'run_id': run['id'], 'head_sha': run['head_sha'], 'runner_id': 1, 'labels': ['windows-latest']}
+        api = GitHub(CFG, lambda: 'synthetic-token')
+
+        def discover(prerequisites):
+            def response(method, path, *args, **kwargs):
+                if path.endswith('fork-pr-contributor-approval'):
+                    return {'approval_policy': 'all_external_contributors'}
+                if '/workflows/' in path:
+                    return {'workflow_runs': [run] if 'status=queued' in path else []}
+                self.assertIn('/runs/50/attempts/2/jobs?', path)
+                return {'jobs': [job, *prerequisites]}
+            with patch.object(api, 'call', side_effect=response):
+                return list(api.queued())
+
+        self.assertFalse(discover([]))
+        self.assertEqual(len(discover([build])), 1)
+        for key, value in [('status', 'queued'), ('conclusion', 'skipped'), ('conclusion', 'failure'),
+                           ('run_id', 51), ('head_sha', 'b' * 40), ('runner_id', 0),
+                           ('labels', ['self-hosted']), ('name', 'unrelated build')]:
+            with self.subTest(key=key, value=value):
+                self.assertFalse(discover([{**build, key: value}]))
+
     def test_approved_fork_is_bound_to_workflow_run_attempt_and_platform(self):
         run, job = job_run()
         self.assertEqual(job['labels'], ['msb-whp-50-2-win10'])

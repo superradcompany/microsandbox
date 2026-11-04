@@ -126,12 +126,17 @@ def candidate(cfg, run, job, approval_policy, now):
     """Only admit an evaluated job from the expected, approved run attempt."""
     if run.get("workflow_id") != cfg.workflow_id or run.get("path") != ".github/workflows/check.yml":
         return None
-    if run.get("status") != "in_progress" or run.get("event") not in {"push", "pull_request", "workflow_dispatch"}:
+    # A workflow can return to queued after its hosted builds finish, while
+    # only self-hosted jobs remain. Do not require a runner to exist already.
+    if run.get("status") not in {"queued", "in_progress"} or run.get("conclusion") is not None:
+        return None
+    if run.get("event") not in {"push", "pull_request", "workflow_dispatch"}:
         return None
     if job.get("status") != "queued" or job.get("run_id") != run["id"]:
         return None
-    # GitHub keeps unapproved fork runs out of in_progress. Requiring approval
-    # for every external contributor also covers previously approved authors.
+    # Keep GitHub's approval policy mandatory for forks. Discovery additionally
+    # requires a completed hosted prerequisite in this attempt's job list;
+    # workflow queue state alone is not evidence that approval was granted.
     fork = (run.get("head_repository") or {}).get("full_name") != cfg.repository
     if fork and (run.get("event") != "pull_request" or approval_policy != "all_external_contributors"):
         return None
