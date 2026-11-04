@@ -2251,6 +2251,36 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let (_home, local, config, id) = stopped_growth_fixture().await;
+            let runtime_dir = local.sandboxes_dir().join("growth/runtime");
+            microsandbox_runtime::checkpoint::layout::initialize_new(&runtime_dir).unwrap();
+            // Let asynchronous lock-directory setup finish before blocking the worker pool.
+            // Lifecycle ownership keeps growth parked until the capture queue is controlled.
+            let run_dir = local.config().run_dir();
+            let lifecycle =
+                microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, "growth")
+                    .unwrap()
+                    .unwrap();
+            let backend: Arc<dyn Backend> = local.clone();
+            let pending = tokio::spawn(async move {
+                grow_root_disk_now(&backend, "growth", id, &config, 1).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(lineage) =
+                    microsandbox_runtime::ipc::try_acquire_snapshot_lineage_guard(
+                        &run_dir, "growth",
+                    )
+                    .unwrap()
+                {
+                    drop(lineage);
+                    assert!(
+                        !pending.is_finished(),
+                        "growth ended before acquiring lineage"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
             let (started, ready) = tokio::sync::oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
             let blocker = tokio::task::spawn_blocking(move || {
@@ -2258,17 +2288,20 @@ mod tests {
                 let _ = blocked.recv();
             });
             ready.await.unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
-            let pending = tokio::spawn(async move {
-                grow_root_disk_now(&backend, "growth", id, &config, 1).await
-            });
+            drop(lifecycle);
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while !local
-                    .sandboxes_dir()
-                    .join("growth/state-layout.json")
-                    .exists()
-                {
-                    assert!(!pending.is_finished(), "growth ended before disk admission");
+                loop {
+                    match CreationStorage::acquire(&local, "growth") {
+                        Ok(storage) => drop(storage),
+                        Err(error) => {
+                            assert!(error.to_string().contains("retry"), "{error}");
+                            break;
+                        }
+                    }
+                    assert!(
+                        !pending.is_finished(),
+                        "growth ended before reserving storage"
+                    );
                     tokio::task::yield_now().await;
                 }
             })

@@ -27,11 +27,8 @@ pub(super) async fn read(connection: &mut SqliteConnection) -> MicrosandboxResul
     let sandboxes = rows
         .iter()
         .map(|row| {
-            if row.incomplete {
-                return Err(diagnostic_error(
-                    "legacy writer inventory includes an unfinished creation",
-                ));
-            }
+            // An interrupted create still has host-saved bindings and can be a writer.
+            // Keep it in discovery, matching recovery; only its own diagnostic is incomplete.
             let mut config = decode_config(row)?;
             if let Some(active) = &row.active_config {
                 crate::runtime::storage_aliases::merge_active_bindings(

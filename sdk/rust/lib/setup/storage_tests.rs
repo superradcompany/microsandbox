@@ -311,6 +311,71 @@ async fn inspection_rejects_mutating_macos_acl_without_removing_it() {
 }
 
 #[tokio::test]
+async fn unfinished_peer_does_not_hide_independent_legacy_diagnosis() {
+    let temp = tempfile::tempdir().unwrap();
+    let (global, mut writer) = catalog(temp.path()).await;
+    for name in ["legacy", "peer"] {
+        let mut config = SandboxConfig::default();
+        config.spec.name = name.into();
+        insert(&mut writer, name, &serde_json::to_string(&config).unwrap()).await;
+    }
+    sqlx::query("UPDATE sandbox SET creation_state='preparing' WHERE name='peer'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let sandbox = global.sandboxes_dir().join("legacy");
+    fs::create_dir_all(sandbox.join("runtime")).unwrap();
+    let contents = vec![23u8; 131072];
+    fs::write(sandbox.join("upper.ext4"), &contents).unwrap();
+    let selected = StorageSelection::Named(vec!["legacy".into(), "peer".into()]);
+    let report = diagnose_resolved(&global, selected).await.unwrap();
+    assert_eq!(report.sandboxes.len(), 2);
+    assert_eq!(report.sandboxes[0].name, "legacy");
+    assert_eq!(
+        report.sandboxes[0].status,
+        if cfg!(target_os = "macos") {
+            StorageDiagnosticStatus::MaintenanceRequired
+        } else {
+            StorageDiagnosticStatus::Eligible
+        }
+    );
+    assert_eq!(report.sandboxes[1].name, "peer");
+    assert_eq!(
+        report.sandboxes[1].status,
+        StorageDiagnosticStatus::RecoveryRequired
+    );
+    assert_eq!(
+        report.sandboxes[1].reason,
+        Some(StorageDiagnosticReason::IncompleteCreation)
+    );
+
+    // Do not skip incomplete peers: a malformed saved configuration could hide a writer.
+    sqlx::query("UPDATE sandbox SET config='invalid-saved-config' WHERE name='peer'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let report = diagnose_resolved(&global, StorageSelection::Named(vec!["legacy".into()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.sandboxes[0].status,
+        StorageDiagnosticStatus::Unavailable
+    );
+    assert_eq!(
+        report.sandboxes[0].reason,
+        Some(StorageDiagnosticReason::StorageUnavailable)
+    );
+    assert_eq!(fs::read(sandbox.join("upper.ext4")).unwrap(), contents);
+    assert!(!sandbox.join("state-layout.json").exists());
+    assert!(!global.sandboxes_dir().join("peer").exists());
+    let registered: i64 = sqlx::query_scalar("SELECT count(*) FROM protected_sandbox_state")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert_eq!(registered, 0, "inspection must not admit either sandbox");
+}
+
+#[tokio::test]
 async fn legacy_preview_accounts_for_active_configuration_writers_without_admission() {
     let temp = tempfile::tempdir().unwrap();
     let (global, mut writer) = catalog(temp.path()).await;
@@ -356,28 +421,41 @@ async fn legacy_preview_accounts_for_active_configuration_writers_without_admiss
         path: sandbox.clone(),
         follow_root_symlinks: false,
     };
-    sqlx::query("UPDATE sandbox SET status='Running', active_config=? WHERE name='peer'")
+    // Incomplete rows remain in writer discovery: creation state never makes an active
+    // desired/active configuration safe to ignore, including before a start finishes.
+    for (status, creation) in [
+        ("Running", None),
+        ("Starting", Some("preparing")),
+        ("Running", Some("prepared")),
+    ] {
+        sqlx::query(
+            "UPDATE sandbox SET status=?, creation_state=?, active_config=? WHERE name='peer'",
+        )
+        .bind(status)
+        .bind(creation)
         .bind(serde_json::to_string(&active).unwrap())
         .execute(&mut writer)
         .await
         .unwrap();
-    let report = diagnose_resolved(&global, StorageSelection::Named(vec!["legacy".into()]))
-        .await
-        .unwrap();
-    assert_eq!(report.sandboxes.len(), 1);
-    assert_eq!(
-        report.sandboxes[0].status,
-        StorageDiagnosticStatus::RecoveryRequired
-    );
-    assert!(
-        report.sandboxes[0]
-            .inspection
-            .as_ref()
-            .unwrap()
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("active"))
-    );
+        let report = diagnose_resolved(&global, StorageSelection::Named(vec!["legacy".into()]))
+            .await
+            .unwrap();
+        assert_eq!(report.sandboxes.len(), 1);
+        assert_eq!(
+            report.sandboxes[0].status,
+            StorageDiagnosticStatus::RecoveryRequired
+        );
+        assert!(
+            report.sandboxes[0]
+                .inspection
+                .as_ref()
+                .unwrap()
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("active")),
+            "{status}/{creation:?}: overlapping incomplete writers must remain blocked"
+        );
+    }
     assert_eq!(
         fs::read(sandbox.join("upper.ext4")).unwrap(),
         vec![23u8; 131072]

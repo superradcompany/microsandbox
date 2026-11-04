@@ -234,7 +234,7 @@ pub fn copy_file_handles(src: &File, dst: &File) -> io::Result<(u64, FastCopyStr
         source_file.seek(SeekFrom::Start(0))?;
         copy_windows_sparse_data(&mut source_file, &mut target_file, 1024 * 1024)?;
         dst.sync_all()?;
-        return Ok((source.len(), FastCopyStrategy::SparseCopy));
+        Ok((source.len(), FastCopyStrategy::SparseCopy))
     }
     #[cfg(unix)]
     {
