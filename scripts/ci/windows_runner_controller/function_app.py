@@ -20,7 +20,7 @@ credential = ManagedIdentityCredential()
 app_token = AppToken()
 
 
-@app.timer_trigger(schedule='0 * * * * *', arg_name='timer', run_on_startup=False, use_monitor=True)
+@app.timer_trigger(schedule='*/15 * * * * *', arg_name='timer', run_on_startup=False, use_monitor=True)
 def reconcile(timer: func.TimerRequest):
     cfg = Config(**json.loads(os.environ['WINDOWS_CI_CONFIG']))
     azure = Azure(credential)

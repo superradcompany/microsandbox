@@ -58,8 +58,16 @@ class Config:
         if not 300 <= self.queue_timeout <= 5400 or self.runner_group_id < 1:
             raise ValueError("Invalid admission deadline or runner group")
         for image in self.images.values():
-            if set(image) != {"publisher", "offer", "sku", "version"} or image["version"] == "latest":
-                raise ValueError("Use pinned Marketplace images, never an old job disk")
+            marketplace = set(image) == {"publisher", "offer", "sku", "version"} and image["version"] != "latest"
+            if not marketplace and not self.prepared_image(image):
+                raise ValueError("Use pinned Marketplace or dedicated gallery image versions, never an old job disk")
+
+    def prepared_image(self, image):
+        # Only immutable versions in the dedicated CI resource group are valid.
+        # A disk, snapshot, external gallery, or mutable 'latest' reference must
+        # never become a shortcut for reusing a previous job's machine state.
+        pattern = re.escape(self.scope) + r"/providers/Microsoft\.Compute/galleries/[\w.-]+/images/[\w.-]+/versions/\d+\.\d+\.\d+"
+        return set(image) == {"id"} and re.fullmatch(pattern, image["id"], re.IGNORECASE) is not None
 
     @property
     def scope(self):

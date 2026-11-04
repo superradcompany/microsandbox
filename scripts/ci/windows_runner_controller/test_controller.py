@@ -16,6 +16,7 @@ from wait_for_cleanup import cleanup_finished, cleanup_expectations
 NOW = 1_800_000_000
 SCOPE = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test-ci'
 IMAGE = {'publisher': 'MicrosoftWindowsDesktop', 'offer': 'test', 'sku': 'test', 'version': '1.2.3'}
+PREPARED_IMAGE = {'id': SCOPE + '/providers/Microsoft.Compute/galleries/test/images/windows/versions/1.0.0'}
 CFG = Config('example/project', 42, '00000000-0000-0000-0000-000000000000', 'test-ci', 'test-region',
              SCOPE + '/providers/Microsoft.Network/virtualNetworks/test/subnets/ci', 'ssh-ed25519 AAAA', '192.0.2.1/32',
              {'win10': IMAGE, 'win11': IMAGE})
@@ -308,6 +309,93 @@ class ControllerTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(CFG, **changes)
 
+    def test_prepared_images_are_pinned_versions_in_the_dedicated_group(self):
+        configured = replace(CFG, images={'win10': PREPARED_IMAGE, 'win11': PREPARED_IMAGE})
+        self.assertTrue(configured.prepared_image(PREPARED_IMAGE))
+        for image in (
+            {'id': PREPARED_IMAGE['id'].replace('/test-ci/', '/unrelated/')},
+            {'id': PREPARED_IMAGE['id'].replace('/1.0.0', '/latest')},
+            {'id': PREPARED_IMAGE['id'] + '?version=1.0.0'},
+            {'id': SCOPE + '/providers/Microsoft.Compute/disks/old-job'},
+            {'id': SCOPE + '/providers/Microsoft.Compute/snapshots/old-job'},
+            {**PREPARED_IMAGE, 'version': '1.0.0'},
+        ):
+            with self.subTest(image=image), self.assertRaises(ValueError):
+                replace(CFG, images={'win10': image, 'win11': IMAGE})
+
+    def test_image_rollout_uses_the_vms_actual_image_for_setup(self):
+        configured = replace(CFG, images={'win10': PREPARED_IMAGE, 'win11': PREPARED_IMAGE})
+        for actual, expected in ((IMAGE, 'bootstrap'), (PREPARED_IMAGE, 'prepare')):
+            with self.subTest(expected=expected):
+                item = lease()
+                vm = {'properties': {'storageProfile': {'imageReference': actual}}}
+                azure, store = FakeAzure({item.resource_ids(CFG)[0]: vm}), MemoryLeases(item)
+                controller = Controller(configured, azure, FakeGitHub(), store, lambda: NOW)
+                with patch.object(controller, 'create', return_value=True), \
+                     patch.object(controller, 'command', return_value=False) as command, \
+                     patch('controller.FILES') as files:
+                    files.__truediv__.return_value.read_bytes.return_value = b'fixture'
+                    files.__truediv__.return_value.read_text.return_value = 'fixture'
+                    controller.advance(item)
+                self.assertEqual(item.phase, expected)
+                self.assertEqual(command.call_count, 1)
+                self.assertEqual(command.call_args.args[1], expected)
+                if expected == 'prepare':
+                    self.assertEqual(command.call_args.args[3]['ImagePlatform'], 'win10')
+                    self.assertIn('Probe', command.call_args.args[3])
+                self.assertFalse(any(method == 'POST' for method, _, _ in azure.calls))
+
+    def test_prepared_image_still_creates_a_new_disk_without_identity(self):
+        configured = replace(CFG, images={'win10': PREPARED_IMAGE, 'win11': PREPARED_IMAGE})
+        item = lease()
+        vm, disk, nic, ip = item.resource_ids(configured)
+        azure = FakeAzure({ip: {'properties': {'provisioningState': 'Succeeded'}},
+                           nic: {'properties': {'provisioningState': 'Succeeded'}}})
+        Controller(configured, azure, FakeGitHub(), MemoryLeases(item), lambda: NOW).create(item)
+        body = next(body for method, path, body in azure.calls if method == 'PUT' and path == vm)
+        self.assertEqual(body['properties']['storageProfile']['imageReference'], PREPARED_IMAGE)
+        self.assertEqual(body['properties']['storageProfile']['osDisk']['createOption'], 'FromImage')
+        self.assertEqual(body['properties']['storageProfile']['osDisk']['deleteOption'], 'Delete')
+        self.assertNotIn('identity', body)
+
+    def test_ready_transitions_are_persisted_before_starting_the_listener(self):
+        item = lease(phase='clear-credentials', runner_id=123)
+        store = MemoryLeases(item)
+        controller = Controller(CFG, FakeAzure(), FakeGitHub(), store, lambda: NOW)
+
+        def command(current, name, script):
+            self.assertEqual(name, 'start')
+            self.assertEqual(store.items[current.job_id].phase, 'start')
+            return True
+
+        with patch.object(controller, 'command', side_effect=command) as start:
+            controller.advance(item)
+        start.assert_called_once()
+        self.assertEqual(store.items[item.job_id].phase, 'running')
+
+    def test_setup_yields_on_pending_work_and_retains_the_legacy_reboot_guard(self):
+        for phase in ('bootstrap', 'wait-reboot'):
+            with self.subTest(phase=phase):
+                item = lease(phase=phase, ready_after=NOW + 90)
+                controller = Controller(CFG, FakeAzure(), FakeGitHub(), MemoryLeases(item), lambda: NOW)
+                with patch.object(controller, 'command', return_value=False) as command, \
+                     patch.object(controller, 'ready', return_value=True) as ready, patch('controller.FILES'):
+                    controller.advance(item)
+                self.assertEqual(item.phase, phase)
+                self.assertEqual(command.call_count, 1 if phase == 'bootstrap' else 0)
+                ready.assert_not_called()
+
+    def test_setup_checks_expiry_between_immediate_transitions(self):
+        item = lease(phase='clear-credentials')
+        store = MemoryLeases(item)
+        with patch('time.time', side_effect=[NOW, NOW + 3601]) as clock:
+            controller = Controller(CFG, FakeAzure(), FakeGitHub(), store, clock)
+            with patch.object(controller, 'command') as command:
+                controller.advance(item)
+        command.assert_not_called()
+        self.assertEqual(store.items[item.job_id].phase, 'cleanup')
+        self.assertEqual(store.items[item.job_id].conclusion, 'timed_out')
+
     def test_vm_creation_always_uses_a_fresh_disk_and_has_no_identity(self):
         item = lease()
         vm, disk, nic, ip = item.resource_ids(CFG)
@@ -580,7 +668,12 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(any(method == 'PUT' for method, _, _ in azure.calls))
         controller.advance(item)
         self.assertEqual(item.phase, 'start')
-        self.assertFalse(any(method == 'PUT' for method, _, _ in azure.calls))
+        # Absence is now confirmed before starting in the same tick; an extra
+        # minute-long wait after the successful GET adds no isolation guarantee.
+        puts = [index for index, (method, _, _) in enumerate(azure.calls) if method == 'PUT']
+        self.assertEqual(len(puts), 1)
+        self.assertEqual(azure.calls[puts[0]][1], item.resource_ids(CFG)[0] + '/runCommands/start')
+        self.assertIn(('GET', path, None), azure.calls[:puts[0]])
 
 
 if __name__ == '__main__':

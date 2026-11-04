@@ -84,8 +84,8 @@ class Controller:
             return False
         vm = self.azure.call("GET", vm_id, missing=True)
         if vm is None:
-            # Create from a pinned Marketplace image on every lease. Never
-            # attach, snapshot, or reuse a disk from a previous job.
+            # Every lease gets a new disk from a pinned Marketplace or clean
+            # builder image. Never attach or capture a previous job's disk.
             self.azure.call("PUT", vm_id, {"location": self.cfg.location, "tags": lease.tags, "properties": {
                 "hardwareProfile": {"vmSize": "Standard_D4s_v5"},
                 "osProfile": {"computerName": "whp-" + lease.platform, "adminUsername": "ciadmin",
@@ -112,6 +112,17 @@ class Controller:
     def ready(self, lease):
         view = self.azure.call("GET", lease.resource_ids(self.cfg)[0] + "/instanceView")
         return any(item.get("code") == "ProvisioningState/succeeded" for item in view.get("vmAgent", {}).get("statuses", []))
+
+    def prepared_image(self, lease):
+        # Read the VM's actual source, not today's config: an image rollout
+        # must not skip bootstrap on a Marketplace VM already being created.
+        vm = self.azure.call("GET", lease.resource_ids(self.cfg)[0])
+        image = vm["properties"]["storageProfile"]["imageReference"]
+        if "id" not in image:
+            return False
+        if not self.cfg.prepared_image({"id": image["id"]}):
+            raise BootstrapFailure()
+        return True
 
     def fail(self, lease, reason, conclusion="failure"):
         lease.phase, lease.conclusion, lease.reason = "cleanup", conclusion, reason
@@ -141,8 +152,21 @@ class Controller:
         self.leases.delete(lease)
 
     def advance(self, lease):
+        # Persist each completed transition before continuing. Pending Azure
+        # work still yields immediately, but completed stages need no timer wait.
+        for _ in range(12):
+            previous = lease.phase
+            if self.clock() >= lease.expires:
+                self.fail(lease, "Windows runner expired during setup.", "timed_out")
+                return
+            self.advance_once(lease)
+            if lease.phase == previous or lease.phase in {"running", "cleanup"}:
+                return
+        raise RuntimeError("Runner setup exceeded its transition bound")
+
+    def advance_once(self, lease):
         if lease.phase == "create" and self.create(lease):
-            lease.phase = "bootstrap"
+            lease.phase = "prepare" if self.prepared_image(lease) else "bootstrap"
         elif lease.phase == "bootstrap":
             if self.command(lease, "bootstrap", (FILES / "bootstrap.ps1").read_text(),
                             {"PublicKey": self.cfg.public_key, "SshSource": self.cfg.ssh_source}):
@@ -156,6 +180,9 @@ class Controller:
         elif lease.phase == "prepare":
             files = {"Probe": base64.b64encode((FILES / "windows-whp-preflight.ps1").read_bytes()).decode(),
                      "Launcher": base64.b64encode((FILES / "RunnerLauncher.cs").read_bytes()).decode()}
+            if self.prepared_image(lease):
+                files.update({"ImagePlatform": lease.platform, "PublicKey": self.cfg.public_key,
+                              "SshSource": self.cfg.ssh_source})
             if self.command(lease, "prepare", (FILES / "prepare.ps1").read_text(), files):
                 lease.phase = "clear-bootstrap"
         elif lease.phase == "clear-bootstrap":
