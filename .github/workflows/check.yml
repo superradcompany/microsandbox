@@ -790,6 +790,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/smoke/cli/runtime-discovery.py --msb build/msb.exe --libkrunfw build/libkrunfw.dll
 
+      - name: Build Windows WHP test bundle
+        if: matrix.component == 'CLI' && matrix.target == 'windows-x86_64'
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          . "$env:GITHUB_WORKSPACE\vendor\libkrunfw\scripts\msvc-env.ps1"
+          Set-MsvcEnvironment -Architecture amd64 -HostArchitecture amd64
+          ./scripts/ci/build-windows-whp-tests.ps1 -Revision $env:GITHUB_SHA
+
+      - name: Upload Windows WHP test bundle
+        if: matrix.component == 'CLI' && matrix.target == 'windows-x86_64'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-whp-tests-x86_64
+          path: build/windows-whp/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Build Go FFI cdylib
         if: matrix.component == 'Go'
         shell: pwsh
@@ -826,6 +845,59 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:MICROSANDBOX_FFI_PATH = "$env:GITHUB_WORKSPACE\target\${{ matrix.rust_target }}\ci\microsandbox_go_ffi.dll"
           go test -tags microsandbox_ffi_path -run TestVolumeFs -count=1 .
+
+  windows-runner-controller:
+    name: Windows runner controller
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test admission, credential boundaries, and cleanup
+        run: python3 -m unittest discover -s scripts/ci/windows_runner_controller -v
+
+  windows-whp:
+    name: Windows WHP (${{ matrix.os }})
+    needs: [changes, windows-build]
+    if: needs.changes.outputs.code == 'true' && vars.WINDOWS_WHP_CI_ENABLED == 'true'
+    # The private controller provisions a fresh VM for this exact run attempt.
+    # It registers only this run/attempt/platform label, with no generic labels.
+    runs-on:
+      - msb-whp-${{ github.run_id }}-${{ github.run_attempt }}-win${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        os: ['10', '11']
+    steps:
+      - name: Download matching Windows tests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-whp-tests-x86_64
+          path: whp
+      - name: Verify nested virtualization and run Windows tests
+        shell: pwsh
+        run: ./whp/run-windows-whp-tests.ps1 -ArtifactDirectory "$env:GITHUB_WORKSPACE/whp" -Revision $env:GITHUB_SHA
+
+  windows-whp-cleanup:
+    name: Windows WHP cleanup
+    needs: windows-whp
+    if: always() && needs.windows-whp.result != 'skipped' && vars.WINDOWS_WHP_CI_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require deletion of both disposable workers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINDOWS_CI_APP_ID: ${{ vars.WINDOWS_CI_APP_ID }}
+        run: python3 scripts/ci/windows_runner_controller/wait_for_cleanup.py
 
   # ---------------------------------------------------------------------------
   # Platform-independent quality lanes. These run once on Linux instead of
@@ -2234,6 +2306,9 @@ jobs:
       - check
       - windows-quality
       - windows-build
+      - windows-runner-controller
+      - windows-whp
+      - windows-whp-cleanup
       - rust-quality
       - node-sdk-build
       - python-wheel-build
