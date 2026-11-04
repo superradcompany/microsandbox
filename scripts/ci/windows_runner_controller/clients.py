@@ -200,6 +200,8 @@ class BlobLeases:
         try:
             self.container.create_container()
         except ResourceExistsError:
+            # Reuse the existing lease container on later initializations.
+            # Only "already exists" is expected; other storage errors propagate.
             pass
 
     def list(self):
