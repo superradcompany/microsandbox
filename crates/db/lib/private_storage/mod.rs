@@ -13,7 +13,11 @@ mod storage;
 mod tests;
 
 #[cfg(unix)]
-pub use storage::{PRIVATE_DATABASE_DIRECTORY_MODE, PRIVATE_DATABASE_FILE_MODE};
+pub use storage::{
+    PRIVATE_DATABASE_DIRECTORY_MODE, PRIVATE_DATABASE_FILE_MODE, is_private_directory_boundary,
+    verify_symbolic_link_authority,
+};
 pub use storage::{
     ensure_private_database_directory, harden_database_files, prepare_database_file,
+    validate_database_inspection, verify_directory_authority,
 };

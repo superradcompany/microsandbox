@@ -36,6 +36,9 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use super::install::is_generated_alias;
 use crate::ui;
 
+mod storage_doctor;
+pub use storage_doctor::{StorageDoctorExit, run_doctor_command};
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -129,15 +132,42 @@ pub struct WindowsSelfSwapArgs {
 }
 
 /// Arguments for `msb doctor` and `msb self doctor`.
-#[derive(Debug, Args, Clone, Copy)]
+#[derive(Debug, Args, Clone)]
+#[group(id = "doctor_args", multiple = true)]
 pub struct DoctorArgs {
     /// Attempt supported host virtualization setup fixes.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "storage")]
     pub fix: bool,
 
     /// Apply fixes without prompting for confirmation.
-    #[arg(long, short = 'y')]
+    #[arg(long, short = 'y', conflicts_with = "storage")]
     pub yes: bool,
+
+    /// Inspect selected local sandbox storage without migration or host setup probes.
+    #[arg(long, requires = "storage_scope")]
+    pub storage: bool,
+
+    /// Sandbox to inspect; repeat to select a named set.
+    #[arg(
+        long = "sandbox",
+        requires = "storage",
+        conflicts_with = "all_sandboxes",
+        group = "storage_scope"
+    )]
+    pub sandboxes: Vec<String>,
+
+    /// Explicitly inspect every sandbox in the configured local catalog.
+    #[arg(
+        long,
+        requires = "storage",
+        conflicts_with = "sandboxes",
+        group = "storage_scope"
+    )]
+    pub all_sandboxes: bool,
+
+    /// Structured storage diagnostic output (exit 0: eligible, 2: blockers, 3: incomplete).
+    #[arg(long, requires = "storage", value_enum)]
+    pub format: Option<crate::ui::OutputFormat>,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -448,7 +478,7 @@ fn parse_version(input: &str) -> anyhow::Result<Version> {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
-        SelfCommand::Doctor(args) => run_doctor(args),
+        SelfCommand::Doctor(args) => run_doctor_command(args).await,
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Downgrade(args) => run_downgrade(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,

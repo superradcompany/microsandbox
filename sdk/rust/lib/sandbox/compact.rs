@@ -97,6 +97,13 @@ impl DiskCompactionBuilder {
                 "disk compaction is only supported by the local backend".into(),
             )
         })?;
+        let transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+            &local.config().run_dir(),
+            &self.name,
+        )
+        .await?;
+        let lineage =
+            crate::snapshot::lineage::lock_source(&local.config().run_dir(), &self.name).await?;
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(&self.name))
             .one(local.db().await?.read())
@@ -159,6 +166,8 @@ impl DiskCompactionBuilder {
             // worker until it finishes, even when its caller disconnects or cancels the await.
             let _guard = _guard;
             let _storage = storage;
+            let _transition = transition;
+            let _lineage = lineage;
 
             microsandbox_runtime::checkpoint::compact_stopped_disks(
                 &runtime_dir,

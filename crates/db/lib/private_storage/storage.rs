@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -58,6 +58,194 @@ pub fn prepare_database_file(path: &Path, create: bool) -> io::Result<PathBuf> {
     harden_file(&path)?;
     harden_sidecars(&path)?;
     Ok(path)
+}
+
+/// Validate an existing catalog for inspection without permission repair or file creation.
+///
+/// Returns the stable parent spelling used by SQLite. SQLite itself may create read-lock
+/// WAL sidecars; this function rejects redirected or externally writable existing artifacts.
+/// Do not open and close extra catalog descriptors: that can release POSIX SQLite locks held
+/// by another connection in this process.
+pub fn validate_database_inspection(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let directory = parent(&absolute);
+    let directory_metadata = fs::symlink_metadata(directory)?;
+    if !directory_metadata.is_dir() || inspection_reparse(&directory_metadata) {
+        return Err(invalid("catalog inspection requires a real directory"));
+    }
+    let directory = fs::canonicalize(directory)?;
+    #[cfg(windows)]
+    for ancestor in directory.ancestors() {
+        inspect_windows_access(ancestor, ancestor == directory, true)?;
+    }
+    #[cfg(unix)]
+    {
+        verify_ancestors(&directory)?;
+        require_owner(&directory_metadata, &directory)?;
+        if directory_metadata.mode() & 0o022 != 0 {
+            return Err(invalid(
+                "catalog directory permits untrusted writers; inspection does not repair permissions",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if !super::macos_acl::verify_ancestor(&directory)? {
+            // Read-only SQLite can create WAL/SHM files. An inherit-only read grant on
+            // this directory could expose those files even when the database is private.
+            return Err(invalid(
+                "catalog ACL can expose read-lock sidecars; inspection does not repair permissions",
+            ));
+        }
+    }
+    let name = absolute
+        .file_name()
+        .ok_or_else(|| invalid("catalog has no filename"))?;
+    let path = directory.join(name);
+    inspect_catalog_file(&path)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        match inspect_catalog_file(Path::new(&name)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+    }
+    Ok(path)
+}
+
+fn inspect_catalog_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || inspection_reparse(&metadata) {
+        return Err(invalid(
+            "catalog and sidecars must be regular files without links or reparse points",
+        ));
+    }
+    #[cfg(windows)]
+    inspect_windows_access(path, true, false)?;
+    #[cfg(unix)]
+    {
+        require_owner(&metadata, path)?;
+        if metadata.mode() & 0o022 != 0 || metadata.nlink() != 1 {
+            return Err(invalid(
+                "catalog artifact permits untrusted writers or aliases; inspection does not repair permissions",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if !super::macos_acl::verify_ancestor(path)? {
+            return Err(invalid(
+                "catalog artifact has untrusted ACL grants; inspection does not repair permissions",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn inspect_windows_access(path: &Path, private: bool, directory: bool) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Metadata-only access; no file data handle or WRITE_DAC grant is requested. Explicitly
+    // inspect reparse points instead of following them, including for directory handles.
+    const READ_CONTROL_AND_ATTRIBUTES: u32 = 0x0002_0080;
+    const OPEN_REPARSE_AND_BACKUP_SEMANTICS: u32 = 0x0220_0000;
+    let file = fs::OpenOptions::new()
+        .access_mode(READ_CONTROL_AND_ATTRIBUTES)
+        .custom_flags(OPEN_REPARSE_AND_BACKUP_SEMANTICS)
+        .share_mode(0x7)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if inspection_reparse(&metadata) || metadata.is_dir() != directory {
+        return Err(invalid(
+            "catalog inspection path changed or contains a reparse point",
+        ));
+    }
+    if private {
+        microsandbox_utils::private_file::verify(&file)
+    } else {
+        microsandbox_utils::private_file::verify_ancestor(&file)
+    }
+}
+
+fn inspection_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    metadata.file_type().is_symlink()
+}
+
+/// Validate a configured Unix ancestor alias without following or modifying it.
+/// Its parent must be validated separately; trusted ownership alone is insufficient on
+/// Darwin, where an ACL on the symlink can independently authorize deletion or changes.
+#[cfg(unix)]
+pub fn verify_symbolic_link_authority(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_symlink()
+        || ![unsafe { libc::geteuid() }, 0].contains(&metadata.uid())
+    {
+        return Err(invalid("storage alias has an untrusted owner or type"));
+    }
+    #[cfg(target_os = "macos")]
+    super::macos_acl::verify_ancestor(path)?;
+    Ok(())
+}
+
+/// Whether Unix path traversal into this directory is private to the current host account.
+/// A caller may use this boundary to interpret permissions on descendants, but must still
+/// validate their ownership and type. Windows has no equivalent traversal exemption.
+#[cfg(unix)]
+pub fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
+    let metadata = file.metadata()?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Ok(false);
+    }
+    #[cfg(target_os = "macos")]
+    return super::macos_acl::is_private_directory_boundary(file);
+    #[cfg(not(target_os = "macos"))]
+    Ok(true)
+}
+
+/// Validate an opened directory's namespace authority without changing its permissions.
+///
+/// Callers must validate every actual ancestor and retain the required handles against
+/// replacement. Publication parents also need safe inherited grants for newly created files;
+/// a sticky public directory is acceptable only as an ancestor of an already owned child.
+pub fn verify_directory_authority(file: &File, publication_parent: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || inspection_reparse(&metadata) {
+        return Err(invalid("storage namespace requires a real directory"));
+    }
+    #[cfg(unix)]
+    {
+        let owner = metadata.uid();
+        if owner != unsafe { libc::geteuid() } && owner != 0 {
+            return Err(invalid("storage directory is owned by another account"));
+        }
+        if metadata.mode() & 0o022 != 0 && (publication_parent || metadata.mode() & 0o1000 == 0) {
+            return Err(invalid(
+                "storage directory permits untrusted namespace mutation",
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        super::macos_acl::verify_directory_authority(file)?;
+    }
+    #[cfg(windows)]
+    if publication_parent {
+        microsandbox_utils::private_file::verify_publication_parent(file)?;
+    } else {
+        microsandbox_utils::private_file::verify_ancestor(file)?;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = publication_parent;
+        return Err(invalid(
+            "storage namespace validation is unsupported on this platform",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate and, when necessary, repair an existing catalog and its journals.

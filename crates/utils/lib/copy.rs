@@ -174,6 +174,81 @@ fn sparse_copy_impl(src: &Path, dst: &Path, sync_destination: bool) -> io::Resul
     sparse_copy_files(&src_file, &dst_file, sync_destination)
 }
 
+/// Copy between already acquired distinct regular files without reopening either pathname.
+///
+/// The caller owns an empty private destination and excludes source writers. The destination is
+/// flushed before success. Linux and Windows try handle-based CoW cloning first; other Unix
+/// systems use allocated-extent copying (callers may perform a handle-based clone beforehand).
+pub fn copy_file_handles(src: &File, dst: &File) -> io::Result<(u64, FastCopyStrategy)> {
+    let source = src.metadata()?;
+    let target = dst.metadata()?;
+    if !source.is_file() || !target.is_file() || target.len() != 0 {
+        return Err(io::Error::other(
+            "capture requires regular source and empty private destination",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if source.dev() == target.dev() && source.ino() == target.ino() {
+            return Err(io::Error::other(
+                "capture source and destination are the same file",
+            ));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // FICLONE preserves independent inode identity and never consults a source pathname.
+        if unsafe {
+            libc::ioctl(
+                dst.as_raw_fd(),
+                0x4004_9409_u64 as libc::c_ulong,
+                src.as_raw_fd(),
+            )
+        } == 0
+        {
+            dst.sync_all()?;
+            return Ok((source.len(), FastCopyStrategy::Reflink));
+        }
+        let error = io::Error::last_os_error();
+        if !is_reflink_unsupported(&error) {
+            return Err(error);
+        }
+        dst.set_len(0)?;
+    }
+    #[cfg(windows)]
+    {
+        let mut source_file = src.try_clone()?;
+        let mut target_file = dst.try_clone()?;
+        match reflink_windows_files(&mut source_file, &mut target_file) {
+            Ok(()) => {
+                dst.sync_all()?;
+                return Ok((source.len(), FastCopyStrategy::Reflink));
+            }
+            Err(error) if is_reflink_unsupported(&error) => {}
+            Err(error) => return Err(error),
+        }
+        dst.set_len(0)?;
+        dst.set_len(source.len())?;
+        mark_sparse(dst)?;
+        source_file.seek(SeekFrom::Start(0))?;
+        copy_windows_sparse_data(&mut source_file, &mut target_file, 1024 * 1024)?;
+        dst.sync_all()?;
+        return Ok((source.len(), FastCopyStrategy::SparseCopy));
+    }
+    #[cfg(unix)]
+    {
+        sparse_copy_files(src, dst, true).map(|bytes| (bytes, FastCopyStrategy::SparseCopy))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "handle-based sparse capture is unavailable",
+        ))
+    }
+}
+
 /// Copy an ephemeral Linux memory generation between already-owned files, preserving holes.
 /// The destination must be a distinct writable object. No durability flush is performed.
 #[cfg(target_os = "linux")]

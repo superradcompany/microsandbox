@@ -20,6 +20,7 @@ pub(crate) mod protected_state;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod reap;
 pub(crate) mod spawn;
+pub(crate) mod storage_aliases;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports

@@ -793,6 +793,13 @@ async fn grow_root_disk_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
+    let transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+        &local_backend.config().run_dir(),
+        name,
+    )
+    .await?;
+    let lineage =
+        crate::snapshot::lineage::lock_source(&local_backend.config().run_dir(), name).await?;
     // Planning does not own the VM namespace: another caller may have started or replaced it.
     // Revalidate under runtime ownership before migrating or changing any disk bytes.
     let guard = crate::runtime::acquire_sandbox_lifecycle_guard(
@@ -825,6 +832,8 @@ async fn grow_root_disk_now(
         // Keep ownership in the worker, including across the asynchronous fallback helpers.
         // Canceling the caller or shutting down its executor must not release a live writer's lock.
         let _guard = guard;
+        let _transition = transition;
+        let _lineage = lineage;
         let handled = microsandbox_runtime::checkpoint::grow_stopped_root(
             &runtime_dir,
             u64::from(target_mib) * 1024 * 1024,

@@ -34,6 +34,14 @@ pub struct PySandbox {
     local_backend: bool,
 }
 
+/// A completed stopped-sandbox storage recovery with original inputs retained.
+#[pyclass(name = "StorageRecovery", get_all, frozen)]
+pub struct PyStorageRecovery {
+    name: String,
+    ready: bool,
+    originals_retained: bool,
+}
+
 /// One child outcome from a capture-once batch.
 #[pyclass(name = "ForkOutcome", get_all, frozen)]
 pub struct PyForkOutcome {
@@ -280,6 +288,42 @@ impl PySandbox {
             .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("sandbox is busy"))?;
         let sandbox = guard.as_ref().ok_or_else(crate::error::consumed)?;
         Ok(sandbox.backend_kind().as_str().to_string())
+    }
+
+    /// Import or recover stopped storage without booting or stopping a VM.
+    #[staticmethod]
+    #[pyo3(signature = (name, *, selections = None, accept_selected_view = false, legacy_writers_stopped = false))]
+    fn recover_storage<'py>(
+        py: Python<'py>,
+        name: String,
+        selections: Option<HashMap<String, String>>,
+        accept_selected_view: bool,
+        legacy_writers_stopped: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = microsandbox::sandbox::StorageRecoveryOptions {
+            selections: selections
+                .unwrap_or_default()
+                .into_iter()
+                .map(
+                    |(disk_id, candidate_id)| microsandbox::sandbox::StorageRecoverySelection {
+                        disk_id,
+                        candidate_id,
+                    },
+                )
+                .collect(),
+            accept_selected_view,
+            legacy_writers_stopped,
+        };
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = microsandbox::Sandbox::recover_storage(&name, options)
+                .await
+                .map_err(to_py_err)?;
+            Ok(PyStorageRecovery {
+                name: result.name,
+                ready: result.ready,
+                originals_retained: result.originals_retained,
+            })
+        })
     }
 
     /// Restore an installed snapshot or archive into a detached sandbox.

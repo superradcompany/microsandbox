@@ -27,6 +27,7 @@ pub mod pause;
 pub mod ping;
 pub mod ps;
 pub mod pull;
+pub mod recover_storage;
 pub mod registry;
 pub mod remove;
 pub mod restart;

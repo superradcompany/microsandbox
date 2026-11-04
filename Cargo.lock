@@ -3969,6 +3969,7 @@ dependencies = [
  "async-trait",
  "libc",
  "microsandbox-types",
+ "microsandbox-utils",
  "sea-orm",
  "semver",
  "serde_json",

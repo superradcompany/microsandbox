@@ -145,6 +145,20 @@ pub(super) fn clear_file(path: &Path) -> io::Result<()> {
 pub(super) fn verify_ancestor(path: &Path) -> io::Result<bool> {
     let name = c_path(path)?;
     let acl = Acl::read(unsafe { acl_get_link_np(name.as_ptr(), ACL_TYPE_EXTENDED) })?;
+    verify_ancestor_acl(&acl, &format!("catalog ancestor {}", path.display()))
+}
+
+pub(super) fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
+    let acl = Acl::read(unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) })?;
+    Ok(!acl.grants_untrusted_access()?)
+}
+
+pub(super) fn verify_directory_authority(file: &File) -> io::Result<()> {
+    let acl = Acl::read(unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) })?;
+    verify_ancestor_acl(&acl, "storage directory").map(|_| ())
+}
+
+fn verify_ancestor_acl(acl: &Acl, context: &str) -> io::Result<bool> {
     let mut no_grants = true;
     for entry in acl.entries()? {
         let mut tag = 0;
@@ -163,8 +177,7 @@ pub(super) fn verify_ancestor(path: &Path) -> io::Result<bool> {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "catalog ancestor {} has a mutation-granting ACL; use a storage root protected from other accounts",
-                    path.display()
+                    "{context} has a mutation-granting ACL; use a storage root protected from other accounts"
                 ),
             ));
         }

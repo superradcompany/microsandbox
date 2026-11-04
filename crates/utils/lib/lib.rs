@@ -4,6 +4,7 @@ pub mod copy;
 pub mod extent;
 pub mod format;
 pub mod log_text;
+pub mod private_file;
 pub mod process;
 pub mod process_lock;
 pub mod secret;

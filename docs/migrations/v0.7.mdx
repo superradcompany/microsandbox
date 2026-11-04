@@ -44,9 +44,39 @@ Use your package manager for other SDKs. For an installed runtime, [`msb self up
 
 ## Protected sandbox state
 
-Update both the SDK/CLI and runtime, then retry the operation. An upgrade-required error identifies the selected runtime; update an explicitly pinned runtime too. `msb self update` updates binaries, while the next stopped-state operation or start validates and migrates eligible sandbox storage automatically. Existing VMs must restart to gain the protection.
+Update both the SDK/CLI and runtime, then retry the operation. An upgrade-required error identifies the selected runtime; update an explicitly pinned runtime too. `msb self update` updates binaries; storage migration is a separate step described below. Existing VMs must restart to gain the protection.
 
-Migration refuses legacy disk chains or checkpoints whose authority cannot be established safely. Preserve that sandbox and recover from a verified backup or an independently verified disk chain; do not delete journals or guards to bypass the error. Downgrade is unavailable while protected or migrating sandboxes remain.
+The strict migration introduced in v0.7.12 can refuse existing snapshots, forks, owned disks, and completed disk growth or compaction. A refusal does not itself delete the disk data. Preserve the original sandbox; restoring an earlier snapshot omits writes made after that snapshot.
+
+Inspect a sandbox before retrying with updated tools:
+
+```bash
+msb doctor --storage --sandbox app
+# Check the whole home only when requested:
+msb doctor --storage --all-sandboxes --format json
+```
+
+On Linux and Windows, eligible storage migrates automatically on its next start or stopped storage operation. To import it or resume an interrupted migration with unchanged inputs without booting a VM, run `msb recover-storage app`. Stop any related writers identified by the report, then retry. If the original inputs changed after an interrupted attempt, the saved plan is refused; preserve the files and plan for recovery rather than deleting them or editing journals. Original legacy files remain retained so you can verify the migrated data before cleanup. External disks remain in use at their configured paths.
+
+Unsafe catalog or migration destination permissions are refused without automatic repair. Preserve the home and verify its configuration or restore a trusted backup before securing its permissions and retrying. Migration also refuses disk groups whose estimated eager parser metadata exceeds 256 MiB; this is a metadata admission limit, not a guest RAM or total process memory limit.
+
+Linux and Windows reserve the selected disk files against writers during migration. On macOS, legacy migration requires explicit maintenance recovery: stop legacy VMs across every microsandbox home and prevent old-tool launches or writes to the affected storage until recovery finishes, then run:
+
+```bash
+msb recover-storage app --legacy-writers-stopped
+```
+
+The flag confirms that you have established these conditions; it does not stop processes or establish them for you. New and already migrated sandboxes do not require this maintenance and can keep running.
+
+If the active view cannot be determined, inspection reports complete, authorized candidates when available. Explicit recovery requires their exact disk and candidate IDs:
+
+```bash
+msb recover-storage app --select root=CANDIDATE_ID --accept-selected-view
+```
+
+On macOS, add `--legacy-writers-stopped` after establishing the maintenance conditions above. Select every required disk in the reported group. The selected view may omit later writes; candidate selection cannot repair missing disk data or bypass source validation. A changed candidate requires fresh inspection. Pending memory/device restores are separate from disk recovery and are never silently converted to a cold boot.
+
+Do not delete journals, guards, or migration records to bypass an error, and do not downgrade in place to obtain a backup. Downgrade remains unavailable while protected or migrating sandboxes exist. Saved-configuration errors described below are a separate problem.
 
 ## Later v0.7 releases
 

@@ -157,6 +157,32 @@ impl BackendConfig {
         Ok(self)
     }
 
+    /// Apply operation settings to a local backend whose paths have already been captured.
+    /// Re-reading environment paths here could inspect a different home from the backend
+    /// that owns the operation. Only winning operation paths are anchored against this call.
+    #[cfg(feature = "local")]
+    pub(crate) fn apply_operation_patch(
+        mut self,
+        mut options: GlobalConfigPatch,
+    ) -> MicrosandboxResult<Self> {
+        let captured = self.resolved_config().clone();
+        super::runtime_paths::resolve_patch(&mut options, None, &self.managed)?;
+        self.defaults =
+            GlobalConfigPatch::from_present_fields((*captured).clone()).overlay(options);
+        let mut resolved = self.global_layers().build().into_config();
+        // Clearing an operation's home restores the backend's captured home, never the
+        // current process environment. Optional subordinate paths still derive from it.
+        if resolved.home.is_none() {
+            resolved.home = Some(captured.home());
+        }
+        super::runtime_paths::resolve(&mut resolved)?;
+        resolved.validate_sandbox_defaults()?;
+        resolved.validate_snapshots()?;
+        self.resolved = OnceLock::from(Arc::new(resolved));
+        self.validate_backend_policy()?;
+        Ok(self)
+    }
+
     /// Order the ordinary inputs before operation options and managed policy are applied.
     fn compose_defaults(
         builtins: GlobalConfigPatch,
@@ -697,6 +723,80 @@ mod tests {
             Some(std::path::absolute("environment-agentd").unwrap().as_path())
         );
         assert_eq!(enforced.resolved_config().paths.agentd, None);
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn captured_operation_options_keep_managed_paths_and_source_provenance() {
+        let _guard = crate::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user/config.json");
+        let admin = dir.path().join("admin/managed.json");
+        std::fs::create_dir(user.parent().unwrap()).unwrap();
+        std::fs::create_dir(admin.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user,
+            r#"{"home":"./state","paths":{"snapshots":"./snapshots"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &admin,
+            r#"{"overrides":{"paths":{"logs":"./logs"},"allowed_backends":["local"]}}"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Managed config validation checks its directories as well as the file; keep
+            // this precedence fixture valid even when the host has a group-writable umask.
+            for directory in [dir.path(), user.parent().unwrap(), admin.parent().unwrap()] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let captured = BackendConfig::load_from(&user, Some(&admin))
+            .unwrap()
+            .prepare_for_local_backend(GlobalConfigPatch::new())
+            .unwrap();
+        let options = serde_json::from_value(serde_json::json!({
+            "home": null,
+            "paths": {"cache":"./operation-cache", "logs":"./ignored-operation-logs"},
+            "allowed_backends": ["cloud"]
+        }))
+        .unwrap();
+        let patched = captured.clone().apply_operation_patch(options).unwrap();
+        assert_eq!(
+            patched.resolved_config().home(),
+            user.parent().unwrap().join("state")
+        );
+        assert_eq!(
+            patched.resolved_config().snapshots_dir(),
+            user.parent().unwrap().join("snapshots")
+        );
+        assert_eq!(
+            patched.resolved_config().paths.cache,
+            Some(std::path::absolute("operation-cache").unwrap())
+        );
+        assert_eq!(
+            patched.resolved_config().paths.logs,
+            Some(admin.parent().unwrap().join("logs"))
+        );
+        patched.require_backend(BackendKind::Local, None).unwrap();
+        let error = patched
+            .require_backend(BackendKind::Cloud, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("managed config"));
+        assert!(error.contains(admin.to_str().unwrap()));
+        assert!(captured.resolved_config().paths.cache.is_none());
+        let overridden = captured
+            .apply_operation_patch(GlobalConfigPatch::new().home("./operation-home".into()))
+            .unwrap();
+        assert_eq!(
+            overridden.resolved_config().home(),
+            std::path::absolute("operation-home").unwrap()
+        );
     }
 
     #[test]

@@ -63,6 +63,7 @@ use crate::db::entity::{
 };
 use crate::runtime::handle::StartupProcess;
 use crate::runtime::launch_contract;
+use crate::runtime::protected_state::StoragePreparation;
 use crate::runtime::{ProcessHandle, SpawnMode};
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
@@ -323,9 +324,11 @@ impl LocalBackend {
 
         // Persist ownership before any deterministic sandbox path is created. An interrupted
         // insert can leave a row, but never untracked storage.
+        let reserved_config = config.clone_for_persistence();
+        let reserved_config_json = serde_json::to_string(&reserved_config)?;
         let sandbox_id = Self::insert_sandbox_record_impl(
             db.write(),
-            &config.clone_for_persistence(),
+            &reserved_config,
             SandboxStatus::Starting,
             true,
         )
@@ -862,7 +865,15 @@ impl LocalBackend {
                     self.ensure_named_volumes(preparation, &config),
                 )
                 .await?;
-                self.prepare_sandbox_launch(&config, preparation).await?;
+                self.prepare_sandbox_launch(
+                    &config,
+                    preparation,
+                    StoragePreparation::New {
+                        catalog_id: sandbox_id,
+                        expected_config: &reserved_config_json,
+                    },
+                )
+                .await?;
                 Ok::<_, MicrosandboxError>((volumes, _branch_pin))
             })
             .await

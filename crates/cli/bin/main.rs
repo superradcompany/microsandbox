@@ -26,9 +26,30 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Sandboxes",
         commands: &[
-            "run", "create", "restore", "modify", "start", "stop", "pause", "resume", "fork",
-            "restart", "wait", "ping", "touch", "list", "status", "metrics", "remove", "exec",
-            "copy", "logs", "ssh", "inspect", "sandbox",
+            "run",
+            "create",
+            "restore",
+            "modify",
+            "start",
+            "stop",
+            "pause",
+            "resume",
+            "fork",
+            "restart",
+            "wait",
+            "ping",
+            "touch",
+            "list",
+            "status",
+            "metrics",
+            "remove",
+            "exec",
+            "copy",
+            "logs",
+            "ssh",
+            "inspect",
+            "recover-storage",
+            "sandbox",
         ],
     },
     CommandGroup {
@@ -509,6 +530,9 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some(diagnostic) = err.downcast_ref::<self_cmd::StorageDoctorExit>() {
+        return diagnostic.code;
+    }
     if err.chain().any(|cause| {
         cause
             .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
@@ -732,7 +756,7 @@ fn run_async_command_anyhow(
             Commands::Snapshot(args) => snapshot::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
@@ -763,6 +787,7 @@ fn requires_current_catalog(command: &Commands) -> bool {
                 | sandbox::SandboxCommands::Start(_)
                 | sandbox::SandboxCommands::Restart(_)
                 | sandbox::SandboxCommands::Fork(_)
+                | sandbox::SandboxCommands::RecoverStorage(_)
         ),
         Commands::Snapshot(_) | Commands::Snapshots(_) | Commands::Volume(_) => true,
         _ => false,

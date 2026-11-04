@@ -89,4 +89,12 @@ Doctor reports supported virtualization and storage capabilities. Disabled inter
 
 A temporary clone probe checks whether flat roots can use native copy-on-write. Probe files are removed afterward. See [Performance](/sandboxes/optimization) for details.
 
+### Check sandbox storage
+
+`msb doctor --storage --sandbox app` checks named sandbox storage; repeat `--sandbox` to select more, or use `--all-sandboxes` explicitly. Add `--format json` for a structured report. Storage mode does not run host probes, apply fixes, start or stop VMs, or change catalog records, permissions, or disk contents. SQLite may maintain its normal WAL read-lock sidecars. `--fix` and host-fix confirmation flags cannot be combined with storage mode.
+
+Exit codes are `0` for ready or eligible storage, `2` for blockers, required maintenance, or an incomplete migration, `3` when any sandbox could not be inspected, and `1` for a command-level failure. Running-sandbox results are provisional. Plain `msb doctor` retains its host checks without inventorying sandbox storage.
+
+`msb recover-storage NAME` imports or resumes stopped storage without booting it. macOS legacy storage requires `--legacy-writers-stopped` after establishing the maintenance conditions in the migration guide. Explicit `--select DISK_ID=CANDIDATE_ID` choices require `--accept-selected-view`; `--format json` returns the completion report. See [protected-state migration](/migrations/v0.7#protected-sandbox-state) before choosing a view that may omit later writes.
+
 See [Performance](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

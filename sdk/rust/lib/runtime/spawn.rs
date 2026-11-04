@@ -68,6 +68,7 @@ use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 use super::lifecycle::acquire_sandbox_lifecycle_guard;
 #[cfg(feature = "net")]
 use super::network_slot::NetworkSlot;
+use super::protected_state::{self, StoragePreparation};
 #[cfg(windows)]
 use super::sockets::ensure_agent_pipe_unclaimed;
 use super::sockets::remove_socket_artifacts_at;
@@ -186,6 +187,7 @@ impl LocalBackend {
         &self,
         config: &SandboxConfig,
         storage: &CreationStorage,
+        preparation: StoragePreparation<'_>,
     ) -> MicrosandboxResult<()> {
         if storage.path() != self.sandboxes_dir().join(&config.spec.name) {
             return Err(MicrosandboxError::Runtime(
@@ -207,7 +209,7 @@ impl LocalBackend {
         #[cfg(not(feature = "embed-binaries"))]
         crate::setup::resolve_runtime(self.config())?;
         launch_contract::validate_runtime_config(config, self.config()).await?;
-        super::protected_state::prepare(self, config, storage).await?;
+        protected_state::prepare_launch(self, config, storage, preparation).await?;
         let runtime_storage = storage.clone();
         let scripts = config.spec.runtime.scripts.clone();
 
@@ -279,7 +281,8 @@ impl LocalBackend {
             ),
         };
         let storage = CreationStorage::acquire(self, &config.spec.name)?;
-        self.prepare_sandbox_launch(config, &storage).await?;
+        self.prepare_sandbox_launch(config, &storage, StoragePreparation::Existing)
+            .await?;
         self.launch_sandbox(config, sandbox_id, mode, lifecycle_guard)
             .await
     }
