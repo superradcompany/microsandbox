@@ -14,7 +14,7 @@ The GitHub App is installed on this repository only, with Administration write f
 
 The listener runs as NetworkService with Hyper-V Administrators membership. The service executable and Azure agent state are outside job-writable storage. A job can modify its own machine, so the underlying VM is always destroyed. No disk, runner directory, build cache, or image made from a used worker is reused. The dedicated worker subnet denies inbound access except operator SSH from one configured IPv4 `/32`, denies peer traffic, and blocks Azure metadata access. Workers have no route to production networks. Use only the operator's public SSH key in configuration.
 
-The timer stores credential-free leases in a private blob container. Completed, failed, cancelled, and expired jobs enter cleanup. Cleanup removes the exact runner registration, VM, OS disk, NIC, and public IP, retries partial failures, and reports success only after all four Azure resource IDs return 404. A separate tag-based pass runs before lease storage and GitHub access, so expired resources can still be deleted when either dependency is unavailable. Keep the timer running when disabling new admissions.
+The timer stores credential-free leases in a private blob container. Completed, failed, cancelled, and expired jobs enter cleanup. Before issuing another JIT configuration or completing cleanup, the controller reconciles registrations by the lease's exact job-derived runner name, including registrations whose API response or lease save was lost. Cleanup removes those registrations, the VM, OS disk, NIC, and public IP, retries partial failures, and reports success only after their IDs return 404. A separate tag-based pass runs before lease storage and GitHub access, so expired resources can still be deleted when either dependency is unavailable. Keep the timer running when disabling new admissions.
 
 ## Limits and results
 
@@ -22,7 +22,7 @@ The timer stores credential-free leases in a private blob container. Completed, 
 - A 20-minute GitHub job limit, a maximum 60-minute lease from allocation through cleanup, and a maximum 90-minute admission deadline. Provisioning time counts against the lease. Azure outages can delay deletion, so these limits are not a billing guarantee.
 - No warm pool. Idle workers scale to zero; the private Function, storage, and Key Vault have their own ongoing usage costs.
 - Setup failure, expired leases, and admission timeout cancel the affected workflow run. Test failure is reported by the Windows job and does not cancel the other Windows lane.
-- The App publishes a separate infrastructure check for each OS. A hosted cleanup job verifies both checks belong to the configured App and exact run attempt before Check Summary can pass.
+- The App publishes a separate infrastructure check for each OS. A hosted cleanup job verifies both checks belong to the configured App and each lane's executed attempt before Check Summary can pass. Partial reruns reuse a successful lane's original cleanup proof, identified by its evaluated routing label, and require a new proof for every lane that runs again. Missing or skipped lanes cannot qualify.
 - Public test output contains only allowlisted stage results, OS version, revision, and test counts. Raw runtime diagnostics remain on the disposable disk and are deleted with it. Do not upload them automatically. Inspect failures privately, then share only redacted, relevant details.
 
 ## Private deployment

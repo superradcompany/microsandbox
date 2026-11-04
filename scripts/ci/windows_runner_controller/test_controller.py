@@ -1,16 +1,17 @@
 """Safety boundaries for admission, fresh disks, credentials, and cleanup."""
 
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import replace
 import json
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from clients import ApiError, GitHub
+from clients import ApiError, GitHub, attempt_jobs
 from controller import Controller, reap_expired_resources
 from models import Config, Lease, candidate, utc
-from wait_for_cleanup import cleanup_finished
+from wait_for_cleanup import cleanup_finished, cleanup_expectations
 
 NOW = 1_800_000_000
 SCOPE = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/test-ci'
@@ -95,6 +96,19 @@ class FakeGitHub:
 
 
 class ControllerTests(unittest.TestCase):
+    def test_attempt_job_pagination_is_complete_and_fails_closed_at_its_limit(self):
+        records = [{'id': index} for index in range(65)]
+
+        def response(method, path):
+            self.assertIn('/runs/50/attempts/2/jobs?', path)
+            query = parse_qs(urlsplit(path).query)
+            size, page = int(query['per_page'][0]), int(query['page'][0])
+            return {'jobs': records[(page - 1) * size:page * size]}
+
+        self.assertEqual(attempt_jobs(response, 50, 2), records)
+        with self.assertRaises(RuntimeError):
+            attempt_jobs(lambda method, path: {'jobs': records[:30]}, 50, 2)
+
     def test_discovery_reserves_both_queued_platforms_and_deduplicates_runs(self):
         first, second = lease(), lease(job_id=101, platform='win11')
         run, job = job_run(first)
@@ -166,6 +180,12 @@ class ControllerTests(unittest.TestCase):
 
         self.assertFalse(discover([]))
         self.assertEqual(len(discover([build])), 1)
+        # GitHub copies successful jobs into a partial rerun's attempt-specific
+        # list, retaining their earlier execution timestamps. They still prove
+        # approval for this exact run and revision, without rerunning the build.
+        reused = {**build, 'id': 200, 'run_attempt': 2,
+                  'started_at': utc(NOW - 7200), 'completed_at': utc(NOW - 3600)}
+        self.assertEqual(len(discover([reused])), 1)
         for key, value in [('status', 'queued'), ('conclusion', 'skipped'), ('conclusion', 'failure'),
                            ('run_id', 51), ('head_sha', 'b' * 40), ('runner_id', 0),
                            ('labels', ['self-hosted']), ('name', 'unrelated build')]:
@@ -261,6 +281,111 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(github.jit_calls, 0)
         self.assertEqual(store.items[100].phase, 'jit-staged')
 
+    def test_jit_recovery_removes_registration_when_response_or_save_is_lost(self):
+        for failure in ('response', 'save'):
+            with self.subTest(failure=failure):
+                item = lease(phase='jit')
+                store, azure, api = MemoryLeases(item), FakeAzure(), GitHub(CFG, lambda: 'synthetic-token')
+                runners, created, deleted = {900: {'id': 900, 'name': 'wci-1000'}}, [], []
+
+                def response(method, path, body=None, **options):
+                    if path.startswith('/actions/runners?'):
+                        return {'runners': list(runners.values())}
+                    if path == '/actions/runners/generate-jitconfig':
+                        runner = {'id': 300 + len(created), 'name': body['name']}
+                        runners[runner['id']] = runner
+                        created.append(runner['id'])
+                        if failure == 'response' and len(created) == 1:
+                            raise ApiError(504)  # The POST succeeded, but its response was lost.
+                        return {'runner': runner, 'encoded_jit_config': 'SYNTHETIC_PRIVATE_CONFIG'}
+                    runner_id = int(path.rsplit('/', 1)[1])
+                    if method == 'DELETE':
+                        deleted.append(runner_id)
+                        runners.pop(runner_id, None)
+                        return {}
+                    return runners.get(runner_id)
+
+                controller = Controller(CFG, azure, api, store, lambda: NOW)
+                with patch.object(api, 'call', side_effect=response):
+                    lost_save = patch.object(store, 'save', side_effect=RuntimeError('lost save')) if failure == 'save' else nullcontext()
+                    with lost_save:
+                        with self.assertRaises((ApiError, RuntimeError)):
+                            controller.advance(item)
+                    self.assertEqual(store.items[100].runner_id, 0)
+                    self.assertIn(300, runners)
+                    controller.advance(store.list()[0])
+                self.assertIn(300, deleted)
+                self.assertEqual(set(runners), {301, 900})
+                self.assertEqual(store.items[100].runner_id, 301)
+                self.assertEqual(store.items[100].phase, 'jit-staged')
+
+    def test_cleanup_waits_for_unsaved_runner_removal(self):
+        item = lease(phase='cleanup', check_id=1)
+        store, api = MemoryLeases(item), GitHub(CFG, lambda: 'synthetic-token')
+        runner = {'id': 300, 'name': item.name}
+        runners, completed, deletes = {300: runner}, [], []
+
+        def response(method, path, body=None, **options):
+            if path.startswith('/actions/runners?'):
+                return {'runners': list(runners.values())}
+            if path == '/actions/runners/300':
+                if method == 'DELETE':
+                    deletes.append(300)
+                    if len(deletes) == 1:
+                        raise ApiError(503)
+                    runners.clear()
+                    return {}
+                return runners.get(300)
+            if path == '/check-runs/1':
+                completed.append(body)
+                return {}
+            self.fail('Unexpected GitHub operation')
+
+        controller = Controller(CFG, FakeAzure(), api, store, lambda: NOW)
+        with patch.object(api, 'call', side_effect=response):
+            controller.tick()
+            self.assertFalse(completed)
+            self.assertIn(100, store.items)
+            controller.tick()
+        self.assertFalse(runners)
+        self.assertFalse(store.items)
+        self.assertEqual(len(completed), 1)
+
+    def test_runner_reconciliation_paginates_and_uses_exact_names(self):
+        api, item = GitHub(CFG, lambda: 'synthetic-token'), lease()
+        runners = {index: {'id': index, 'name': f'unrelated-{index}'} for index in range(1, 101)}
+        runners.update({300: {'id': 300, 'name': item.name}, 301: {'id': 301, 'name': item.name + '0'}})
+        deleted = []
+
+        def response(method, path, *args, **options):
+            if path.startswith('/actions/runners?'):
+                page = int(parse_qs(urlsplit(path).query)['page'][0])
+                return {'runners': list(runners.values())[(page - 1) * 100:page * 100]}
+            runner_id = int(path.rsplit('/', 1)[1])
+            if method == 'DELETE':
+                deleted.append(runner_id)
+                runners.pop(runner_id, None)
+                return {}
+            return runners.get(runner_id)
+
+        with patch.object(api, 'call', side_effect=response):
+            api.remove_runner(item)
+        self.assertEqual(deleted, [300])
+        self.assertIn(301, runners)
+
+    def test_runner_reconciliation_requires_verified_absence(self):
+        api, item = GitHub(CFG, lambda: 'synthetic-token'), lease(runner_id=300)
+
+        def response(method, path, *args, **options):
+            if path.startswith('/actions/runners?'):
+                return {'runners': [{'id': 300, 'name': item.name}]}
+            if method == 'GET':
+                return {'id': 300, 'name': item.name}
+            return {}  # Acknowledged DELETE, but removal has not completed.
+
+        with patch.object(api, 'call', side_effect=response), self.assertRaises(RuntimeError):
+            api.remove_runner(item)
+
     def test_orphan_expiry_is_tagged_scoped_and_independent_of_lease_storage(self):
         item = lease()
         resource = {'type': 'Microsoft.Network/networkInterfaces', 'name': item.name + '-nic',
@@ -303,6 +428,35 @@ class ControllerTests(unittest.TestCase):
         checks[0].update(status='completed', conclusion='failure')
         with self.assertRaises(RuntimeError):
             cleanup_finished(checks, 42, expected)
+
+    def test_partial_rerun_cleanup_uses_each_lanes_executed_attempt(self):
+        jobs = [{'id': 100 + platform, 'run_id': 50, 'head_sha': 'a' * 40, 'run_attempt': 2,
+                 'name': f'Windows WHP ({platform})', 'status': 'completed', 'conclusion': 'success',
+                 'labels': [f'msb-whp-50-{attempt}-win{platform}']}
+                for platform, attempt in ((10, 1), (11, 2))]
+        expected = cleanup_expectations(jobs, 50, 2, 'a' * 40)
+        self.assertEqual(expected, {'windows-whp/50/1/win10', 'windows-whp/50/2/win11'})
+        checks = [{'id': index, 'external_id': identity, 'app': {'id': 42},
+                   'status': 'completed', 'conclusion': 'success'} for index, identity in enumerate(sorted(expected))]
+        self.assertTrue(cleanup_finished(checks, 42, expected))
+        checks[1]['external_id'] = 'windows-whp/50/1/win11'
+        self.assertFalse(cleanup_finished(checks, 42, expected))
+        # Rerunning only the cleanup job reuses both original lane results.
+        self.assertEqual(cleanup_expectations(jobs, 50, 3, 'a' * 40), expected)
+
+    def test_cleanup_rejects_missing_skipped_or_mismatched_lane_identity(self):
+        jobs = [{'run_id': 50, 'head_sha': 'a' * 40, 'name': f'Windows WHP ({platform})',
+                 'status': 'completed', 'conclusion': 'success', 'labels': [f'msb-whp-50-2-win{platform}']}
+                for platform in (10, 11)]
+        for key, value in [('run_id', 51), ('head_sha', 'b' * 40), ('status', 'queued'),
+                           ('conclusion', 'skipped'), ('labels', ['msb-whp-51-2-win10']),
+                           ('labels', ['msb-whp-50-3-win10']), ('labels', ['msb-whp-50-2-win11']),
+                           ('labels', ['msb-whp-50-2-win10', 'self-hosted'])]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                cleanup_expectations([{**jobs[0], key: value}, jobs[1]], 50, 2, 'a' * 40)
+        for invalid in (jobs[:1], jobs + [jobs[0]], [{**jobs[0], 'conclusion': 'failure', 'labels': ['msb-whp-50-1-win10']}, jobs[1]]):
+            with self.assertRaises(ValueError):
+                cleanup_expectations(invalid, 50, 2, 'a' * 40)
 
     def test_orphan_cloud_resources_reserve_capacity_after_lease_loss(self):
         run, job = job_run(lease(job_id=101))

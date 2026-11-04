@@ -40,6 +40,18 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def attempt_jobs(call, run_id, attempt):
+    # Large job pages can return HTTP 502 for reruns with copied job histories.
+    # Use GitHub's default page size while retaining a bounded, complete scan.
+    jobs = []
+    for page in range(1, 35):
+        batch = call("GET", f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=30&page={page}")["jobs"]
+        jobs.extend(batch)
+        if len(batch) < 30:
+            return jobs
+    raise RuntimeError("Could not inspect every job in the attempt")
+
+
 class Azure:
     def __init__(self, credential):
         self.credential = credential
@@ -83,12 +95,7 @@ class GitHub:
             batch = self.call("GET", f"/actions/workflows/{self.cfg.workflow_id}/runs?status={status}&per_page=100")["workflow_runs"]
             runs.update({run["id"]: run for run in batch})
         for run in sorted(runs.values(), key=lambda item: item["id"]):
-            jobs = []
-            for page in range(1, 11):
-                batch = self.call("GET", f'/actions/runs/{run["id"]}/attempts/{run["run_attempt"]}/jobs?per_page=100&page={page}')["jobs"]
-                jobs.extend(batch)
-                if len(batch) < 100:
-                    break
+            jobs = attempt_jobs(self.call, run["id"], run["run_attempt"])
             fork = (run.get("head_repository") or {}).get("full_name") != self.cfg.repository
             if fork and not any(
                 job.get("name") == "Build Windows CLI (windows-x86_64)"
@@ -135,8 +142,31 @@ class GitHub:
             "labels": lease.labels, "work_folder": "_work"})
 
     def remove_runner(self, lease):
+        # A successful JIT POST can lose its response before runner_id is saved.
+        # The name is derived from the leased job ID, never a guest-supplied
+        # prefix. Collect every exact match before deleting, so pagination cannot
+        # skip registrations as the list shrinks.
+        runner_ids = set()
+        for page in range(1, 11):
+            batch = self.call("GET", f"/actions/runners?per_page=100&page={page}")["runners"]
+            runner_ids.update(runner["id"] for runner in batch if runner.get("name") == lease.name)
+            if len(batch) < 100:
+                break
+        else:
+            raise RuntimeError("Could not inspect every runner registration")
         if lease.runner_id:
-            self.call("DELETE", f"/actions/runners/{lease.runner_id}", missing=True)
+            saved = self.call("GET", f"/actions/runners/{lease.runner_id}", missing=True)
+            if saved is not None:
+                if saved.get("name") != lease.name:
+                    raise RuntimeError("Saved runner identity does not match its lease")
+                runner_ids.add(lease.runner_id)
+        for runner_id in runner_ids:
+            self.call("DELETE", f"/actions/runners/{runner_id}", missing=True)
+        # Keep the durable lease (and block a new JIT registration) until GitHub
+        # confirms deletion, just as Azure resource cleanup requires absence.
+        for runner_id in runner_ids:
+            if self.call("GET", f"/actions/runners/{runner_id}", missing=True) is not None:
+                raise RuntimeError("Runner registration deletion is pending")
 
 
 class AppToken:
