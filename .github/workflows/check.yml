@@ -2216,6 +2216,7 @@ jobs:
     needs:
       - changes
       - docs-language-order
+      - installer-tests
       - test-linux-x86_64
       - check
     runs-on: ubuntu-latest
@@ -2236,6 +2237,7 @@ jobs:
     needs:
       - changes
       - docs-language-order
+      - installer-tests
       - trust-helper
       - build-kernel
       - build-kernel-x86_64
