@@ -72,8 +72,10 @@ need_cmd() {
 
 prepare_install_dir() {
     # The install root also contains the private catalog. Do not let the
-    # caller's umask make a new root writable by other accounts.
-    (umask 077; mkdir -p "$INSTALL_DIR")
+    # caller's umask or an inherited default ACL make a new root writable by
+    # other accounts. -m bounds inherited ACL access on the new root; -p leaves
+    # existing directories unchanged. Keep the umask for any missing parents.
+    (umask 077; mkdir -p -m 700 "$INSTALL_DIR")
 
     # Existing roots may be shared or symlinked custom locations. Leave their
     # permissions alone and explain the repair instead of silently chmod'ing them.

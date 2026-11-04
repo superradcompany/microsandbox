@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -16,7 +17,7 @@ INSTALLER = Path(__file__).resolve().parents[1] / "install.sh"
 
 @unittest.skipUnless(platform.system() in ("Linux", "Darwin"), "Unix installer only")
 class InstallTests(unittest.TestCase):
-    def run_case(self, case, *, umask=0o022, existing_mode=None):
+    def run_case(self, case, *, umask=0o022, existing_mode=None, inherited_acl=None):
         system = platform.system()
         machine = platform.machine()
         if system == "Darwin" and machine != "arm64":
@@ -91,6 +92,15 @@ else:
                                            target_is_directory=True)
                 env["MSB_HOME"] = "alias/../custom-home"
                 target = root / "physical" / "custom-home"
+            if inherited_acl is not None:
+                subprocess.run(["setfacl", "-d", "-m", inherited_acl, str(target.parent)],
+                               check=True, capture_output=True, text=True)
+                parent_acl = os.getxattr(target.parent, "system.posix_acl_default")
+                # Prove this filesystem actually reproduces the umask-only bug.
+                probe = target.parent / "acl-control"
+                subprocess.run(["/bin/sh", "-c", 'umask 077; mkdir -p "$1"',
+                                "sh", str(probe)], check=True)
+                self.assertEqual(probe.stat().st_mode & 0o777, 0o775)
             if case == "existing-symlink":
                 physical = root / "shared home"
                 physical.mkdir()
@@ -107,6 +117,9 @@ else:
             self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
             expected_mode = 0o700 if existing_mode is None else existing_mode
             self.assertEqual(target.stat().st_mode & 0o777, expected_mode)
+            if inherited_acl is not None:
+                self.assertEqual(os.getxattr(target.parent, "system.posix_acl_default"),
+                                 parent_acl, "installer changed the parent's default ACL")
             if existing_mode is not None:
                 self.assertEqual(sentinel.read_text(), "keep me")
                 self.assertEqual(sentinel.stat().st_mode & 0o777, 0o640)
@@ -155,6 +168,15 @@ else:
 
     def test_existing_symlink_target_is_not_chmodded(self):
         self.run_case("existing-symlink", umask=0o002, existing_mode=0o775)
+
+    @unittest.skipUnless(platform.system() == "Linux", "Linux default ACL semantics")
+    def test_fresh_home_is_private_with_inherited_acl(self):
+        self.assertIsNotNone(shutil.which("setfacl"), "install the acl package to run this test")
+        for acl in ("u::rwx,g::rwx,o::rx", "u::rwx,u:65534:rwx,g::rwx,m::rwx,o::rx"):
+            for case in ("default", "relative-spaces"):
+                for mask in (0o002, 0o077):
+                    with self.subTest(acl=acl, case=case, umask=oct(mask)):
+                        self.run_case(case, umask=mask, inherited_acl=acl)
 
     def test_default_home(self):
         self.run_case("default")
