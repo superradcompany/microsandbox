@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use microsandbox::{AgentBridge, BridgeFrame};
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
@@ -104,7 +103,7 @@ impl PyAgentClient {
                 .stream_open(flags, body)
                 .await
                 .map_err(to_py_err_agent)?;
-            Python::with_gil(|py| -> PyResult<PyObject> {
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let out = PyDict::new(py);
                 out.set_item("id", id)?;
                 out.set_item("handle", handle)?;
@@ -170,8 +169,8 @@ impl PyAgentClient {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn frame_to_py(frame: BridgeFrame) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
+fn frame_to_py(frame: BridgeFrame) -> PyResult<Py<PyAny>> {
+    Python::attach(|py| {
         let out = PyDict::new(py);
         out.set_item("id", frame.id)?;
         out.set_item("flags", frame.flags)?;
@@ -185,13 +184,5 @@ fn to_py_err_agent(err: microsandbox::AgentClientError) -> PyErr {
 }
 
 fn timeout_duration(timeout: Option<f64>) -> PyResult<Option<Duration>> {
-    match timeout {
-        Some(timeout) if timeout.is_finite() && timeout >= 0.0 => {
-            Ok(Some(Duration::from_secs_f64(timeout)))
-        }
-        Some(_) => Err(PyValueError::new_err(
-            "timeout must be a non-negative finite number",
-        )),
-        None => Ok(None),
-    }
+    crate::sandbox::optional_duration(timeout)
 }

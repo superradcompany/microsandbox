@@ -5,7 +5,7 @@ use super::*;
 use std::os::windows::{fs::FileExt, io::AsRawHandle};
 
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -13,20 +13,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
-    /// Report the actual link count for owned files, including zero for an unlinked pin.
-    pub(super) fn owned_stat_link_count(
-        &self,
-        mut stat: stat64,
-        data: &InodeData,
-    ) -> io::Result<stat64> {
-        if self.cfg.owned_checkpoint.is_none() {
-            return Ok(stat);
-        }
+    /// Report the host link count, including zero for an unlinked retained file.
+    pub(super) fn stat_link_count(&self, mut stat: stat64, data: &InodeData) -> io::Result<stat64> {
         let file = if let Some(file) = data.retained.lock().unwrap().as_ref() {
             file.try_clone().map_err(host_error)?
         } else {
             StdOpenOptions::new()
-                .access_mode(0x80)
+                .access_mode(FILE_READ_ATTRIBUTES)
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
                 .open(data.path())
                 .map_err(host_error)?
@@ -70,22 +63,21 @@ impl PassthroughFs {
             .map_err(host_error)
     }
 
-    /// Sidecar paths are not inode-scoped like ADS. Owned guest-created hardlink aliases
-    /// therefore receive the same virtual metadata explicitly, without changing bind mounts.
-    pub(super) fn propagate_owned_sidecar_stat(
+    /// Sidecar paths are not inode-scoped like ADS. Tracked hardlink aliases
+    /// therefore receive the same virtual metadata explicitly.
+    pub(super) fn propagate_sidecar_stat(
         &self,
         data: &InodeData,
         stat: OverrideStat,
     ) -> io::Result<()> {
-        if self.cfg.owned_checkpoint.is_none()
-            || !self
-                .stat_store
-                .as_ref()
-                .is_some_and(|store| matches!(store.backend, StatStoreBackend::Sidecar { .. }))
+        if !self
+            .stat_store
+            .as_ref()
+            .is_some_and(|store| matches!(store.backend, StatStoreBackend::Sidecar { .. }))
         {
             return Ok(());
         }
-        // Owned aliases share the logical inode. The path key, not the canonical path
+        // Hardlink aliases share the logical inode. The path key, not the canonical path
         // stored in InodeData, selects each sidecar record. Never hold the table lock
         // during host metadata I/O.
         let aliases = self
@@ -486,9 +478,12 @@ mod tests {
         snapshot.materialize(&generation, &child).unwrap();
         // Simulate a destination volume using sidecars, including its already materialized
         // per-path metadata. NTFS CI can exercise the fallback without mounting another disk.
+        // Both names share an ADS: preserve it before clearing either alias.
+        let [uid, gid, mode, rdev] = capture_owned_metadata(&child, &child.join("first"))
+            .unwrap()
+            .unwrap();
         for name in ["first", "second"] {
             let path = child.join(name);
-            let [uid, gid, mode, rdev] = capture_owned_metadata(&child, &path).unwrap().unwrap();
             StatStore::sidecar(&child)
                 .write(&path, uid, gid, mode, rdev)
                 .unwrap();

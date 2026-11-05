@@ -1,6 +1,7 @@
 ---
 title: Overview
-description: Choose the right credential and explore the Cloud API
+"og:title": Microsandbox cloud REST API reference
+description: Authenticate cloud REST API requests with API keys or personal tokens, and handle errors and pagination.
 keywords: ["cloud API", "REST API", "API keys", "personal access tokens", "endpoint reference"]
 icon: "book-open"
 ---
@@ -24,10 +25,12 @@ The sidebar separates endpoints by who the request represents:
 
 API keys and personal tokens are both sent as bearer tokens:
 
-```bash
+<CodeGroup>
+```bash Shell
 curl https://api.microsandbox.dev/v1/sandboxes \
   -H "Authorization: Bearer $MSB_API_KEY"
 ```
+</CodeGroup>
 
 API keys are created in the [dashboard](https://dashboard.microsandbox.dev/access/api-keys). API-key paths infer the organization from the key. Personal-token paths include the organization slug when the request needs an organization.
 
@@ -41,7 +44,8 @@ https://api.microsandbox.dev
 
 Errors return an `error` object with a stable machine-readable `code`, a human-readable `message`, and optional structured `details`:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "error": {
     "code": "invalid_api_key",
@@ -50,18 +54,21 @@ Errors return an `error` object with a stable machine-readable `code`, a human-r
   }
 }
 ```
+</CodeGroup>
 
 ## Pagination
 
 List endpoints use cursor pagination. Pass `limit` to size the page and `cursor` to continue from a previous response:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "data": [ ... ],
   "has_more": true,
   "next_cursor": "eyJv..."
 }
 ```
+</CodeGroup>
 
 Request the next page with `?cursor=<next_cursor>`; `has_more: false` means you have everything.
 

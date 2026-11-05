@@ -13,14 +13,18 @@ The CLI and SDKs can tune individual sandboxes. Use the
 [global config](/configuration) to set host-wide defaults. Sandbox YAML does
 not currently expose these local performance controls.
 
+The SDK examples use TypeScript, Rust, Python, and Go. Ruby does not expose flat-root selection, placement policies, or huge-page controls.
+
 ## Baseline
 
 Check the host and the sandbox before tuning:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb doctor
 msb inspect my-sandbox
 ```
+</CodeGroup>
 
 `msb doctor` reports host capabilities, including native root-disk cloning and
 interrupt acceleration. `msb inspect` shows the settings the sandbox actually
@@ -106,11 +110,15 @@ To make flat roots the default for future sandboxes, set
 Missing flat images are materialized automatically. To exclude that one-time
 work from a creation benchmark, prepare the image first:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb pull python:3.12 --materialize flat
 ```
+</CodeGroup>
 
-Flat roots also have three clone strategies:
+### Clone strategies
+
+Choose how the private flat-root disk is copied:
 
 | Strategy | Behavior |
 | --- | --- |
@@ -197,7 +205,8 @@ Set `sandbox_defaults.cpu_placement` in the
 On a multi-node host, a placement profile can keep a sandbox's CPU and memory
 on one NUMA node. Define the profile in the [global config](/configuration):
 
-```json
+<CodeGroup>
+```json JSON
 {
   "runtime": {
     "placement_profiles": {
@@ -209,6 +218,7 @@ on one NUMA node. Define the profile in the [global config](/configuration):
   }
 }
 ```
+</CodeGroup>
 
 Then select it when creating the sandbox:
 
@@ -370,7 +380,8 @@ can hold in host memory.
 
 Writeback is global runtime policy, not a per-sandbox SDK option:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "runtime": {
     "block_writeback": {
@@ -379,6 +390,7 @@ Writeback is global runtime policy, not a per-sandbox SDK option:
   }
 }
 ```
+</CodeGroup>
 
 Writeback does not affect non-Linux hosts, read-only disks, or direct I/O. See
 [Global config](/configuration) for `fixed` limits and pool settings.

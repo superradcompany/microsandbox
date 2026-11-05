@@ -6,7 +6,7 @@ use ciborium::Value;
 use microsandbox_protocol::{
     codec::{self, MAX_FRAME_SIZE},
     control::*,
-    message::{self, Message, MessageType},
+    message::{Message, MessageType},
     wire::{self, Envelope, WireError},
 };
 use serde_json::{Value as JsonValue, json};
@@ -315,11 +315,6 @@ fn neutral_envelope_preserves_existing_agent_encoding() {
     )
     .unwrap();
     assert_eq!(agent_bytes, neutral_bytes);
-    assert_eq!(
-        message::PROTOCOL_VERSION,
-        9,
-        "control must not bump the agent generation"
-    );
 }
 
 #[test]

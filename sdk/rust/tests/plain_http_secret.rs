@@ -318,3 +318,69 @@ async fn plain_http_invalid_host_blocks_host_bound_secret() {
 
     teardown(sb, name).await;
 }
+
+/// The guest receives the full denial even when the proxy closes immediately afterward.
+#[msb_test]
+async fn plain_http_secret_denial_delivers_json_to_guest() {
+    for version in ["1.0", "1.1"] {
+        let mut server = HostHttp::start().await.expect("http fixture");
+        let port = server.port();
+        let name = "plain-http-secret-deny-json";
+        let sb = Sandbox::builder(name)
+            .image("mirror.gcr.io/curlimages/curl")
+            .cpus(1)
+            .memory(256)
+            .user("0")
+            .replace()
+            .secret(|s| {
+                s.env("API_KEY")
+                    .value(REAL_SECRET)
+                    .allow("api.allowed.test")
+            })
+            .network(|n| {
+                n.policy(NetworkPolicy::allow_all()).http(|h| {
+                    h.network_deny_message("network-only")
+                        .secret_deny_message("")
+                })
+            })
+            .create()
+            .await
+            .expect("create sandbox");
+
+        let out = sb
+            .shell(format!(
+                r#"curl --http{version} -m 10 -sS -o /tmp/denial -w '%{{http_code}}\n' \
+  -H "Authorization: Bearer $API_KEY" \
+  http://host.microsandbox.internal:{port}/ && cat /tmp/denial"#
+            ))
+            .await
+            .expect("curl denied secret");
+
+        teardown(sb, name).await;
+        let stdout = out.stdout().expect("utf8 stdout");
+        let (code, body) = stdout.split_once('\n').expect("HTTP status and body");
+        assert_eq!(
+            code,
+            "403",
+            "stdout: {stdout}, stderr: {}",
+            out.stderr().unwrap_or_default()
+        );
+        let error: serde_json::Value = serde_json::from_str(body).expect("complete JSON body");
+        assert_eq!(
+            error,
+            serde_json::json!({
+                "code": "secret_policy_denied",
+                "message": "",
+                "domain": "host.microsandbox.internal"
+            })
+        );
+        let auth = tokio::time::timeout(std::time::Duration::from_secs(5), server.received_auth())
+            .await
+            .expect("upstream connection closes")
+            .unwrap_or_default();
+        assert!(
+            auth.is_empty(),
+            "rejected authorization reached upstream: {auth}"
+        );
+    }
+}

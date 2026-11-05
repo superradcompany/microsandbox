@@ -15,6 +15,7 @@ use napi_derive::napi;
 
 use crate::error::to_napi_error;
 use crate::snapshot_copy_builder::JsSnapshotCopyBuilder;
+use crate::storage::{StorageItemUsageJs, item_to_js};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -489,6 +490,13 @@ impl JsSnapshot {
         let report = snapshot.verify().await.map_err(to_napi_error)?;
         Ok(verify_report_to_js(report))
     }
+
+    /// Observe this artifact's storage through its captured backend.
+    #[napi(js_name = "storageUsage")]
+    pub async fn storage_usage(&self) -> Result<StorageItemUsageJs> {
+        let report = self.inner.storage_usage().await.map_err(to_napi_error)?;
+        Ok(item_to_js(report))
+    }
 }
 
 #[napi]
@@ -525,6 +533,13 @@ impl JsSnapshot {
 
 #[napi]
 impl JsSnapshotHandle {
+    /// Observe this artifact's storage through its captured backend.
+    #[napi(js_name = "storageUsage")]
+    pub async fn storage_usage(&self) -> Result<StorageItemUsageJs> {
+        let report = self.inner.storage_usage().await.map_err(to_napi_error)?;
+        Ok(item_to_js(report))
+    }
+
     #[napi(getter)]
     pub fn group(&self) -> Option<String> {
         self.inner.group().map(str::to_string)

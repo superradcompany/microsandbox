@@ -35,6 +35,10 @@ sb = await Sandbox.create("worker", image="python")
 sb, err := m.CreateSandbox(ctx, "worker", m.WithImage("python"))
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("worker", image: "python")
+```
+
 ```bash CLI
 msb create python --name worker
 ```
@@ -95,6 +99,18 @@ sb, err := m.CreateSandbox(ctx, "worker",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  memory: 1024,
+  cpus: 2,
+  env: { "DEBUG" => "true" },
+  labels: { "user.id" => "alice" }
+)
+# Ruby does not expose the tmpfs mount option shown in the other tabs.
+```
+
 ```bash CLI
 msb create python --name worker \
   -c 2 \
@@ -138,25 +154,50 @@ actions, metric attribution, and OCI image labels.
 
 ## Image sources
 
-Most sandboxes start from an OCI image:
-
-```bash
-msb create python --name worker
-```
+Most sandboxes start from an OCI image. You can also use a host directory as the root filesystem, or boot from a disk image. Select one source:
 
 <Tooltip tip="Host-directory and disk-image root filesystems are local-only; microsandbox cloud supports OCI root filesystems."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-You can also use a host directory as the root filesystem:
-
-```bash
-msb create ./my-rootfs --name worker
+<CodeGroup>
+```typescript TypeScript
+const image = "python"; // Or "./my-rootfs" or "./alpine.qcow2".
+await using sb = await Sandbox.builder("worker").image(image).create();
 ```
 
-Or boot from a disk image:
+```rust Rust
+use microsandbox::Sandbox;
 
-```bash
+let image = "python"; // Or "./my-rootfs" or "./alpine.qcow2".
+let sb = Sandbox::builder("worker").image(image).create().await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+image = "python"  # Or "./my-rootfs" or "./alpine.qcow2".
+sb = await Sandbox.create("worker", image=image)
+```
+
+```go Go
+image := "python" // Or "./my-rootfs" or "./alpine.qcow2".
+sb, err := m.CreateSandbox(ctx, "worker", m.WithImage(image))
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+image = "python" # Or "./my-rootfs" or "./alpine.qcow2".
+sb = Microsandbox::Sandbox.create("worker", image: image)
+```
+
+```bash CLI
+# Choose one source:
+msb create python --name worker
+msb create ./my-rootfs --name worker
 msb create ./alpine.qcow2 --name worker
 ```
+</CodeGroup>
 
 OCI images use a copy-on-write overlay so sandboxes can share cached base layers. Disk images are attached as block devices, so each sandbox should use its own disk image copy unless the image format handles its own snapshotting.
 
@@ -208,7 +249,7 @@ When replacing a running sandbox, microsandbox attempts graceful shutdown before
 
 ## Reference
 
-For the complete sandbox API, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For terminal and REST workflows, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
+For the complete sandbox API, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For terminal and REST workflows, see [Sandbox commands](/cli/sandbox-commands) and the [Cloud API](/api-reference/overview).
 
 ## Where to go next
 

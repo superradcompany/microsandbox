@@ -20,7 +20,7 @@ describe("guest writeback forwarding", () => {
         await source.pause({ guestFlush: "required" });
         expect(native.pause).toHaveBeenLastCalledWith("required");
         await source[method]("child", { guestFlush: "skip" });
-        expect(native.fork).toHaveBeenLastCalledWith("child", undefined, "skip");
+        expect(native.fork).toHaveBeenLastCalledWith("child", undefined, "skip", undefined);
       });
     }
   }

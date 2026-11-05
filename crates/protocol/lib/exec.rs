@@ -5,6 +5,19 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 //--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Window charge for each output chunk, bounding even very small writes.
+pub use microsandbox_types::EXEC_OUTPUT_EVENT_OVERHEAD;
+
+/// Runtime-owned execution policy advertised in Ready.
+pub use microsandbox_types::ExecLimits;
+
+/// Maximum encoded execution acknowledgement, signal or resize envelope.
+pub const MAX_EXEC_CONTROL_BYTES: usize = 4096;
+
+//--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
@@ -205,6 +218,39 @@ pub struct ExecResize {
 pub struct ExecSignal {
     /// The signal number to send (e.g. 15 for SIGTERM).
     pub signal: i32,
+}
+
+/// Acknowledges cumulative bytes written into the child's stdin pipe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecStdinAck {
+    /// Bytes written to the child's stdin since this execution started.
+    pub consumed: u64,
+}
+
+/// Acknowledges cumulative output consumed by the SDK, including per-chunk overhead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecOutputAck {
+    /// Payload bytes plus per-chunk overhead consumed since this exec started.
+    pub consumed: u64,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl ExecOutputAck {
+    /// Record one consumed output chunk, including its per-chunk overhead.
+    ///
+    /// Returns `None` on counter overflow without changing the acknowledgement.
+    pub fn consume(&mut self, payload_bytes: usize) -> Option<()> {
+        let charge = u64::try_from(payload_bytes)
+            .ok()?
+            .checked_add(u64::from(EXEC_OUTPUT_EVENT_OVERHEAD))?;
+
+        self.consumed = self.consumed.checked_add(charge)?;
+
+        Some(())
+    }
 }
 
 //--------------------------------------------------------------------------------------------------

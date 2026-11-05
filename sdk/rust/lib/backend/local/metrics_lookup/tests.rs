@@ -63,6 +63,7 @@ fn write(
             memory_bytes: Some(memory),
             memory_available_bytes: None,
             memory_host_resident_bytes: None,
+            memory_limit_bytes: None,
             disk_read_bytes: 0,
             disk_write_bytes: 0,
             net_rx_bytes: 0,
@@ -90,6 +91,62 @@ fn cleanup(names: &[String]) {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_retain_the_shared_database_identity_after_control_is_dropped() {
+    let home = tempfile::tempdir().unwrap();
+    let mut local = crate::test_support::local_backend(crate::config::GlobalConfig {
+        home: Some(home.path().to_path_buf()),
+        ..Default::default()
+    });
+    local.db().await.unwrap();
+    let identity = local
+        .metrics_lookup
+        .state
+        .lock()
+        .unwrap()
+        .database
+        .clone()
+        .unwrap();
+    assert_eq!(Arc::strong_count(&identity), 3);
+    drop(std::mem::take(&mut local.control_sessions));
+    assert_eq!(Arc::strong_count(&identity), 2);
+    assert!(
+        local
+            .verified_metrics(None, false)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Windows SQLite connections prevent renaming the open catalog. Retain only
+    // the shared identity and use binding verification after closing the pools.
+    let pools = local.db().await.unwrap();
+    pools.read().inner().close_by_ref().await.unwrap();
+    pools.write().inner().close_by_ref().await.unwrap();
+    local
+        .metrics_lookup
+        .bind_database(identity.clone())
+        .unwrap();
+    let path = home.path().join("db/msb.db");
+    std::fs::rename(&path, home.path().join("db/old.db")).unwrap();
+    assert!(
+        local
+            .metrics_lookup
+            .bind_database(identity.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("metrics lookup: runtime session changed")
+    );
+    std::fs::write(path, b"replacement").unwrap();
+    assert!(
+        local
+            .metrics_lookup
+            .bind_database(identity)
+            .unwrap_err()
+            .to_string()
+            .contains("metrics lookup: runtime session changed")
+    );
+}
 
 #[tokio::test]
 async fn dual_names_validate_runs_merge_and_invalidate_reused_slots() {

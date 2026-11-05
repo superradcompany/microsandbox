@@ -117,6 +117,27 @@ export type SecretSubstitution = {
    */
   headers: boolean;
   /**
+   * Restrict header substitution to these header field names.
+   *
+   * Requires [`headers`](Self::headers) to be true; a non-empty list with
+   * header substitution disabled is rejected as contradictory. An empty list
+   * (the default) allows every header field. When non-empty, the
+   * placeholder is substituted only in the named fields (matched ASCII
+   * case-insensitively); a placeholder found in any other header field is
+   * treated as a disabled location: on a verified allowed destination it is
+   * forwarded unchanged, while other destinations follow the violation
+   * policy.
+   *
+   * Prefer an allowlist containing only the intended credential header
+   * (typically `Authorization`). Substituting in every header lets an
+   * untrusted guest place the placeholder in a header the upstream host
+   * reflects back in its response (or otherwise exposes), which would let
+   * the guest read the real secret out of that response.
+   *
+   * Names must be valid HTTP field names (RFC 9110 `token`).
+   */
+  header_fields?: Array<string>;
+  /**
    * Substitute in URL query parameters (default: false).
    */
   query: boolean;

@@ -1,14 +1,8 @@
 //! Read-only lookup for a live control target, without unrelated snapshot reconciliation.
 
-use std::time::Duration;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use microsandbox_db::DbReadConnection;
-use microsandbox_migration::schema_metadata;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Statement};
-
-use super::{
-    LocalBackend, acquire_migration_lock, refuse_incomplete_self_downgrade, refuse_schema_ahead,
-};
+use super::LocalBackend;
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::sandbox::SandboxStatus;
 use crate::sandbox::identity::SandboxRunIdentity;
@@ -83,56 +77,13 @@ impl LocalBackend {
         &self,
         name: &str,
     ) -> MicrosandboxResult<Option<(sandbox_entity::Model, SandboxRunIdentity)>> {
-        let db_dir = self.config().home().join(microsandbox_utils::DB_SUBDIR);
-        let db_path = db_dir.join(microsandbox_utils::DB_FILENAME);
-        match std::fs::metadata(&db_path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        }
-        // Use the same installation coordination as the slow path. In particular, a rolled
-        // back database can look current while an incomplete downgrade still owns its files.
-        let _migration_lock = acquire_migration_lock(&db_dir).await?;
-        refuse_incomplete_self_downgrade(&db_dir)?;
-        let database = &self.config().database;
-        let read = if let Some(pools) = self.db.get() {
-            pools.read().clone()
-        } else {
-            DbReadConnection::open_read_only(
-                &db_path,
-                Duration::from_secs(database.connect_timeout_secs),
-                Duration::from_secs(database.busy_timeout_secs),
-            )
-            .await
-            .map_err(|error| {
-                MicrosandboxError::Custom(format!(
-                    "read control catalog {}: {error}",
-                    db_path.display()
-                ))
-            })?
-        };
-        microsandbox_runtime::maintenance::refuse_if_install_exclusive_held(&read)
-            .await
-            .map_err(|error| MicrosandboxError::Runtime(error.to_string()))?;
-        refuse_schema_ahead(read.inner()).await?;
-        let row = match read
-            .query_one_raw(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                "SELECT COUNT(*) FROM seaql_migrations",
-            ))
-            .await
-        {
-            Ok(Some(row)) => row,
-            Ok(None) => return Ok(None),
-            Err(error) if super::is_missing_migrations_table(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        if row.try_get_by_index::<i64>(0)? != schema_metadata::migration_ids().count() as i64 {
+        let Some(catalog) = self.read_current_catalog().await? else {
             return Ok(None);
-        }
+        };
+        let read = &catalog.read;
         let model = sandbox_entity::Entity::find()
             .filter(sandbox_entity::Column::Name.eq(name))
-            .one(&read)
+            .one(read)
             .await?
             .ok_or_else(|| MicrosandboxError::SandboxNotFound(name.into()))?;
         if !matches!(
@@ -141,7 +92,7 @@ impl LocalBackend {
         ) {
             return Ok(None);
         }
-        let run = Self::load_active_run(&read, model.id).await?;
+        let run = Self::load_active_run(read, model.id).await?;
         let pid = Self::pid_from_run(run.as_ref());
         // Do not clean up sockets from this read-only observation. The slow path rechecks
         // the exact row/run under lifecycle ownership before touching stale artifacts.
@@ -164,6 +115,11 @@ impl LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    use microsandbox_migration::schema_metadata;
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    use crate::{backend::local::creation::CreationStorage, sandbox::identity::BranchSource};
+
     use super::*;
 
     async fn fixture() -> (tempfile::TempDir, LocalBackend) {
@@ -228,6 +184,10 @@ mod tests {
     #[tokio::test]
     async fn branch_refuses_a_restarted_source_before_writing_handoff_state() {
         let (home, backend) = fixture().await;
+        // Keep this fixture eligible for storage operations so the test reaches run identity validation.
+        let runtime = backend.sandboxes_dir().join("source/runtime");
+        std::fs::create_dir_all(&runtime).unwrap();
+        microsandbox_runtime::checkpoint::layout::initialize_new(&runtime).unwrap();
         let selected = backend.control_run_identity("source", 1).await.unwrap();
         let writer = backend.db().await.unwrap().write();
         writer
@@ -257,14 +217,14 @@ mod tests {
         let result = crate::sandbox::branch::capture_child(
             &backend,
             &mut child,
-            &crate::sandbox::identity::BranchSource {
+            &BranchSource {
                 guest_flush: None,
                 batch: None,
                 record_integrity: false,
                 name: "source".into(),
                 run: selected,
             },
-            &child_dir,
+            &CreationStorage::for_test(&child_dir),
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("changed runtime"));
@@ -317,7 +277,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("schema is newer")
+                .contains("newer or unrecognized database schema")
         );
         writer
             .execute_unprepared(

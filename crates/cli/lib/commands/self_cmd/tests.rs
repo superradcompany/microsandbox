@@ -1,5 +1,8 @@
 //! Tests for CLI self-update and downgrade operations.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use microsandbox_db::compat as db_compat;
 use microsandbox_db::compat::config::prepare;
 use serde_json::Value;
@@ -223,6 +226,15 @@ async fn vacuum_into_writes_backup_file() {
     vacuum_into(db.inner(), &backup_path).await.unwrap();
 
     assert!(backup_path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(
+            fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
+            microsandbox_db::pool::PRIVATE_DATABASE_FILE_MODE
+        );
+    }
 
     let backup_db = microsandbox_db::connection::DbWriteConnection::open(
         &backup_path,
@@ -276,6 +288,54 @@ async fn rollback_schema_steps_through_latest_migrations() {
     .await
     .unwrap();
     Migrator::up(db.inner(), None).await.unwrap();
+
+    // An empty catalog can retire protection before the older creation migrations.
+    rollback_schema(db.inner(), 1).await.unwrap();
+    assert!(
+        !microsandbox_db::catalog::has_table(&db, "protected_sandbox_state")
+            .await
+            .unwrap()
+    );
+
+    // Retire standalone volume tracking before sandbox-owned creation tracking.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "creation_state")
+            .await
+            .unwrap()
+    );
+
+    // Completed catalogs can retire creation tracking before the older schema changes.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "sandbox", "creation_state")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !microsandbox_db::catalog::has_column(&db, "volume", "pending_creation_sandbox_id")
+            .await
+            .unwrap()
+    );
+
+    // Remove saved caller overrides before rolling back the older schema changes.
+    rollback_schema(db.inner(), 1).await.unwrap();
+
+    let columns = db
+        .query_all_raw(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "PRAGMA table_info(sandbox)",
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !columns
+            .iter()
+            .any(|row| row.try_get_by_index::<String>(1).unwrap() == "caller_config_overrides"),
+        "caller overrides should be removed after rollback"
+    );
 
     // With no clock policies to preserve, rollback removes the catalog compatibility marker.
     rollback_schema(db.inner(), 1).await.unwrap();
@@ -724,7 +784,7 @@ async fn released_v0_7_check_works_on_read_only_connection() {
         .execute_unprepared("PRAGMA query_only = ON")
         .await
         .unwrap();
-    for patch in 0..=2 {
+    for patch in 0..=6 {
         prepare(
             db.inner(),
             &Version::parse(&format!("0.7.{patch}")).unwrap(),
@@ -980,6 +1040,113 @@ async fn invalid_active_policy_rolls_back_all_config_writes() {
     assert_eq!(row.try_get::<String>("", "config").unwrap(), raw);
 }
 
+/// Refusal must roll back earlier rows as well as either saved-config column.
+#[tokio::test]
+async fn scoped_header_downgrade_refuses_without_changing_the_catalog() {
+    let mut failures = Vec::new();
+    for version in [
+        "0.6.0", "0.6.18", "0.7.0", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6",
+    ] {
+        for column in ["config", "active_config"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = open_downgrade_db(&dir.path().join("source.db"))
+                .await
+                .unwrap();
+            db.inner()
+                .execute_unprepared(
+                    "CREATE TABLE sandbox(id INTEGER PRIMARY KEY, config TEXT, active_config TEXT)",
+                )
+                .await
+                .unwrap();
+
+            let raw = current_saved_config();
+            let mut restricted: Value = serde_json::from_str(&raw).unwrap();
+            restricted["network"]["secrets"]["secrets"][0]["substitution"] = serde_json::json!({"headers":true,"header_fields":["authorization"],"query":false,"body":false});
+
+            let restricted = restricted.to_string();
+            let (config, active) = if column == "config" {
+                (&restricted, &raw)
+            } else {
+                (&raw, &restricted)
+            };
+
+            db.inner()
+                .execute_raw(Statement::from_sql_and_values(
+                    DatabaseBackend::Sqlite,
+                    "INSERT INTO sandbox VALUES (1, ?, ?), (2, ?, ?)",
+                    [
+                        raw.clone().into(),
+                        raw.clone().into(),
+                        config.clone().into(),
+                        active.clone().into(),
+                    ],
+                ))
+                .await
+                .unwrap();
+
+            let target = Version::parse(version).unwrap();
+            for (phase, result) in [
+                (
+                    "preflight",
+                    preflight_schema_rollback(
+                        db.inner(),
+                        &dir.path().join("preflight.db"),
+                        0,
+                        &target,
+                    )
+                    .await,
+                ),
+                (
+                    "rollback",
+                    rollback_schema_for_target(db.inner(), 0, Some(&target)).await,
+                ),
+            ] {
+                match result {
+                    Err(error) => {
+                        let error = error.to_string();
+                        assert!(
+                            error.contains("header-field") && error.contains(column),
+                            "{version} {phase}: {error}"
+                        );
+                        assert!(!error.contains("synthetic"), "{version} {phase}: {error}");
+                    }
+                    Ok(()) => failures.push(format!(
+                        "{version} {column} {phase}: unsafe downgrade accepted"
+                    )),
+                }
+            }
+
+            let rows = db
+                .inner()
+                .query_all_raw(Statement::from_string(
+                    DatabaseBackend::Sqlite,
+                    "SELECT config, active_config FROM sandbox ORDER BY id",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2);
+
+            for (row, (expected_config, expected_active)) in
+                rows.iter().zip([(&raw, &raw), (config, active)])
+            {
+                assert_eq!(
+                    &row.try_get::<String>("", "config").unwrap(),
+                    expected_config,
+                    "{version} {column}"
+                );
+
+                assert_eq!(
+                    &row.try_get::<String>("", "active_config").unwrap(),
+                    expected_active,
+                    "{version} {column}"
+                );
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Uses catalogs created and upgraded by real release/candidate binaries.
 #[tokio::test]
 #[ignore = "requires MSB_TEST_CATALOG_MATRIX containing isolated release fixture homes"]
@@ -1165,4 +1332,47 @@ async fn released_sdk_secret_downgrade() {
         .unwrap();
     drop(db);
     phase("restart", old_python, old_runtime).await;
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_downgrade_secures_legacy_storage_before_preparing_copies() {
+    let root = tempfile::tempdir().unwrap();
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    let db_dir = root.path().join("db");
+    fs::create_dir(&db_dir).unwrap();
+    fs::set_permissions(&db_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let legacy_backup = db_dir.join("msb.db.bak-legacy");
+    fs::write(&legacy_backup, "synthetic secret").unwrap();
+    fs::set_permissions(&legacy_backup, fs::Permissions::from_mode(0o644)).unwrap();
+    let _lock = acquire_downgrade_operation_lock(&db_dir).unwrap();
+    for directory in [&db_dir, &db_dir.join("self-downgrade")] {
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        fs::metadata(&legacy_backup).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read_to_string(legacy_backup).unwrap(),
+        "synthetic secret"
+    );
+}
+
+#[tokio::test]
+async fn resume_verification_rejects_empty_or_missing_backups_without_creating_them() {
+    let root = tempfile::tempdir().unwrap();
+    let backup = root.path().join("msb.db.bak-test");
+    assert!(verify_sqlite_backup(&backup).await.is_err());
+    assert!(!backup.exists());
+    fs::write(&backup, "").unwrap();
+    assert!(verify_sqlite_backup(&backup).await.is_err());
+    assert_eq!(fs::metadata(&backup).unwrap().len(), 0);
 }

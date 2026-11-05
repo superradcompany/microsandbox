@@ -88,3 +88,6 @@ See [host sockets](/networking/host-sockets).
 - The Go SDK no longer crashes on macOS when the host process spawns a child after starting a sandbox. Tokio's SIGCHLD handler is now installed with `SA_ONSTACK` on every Unix target, matching Go's cgo signal contract.
 - Sandbox labels stay consistent across modify, migration, and metrics. Label changes now update the canonical config and the projection atomically, and metrics enrichment refreshes labels from the active config instead of caching them as immutable.
 - `msb modify` now produces the same `$MSB_<NAME>` default secret placeholders as `msb create`, and existing placeholders are preserved when rotating secrets.
+- **Null stdin now closes immediately.** Rust SDK executions configured with `StdinMode::Null`
+  send EOF to the guest process instead of leaving its stdin pipe open. Programs such as `cat` and
+  interpreters reading from standard input now finish instead of waiting indefinitely.

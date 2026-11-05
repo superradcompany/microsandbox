@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "packages/protocol-client/typescript"
   },
-  "version": "0.7.6",
+  "version": "0.7.11",
   "type": "module",
   "license": "Apache-2.0",
   "engines": { "node": ">=22" },
@@ -20,5 +20,5 @@
     "test": "vitest run tests && node --expose-gc tests/finalization.mjs"
   },
   "dependencies": { "cbor-x": "^1.6.0" },
-  "devDependencies": { "@types/node": "^25.5.2", "typescript": "^5.6", "vitest": "^4.1" }
+  "devDependencies": { "@types/node": "^25.5.2", "typescript": "^5.6", "vitest": "^4.1.12" }
 }

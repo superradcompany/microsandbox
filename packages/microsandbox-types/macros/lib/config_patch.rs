@@ -25,6 +25,8 @@ struct PatchField {
     nullable: bool,
     serde_attrs: Vec<syn::Attribute>,
     adapter: Option<Path>,
+    transient: bool,
+    serde_lossless: bool,
 }
 
 enum MergeStrategy {
@@ -37,7 +39,7 @@ enum MergeStrategy {
 //--------------------------------------------------------------------------------------------------
 
 impl PatchField {
-    fn parse(field: syn::Field, deserialize: bool) -> syn::Result<Self> {
+    fn parse(field: syn::Field, deserialize: bool, serde_lossless: bool) -> syn::Result<Self> {
         let ident = field.ident.clone().ok_or_else(|| {
             syn::Error::new(Span::call_site(), "ConfigPatch requires named fields")
         })?;
@@ -77,13 +79,14 @@ impl PatchField {
             })?;
         }
         let option_inner = option_inner(&field.ty).cloned();
-        nullable |= deserialize && option_inner.is_some();
+        nullable |= deserialize && !serde_lossless && option_inner.is_some();
         if nullable && (option_inner.is_none() || nested || merge.is_some()) {
             return Err(syn::Error::new(
                 field.ty.span(),
                 "nullable patches require an atomic Option field",
             ));
         }
+        let mut transient = false;
         let mut serde_attrs = Vec::new();
         let mut adapter = None;
         if deserialize {
@@ -93,6 +96,12 @@ impl PatchField {
                         syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
                     )?;
                     for meta in items {
+                        if serde_lossless
+                            && (meta.path().is_ident("skip")
+                                || meta.path().is_ident("skip_serializing"))
+                        {
+                            transient = true;
+                        }
                         if meta.path().is_ident("rename") || meta.path().is_ident("alias") {
                             serde_attrs.push(syn::parse_quote!(#[serde(#meta)]));
                         } else if let syn::Meta::NameValue(value) = meta
@@ -166,6 +175,8 @@ impl PatchField {
             nullable,
             serde_attrs,
             adapter,
+            transient,
+            serde_lossless,
         })
     }
 
@@ -509,7 +520,13 @@ impl PatchField {
     }
 
     fn serde_attributes(&self, patch: &Ident) -> proc_macro2::TokenStream {
+        if self.transient {
+            return quote! { #[serde(skip)] };
+        }
         let attrs = &self.serde_attrs;
+        if self.serde_lossless && self.merge.is_some() {
+            return quote! { #(#attrs)* #[serde(default, skip_serializing_if = "Option::is_none")] };
+        }
         if let Some(nested) = &self.nested_patch
             && !self.nested_optional
         {
@@ -594,11 +611,17 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
 
     let patch_ident = format_ident!("{}Patch", input.ident);
     let mut deserialize = false;
+    let mut serde_lossless = false;
     for attr in &input.attrs {
         if !attr.path().is_ident("config_patch") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("serde_lossless") {
+                deserialize = true;
+                serde_lossless = true;
+                return Ok(());
+            }
             if meta.path.is_ident("serde") {
                 deserialize = true;
                 return Ok(());
@@ -625,7 +648,7 @@ pub(crate) fn expand_config_patch(input: DeriveInput) -> syn::Result<proc_macro2
     let fields = fields
         .named
         .into_iter()
-        .map(|field| PatchField::parse(field, deserialize))
+        .map(|field| PatchField::parse(field, deserialize, serde_lossless))
         .collect::<syn::Result<Vec<_>>>()?;
 
     let patch_fields = fields.iter().map(|field| {

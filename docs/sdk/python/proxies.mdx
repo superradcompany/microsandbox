@@ -1,6 +1,7 @@
 ---
 title: Proxies
-description: Python SDK - Proxy API reference
+"og:title": Python SDK Proxies reference
+description: Route outbound sandbox connections through an HTTP CONNECT, SOCKS4, or SOCKS5 proxy with the Python SDK.
 ---
 
 Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with the `proxy=` argument to [`Sandbox.create()`](/sdk/python/sandbox#sandbox-create). Proxy protocols are mutually exclusive.
@@ -33,11 +34,11 @@ Frozen proxy configuration passed through `Sandbox.create(proxy=...)`.
 
 | Class method | Returns | Description |
 |--------------|---------|-------------|
-| `http_connect(address)` | `OutboundProxy` | Configure an HTTP CONNECT proxy at `IP:port` for TCP |
+| `http_connect(address)` | `OutboundProxy` | Configure an HTTP CONNECT proxy at `IP:port` for TCP, with optional credentials |
 | `socks4(address, *, user_id=None)` | `OutboundProxy` | Configure a SOCKS4 proxy at `IP:port` with an optional user ID |
 | `socks5(address)` | `OutboundProxy` | Configure a SOCKS5 proxy at `IP:port` |
 
-HTTP CONNECT sends the policy-checked destination IP and port through the proxy. Destination DNS resolution remains in microsandbox. HTTP CONNECT does not support proxy authentication or UDP.
+HTTP CONNECT sends the policy-checked destination IP and port through the proxy. Destination DNS resolution remains in microsandbox. HTTP CONNECT supports TCP only and optional HTTP Basic authentication; UDP is unsupported.
 
 The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies the caller; it is not a password.
 
@@ -47,9 +48,11 @@ The SOCKS4 `user_id` must contain 1–255 bytes and no null byte. It identifies 
 credentials(username: str, password: SecretSource) -> OutboundProxy
 ```
 
-Return a SOCKS5 proxy with username/password authentication. Pass `SecretSource.env("SOCKS5_PASSWORD")` as `password`. Calling this method on a SOCKS4 proxy raises `ValueError`.
+Return a SOCKS5 or HTTP CONNECT proxy with username/password authentication. Pass `SecretSource.env("SOCKS5_PASSWORD")` or `SecretSource.env("HTTP_CONNECT_PASSWORD")` as `password`. Calling this method on a SOCKS4 proxy raises `ValueError`.
 
-The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json` and the database contain the source reference but never the resolved password. The username and resolved password must each contain 1–255 bytes.
+HTTP CONNECT accepts an empty username for token-only authentication. A non-empty username must not contain `:` or control characters.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json` and the database contain the source reference but never the resolved password. For SOCKS5, the username and resolved password must each contain 1–255 bytes.
 
 ## SecretSource
 
@@ -59,4 +62,4 @@ The host environment variable is read once each time the sandbox starts. Changin
 SecretSource.env(variable: str) -> SecretSource
 ```
 
-Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.
+Create a host environment-variable reference for a SOCKS5 or HTTP CONNECT password. Import `SecretSource` from `microsandbox`.

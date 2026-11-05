@@ -13,6 +13,8 @@ Volumes give a sandbox persistent or shared storage by mounting host data, manag
 
 Choose bind mounts, named volumes, disk-image volumes, or tmpfs. Local sandboxes also support owned volumes: private storage that lives and dies with the sandbox.
 
+Ruby can create, inspect, list, and remove named volumes, but does not expose sandbox mount configuration, default-volume lookup, or volume filesystem operations. See the [Ruby volume reference](/sdk/ruby/volumes).
+
 ## Temporary files
 
 For OCI sandboxes with a disk-backed root, `/tmp` uses the root disk unless you
@@ -128,10 +130,12 @@ Use `--mount-file` when you want to bind one host file instead of an entire dire
 
 File mounts expose the selected host inode through an isolated one-entry filesystem. They do not hard-link or copy the source, host changes remain visible, and other files in the source directory are not part of the guest-visible share. Writable file mounts receive the same default quota as directory binds; use `quota=<size>` to set a smaller or larger guest-growth budget.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb create alpine --name config-reader \
   --mount-file ./config.toml:/etc/app/config.toml:ro,nodev
 ```
+</CodeGroup>
 
 ## Owned volumes
 
@@ -219,10 +223,13 @@ cache = await Volume.create("pip-cache")
 cache, err := m.CreateVolume(ctx, "pip-cache")
 ```
 
+```ruby Ruby
+cache = Microsandbox::Volume.builder("pip-cache").directory.create
+```
+
 ```bash CLI
 msb volume create pip-cache
 ```
-
 </CodeGroup>
 
 Create a disk-backed named volume when a workload needs a real guest block filesystem, such as Docker's data root:
@@ -258,6 +265,13 @@ dockerData, err := m.CreateVolume(ctx, "docker-data",
     m.WithVolumeKind(m.VolumeKindDisk),
     m.WithVolumeSize(20 * 1024),
 )
+```
+
+```ruby Ruby
+docker_data = Microsandbox::Volume.builder("docker-data")
+  .disk
+  .size(20 * 1024)
+  .create
 ```
 
 ```bash CLI
@@ -311,10 +325,12 @@ msb create python --name worker \
 
 The CLI command above creates `pip-cache` as a directory-backed named volume if it is missing. To create or reuse a disk-backed named volume while mounting it:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb create docker:dind --name docker-demo \
   --mount-named docker-data:/var/lib/docker:kind=disk,size=20G
 ```
+</CodeGroup>
 
 ### Sharing and host-side access
 
@@ -345,12 +361,20 @@ volumes, err := m.ListVolumes(ctx)
 err = m.RemoveVolume(ctx, "old-cache")
 ```
 
+```ruby Ruby
+volumes = Microsandbox::Volume.list
+Microsandbox::Volume.remove("old-cache")
+```
+
 ```bash CLI
 msb volume ls
 msb volume rm old-cache
 ```
-
 </CodeGroup>
+
+<Note>
+If local volume creation is interrupted, remove it with `msb volume rm <name>` or the volume removal API, then retry. If the error names an incomplete sandbox, remove or replace that sandbox instead.
+</Note>
 
 ## Disk-image volumes
 
@@ -479,7 +503,9 @@ Most CLI mount flags use `SOURCE:DEST[:OPTIONS]`; `--mount-owned` only needs `DE
 
 ## Combining mounts
 
-You can repeat mount flags, so a sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space.
+A sandbox can combine host directories, individual files, named volumes, disk images, and tmpfs scratch space. In the CLI, repeat the mount flags.
+
+Ruby currently supports named-volume management, but does not expose sandbox mount configuration.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -517,6 +543,53 @@ let sb = Sandbox::builder("full")
     .await?;
 ```
 
+```python Python
+from microsandbox import DiskImageFormat, Sandbox, StatVirtualization, Volume
+
+sb = await Sandbox.create(
+    "full",
+    image="python",
+    volumes={
+        "/app/src": Volume.bind("./src", readonly=True, noexec=True),
+        "/app/pyproject.toml": Volume.bind("./pyproject.toml", readonly=True),
+        "/root/.cache/pip": Volume.named(
+            "pip-cache", stat_virtualization=StatVirtualization.RELAXED,
+        ),
+        "/dataset": Volume.disk(
+            "./dataset.qcow2", format=DiskImageFormat.QCOW2,
+            fstype="ext4", readonly=True,
+        ),
+        "/tmp": Volume.tmpfs(size_mib=1024, noexec=True, nosuid=True, nodev=True),
+    },
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "full",
+    m.WithImage("python"),
+    m.WithMounts(map[string]m.MountConfig{
+        "/app/src": m.Mount.Bind("./src", m.MountOptions{
+            Readonly: true, Noexec: true,
+        }),
+        "/app/pyproject.toml": m.Mount.Bind("./pyproject.toml", m.MountOptions{
+            Readonly: true,
+        }),
+        "/root/.cache/pip": m.Mount.Named("pip-cache", m.MountOptions{
+            StatVirtualization: m.StatVirtualizationRelaxed,
+        }),
+        "/dataset": m.Mount.Disk("./dataset.qcow2", m.DiskOptions{
+            Format: "qcow2", Fstype: "ext4", Readonly: true,
+        }),
+        "/tmp": m.Mount.Tmpfs(m.TmpfsOptions{
+            SizeMiB: 1024, Noexec: true, Nosuid: true, Nodev: true,
+        }),
+    }),
+)
+if err != nil {
+    return err
+}
+```
+
 ```bash CLI
 msb create python --name full \
   --mount-dir ./src:/app/src:ro,noexec \
@@ -529,4 +602,4 @@ msb create python --name full \
 
 ## Reference
 
-For exact volume APIs, see [TypeScript](/sdk/typescript/volumes), [Rust](/sdk/rust/volumes), [Python](/sdk/python/volumes), or [Go](/sdk/go/volumes). For local volume management, see [Volume commands](/cli/volume-commands).
+For exact volume APIs, see [TypeScript](/sdk/typescript/volumes), [Rust](/sdk/rust/volumes), [Python](/sdk/python/volumes), [Go](/sdk/go/volumes), or [Ruby](/sdk/ruby/volumes). For local volume management, see [Volume commands](/cli/volume-commands).

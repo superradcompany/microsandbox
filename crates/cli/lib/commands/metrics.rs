@@ -22,7 +22,7 @@ use microsandbox::sandbox::{
 };
 use microsandbox_utils::format::{format_bytes, format_duration};
 
-use crate::ui;
+use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -45,8 +45,8 @@ pub struct MetricsArgs {
     pub name: Option<String>,
 
     /// Output format (json).
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 
     /// Continuously refresh the table in place. Ctrl-C to quit.
     #[arg(short = 'w', long, conflicts_with_all = ["follow", "format"])]
@@ -119,7 +119,7 @@ pub async fn run(args: MetricsArgs) -> anyhow::Result<()> {
 
     let reports = collect_reports(local, &args).await?;
 
-    if args.format.as_deref() == Some("json") {
+    if args.format == Some(OutputFormat::Json) {
         print_json_snapshot(&args, &reports)?;
         return Ok(());
     }

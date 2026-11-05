@@ -11,7 +11,7 @@ use sha2::{Digest as _, Sha256};
 use super::admitted_disk::AdmittedDiskLayers;
 use super::{
     CheckpointManifest, DiskGenerationManifest, DiskLayerRef, MemoryExtentContent, MemoryManifest,
-    ObjectId,
+    ObjectId, fs_state_budget_error,
 };
 use crate::error::{ImageError, ImageResult};
 
@@ -22,7 +22,6 @@ use crate::error::{ImageError, ImageResult};
 const CHECKPOINT_ROOT_FILE: &str = "checkpoint.json";
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXECUTION_STATE_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_DEVICE_STATE_BYTES: u64 = 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -67,8 +66,14 @@ impl CheckpointClosure {
     }
 
     /// Open and validate a checkpoint closure for restore on this host architecture.
-    pub fn open(root: impl Into<PathBuf>, expected_root: Option<&ObjectId>) -> ImageResult<Self> {
-        Self::open_inner(root.into(), expected_root, true)
+    ///
+    /// `fs_state_limit` is the virtio-fs backend state budget, in bytes, the closure may carry.
+    pub fn open(
+        root: impl Into<PathBuf>,
+        expected_root: Option<&ObjectId>,
+        fs_state_limit: usize,
+    ) -> ImageResult<Self> {
+        Self::open_inner(root.into(), expected_root, true, fs_state_limit)
     }
 
     /// Open and validate a checkpoint closure without requiring host architecture compatibility.
@@ -78,14 +83,16 @@ impl CheckpointClosure {
     pub fn open_portable(
         root: impl Into<PathBuf>,
         expected_root: Option<&ObjectId>,
+        fs_state_limit: usize,
     ) -> ImageResult<Self> {
-        Self::open_inner(root.into(), expected_root, false)
+        Self::open_inner(root.into(), expected_root, false, fs_state_limit)
     }
 
     fn open_inner(
         root: PathBuf,
         expected_root: Option<&ObjectId>,
         require_host_architecture: bool,
+        fs_state_limit: usize,
     ) -> ImageResult<Self> {
         let (root_id, checkpoint) = read_checkpoint_root(&root, expected_root)?;
         if require_host_architecture && checkpoint.architecture != std::env::consts::ARCH {
@@ -107,14 +114,26 @@ impl CheckpointClosure {
         validate_memory_objects(&root, &memory)?;
 
         // Execution/device codecs perform their own bounded semantic decoding in the runtime. At
-        // this layer we still prove that every named immutable object exists and matches its id.
+        // this layer we still prove that every named immutable object exists and matches its id,
+        // and decode virtio-fs states so a backend state over the budget is refused before restore.
         read_object_verified(
             &root,
             &checkpoint.execution_state,
             MAX_EXECUTION_STATE_BYTES,
         )?;
         for device in &checkpoint.devices {
-            read_object_verified(&root, &device.state, MAX_DEVICE_STATE_BYTES)?;
+            let max_len = device.max_state_bytes(fs_state_limit);
+            if device.is_virtio_fs() && object_len(&root, &device.state)? > max_len {
+                return checkpoint_error(fs_state_budget_error(fs_state_limit));
+            }
+            let bytes = read_object_verified(&root, &device.state, max_len)?;
+            if device.is_virtio_fs() {
+                device
+                    .decode_virtio_state(&bytes, fs_state_limit)
+                    .map_err(|error| {
+                        checkpoint_error_value(format!("device {}: {error}", device.device_id))
+                    })?;
+            }
         }
 
         let mut disks = Vec::with_capacity(checkpoint.disks.len());
@@ -186,6 +205,11 @@ impl CheckpointClosure {
     /// Read and reverify one immutable object, bounded by `max_len`.
     pub fn read_object(&self, id: &ObjectId, max_len: u64) -> ImageResult<Vec<u8>> {
         read_object_verified(&self.root, id, max_len)
+    }
+
+    /// Return the length of one object without reading it.
+    pub fn object_len(&self, id: &ObjectId) -> ImageResult<u64> {
+        object_len(&self.root, id)
     }
 
     /// Load and verify one object into reusable storage, without changing its identity contract.
@@ -281,6 +305,18 @@ fn validate_memory_objects(root: &Path, memory: &MemoryManifest) -> ImageResult<
 fn disk_layer_path(root: &Path, layer: &DiskLayerRef) -> PathBuf {
     root.join("layers")
         .join(format!("{}.{}", layer.layer_id, layer.format))
+}
+
+fn object_len(root: &Path, id: &ObjectId) -> ImageResult<u64> {
+    let path = object_path(root, id);
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() {
+        return checkpoint_error(format!(
+            "checkpoint member is not a regular file: {}",
+            path.display()
+        ));
+    }
+    Ok(metadata.len())
 }
 
 fn read_object_verified(root: &Path, id: &ObjectId, max_len: u64) -> ImageResult<Vec<u8>> {
@@ -400,6 +436,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::checkpoint::manifest::DEFAULT_FS_STATE_LIMIT;
     use crate::checkpoint::{
         CaptureIntent, ContentRef, DeviceStateRef, MemoryCaptureMode, MemoryExtent,
         ResourceDescriptor, ResourceTreatment,
@@ -424,6 +461,30 @@ mod tests {
             read_object_verified_into(directory.path(), &second, 64, &mut buffer),
             Err(ImageError::DigestMismatch { .. })
         ));
+    }
+
+    /// Encode a generic virtio state for a virtio-fs device with `backend_len` bytes of backend
+    /// state, in the msb_krun device-state format.
+    fn virtio_fs_state(backend_len: usize) -> Vec<u8> {
+        let mut device_state = b"MSBKFS\0\0".to_vec();
+        device_state.extend_from_slice(&1u16.to_le_bytes());
+        device_state.extend_from_slice(&0u64.to_le_bytes());
+        device_state.extend_from_slice(&u32::try_from(backend_len).unwrap().to_le_bytes());
+        device_state.resize(device_state.len() + backend_len, 7);
+
+        let mut bytes = b"MSBKVIO\0\0".to_vec();
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(b"fs");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&26u32.to_le_bytes());
+        // Feature, queue and shm selectors, status, config generation, interrupt status, no IRQ
+        // line, acked features and an empty queue list.
+        bytes.extend_from_slice(&[0; 6 * 4 + 8 + 1 + 8 + 4]);
+        bytes.extend_from_slice(&u32::try_from(device_state.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&device_state);
+        bytes
     }
 
     fn fixture() -> (tempfile::TempDir, ObjectId) {
@@ -498,7 +559,9 @@ mod tests {
         ))
         .unwrap();
         assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).is_ok());
-        assert!(CheckpointClosure::open(directory.path(), Some(&root)).is_err());
+        assert!(
+            CheckpointClosure::open(directory.path(), Some(&root), DEFAULT_FS_STATE_LIMIT).is_err()
+        );
         let wrong = ObjectId::from_bytes(b"wrong root").unwrap();
         assert!(CheckpointClosure::inspect_manifest(directory.path(), Some(&wrong)).is_err());
     }
@@ -543,15 +606,17 @@ mod tests {
                 checkpoint.to_canonical_bytes().unwrap(),
             )
             .unwrap();
-            assert!(CheckpointClosure::open(directory.path(), None).is_ok());
+            assert!(
+                CheckpointClosure::open(directory.path(), None, DEFAULT_FS_STATE_LIMIT).is_ok()
+            );
             // Same-length content changes are intentionally only detectable when opted in.
             std::fs::write(&path, [18; 4096]).unwrap();
             assert_eq!(
-                CheckpointClosure::open(directory.path(), None).is_err(),
+                CheckpointClosure::open(directory.path(), None, DEFAULT_FS_STATE_LIMIT).is_err(),
                 record_integrity
             );
             std::fs::write(&path, [17; 4095]).unwrap();
-            let error = CheckpointClosure::open(directory.path(), None)
+            let error = CheckpointClosure::open(directory.path(), None, DEFAULT_FS_STATE_LIMIT)
                 .err()
                 .unwrap()
                 .to_string();
@@ -563,10 +628,65 @@ mod tests {
     fn opens_complete_valid_closure() {
         let (directory, expected) = fixture();
 
-        let closure = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap();
+        let closure =
+            CheckpointClosure::open(directory.path(), Some(&expected), DEFAULT_FS_STATE_LIMIT)
+                .unwrap();
 
         assert_eq!(closure.root_id(), &expected);
         assert_eq!(closure.memory().pause_generation, 7);
+    }
+
+    #[test]
+    fn device_state_limit_depends_on_device_type_and_budget() {
+        const MIB: usize = 1024 * 1024;
+        const FS: u32 = 26;
+        // (device type, budget in MiB, state, admitted)
+        let cases = [
+            (FS, 4, virtio_fs_state(4 * MIB), true),
+            (FS, 4, virtio_fs_state(4 * MIB + 1), false),
+            (FS, 4, vec![7; 5 * MIB + 23], false),
+            (FS, 64, virtio_fs_state(4 * MIB + 1), true),
+            (FS, 64, virtio_fs_state(64 * MIB), true),
+            (FS, 64, virtio_fs_state(64 * MIB + 1), false),
+            (4, 64, vec![7; MIB], true),
+            (4, 64, vec![7; MIB + 1], false),
+        ];
+        for (device_type, budget, state, admitted) in cases {
+            let len = state.len();
+            let (directory, root) = fixture();
+            let store = super::super::LocalObjectStore::open(directory.path()).unwrap();
+            let mut checkpoint =
+                CheckpointClosure::inspect_manifest(directory.path(), Some(&root)).unwrap();
+            checkpoint.devices[0].device_type = device_type;
+            checkpoint.devices[0].state = store.put_bytes(&state).unwrap();
+            let root_bytes = checkpoint.to_canonical_bytes().unwrap();
+            let root = ObjectId::from_bytes(&root_bytes).unwrap();
+            std::fs::write(directory.path().join(CHECKPOINT_ROOT_FILE), root_bytes).unwrap();
+
+            let limit = budget * MIB;
+            let results = [
+                CheckpointClosure::open(directory.path(), Some(&root), limit).map(drop),
+                CheckpointClosure::open_portable(directory.path(), Some(&root), limit).map(drop),
+            ];
+            for result in results {
+                match result {
+                    Ok(()) => assert!(admitted, "type {device_type}, {len} bytes"),
+                    Err(error) => {
+                        let message = error.to_string();
+                        assert!(
+                            !admitted,
+                            "type {device_type}, {budget} MiB, {len} bytes: {message}"
+                        );
+                        assert!(message.contains("exceeds"), "{message}");
+                        assert_eq!(
+                            message.contains("snapshots.max_filesystem_state_mib"),
+                            device_type == FS,
+                            "{message}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -661,7 +781,8 @@ mod tests {
         let root = ObjectId::from_bytes(&bytes).unwrap();
         std::fs::write(&root_path, bytes).unwrap();
 
-        let closure = CheckpointClosure::open(directory.path(), Some(&root)).unwrap();
+        let closure =
+            CheckpointClosure::open(directory.path(), Some(&root), DEFAULT_FS_STATE_LIMIT).unwrap();
         assert_eq!(closure.disks().len(), 2);
         assert!(closure.disks().iter().all(|disk| disk.layers.len() == 256));
         let reusable = paths
@@ -674,7 +795,7 @@ mod tests {
         // A layer outside the retained receipt set must still be verified during admission.
         std::fs::write(paths.last().unwrap(), [0xAA]).unwrap();
         assert!(matches!(
-            CheckpointClosure::open(directory.path(), Some(&root)),
+            CheckpointClosure::open(directory.path(), Some(&root), DEFAULT_FS_STATE_LIMIT),
             Err(ImageError::DigestMismatch { .. })
         ));
     }
@@ -697,8 +818,11 @@ mod tests {
         let expected = ObjectId::from_bytes(&root_bytes).unwrap();
         std::fs::write(root_path, root_bytes).unwrap();
 
-        CheckpointClosure::open_portable(directory.path(), Some(&expected)).unwrap();
-        let error = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap_err();
+        CheckpointClosure::open_portable(directory.path(), Some(&expected), DEFAULT_FS_STATE_LIMIT)
+            .unwrap();
+        let error =
+            CheckpointClosure::open(directory.path(), Some(&expected), DEFAULT_FS_STATE_LIMIT)
+                .unwrap_err();
         assert!(error.to_string().contains("cannot restore"));
     }
 
@@ -719,7 +843,9 @@ mod tests {
         };
         std::fs::write(object_path(directory.path(), &content.object), b"changed").unwrap();
 
-        let closure = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap();
+        let closure =
+            CheckpointClosure::open(directory.path(), Some(&expected), DEFAULT_FS_STATE_LIMIT)
+                .unwrap();
         let error = closure
             .read_object(&content.object, MAX_MANIFEST_BYTES)
             .unwrap_err();
@@ -730,7 +856,9 @@ mod tests {
     #[test]
     fn explicit_verification_detects_replaced_memory_object() {
         let (directory, expected) = fixture();
-        let closure = CheckpointClosure::open(directory.path(), Some(&expected)).unwrap();
+        let closure =
+            CheckpointClosure::open(directory.path(), Some(&expected), DEFAULT_FS_STATE_LIMIT)
+                .unwrap();
         let MemoryExtentContent::Object(content) = &closure.memory().extents[0].content else {
             panic!("fixture uses object memory");
         };

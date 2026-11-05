@@ -7,11 +7,14 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::Mutex;
 
+use crate::jobs::{JsJob, job_error, json, list_options};
+
 use crate::attach_options_builder::JsAttachOptionsBuilder;
 use crate::error::to_napi_error;
 use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFsOps;
+use crate::mount_builder::JsMountBuilder;
 use crate::sandbox_handle::{
     JsSandboxHandle, SandboxDestroyOptions, SandboxRestartOptions, destroy_options, restart_options,
 };
@@ -109,6 +112,51 @@ impl Sandbox {
 
 #[napi]
 impl Sandbox {
+    /// Retrieve a retained managed job in this sandbox.
+    #[napi]
+    pub async fn get_job(&self, id: String) -> Result<JsJob> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb.get_job(id).await.map_err(job_error)?,
+        })
+    }
+
+    /// List bounded managed-job metadata without creating processes.
+    #[napi]
+    pub async fn list_jobs(&self, all: bool, limit: u32, cursor: Option<String>) -> Result<String> {
+        let options = list_options(all, limit, cursor)?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        json(sb.list_jobs_with(|_| options).await.map_err(job_error)?)
+    }
+
+    /// Launch with runtime-owned I/O, retaining pipe input by default.
+    #[napi]
+    pub async fn exec_detached(&self, cmd: String, args: Option<Vec<String>>) -> Result<JsJob> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb
+                .exec_detached(cmd, args.unwrap_or_default())
+                .await
+                .map_err(job_error)?,
+        })
+    }
+
+    #[napi(js_name = "execDetachedWithBuilder")]
+    pub async unsafe fn exec_detached_with_builder(
+        &self,
+        cmd: String,
+        builder: &mut JsExecOptionsBuilder,
+    ) -> Result<JsJob> {
+        let options = builder.take_inner_builder()?;
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(JsJob {
+            inner: sb
+                .exec_detached_with(cmd, |_| options)
+                .await
+                .map_err(job_error)?,
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
@@ -565,65 +613,99 @@ impl Sandbox {
     }
 
     /// @deprecated Use fork for live execution duplication.
-    #[napi]
-    pub async fn branch(
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn branch<'env>(
         &self,
+        env: &'env Env,
         name: String,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Sandbox> {
-        self.fork(name, record_integrity, guest_flush).await
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        self.fork(env, name, record_integrity, guest_flush, volumes)
     }
 
     /// @deprecated Use forkMany for live execution duplication.
-    #[napi]
-    pub async fn branch_many(
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn branch_many<'env>(
         &self,
+        env: &'env Env,
         names: Vec<String>,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Vec<JsBranchOutcome>> {
-        self.fork_many(names, record_integrity, guest_flush).await
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Vec<JsBranchOutcome>>> {
+        self.fork_many(env, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[napi]
-    pub async fn fork(
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn fork<'env>(
         &self,
+        env: &'env Env,
         name: String,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Sandbox> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        let mut builder = sb
-            .fork(name)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(Sandbox::from_rust(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Sandbox>> {
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
+        let inner = self.inner.clone();
+
+        env.spawn_future(async move {
+            let volumes = volumes?;
+            let sb = inner.get().await.ok_or_else(consumed_error)?;
+            let mut builder = sb.fork(name);
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(Sandbox::from_rust(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
+        })
     }
 
     /// Capture once and return individual child startup outcomes.
-    #[napi]
-    pub async fn fork_many(
+    #[napi(ts_return_type = "Promise<Array<JsBranchOutcome>>")]
+    pub fn fork_many<'env>(
         &self,
+        env: &'env Env,
         names: Vec<String>,
         record_integrity: Option<bool>,
         guest_flush: Option<String>,
-    ) -> Result<Vec<JsBranchOutcome>> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        let mut builder = sb
-            .fork_many(names)
-            .guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
-        if record_integrity.unwrap_or(false) {
-            builder = builder.record_integrity();
-        }
-        Ok(branch_outcomes(
-            builder.fork().await.map_err(to_napi_error)?,
-        ))
+        volumes: Option<Vec<&mut JsMountBuilder>>,
+    ) -> Result<PromiseRaw<'env, Vec<JsBranchOutcome>>> {
+        // Capture mounts and local paths before the async operation starts.
+        let volumes = JsMountBuilder::take_fork_volumes(
+            volumes.unwrap_or_default(),
+            self.backend_kind == "local",
+        );
+        let inner = self.inner.clone();
+
+        env.spawn_future(async move {
+            let volumes = volumes?;
+            let sb = inner.get().await.ok_or_else(consumed_error)?;
+            let mut builder = sb.fork_many(names);
+            builder =
+                builder.guest_flush(crate::snapshot_builder::guest_flush_policy(guest_flush)?);
+            if record_integrity.unwrap_or(false) {
+                builder = builder.record_integrity();
+            }
+            for (guest, mount) in volumes {
+                builder = builder.volume(guest, |_| mount);
+            }
+            Ok(branch_outcomes(
+                builder.fork().await.map_err(to_napi_error)?,
+            ))
+        })
     }
 
     /// Explicit resident pause through host control.
@@ -1179,6 +1261,33 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        ports: options
+            .ports
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|port| {
+                Ok(microsandbox::sandbox::PublishedPortSpec {
+                    host_port: modify_port_number(port.host_port, "hostPort")?,
+                    guest_port: modify_port_number(port.guest_port, "guestPort")?,
+                    host_bind: port.host_bind.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                    protocol: modify_port_protocol(port.protocol.as_deref())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        ports_remove: options
+            .ports_remove
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|port| {
+                Ok(microsandbox::sandbox::PublishedPortKey {
+                    host_port: modify_port_number(port.host_port, "hostPort")?,
+                    host_bind: port.host_bind.clone().unwrap_or_else(|| "127.0.0.1".into()),
+                    protocol: modify_port_protocol(port.protocol.as_deref())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
     };
 
     let builder = builder.with_patch(patch);
@@ -1192,6 +1301,33 @@ pub(crate) fn configure_modify(
             )));
         }
     })
+}
+
+fn modify_port_number(value: f64, name: &str) -> Result<u16> {
+    u16::try_from(crate::numeric::safe_integer(value, name)?)
+        .map_err(|_| Error::from_reason(format!("{name} must be between 1 and 65535")))
+}
+
+fn modify_port_protocol(protocol: Option<&str>) -> Result<microsandbox::sandbox::PortProtocol> {
+    match protocol.unwrap_or("tcp") {
+        "tcp" => Ok(microsandbox::sandbox::PortProtocol::Tcp),
+        "udp" => Ok(microsandbox::sandbox::PortProtocol::Udp),
+        value => Err(Error::from_reason(format!(
+            "invalid port protocol: {value}"
+        ))),
+    }
+}
+
+/// Whether this native library understands published-port modification.
+#[napi]
+pub fn supports_port_modification() -> bool {
+    true
+}
+
+/// Whether this native library applies secret policy fields in modify specs.
+#[napi]
+pub fn supports_secret_policy_modification() -> bool {
+    true
 }
 
 pub(crate) fn modify_dry_run(options: Option<&SandboxModifyOptions>) -> bool {
@@ -1241,8 +1377,9 @@ pub(crate) fn checked_layer_count(layers: Option<f64>) -> Result<Option<usize>> 
 }
 
 /// Convert one `secrets` entry into the canonical secret patch, rejecting
-/// specs that set more than one of `env` / `value` / `store`. Errors name
-/// only the conflicting fields, never the secret material; the raw value
+/// specs that set more than one of `env` / `value` / `store` or an unknown
+/// `violationAction`. Errors name only the secret and the field, never the
+/// secret material; the raw value
 /// moves straight into the patch's `Zeroizing` field.
 fn secret_patch_from_spec(
     name: String,
@@ -1266,6 +1403,12 @@ fn secret_patch_from_spec(
         )));
     }
 
+    let violation_action = spec
+        .violation_action
+        .as_deref()
+        .map(crate::secret_builder::parse_violation_action)
+        .transpose()
+        .map_err(|error| Error::from_reason(format!("secret {name:?}: {}", error.reason)))?;
     let source = match (spec.env, spec.store) {
         (Some(var), _) => Some(SecretSource::Env { var }),
         (_, Some(reference)) => Some(SecretSource::Store { reference }),
@@ -1277,8 +1420,25 @@ fn secret_patch_from_spec(
         value: spec.value.unwrap_or_default().into(),
         placeholder: spec.placeholder,
         allowed_hosts: spec.allowed_hosts.unwrap_or_default(),
-        ..SecretModificationPatch::default()
+        substitution: spec.substitution.map(substitution_from_spec),
+        passthrough_hosts: spec.allow_placeholder_for.unwrap_or_default(),
+        violation_action,
+        require_tls_identity: spec.require_tls_identity,
     })
+}
+
+/// A supplied substitution replaces the whole stored rule, so omitted
+/// locations take the create defaults rather than the stored values.
+fn substitution_from_spec(
+    spec: SecretModifySubstitution,
+) -> microsandbox::sandbox::SecretSubstitution {
+    let defaults = microsandbox::sandbox::SecretSubstitution::default();
+    microsandbox::sandbox::SecretSubstitution {
+        headers: spec.headers.unwrap_or(defaults.headers),
+        header_fields: spec.header_fields.unwrap_or(defaults.header_fields),
+        query: spec.query.unwrap_or(defaults.query),
+        body: spec.body.unwrap_or(defaults.body),
+    }
 }
 
 /// Drive dry-run or apply and serialize the resulting plan to JSON.
@@ -1326,3 +1486,153 @@ fn consumed_error() -> napi::Error {
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use microsandbox::sandbox::{SecretSource, SecretSubstitution, SecretViolationAction};
+
+    use super::*;
+
+    fn spec() -> SecretModifySpec {
+        SecretModifySpec::default()
+    }
+
+    fn locations(substitution: Option<SecretSubstitution>) -> (bool, Vec<String>, bool, bool) {
+        let substitution = substitution.expect("substitution should be set");
+        (
+            substitution.headers,
+            substitution.header_fields,
+            substitution.query,
+            substitution.body,
+        )
+    }
+
+    #[test]
+    fn partial_substitution_takes_create_defaults() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                substitution: Some(SecretModifySubstitution {
+                    header_fields: Some(vec!["authorization".into()]),
+                    ..SecretModifySubstitution::default()
+                }),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            locations(patch.substitution),
+            (true, vec!["authorization".into()], false, false)
+        );
+
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                substitution: Some(SecretModifySubstitution {
+                    query: Some(true),
+                    ..SecretModifySubstitution::default()
+                }),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(locations(patch.substitution), (true, vec![], true, false));
+    }
+
+    #[test]
+    fn omitted_policy_fields_leave_the_stored_policy_alone() {
+        let patch = secret_patch_from_spec("API_KEY".into(), spec()).unwrap();
+        assert!(patch.substitution.is_none());
+        assert_eq!(patch.violation_action, None);
+        assert_eq!(patch.require_tls_identity, None);
+        assert!(patch.passthrough_hosts.is_empty());
+    }
+
+    #[test]
+    fn violation_action_parses_and_rejects_unknown_values() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                violation_action: Some("block-and-terminate".into()),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            patch.violation_action,
+            Some(SecretViolationAction::BlockAndTerminate)
+        );
+
+        let error = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                violation_action: Some("explode".into()),
+                ..spec()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            "secret \"API_KEY\": invalid secret violation action: explode"
+        );
+    }
+
+    #[test]
+    fn explicit_false_tls_identity_is_kept() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                require_tls_identity: Some(false),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(patch.require_tls_identity, Some(false));
+    }
+
+    #[test]
+    fn allow_placeholder_for_maps_to_passthrough_hosts() {
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                allow_placeholder_for: Some(vec!["api.anthropic.com".into()]),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(patch.passthrough_hosts, vec!["api.anthropic.com"]);
+    }
+
+    #[test]
+    fn secret_sources_stay_mutually_exclusive() {
+        let error = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                env: Some("HOST_KEY".into()),
+                value: Some("dummy".into()),
+                substitution: Some(SecretModifySubstitution::default()),
+                ..spec()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.reason,
+            "secret \"API_KEY\": \"env\" and \"value\" are mutually exclusive; set at most one"
+        );
+
+        let patch = secret_patch_from_spec(
+            "API_KEY".into(),
+            SecretModifySpec {
+                env: Some("HOST_KEY".into()),
+                ..spec()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            patch.source,
+            Some(SecretSource::Env {
+                var: "HOST_KEY".into()
+            })
+        );
+    }
+}

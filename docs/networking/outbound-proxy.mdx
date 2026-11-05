@@ -14,7 +14,7 @@ Set `sandbox_defaults.outbound_proxy` in [global configuration](/configuration#s
 
 | Proxy | Authentication | Traffic | Availability |
 |-------|----------------|---------|--------------|
-| HTTP CONNECT | None | TCP | SDKs and CLI |
+| HTTP CONNECT | Optional username and password | TCP | SDKs and CLI |
 | SOCKS4 | None | TCP | SDKs and CLI |
 | SOCKS4 | Optional user ID | TCP | SDKs and CLI |
 | SOCKS5 | None | TCP and non-DNS UDP | SDKs and CLI |
@@ -61,6 +61,14 @@ sb, err := m.CreateSandbox(ctx, "proxied",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "proxied",
+  image: "python",
+  proxy: Microsandbox::OutboundProxy.socks5("127.0.0.1:1080")
+)
+```
+
 ```bash CLI
 # Choose one:
 msb create python --name proxied --proxy http://127.0.0.1:3128
@@ -73,7 +81,7 @@ SDK addresses use `IP:port`. The `msb run` and `msb create` commands accept `--p
 
 ## HTTP CONNECT
 
-HTTP CONNECT opens a TCP tunnel through an HTTP proxy. It does not support proxy authentication or UDP. microsandbox resolves and checks the destination using its normal DNS and egress policy before sending the destination IP and port in the CONNECT request. The proxy address itself must be an IP address with a port.
+HTTP CONNECT opens a TCP tunnel through an HTTP proxy. It supports optional HTTP Basic authentication and TCP only; UDP is unsupported. microsandbox resolves and checks the destination using its normal DNS and egress policy before sending the destination IP and port in the CONNECT request. The proxy address itself must be an IP address with a port.
 
 The selected `msb` runtime must support HTTP CONNECT. When using an older runtime, the SDK requests an upgrade before creating or replacing a sandbox.
 
@@ -92,6 +100,11 @@ proxy=OutboundProxy.http_connect("127.0.0.1:3128")
 
 ```go Go
 m.WithProxy(m.HTTPConnectProxy("127.0.0.1:3128"))
+```
+
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+sandbox = Microsandbox::Sandbox.create("proxied", image: "alpine", proxy: proxy)
 ```
 
 ```bash CLI
@@ -121,6 +134,10 @@ m.WithProxy(m.SOCKS4Proxy(
     "127.0.0.1:1080",
     m.SOCKS4ProxyOptions{UserID: "sandbox"},
 ))
+```
+
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.socks4("127.0.0.1:1080").user_id("sandbox")
 ```
 
 ```bash CLI
@@ -170,6 +187,13 @@ proxy := m.SOCKS5Proxy("127.0.0.1:1080").Credentials(
 m.WithProxy(proxy)
 ```
 
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").credentials(
+  "sandbox",
+  Microsandbox::SecretSource.env("SOCKS5_PASSWORD")
+)
+```
+
 ```bash CLI
 msb run alpine \
   --proxy socks5://127.0.0.1:1080 \
@@ -186,6 +210,70 @@ msb run alpine \
   SOCKS5 authentication does not encrypt credentials in transit. Use a trusted local or private proxy, or encrypt the connection separately.
 </Warning>
 
+## HTTP CONNECT credentials
+
+HTTP CONNECT supports optional HTTP Basic authentication. Passwords are loaded from a host environment variable rather than placed directly in configuration.
+
+<CodeGroup>
+```typescript TypeScript
+.proxy((proxy) =>
+  proxy.httpConnect("127.0.0.1:3128").credentials(
+    "sandbox",
+    SecretSource.env("HTTP_CONNECT_PASSWORD"),
+  ),
+)
+```
+
+```rust Rust
+.proxy(|proxy| {
+    proxy.http_connect("127.0.0.1:3128").credentials(
+        "sandbox",
+        SecretSource::env("HTTP_CONNECT_PASSWORD"),
+    )
+})
+```
+
+```python Python
+proxy = OutboundProxy.http_connect("127.0.0.1:3128").credentials(
+    "sandbox",
+    SecretSource.env("HTTP_CONNECT_PASSWORD"),
+)
+```
+
+```go Go
+proxy := m.HTTPConnectProxy("127.0.0.1:3128").Credentials(
+    "sandbox",
+    m.SecretSourceEnv("HTTP_CONNECT_PASSWORD"),
+)
+m.WithProxy(proxy)
+```
+
+```ruby Ruby
+proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128").credentials(
+  "sandbox",
+  Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD")
+)
+```
+
+```bash CLI
+msb run alpine \
+  --proxy http://127.0.0.1:3128 \
+  --http-connect-username sandbox \
+  --http-connect-password-env HTTP_CONNECT_PASSWORD
+```
+</CodeGroup>
+
+- **Password source:** Set the password in a host environment variable, the only supported source. Configuration stores only the variable name, such as `HTTP_CONNECT_PASSWORD`, never the password.
+- **When changes apply:** The password is read when the sandbox starts. Restart the sandbox after changing it.
+- **Username:** RFC 7617 permits an empty username for token-only authentication. A non-empty username must not contain `:` or control characters.
+- **Password:** The resolved password must not be empty.
+- **407 responses:** A proxy that requires authentication is refused instead of retried without credentials. The error distinguishes missing credentials from rejected credentials.
+- **Runtime support:** The selected `msb` runtime must advertise the HTTP CONNECT authentication capability. An older runtime fails the launch with an upgrade-required error instead of silently connecting unauthenticated.
+
+<Warning>
+  HTTP Basic authentication does not encrypt credentials in transit. Use a trusted local or private proxy, or encrypt the connection separately.
+</Warning>
+
 ## Behavior and limits
 
 - Network policy is evaluated against the sandbox's actual destination before the proxy connection is opened.
@@ -194,11 +282,12 @@ msb run alpine \
 - DNS uses microsandbox's DNS forwarder instead of the configured proxy. This includes plain DNS, DNS-over-TCP, and DNS-over-TLS.
 - Connections to `host.microsandbox.internal` bypass the proxy and continue to target the microsandbox host.
 - Each TCP connection opens its own proxy connection and handshake. Each UDP flow opens its own SOCKS5 control connection and UDP association.
+- HTTP CONNECT authentication uses HTTP Basic credentials on the CONNECT request; see [HTTP CONNECT credentials](#http-connect-credentials) for the 407 behavior.
 - TLS interception and secret injection continue to work as configured.
 
 ## Reference
 
-For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), or [Go](/sdk/go/proxies). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
+For exact proxy APIs, see [TypeScript](/sdk/typescript/proxies), [Rust](/sdk/rust/proxies), [Python](/sdk/python/proxies), [Go](/sdk/go/proxies), or [Ruby](/sdk/ruby/networking#outboundproxy). For CLI flags, see [Sandbox commands](/cli/sandbox-commands#outbound-proxy).
 
 ## Related
 

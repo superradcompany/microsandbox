@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: Get a sandbox running in under 5 minutes
+description: Get a sandbox running in under 5 minutes.
 icon: "bolt"
 ---
 
@@ -45,7 +45,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
 
 <Steps>
   <Step title="Install microsandbox">
-    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. The same installation also drives [microsandbox cloud](/cloud/overview) when an API key is set.
+    For application code, install the SDK for your language. For terminal workflows, use one of the CLI options above. Both run microsandbox locally by default; there is no separate server or daemon to set up. To run on cloud, set `MSB_BACKEND=cloud` and `MSB_API_KEY`, choose a cloud profile, or select cloud in code in supported SDKs. See [Local or cloud](/operations/backends).
 
     <CodeGroup>
     ```bash TypeScript
@@ -74,9 +74,11 @@ Having trouble with a local installation? Choose your platform for setup checks 
 
     Check local virtualization support with:
 
-    ```bash
+    <CodeGroup>
+    ```bash Shell
     msb doctor
     ```
+    </CodeGroup>
 
     For platform-specific setup notes, see [Linux troubleshooting](/troubleshooting/linux), [macOS troubleshooting](/troubleshooting/macos), or [Windows troubleshooting](/troubleshooting/windows).
   </Step>
@@ -88,20 +90,27 @@ Having trouble with a local installation? Choose your platform for setup checks 
     ```typescript TypeScript
     import { Sandbox } from "microsandbox";
 
-    await using sb = await Sandbox.builder("hello")
+    const sb = await Sandbox.builder("hello")
         .image("python")
         .memory(512)
         .create();
 
-    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-    console.log(output.stdout()); // Hello from a microVM!
+    try {
+        const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+        console.log(output.stdout()); // Hello from a microVM!
+    } finally {
+        await sb.stop();
+        await Sandbox.remove("hello");
+    }
     ```
 
     ```rust Rust
+    use std::error::Error;
+
     use microsandbox::Sandbox;
 
     #[tokio::main]
-    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    async fn main() -> Result<(), Box<dyn Error>> {
         let sb = Sandbox::builder("hello")
             .image("python")
             .memory(512)
@@ -112,6 +121,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
         println!("{}", output.stdout()?); // Hello from a microVM!
 
         sb.stop().await?;
+        Sandbox::remove("hello").await?;
         Ok(())
     }
     ```
@@ -131,6 +141,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
         print(output.stdout_text)  # Hello from a microVM!
 
         await sb.stop()
+        await Sandbox.remove("hello")
 
     asyncio.run(main())
     ```
@@ -143,7 +154,10 @@ Having trouble with a local installation? Choose your platform for setup checks 
     if err != nil {
         return err
     }
-    defer sb.Stop(ctx)
+    defer func() {
+        _ = sb.Stop(ctx)
+        _ = m.RemoveSandbox(ctx, "hello")
+    }()
 
     output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
     if err != nil {
@@ -161,6 +175,7 @@ Having trouble with a local installation? Choose your platform for setup checks 
       output = sandbox.exec("python", ["-c", "print('Hello from a microVM!')"])
       puts output.stdout
     end
+    Microsandbox::Sandbox.remove("hello")
     ```
 
     ```bash CLI
@@ -188,7 +203,9 @@ The `exec` call uses the host-guest command channel, not SSH and not the sandbox
 
 ## Next steps
 
-- [Explore practical examples](/examples/overview): tested workflows for agents, CI/CD, Docker, automation, and more
+- [SDK references](/sdk/overview#reference): choose TypeScript, Rust, Python, Go, or Ruby for sandbox lifecycle and API details
+- [Protect API credentials](/sandboxes/secrets): let sandboxed code use an API without receiving the credential value
+- [Browse guides](/how-to/overview): set up agents, CI/CD, Docker, and more
 - [Run on microsandbox cloud](/cloud/overview): the same code on hosted infrastructure
 - [Modify live sandbox settings](/sandboxes/tuning): resize headroom, labels, secrets, and storage
 - [Troubleshoot Linux setup](/troubleshooting/linux): KVM, `/dev/kvm`, and permissions

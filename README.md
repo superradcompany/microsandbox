@@ -12,9 +12,14 @@
 
 <br />
 
-<div align="center"><b>——&nbsp;&nbsp;&nbsp;easy, fast, local microVMs for untrusted workloads&nbsp;&nbsp;&nbsp;——</b></div>
+<div align="center"><b>——&nbsp;&nbsp;&nbsp;easy, fast, programmable microVMs for untrusted workloads&nbsp;&nbsp;&nbsp;——</b></div>
 
 <br />
+
+<div align='center'>
+    <a href="https://trendshift.io/repositories/24502?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-24502" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/24502" alt="superradcompany%2Fmicrosandbox | Trendshift" width="250" height="55"/></a>
+</div>
+
 <br />
 
 <div align='center'>
@@ -22,6 +27,7 @@
   <a href="https://discord.gg/T95Y3XnEAK"><img src="https://img.shields.io/discord/1315784565562019870?label=Discord&logo=discord&logoColor=white&color=5865F2&style=for-the-badge" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache 2.0-blue.svg?style=for-the-badge" alt="Apache 2.0 License"></a>
 </div>
+
 
 <br />
 
@@ -106,9 +112,9 @@
 
 > **Requirements**:
 >
-> - <img height="14" src="https://api.iconify.design/simple-icons:apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
-> - <img height="14" src="https://api.iconify.design/simple-icons:linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
-> - <img height="14" src="https://api.iconify.design/simple-icons:windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled.
+> - <img height="14" src="https://api.iconify.design/simple-icons/apple.svg?color=%23A770EF" alt="macOS"> **macOS**: Apple Silicon.
+> - <img height="14" src="https://api.iconify.design/simple-icons/linux.svg?color=%23A770EF" alt="Linux"> **Linux**: KVM enabled.
+> - <img height="14" src="https://api.iconify.design/simple-icons/windows.svg?color=%23A770EF" alt="Windows"> **Windows**: WHP enabled.
 >
 > **Warning**: Microsandbox is still **beta software**. Expect breaking changes, missing features, and rough edges.
 
@@ -139,14 +145,14 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >
 > ```sh
 > # Fork a running sandbox.
-> msb fork app --name experiment
-> msb exec experiment -- python -c "print('An independent copy!')"
+> msb fork app --name app2
+> msb exec app2 -- python -c "print('An independent copy!')"
 > ```
 >
 > ```sh
-> # Save now, resume later
-> msb snap create --sandbox app --full -o saved.msb
-> msb snap restore saved.msb --name restored
+> # Snapshot now, resume later.
+> msb snap create --sandbox app --full -o snapshot.msb
+> msb snap restore snapshot.msb --name app3
 > ```
 >
 > Forking duplicates live execution. Restoring starts from saved state; add `--cow-mem` to share unchanged memory from a full snapshot. Snapshot generations describe progression, while branches describe distinct paths through snapshot history. The old `--forked` restore flag remains a deprecated alias. See [forking and snapshots](https://docs.microsandbox.dev/sandboxes/snapshots#forking).
@@ -191,14 +197,6 @@ The `msb` CLI provides a complete interface for managing sandboxes, snapshots, i
 >     with urllib.request.urlopen(request) as response:
 >         print(response.read().decode())
 >     PY
-> ```
-
-#### <img height="14" src="https://octicons-col.vercel.app/download/A770EF">&nbsp;&nbsp;Install & Uninstall Sandboxes
-
-> ```sh
-> msb install ubuntu               # Install ubuntu sandbox as 'ubuntu' command
-> ubuntu                           # Opens Ubuntu in a microVM
-> msb uninstall ubuntu             # Uninstall the ubuntu sandbox
 > ```
 
 #### <img height="14" src="https://octicons-col.vercel.app/list-unordered/A770EF">&nbsp;&nbsp;Status & Inspection
@@ -383,22 +381,22 @@ The SDK lets you create and control sandboxes directly from your application. `S
 
 <br />
 
-## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/ffffff" alt="beaker-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/000000" alt="beaker"></a>&nbsp;&nbsp;Examples
+## <a href="./#gh-dark-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/ffffff" alt="beaker-dark"></a><a href="./#gh-light-mode-only" target="_blank"><img height="18" src="https://octicons-col.vercel.app/beaker/000000" alt="beaker"></a>&nbsp;&nbsp;Guides
 
 Practical ways to put microsandbox to work:
 
-> • <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/examples/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/examples/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Browser Use](https://docs.microsandbox.dev/examples/browser-automation/browser-use)**: Run an AI browser agent inside a microVM.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/examples/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/examples/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/examples/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/examples/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.<br />
-> • <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/examples/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
+> • <img height="14" src="https://octicons-col.vercel.app/container/A770EF"> **[Docker in a Sandbox](https://docs.microsandbox.dev/how-to/docker/docker-in-sandbox)**: Run Docker without touching the host daemon.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/code/A770EF"> **[OpenCode](https://docs.microsandbox.dev/how-to/agents/opencode)**: Give a coding agent an isolated project workspace.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Browser Use](https://docs.microsandbox.dev/how-to/browser-automation/browser-use)**: Run an AI browser agent inside a microVM.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/globe/A770EF"> **[Playwright](https://docs.microsandbox.dev/how-to/browser-automation/playwright)**: Run headless browser jobs inside a microVM.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/cache/A770EF"> **[Warm Workers](https://docs.microsandbox.dev/how-to/sandboxing/warm-workers)**: Snapshot a toolchain and launch clean workers.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/database/A770EF"> **[Migration Rehearsal](https://docs.microsandbox.dev/how-to/data/migration-rehearsal)**: Test a database migration, then restore the baseline.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[GitHub Actions Runner](https://docs.microsandbox.dev/how-to/ci-cd/github-actions-runner)**: Run each self-hosted job in a disposable microVM.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/file/A770EF"> **[Documents to PDF](https://docs.microsandbox.dev/how-to/file-processing/libreoffice-pdf)**: Convert untrusted documents in a fresh offline worker.
 
 <br />
 
-<a href="https://docs.microsandbox.dev/examples/overview"><img src="https://img.shields.io/badge/Browse_Examples-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="Browse Examples"></a>
+<a href="https://docs.microsandbox.dev/how-to/overview"><img src="https://img.shields.io/badge/Browse_Guides-%E2%86%92-A770EF?style=flat-square&labelColor=2b2b2b" alt="Browse Guides"></a>
 
 <br />
 
@@ -406,7 +404,7 @@ Practical ways to put microsandbox to work:
 
 #### <img height="14" src="https://octicons-col.vercel.app/hubot/A770EF">&nbsp;&nbsp;Agent frameworks & runtimes
 
-> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox#microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
+> • <img height="14" src="https://octicons-col.vercel.app/workflow/A770EF"> **[Eve](https://eve.dev/docs/sandbox/microsandbox) by Vercel**: Agent framework that ships microsandbox as a sandbox backend.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/organization/A770EF"> **[Agentic Coding Quickstart](https://github.com/GSA-TTS/agentic-coding-quickstart) by U.S. GSA**: From zero to a running AI coding agent with USAi in minutes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/package/A770EF"> **[Condukt](https://github.com/tuist/condukt) and [Once](https://github.com/tuist/once) by Tuist**: Elixir agentic engine, and cacheable actions that run in fresh sandboxes.<br />
 > • <img height="14" src="https://octicons-col.vercel.app/link/A770EF"> **[langchain-microsandbox](https://github.com/kenwoodjw/langchain-microsandbox) by kenwoodjw**: Microsandbox integration for LangChain Deep Agents.<br />

@@ -1,51 +1,15 @@
 ---
 title: Sandbox
-description: TypeScript SDK - Sandbox API reference
+"og:title": TypeScript SDK Sandbox reference
+description: Create and manage microVM sandboxes with the TypeScript SDK.
 keywords: ["TypeScript SDK", "TypeScript sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Reuse and restart sandboxes
+<span id="forking" />
 
-```typescript
-Sandbox.builder(name).connectOrCreate(): Promise<Sandbox>
-handle.connectOrStart(options?): Promise<Sandbox>
-handle.waitForStatus(status): Promise<SandboxHandle>
-handle.restart(options?): Promise<Sandbox>
-handle.destroy(options?): Promise<void>
-sandbox.id: string
-handle.id: string
-```
-
-Use `connectOrCreate` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Builder options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver throws `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
-
-## Forking
-
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### fork() and forkMany()
-
-```typescript
-fork(name: string, options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<Sandbox>
-forkMany(names: string[], options?: { recordIntegrity?: boolean; guestFlush?: GuestFlush }): Promise<ForkOutcome[]>
-```
-
-`recordIntegrity` records disk hashes. `guestFlush` selects `"auto"`, `"required"`, or `"skip"`; the default is `"auto"`. Copy-on-write memory is inherent to a live fork, so no restore option is needed.
-
-### ForkOutcome
-
-| Field | Meaning |
-| --- | --- |
-| `name` | Requested child name |
-| `sandbox` | Started `Sandbox` on success |
-| `error` | `Error` on failure |
-
-Exactly one of `sandbox` and `error` is present. `branch()`, `branchMany()`, and `BranchOutcome` remain deprecated aliases.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 ## Functions
 
@@ -60,27 +24,6 @@ allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
 Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbox, keyed by sandbox name. See [Metrics](/sandboxes/metrics) for a complete example.
 
 ## Sandbox
-
-### External mount restore
-
-`Sandbox.restore()` leaves host resources unmapped unless explicitly supplied or inherited. `.externalMountPolicy("strict")` validates supplied filesystem bindings; `"relaxed"` accepts supported mismatches without granting access to omitted resources. Inspect `await sandbox.restoreWarnings()` for unmapped paths and accepted mismatches. Each warning has `guestPath`, `reason`, and `staleInodes: readonly bigint[]`. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-Use `createWithProgress()` for fresh creation and `restoreWithProgress()` for snapshots. Ignoring events does not delay the operation; `awaitSandbox()` supplies the authoritative result.
-
-```typescript
-const creation = await Sandbox.restore("saved")
-  .name("child")
-  .cowMemory()
-  .restoreWithProgress();
-for await (const event of creation) {
-  if (event.kind === "startup") console.log(event.phase, event.completedBytes, event.totalBytes);
-}
-const sandbox = await creation.awaitSandbox();
-```
-
-Startup phases report preparing, waiting for RAM backing, preparing RAM backing, reusing backing, syncing, and activating. Totals are absent for indeterminate work. Preparation does not consume the activation timeout. Call `creation.cancel()` to cancel creation, then await its result. `createWithPullProgress()` remains image-only.
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
@@ -434,7 +377,7 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed.</div>
+    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed. Must be an integer from 0 to 4294967295, inclusive; other values reject with <code>RangeError</code> before calling native.</div>
   </div>
 </div>
 
@@ -639,9 +582,15 @@ await sandbox.modify({ secretsRemove: ["OLD_API_KEY"] });
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart. `rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`cpus` and `memory` resize live within the [`maxCpus`](#sandboxbuilder-maxcpus) / [`maxMemory`](#sandboxbuilder-maxmemory) ceilings; raising a ceiling requires a restart.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+`rootDiskSize` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder`, `allowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Unknown keys are rejected. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy: "restart"` to apply now, or `policy: "next_start"` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `resizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -915,6 +864,34 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 </Accordion>
 
 Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) - but only if `ownsLifecycle` is `true`.
+
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
+
+```typescript
+restoreWarnings(): Promise<ExternalMountWarning[]>
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+#### <span className="msb-hn">guestPath</span>
+
+`string`
+
+Guest-visible mount path.
+
+#### <span className="msb-hn">reason</span>
+
+`string`
+
+Why the resource could not be reconstructed.
+
+#### <span className="msb-hn">staleInodes</span>
+
+`readonly bigint[]`
+
+Permanently invalid captured node IDs; empty when the whole export is unavailable.
 
 ## SandboxBuilder
 
@@ -1482,6 +1459,14 @@ Set the interval, in milliseconds, at which the host samples background metrics 
     <div className="msb-param-desc">Sampling interval in milliseconds.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">interceptTls()</span>
+
+```typescript
+interceptTls(): this
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved. Later `network()` callbacks preserve settings unless explicitly changed. Calling `tls()` inside the callback replaces the TLS settings.
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">network()</span>
 
@@ -2553,7 +2538,7 @@ Connect to a running sandbox without taking ownership. Returns an error if it do
 connectWithTimeout(timeoutMs)
 ```
 
-Same as `connect()` with an explicit timeout in milliseconds
+Same as `connect()` with an explicit timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2653,7 +2638,7 @@ Force terminate and wait until stopped state is observed
 killWithTimeout(timeoutMs)
 ```
 
-Same as `kill()` with an explicit observation timeout
+Same as `kill()` with an explicit observation timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2713,7 +2698,7 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 snapshot(name)
@@ -2863,36 +2848,148 @@ type LogSource = "stdout" | "stderr" | "output" | "system";
 
 A requested sandbox modification. Omitted fields are left unchanged.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| cpus | `number` | Desired effective vCPU count. Live when within the booted `maxCpus` |
-| maxCpus | `number` | Boot-time maximum possible vCPUs (restart-backed) |
-| memory | `number` | Desired effective guest memory in MiB. Live when within the booted `maxMemory` |
-| maxMemory | `number` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
-| rootDiskSize | `number` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
-| env | `Record<string, string>` | Environment variables to set for future execs |
-| envRemove | `string[]` | Environment variable keys to remove |
-| labels | `Record<string, string>` | Labels to set |
-| labelsRemove | `string[]` | Label keys to remove |
-| workdir | `string` | Working directory for future execs |
-| secrets | `Record<string, SecretModifySpec>` | Desired secret specs keyed by stable secret name |
-| secretsRemove | `string[]` | Secret names to remove explicitly |
-| policy | `"no_restart" \| "next_start" \| "restart"` | `"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now |
-| dryRun | `boolean` | Compute the plan without applying anything. Defaults to `false` |
+#### <span className="msb-hn">cpus</span>
+
+`number`
+
+Desired effective vCPU count. Live when within the booted `maxCpus`
+
+#### <span className="msb-hn">maxCpus</span>
+
+`number`
+
+Boot-time maximum possible vCPUs (restart-backed)
+
+#### <span className="msb-hn">memory</span>
+
+`number`
+
+Desired effective guest memory in MiB. Live when within the booted `maxMemory`
+
+#### <span className="msb-hn">maxMemory</span>
+
+`number`
+
+Boot-time maximum hotpluggable memory in MiB (restart-backed)
+
+#### <span className="msb-hn">rootDiskSize</span>
+
+`number`
+
+Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start
+
+#### <span className="msb-hn">env</span>
+
+`Record<string, string>`
+
+Environment variables to set for future execs
+
+#### <span className="msb-hn">envRemove</span>
+
+`string[]`
+
+Environment variable keys to remove
+
+#### <span className="msb-hn">ports</span>
+
+`ModifyPort[]`
+
+Add/update `{hostPort, guestPort, hostBind?, protocol?}` mappings; other endpoints stay unchanged
+
+#### <span className="msb-hn">portsRemove</span>
+
+`ModifyPortEndpoint[]`
+
+Remove `{hostPort, hostBind?, protocol?}` endpoints; loopback TCP by default
+
+#### <span className="msb-hn">labels</span>
+
+`Record<string, string>`
+
+Labels to set
+
+#### <span className="msb-hn">labelsRemove</span>
+
+`string[]`
+
+Label keys to remove
+
+#### <span className="msb-hn">workdir</span>
+
+`string`
+
+Working directory for future execs
+
+#### <span className="msb-hn">secrets</span>
+
+`Record<string, SecretModifySpec>`
+
+Desired secret specs keyed by stable secret name
+
+#### <span className="msb-hn">secretsRemove</span>
+
+`string[]`
+
+Secret names to remove explicitly
+
+#### <span className="msb-hn">policy</span>
+
+`"no_restart" \| "next_start" \| "restart"`
+
+`"no_restart"` (default) applies only changes that can complete without restarting; `"next_start"` persists changes for the next start without mutating a running VM; `"restart"` restarts if needed so restart-required changes become active now
+
+#### <span className="msb-hn">dryRun</span>
+
+`boolean`
+
+Compute the plan without applying anything. Defaults to `false`
 
 ### SecretModifySpec
 
 <p className="msb-backref">Used by <a href="#sandbox-modify">modify()</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the other supplied fields.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| env | `string` | Host environment variable to resolve when applying the modification |
-| value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
-| store | `string` | Reserved for a host-side secret store reference; currently unsupported |
-| placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
-| allowedHosts | `string[]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>env</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host environment variable to resolve when applying the modification.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>value</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Raw secret value. Stored in the durable sandbox config until replaced by a source reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>store</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Reserved for a host-side secret store reference; currently unsupported.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>placeholder</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Explicit guest-visible placeholder. New secrets default to <code>$MSB_&lt;NAME&gt;</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowedHosts</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>substitution</code><a className="msb-type" href="/sdk/typescript/secrets#secretsubstitution">SecretSubstitution</a></div>
+    <div className="msb-param-desc">Desired substitution locations. A supplied value replaces the stored rule; omitted keys take the defaults (headers on, every header, no query or body), so repeat <code>headerFields</code> to keep a narrowed list. Omission keeps the stored rule; new secrets default to headers only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>violationAction</code><a className="msb-type" href="/sdk/typescript/secrets#violationaction">ViolationAction</a></div>
+    <div className="msb-param-desc">Per-secret blocking action. Omission keeps the existing override.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>requireTlsIdentity</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Whether substitution requires verified TLS identity. Omission keeps the existing setting; new secrets default to <code>true</code>. Explicit <code>false</code> disables this requirement.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>allowPlaceholderFor</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Hosts permitted to receive the unchanged placeholder. A non-empty list replaces the existing hosts; an empty list leaves them unchanged.</div>
+  </div>
+</div>
 
 ### PullPolicy
 
@@ -3148,3 +3245,11 @@ Current lifecycle state of a sandbox. String literal type.
 | `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nestedVirt(enabled: boolean)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```typescript
+const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
+```

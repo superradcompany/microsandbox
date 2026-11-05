@@ -4,12 +4,15 @@ pub(super) mod archive;
 mod artifact;
 mod copy;
 mod create;
+pub(crate) mod deletion;
 mod dispatch;
 pub mod downgrade;
 mod group;
+mod lease;
 pub(crate) mod lineage;
 mod metadata;
 pub(super) mod migration;
+pub(crate) mod publication;
 mod restore;
 mod store;
 mod verify;
@@ -22,7 +25,6 @@ use crate::snapshot::{
     HeadUpdate, Manifest, SnapshotArchive, SnapshotConfig, SnapshotFormat, SnapshotId,
     SnapshotScope, UpperIntegrity,
 };
-pub(crate) use archive::materialize_archive_for_child_with_overrides as materialize_archive_for_child;
 use artifact::{Snapshot, SnapshotHandle};
 pub(crate) use create::{
     CHECKPOINT_DIRECTORY, stage_local_branch_closure, validate_checkpoint_owned_inventory,
@@ -30,9 +32,11 @@ pub(crate) use create::{
 };
 pub(crate) use restore::{
     adopt_local_branch_for_child, apply_additional_disks, materialize_additional_disks,
-    materialize_checkpoint_child_disk_state, materialize_checkpoint_child_state,
-    materialize_checkpoint_disk_for_child, materialize_checkpoint_for_child,
-    materialize_file_snapshot_for_child, materialize_owned_volumes, root_device,
+    materialize_checkpoint_child_state, materialize_checkpoint_disk_for_child,
+    materialize_checkpoint_for_child, materialize_file_snapshot_for_child,
+    materialize_owned_volumes, root_device,
 };
 
+pub(crate) use archive::save_snapshot_expected;
 pub(super) use store::looks_like_path;
+pub(crate) use store::remove_snapshot_expected;

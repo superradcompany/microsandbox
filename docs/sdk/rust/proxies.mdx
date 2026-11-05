@@ -1,6 +1,7 @@
 ---
 title: Proxies
-description: Rust SDK - Proxy API reference
+"og:title": Rust SDK Proxies reference
+description: Route outbound sandbox connections through an HTTP CONNECT, SOCKS4, or SOCKS5 proxy with the Rust SDK.
 ---
 
 Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder::proxy()`](#proxy). Proxy protocols are mutually exclusive.
@@ -45,7 +46,7 @@ Protocol selector passed to [`SandboxBuilder::proxy()`](#proxy).
 fn http_connect(self, address: impl Into<String>) -> HttpConnectProxyBuilder
 ```
 
-Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
+Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only. Use the returned builder to enable optional HTTP Basic authentication.
 
 ### <span id="socks4">socks4()</span>
 
@@ -89,6 +90,20 @@ Set optional SOCKS5 username/password authentication. Pass `SecretSource::env("S
 
 The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json()` and the database contain the source reference but never the resolved password.
 
+## HttpConnectProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder::http_connect()`](#http-connect). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+### credentials()
+
+```rust
+fn credentials(self, username: impl Into<String>, password: SecretSource) -> Self
+```
+
+Set optional HTTP CONNECT username/password authentication. Pass `SecretSource::env("HTTP_CONNECT_PASSWORD")` as `password`; store-backed sources are not supported for proxy credentials. HTTP Basic permits an empty username for token-only authentication; a non-empty username must not contain `:` or control characters. The resolved password must not be empty.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `config_json()` and the database contain the source reference but never the resolved password.
+
 ## SecretSource
 
 ### env()
@@ -97,14 +112,18 @@ The host environment variable is read once each time the sandbox starts. Changin
 fn env(var: impl Into<String>) -> SecretSource
 ```
 
-Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.
+Create a host environment-variable reference for a SOCKS5 or HTTP CONNECT password. Import `SecretSource` from `microsandbox`.
 
 ## OutboundProxy
 
-Declarative outbound proxy configuration stored in the sandbox's durable network specification. `Socks5Credentials` contains a password source, not the resolved password.
+Declarative outbound proxy configuration stored in the sandbox's durable network specification. `Socks5Credentials` and [`HttpConnectCredentials`](#httpconnectcredentials) contain a password source, not the resolved password.
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
-| `HttpConnect` | `address: SocketAddr` | HTTP proxy address used for TCP CONNECT tunnels |
+| `HttpConnect` | `address: SocketAddr`, `credentials: Option<HttpConnectCredentials>` | HTTP proxy address and optional username/password credentials |
 | `Socks4` | `address: SocketAddr`, `user_id: Option<String>` | SOCKS4 proxy address and optional user ID |
 | `Socks5` | `address: SocketAddr`, `credentials: Option<Socks5Credentials>` | SOCKS5 proxy address and optional username/password credentials |
+
+## HttpConnectCredentials
+
+Environment-backed username and password reference stored on [`OutboundProxy::HttpConnect`](#outboundproxy). It holds the username and a host environment variable name, never the resolved password. Create it through [`HttpConnectProxyBuilder::credentials()`](#httpconnectproxybuilder).

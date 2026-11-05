@@ -53,6 +53,7 @@ struct RestoreOptions {
     #[serde(default)]
     ports: Vec<PortBindingOpts>,
     tcp_accept_queue_size: Option<u32>,
+    max_inbound_tcp_connections: Option<usize>,
     #[serde(default)]
     vsock: Vec<VsockRouteOpts>,
 }
@@ -163,6 +164,9 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
             "udp" => builder.port_udp_bind(bind, port.host_port, port.guest_port),
             _ => return Err(FfiError::invalid_argument("invalid restore port protocol")),
         };
+    }
+    if let Some(value) = opts.max_inbound_tcp_connections {
+        builder = builder.max_inbound_tcp_connections(value);
     }
     if let Some(size) = opts.tcp_accept_queue_size {
         builder = builder.tcp_accept_queue_size(size);

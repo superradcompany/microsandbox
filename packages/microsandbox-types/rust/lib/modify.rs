@@ -9,7 +9,9 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::domain::{EnvVar, SecretSubstitution, SecretViolationAction};
+use crate::domain::{
+    EnvVar, PortProtocol, PublishedPortSpec, SecretSubstitution, SecretViolationAction,
+};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -63,6 +65,15 @@ pub struct SandboxModificationPatch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels_remove: Vec<String>,
 
+    /// Published ports to add or update, keyed by host address, port, and protocol.
+    /// Omitted mappings remain unchanged; removal is explicit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PublishedPortSpec>,
+
+    /// Published host endpoints to remove.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports_remove: Vec<PublishedPortKey>,
+
     /// Desired working directory for future execs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
@@ -76,6 +87,19 @@ pub struct SandboxModificationPatch {
     /// `secrets` never means removal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets_remove: Vec<String>,
+}
+
+/// Host endpoint identifying a published port independently of its guest destination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct PublishedPortKey {
+    /// Host address to unpublish, such as `127.0.0.1`.
+    pub host_bind: String,
+    /// Host-side port.
+    pub host_port: u16,
+    /// Transport protocol; defaults to TCP.
+    #[serde(default)]
+    pub protocol: PortProtocol,
 }
 
 /// Policy selected for applying or planning a modification.

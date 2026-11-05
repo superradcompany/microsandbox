@@ -32,7 +32,7 @@ use russh::client::Msg as ClientMsg;
 use russh::keys::{
     Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKeyBase64, decode_secret_key,
 };
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::server::{Auth, ChannelOpenHandle, Msg, PublicKeyOffer, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelOpenFailure, Sig};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -833,7 +833,8 @@ impl SshClient {
                 .map_err(|e| MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
             let tty_input = open_nonblocking_terminal_input(&tty_input_path)
                 .map_err(|e| MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
-            let stdin_async = tokio::io::unix::AsyncFd::new(tty_input)
+            // SAFETY: The owned terminal file keeps its non-blocking descriptor open and unchanged.
+            let stdin_async = unsafe { tokio::io::unix::AsyncFd::register(tty_input) }
                 .map_err(|e| MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
             let mut stdout = tokio::io::stdout();
             let mut sigwinch =
@@ -1502,9 +1503,9 @@ impl russh::server::Handler for SshSession {
     async fn auth_publickey_offered(
         &mut self,
         _user: &str,
-        public_key: &russh::keys::PublicKey,
+        offer: PublicKeyOffer<'_>,
     ) -> Result<Auth, Self::Error> {
-        if self.key_is_authorized(public_key) {
+        if self.key_is_authorized(offer.public_key) {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
@@ -1514,9 +1515,9 @@ impl russh::server::Handler for SshSession {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &russh::keys::PublicKey,
+        key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
-        if self.key_is_authorized(public_key) {
+        if self.key_is_authorized(key.public_key) {
             self.user = Some(user.to_string());
             Ok(Auth::Accept)
         } else {

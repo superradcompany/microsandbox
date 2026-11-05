@@ -11,10 +11,6 @@ The defaults are tuned for the common case: running untrusted code that needs th
 If a workload doesn't need the network, remove it. Nothing to filter is the strongest filter.
 
 <CodeGroup>
-```bash CLI
-msb create python --name isolated --no-net
-```
-
 ```typescript TypeScript
 await using sb = await Sandbox.builder("isolated")
     .image("python")
@@ -35,17 +31,97 @@ from microsandbox import Network, Sandbox
 
 sb = await Sandbox.create("isolated", image="python", network=Network.none())
 ```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "isolated",
+    m.WithImage("python"),
+    m.WithNetwork(m.NetworkPolicy.None()),
+)
+if err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create("isolated", image: "python", network: :none)
+```
+
+```bash CLI
+msb create python --name isolated --no-net
+```
 </CodeGroup>
 
 ## Deny egress by default
 
 When a workload needs only a handful of destinations, switch from allow-public to deny-by-default and allow exactly what's required. In any allow-by-default policy, remember to `deny@meta` so the cloud metadata service stays blocked.
 
-```bash
+<CodeGroup>
+```typescript TypeScript
+import { NetworkPolicy, Sandbox } from "microsandbox";
+
+await using sb = await Sandbox.builder("restricted-worker")
+    .image("alpine")
+    .network((n) => n.policy(
+        NetworkPolicy.builder()
+            .defaultDeny()
+            .egress((e) => e.tcp().port(443).allowPublic())
+            .egress((e) => e.udp().tcp().port(53).allowHost())
+            .build(),
+    ))
+    .create();
+```
+
+```rust Rust
+use microsandbox::{NetworkPolicy, Sandbox};
+
+let policy = NetworkPolicy::builder()
+    .default_deny()
+    .egress(|e| e.tcp().port(443).allow_public())
+    .egress(|e| e.udp().tcp().port(53).allow_host())
+    .build()?;
+
+let sb = Sandbox::builder("restricted-worker")
+    .image("alpine")
+    .network(|n| n.policy(policy))
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Action, DestGroup, Destination, Network, NetworkPolicy, Protocol, Rule, Sandbox
+
+sb = await Sandbox.create(
+    "restricted-worker",
+    image="alpine",
+    network=Network(policy=NetworkPolicy(
+        default_egress=Action.DENY,
+        rules=(
+            Rule.allow(destination=Destination.group(DestGroup.PUBLIC), protocol=Protocol.TCP, port=443),
+            *Rule.allow_dns(),
+        ),
+    )),
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "restricted-worker",
+    m.WithImage("alpine"),
+    m.WithNetwork(&m.NetworkConfig{
+        DefaultEgress: m.PolicyActionDeny,
+        Rules: []m.PolicyRule{
+            {Action: m.PolicyActionAllow, Direction: m.PolicyDirectionEgress, Destination: "public", Protocol: m.PolicyProtocolTCP, Port: "443"},
+            m.Rule.AllowDNS(),
+        },
+    }),
+)
+```
+
+```bash CLI
 msb create alpine --name restricted-worker \
   --net-default-egress deny \
-  --net-rule "allow@public:tcp:443,allow@host:udp:53"
+  --net-rule "allow@public:tcp:443,allow@dns"
 ```
+</CodeGroup>
 
 See [Networking overview](/networking/overview#low-level-custom-policies) for the full rule syntax and SDK equivalents.
 
@@ -56,9 +132,57 @@ Two independent steps, both worth taking for untrusted code:
 - Run the workload as a **non-root user**.
 - Apply the **restricted security profile**, which sets `no_new_privs`, drops the mount-admin capability, and forces `nosuid,nodev` on user mounts.
 
-```bash
-msb create python --name worker --user app --security restricted
+<CodeGroup>
+```typescript TypeScript
+await using sb = await Sandbox.builder("worker")
+    .image("python")
+    .user("1000:1000")
+    .security("restricted")
+    .create();
 ```
+
+```rust Rust
+use microsandbox::{Sandbox, SecurityProfile};
+
+let sb = Sandbox::builder("worker")
+    .image("python")
+    .user("1000:1000")
+    .security(SecurityProfile::Restricted)
+    .create()
+    .await?;
+```
+
+```python Python
+from microsandbox import Sandbox, SecurityProfile
+
+sb = await Sandbox.create(
+    "worker",
+    image="python",
+    user="1000:1000",
+    security=SecurityProfile.RESTRICTED,
+)
+```
+
+```go Go
+sb, err := m.CreateSandbox(ctx, "worker",
+    m.WithImage("python"),
+    m.WithUser("1000:1000"),
+    m.WithSecurityProfile(m.SecurityProfileRestricted),
+)
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker", image: "python", user: "1000:1000"
+)
+# Ruby supports the non-root user option, but does not expose
+# the restricted security-profile option shown in the other tabs.
+```
+
+```bash CLI
+msb create python --name worker --user 1000:1000 --security restricted
+```
+</CodeGroup>
 
 The restricted profile is incompatible with workloads that need those capabilities, such as `sudo` or Docker-in-Docker. See [Isolation boundary](/security/isolation#in-guest-privilege) for the SDK forms.
 

@@ -1,0 +1,85 @@
+---
+title: Storage commands
+sidebarTitle: Storage
+description: Check local storage usage and clean up unused memory files.
+icon: "database"
+---
+
+Check disk usage with `msb df` and remove unused runtime memory files with `msb prune`. Both commands are local-only. For application code, see [SDK storage](/sdk/storage).
+
+## msb df
+
+Show storage used by images, snapshots, sandboxes, volumes, and runtime memory files:
+
+<CodeGroup>
+```bash Shell
+msb df
+```
+</CodeGroup>
+
+Add `--verbose` for object paths, ownership, and accounting details, or `--format json` for structured output. Use `msb inspect NAME` or `msb snap inspect REF` to inspect one sandbox or snapshot.
+
+`RECLAIMABLE` shows unused runtime memory files eligible for cleanup. Reported sizes may differ from the disk space actually freed, especially when files share data.
+
+<Accordion title="How storage is measured">
+
+The table always includes images, durable snapshots, branch memory, snapshot memory, sandboxes, and volumes, even when their measured usage is zero. `--verbose` adds object paths, allocated-block observations, and reasons entries are retained or could not be measured. Unknown measurements appear as `-` in tables and `null` in JSON.
+
+| Column | Meaning |
+| --- | --- |
+| `TYPE` | Managed storage category |
+| `COUNT` | Indexed objects, or published backing files for memory caches |
+| `IN USE` | Observed owners where ownership can be checked; unknown for categories without reader leases |
+| `LOGICAL SIZE` | Regular-file lengths, with hard links counted once per category on Unix |
+| `RECLAIMABLE` | Logical bytes currently eligible for runtime-cache cleanup |
+
+Image references share layers, so image accounting scans the shared cache instead of summing each image's advertised size. Managed-directory totals include metadata and unindexed files. Indexed external snapshot directories are included; host bind mounts, external linked payloads, unindexed external snapshots, and anonymous Linux RAM are excluded. Concurrent filesystem activity can change measurements while a scan runs.
+
+Logical file lengths and allocated blocks do not measure unique physical storage on filesystems with shared copy-on-write extents. Removing 1 GiB of logical data may free less physical space. There is no combined total when categories may overlap.
+
+</Accordion>
+
+## msb prune
+
+Preview cleanup, then run it:
+
+<CodeGroup>
+```bash Shell
+msb prune --dry-run
+msb prune
+```
+</CodeGroup>
+
+Cleanup removes unused memory files from branches and cached snapshot restores. It keeps saved snapshots, sandbox disks, named volumes, and images. To clean up images, use [`msb image prune`](/cli/image-commands#msb-image-prune).
+
+Files still in use are skipped. Without `--yes`, cleanup asks for confirmation in an interactive terminal. The result can differ from the preview if files become active in the meantime.
+
+- `--dry-run`: preview without deleting files.
+- `--yes`: skip the confirmation prompt.
+- `--older-than 10m`: only consider files at least ten minutes old. Accepts a nonnegative integer with `s`, `m`, `h`, or `d`; defaults to `0s`.
+- `--format json`: return a structured report.
+- `-q`, `--quiet`: suppress successful human output. Does not skip confirmation and cannot be combined with JSON.
+
+<Accordion title="Cleanup rules and JSON output">
+
+Prune only removes recognized, published runtime RAM files with no live backing pin or pending branch handoff. Stable lock files and capture staging directories are retained. The age filter uses file modification times, which clones can inherit; ownership is checked again before removal.
+
+JSON includes `entries`, `files_removed`, `logical_bytes_removed`, and `physical_bytes_reclaimed`. The latter remains `null`: the command does not claim physical storage savings. Entries explain `in_use`, `pending_handoff`, `too_young`, `missing_handoff_lock`, `changed`, or `error` decisions. An error report retains successful removal counts and exits unsuccessfully; a caller can retry later. Dry-run entries use `reclaimable` and removal counters remain zero.
+
+</Accordion>
+
+## Automatic branch cleanup
+
+Unused branch memory files are also cleaned up automatically when possible. Paused sandboxes keep their backing files. Cached snapshot memory stays available for faster restores until you explicitly prune it.
+
+<Accordion title="When automatic cleanup runs">
+
+Branch backing is reclaimed best-effort after its last tracked SDK or baseline owner releases it, provided no other pin or handoff remains. Paused sandboxes retain their backing. Runtime process exit and abrupt termination release kernel pins. After a graceful stop, cleanup tries the stopped branch's exact backing file and then traverses the branch cache in bounded passes without pauses between them; CLI commands wait for that traversal after the graceful-stop result, while SDK callers can continue without waiting. A subsequent branch also triggers a bounded sweep for leftovers, limited to once every 30 seconds within one SDK process.
+
+Automatic cleanup targets branch memory. Unused snapshot RAM realizations remain available for warm restores until explicitly pruned. Neither path changes memory bytes, snapshot formats, or checkpoint sparsity.
+
+</Accordion>
+
+<span id="sdk-reporting" />
+
+For storage reporting and cleanup in application code, see [SDK storage](/sdk/storage).

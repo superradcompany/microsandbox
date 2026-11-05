@@ -145,6 +145,7 @@ pub(super) struct PreparedState {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::capture(fs);
     }
@@ -212,7 +213,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
         dirs,
     };
     if fs.cfg.external_checkpoint.is_none() {
-        return mobility::encode(KIND, &state);
+        return mobility::encode(KIND, &state, limit);
     }
     if state.writeback {
         return Err(invalid_state(
@@ -243,15 +244,17 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             identities,
             invalid_inodes: fs.invalid_inodes.read().unwrap().clone(),
         },
+        limit,
     )
 }
 
 pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedState> {
+    let limit = fs.cfg.max_state_bytes;
     if fs.cfg.owned_checkpoint.is_some() {
         return owned::prepare(fs, bytes);
     }
     if let Some(options) = &fs.cfg.external_checkpoint {
-        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+        let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
         validate_external_shape(&external)?;
         validate_semantics(fs, &external.state, external.invalid_inodes.contains(&1))?;
         let mut invalid = external.invalid_inodes;
@@ -301,7 +304,7 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
         prepared.invalid_inodes = invalid;
         return Ok(prepared);
     }
-    let state: PassthroughState = mobility::decode(KIND, bytes)?;
+    let state: PassthroughState = mobility::decode(KIND, bytes, limit)?;
     validate_semantics(fs, &state, false)?;
     rebuild(fs, state, None)
 }
@@ -327,8 +330,8 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Validate an external payload without opening any destination path.
-pub(super) fn validate_unavailable(bytes: &[u8]) -> io::Result<()> {
-    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+pub(super) fn validate_unavailable(bytes: &[u8], limit: usize) -> io::Result<()> {
+    let external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
     validate_external_shape(&external)?;
     validate_shape(&external.state, false, external.invalid_inodes.contains(&1))
 }
@@ -337,11 +340,12 @@ pub(super) fn prepare_single_file_state(
     bytes: &[u8],
     source: &std::ffi::CStr,
     destination: &std::ffi::CStr,
+    limit: usize,
 ) -> io::Result<(
     Vec<u8>,
     crate::backends::passthroughfs::ExternalSingleFileIndex,
 )> {
-    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes)?;
+    let mut external: ExternalState = mobility::decode(EXTERNAL_KIND, bytes, limit)?;
     validate_external_shape(&external)?;
     validate_shape(&external.state, false, external.invalid_inodes.contains(&1))?;
     if !external.state.dirs.is_empty() {
@@ -383,7 +387,7 @@ pub(super) fn prepare_single_file_state(
             .collect(),
         invalid_inodes: external.invalid_inodes.clone(),
     };
-    Ok((mobility::encode(EXTERNAL_KIND, &external)?, index))
+    Ok((mobility::encode(EXTERNAL_KIND, &external, limit)?, index))
 }
 
 fn validate_external_shape(external: &ExternalState) -> io::Result<()> {
@@ -1174,7 +1178,7 @@ mod tests {
         assert_eq!(relaxed.request_error(fresh.inode), None);
         assert_eq!(std::fs::read(&path).unwrap(), b"new host bytes");
         let recaptured = capture(&relaxed).unwrap();
-        validate_unavailable(&recaptured).unwrap();
+        validate_unavailable(&recaptured, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
     }
 
     #[test]
@@ -1232,15 +1236,24 @@ mod tests {
         let source = external_backend(root.path(), false, false);
         source.init(FsOptions::empty()).unwrap();
         let entry = source.lookup(context(), 1, c"data").unwrap();
-        let mut state: ExternalState =
-            mobility::decode(EXTERNAL_KIND, &capture(&source).unwrap()).unwrap();
+        let mut state: ExternalState = mobility::decode(
+            EXTERNAL_KIND,
+            &capture(&source).unwrap(),
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
         state
             .identities
             .get_mut(&entry.inode)
             .unwrap()
             .content
             .clear();
-        let malformed = mobility::encode(EXTERNAL_KIND, &state).unwrap();
+        let malformed = mobility::encode(
+            EXTERNAL_KIND,
+            &state,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
         assert!(prepare(&external_backend(root.path(), true, false), &malformed).is_err());
         assert!(
             crate::UnavailableFs::default()
@@ -1257,8 +1270,12 @@ mod tests {
         let source = external_backend(root.path(), false, false);
         source.init(FsOptions::empty()).unwrap();
         source.lookup(context(), 1, c"data").unwrap();
-        let state: ExternalState =
-            mobility::decode(EXTERNAL_KIND, &capture(&source).unwrap()).unwrap();
+        let state: ExternalState = mobility::decode(
+            EXTERNAL_KIND,
+            &capture(&source).unwrap(),
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
         std::fs::rename(&path, root.path().join("old")).unwrap();
         std::fs::write(&path, b"old").unwrap();
         assert!(rebuild(&source, state.state, Some(&state.identities)).is_err());
@@ -1499,9 +1516,11 @@ mod tests {
         drop(restored);
 
         let before = capture(&destination).unwrap();
-        let mut corrupt: PassthroughState = mobility::decode(KIND, &before).unwrap();
+        let mut corrupt: PassthroughState =
+            mobility::decode(KIND, &before, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
         corrupt.next_handle = 0;
-        let corrupt = mobility::encode(KIND, &corrupt).unwrap();
+        let corrupt =
+            mobility::encode(KIND, &corrupt, msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES).unwrap();
         assert!(destination.restore_state(&corrupt).is_err());
         assert_eq!(capture(&destination).unwrap(), before);
 

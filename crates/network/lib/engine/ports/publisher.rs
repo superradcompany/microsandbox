@@ -7,10 +7,12 @@
 //! packets, and guest replies to active peers are sent back through the same
 //! host socket.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -19,10 +21,11 @@ use smoltcp::iface::{Interface, SocketHandle, SocketSet};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{EthernetAddress, IpEndpoint};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
-use crate::config::{PortProtocol, PublishedPort, TcpAcceptQueueSize};
+use crate::config::{ConnectionLimit, PortProtocol, PublishedPort, TcpAcceptQueueSize};
 use crate::netstack::shared::SharedState;
 use crate::policy::{NetworkPolicy, Protocol};
 use crate::tcp::deferred_close::DeferredClose;
@@ -32,9 +35,15 @@ use crate::udp::relay::{construct_udp_response, extract_udp_payload};
 // Constants
 //--------------------------------------------------------------------------------------------------
 
+/// Bound finished TCP shutdown state independently of the active connection cap.
+const MAX_RETAINED_INBOUND_TCP_CONNECTIONS: usize = 256;
+
 /// TCP socket buffer sizes for inbound connections.
 const TCP_RX_BUF_SIZE: usize = 65536;
 const TCP_TX_BUF_SIZE: usize = 65536;
+
+/// Release host response writers that stop making progress.
+const HOST_WRITE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Channel capacity for relay tasks.
 const CHANNEL_CAPACITY: usize = 32;
@@ -83,7 +92,13 @@ pub struct PortPublisher {
     /// Ephemeral port counter.
     ephemeral_port: Arc<AtomicU16>,
     /// Maximum inbound connections (prevents resource exhaustion from host-side floods).
-    max_inbound: usize,
+    max_inbound: Option<NonZeroUsize>,
+    /// Finished flows, oldest first, kept outside the active admission budget.
+    time_wait: VecDeque<SocketHandle>,
+    /// Source ports reserved by active and retained TCP sockets.
+    tcp_ports: HashSet<u16>,
+    /// Last capacity warning, to keep host-side floods from flooding logs.
+    last_capacity_warning: Option<Instant>,
     /// UDP published-port routes, keyed by guest-side port.
     udp_routes: PublishedUdpRoutes,
 }
@@ -131,6 +146,8 @@ struct PublishedUdpPeer {
 /// A single inbound connection relay (host socket ↔ smoltcp socket).
 struct InboundRelay {
     handle: SocketHandle,
+    /// Set only after the host relay has finished draining or its client has gone away.
+    host_finished: Arc<AtomicBool>,
     /// Sends guest data to the host. Dropped after guest FIN and buffered data drain.
     to_host: Option<mpsc::Sender<Bytes>>,
     /// Data removed from smoltcp while the host relay channel was full.
@@ -170,6 +187,7 @@ impl PortPublisher {
     pub fn new(
         ports: &[PublishedPort],
         tcp_accept_queue_size: TcpAcceptQueueSize,
+        max_inbound_tcp_connections: Option<ConnectionLimit>,
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
         gateway_ipv4: Option<Ipv4Addr>,
@@ -220,7 +238,12 @@ impl PortPublisher {
             guest_ipv4,
             guest_ipv6,
             ephemeral_port,
-            max_inbound: 256,
+            max_inbound: max_inbound_tcp_connections
+                .unwrap_or(ConnectionLimit::Unlimited)
+                .cap(),
+            time_wait: VecDeque::new(),
+            tcp_ports: HashSet::new(),
+            last_capacity_warning: None,
             udp_routes,
         }
     }
@@ -242,9 +265,23 @@ impl PortPublisher {
             return;
         };
 
+        self.retire_finished(sockets);
+
+        // Reclaim completed sockets before applying the admission limit rather
+        // than waiting for the poll loop's periodic cleanup.
+        if self
+            .max_inbound
+            .is_some_and(|limit| self.connections.len() >= limit.get())
+        {
+            self.cleanup_closed(sockets);
+        }
+
         while let Ok(conn) = self.inbound_rx.try_recv() {
-            if self.connections.len() >= self.max_inbound {
-                tracing::debug!("published port: max inbound connections reached, rejecting");
+            if self
+                .max_inbound
+                .is_some_and(|limit| self.connections.len() >= limit.get())
+            {
+                self.warn_capacity("active inbound connection limit");
                 reject_with_rst(&conn.stream);
                 continue;
             }
@@ -255,7 +292,15 @@ impl PortPublisher {
 
             // Connect to the guest.
             let remote = IpEndpoint::new(guest_ip.into(), conn.guest_port);
-            let local_port = self.alloc_ephemeral_port();
+            let local_port = self.alloc_ephemeral_port().or_else(|| {
+                self.cleanup_closed(sockets);
+                self.alloc_ephemeral_port()
+            });
+            let Some(local_port) = local_port else {
+                self.warn_capacity("TCP source ports exhausted");
+                reject_with_rst(&conn.stream);
+                continue;
+            };
 
             if socket.connect(iface.context(), remote, local_port).is_err() {
                 tracing::debug!(
@@ -267,6 +312,7 @@ impl PortPublisher {
             }
 
             let handle = sockets.add(socket);
+            self.tcp_ports.insert(local_port);
 
             // Create channel pair for relay.
             let (to_host_tx, to_host_rx) = mpsc::channel(CHANNEL_CAPACITY);
@@ -274,19 +320,38 @@ impl PortPublisher {
 
             // Spawn relay task: host TcpStream ↔ channels.
             let shared_clone = shared.clone();
+            let host_finished = Arc::new(AtomicBool::new(false));
+            let finished = host_finished.clone();
             tokio_handle.spawn(async move {
                 let _ =
-                    inbound_relay_task(conn.stream, to_host_rx, from_host_tx, shared_clone).await;
+                    inbound_relay_task(conn.stream, to_host_rx, from_host_tx, shared_clone.clone())
+                        .await;
+                finished.store(true, Ordering::Release);
+                shared_clone.proxy_wake.wake();
             });
 
             self.connections.push(InboundRelay {
                 handle,
+                host_finished,
                 to_host: Some(to_host_tx),
                 read_buf: None,
                 from_host: from_host_rx,
                 write_buf: None,
                 deferred_close: DeferredClose::default(),
             });
+        }
+    }
+
+    /// Surface capacity failures without emitting one warning per rejected connection.
+    fn warn_capacity(&mut self, reason: &str) {
+        let now = Instant::now();
+        if self
+            .last_capacity_warning
+            .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+        {
+            tracing::warn!(reason, limit = ?self.max_inbound, active = self.connections.len(),
+                "published port: capacity exhausted; rejecting connection");
+            self.last_capacity_warning = Some(now);
         }
     }
 
@@ -306,6 +371,10 @@ impl PortPublisher {
             let socket = sockets.get_mut::<tcp::Socket>(relay.handle);
 
             if matches!(socket.state(), tcp::State::Closed) {
+                // Wake an idle relay after reset. A host that already sent EOF
+                // can still finish writing the response queued in its channel.
+                relay.to_host = None;
+                relay.from_host.close();
                 relay.deferred_close = DeferredClose::default();
                 continue;
             }
@@ -425,19 +494,65 @@ impl PortPublisher {
         false
     }
 
+    /// Retain shutdown state without charging it against the active connection cap.
+    fn retire_finished(&mut self, sockets: &mut SocketSet<'_>) {
+        let retained = &mut self.time_wait;
+        self.connections.retain(|relay| {
+            let socket = sockets.get::<tcp::Socket>(relay.handle);
+            let finished = socket.state() == tcp::State::TimeWait
+                && relay.host_finished.load(Ordering::Acquire);
+            if finished {
+                retained.push_back(relay.handle);
+            }
+            !finished
+        });
+
+        while self.time_wait.len() > MAX_RETAINED_INBOUND_TCP_CONNECTIONS {
+            let handle = self.time_wait.pop_front().unwrap();
+            let socket = sockets.get::<tcp::Socket>(handle);
+            if let Some(endpoint) = socket.local_endpoint() {
+                self.tcp_ports.remove(&endpoint.port);
+            }
+            sockets.remove(handle);
+        }
+    }
+
     /// Remove closed inbound connections.
     ///
-    /// Only removes sockets in `Closed` state. Sockets in `TimeWait` are
-    /// left for smoltcp's 2*MSL timer to handle naturally.
+    /// Only removes sockets in `Closed` state after any pending reset is sent.
+    /// Sockets in `TimeWait` are left for smoltcp's 2*MSL timer to handle naturally.
     pub fn cleanup_closed(&mut self, sockets: &mut SocketSet<'_>) {
         self.connections.retain(|relay| {
             let socket = sockets.get::<tcp::Socket>(relay.handle);
-            let closed = matches!(socket.state(), tcp::State::Closed);
+            let closed = matches!(socket.state(), tcp::State::Closed)
+                && socket.remote_endpoint().is_none()
+                && relay.host_finished.load(Ordering::Acquire);
             if closed {
                 sockets.remove(relay.handle);
             }
             !closed
         });
+
+        self.time_wait.retain(|&handle| {
+            let closed = sockets.get::<tcp::Socket>(handle).state() == tcp::State::Closed;
+            if closed {
+                sockets.remove(handle);
+            }
+            !closed
+        });
+
+        self.tcp_ports.clear();
+        for handle in self
+            .connections
+            .iter()
+            .map(|relay| relay.handle)
+            .chain(self.time_wait.iter().copied())
+        {
+            if let Some(endpoint) = sockets.get::<tcp::Socket>(handle).local_endpoint() {
+                self.tcp_ports.insert(endpoint.port);
+            }
+        }
+
         self.cleanup_udp_peers();
     }
 
@@ -546,17 +661,21 @@ impl PortPublisher {
         }
     }
 
-    fn alloc_ephemeral_port(&self) -> u16 {
-        loop {
+    fn alloc_ephemeral_port(&self) -> Option<u16> {
+        // Skip ports still owned by active or TIME-WAIT sockets after wrapping.
+        for _ in 0..=u16::MAX {
             let port = self.ephemeral_port.fetch_add(1, Ordering::Relaxed);
-            // Wrap around in the ephemeral range.
-            if port == 0 || port < UDP_EPHEMERAL_PORT_START {
+            if port < UDP_EPHEMERAL_PORT_START {
                 self.ephemeral_port
                     .store(UDP_EPHEMERAL_PORT_START, Ordering::Relaxed);
                 continue;
             }
-            return port;
+            if !self.tcp_ports.contains(&port) {
+                return Some(port);
+            }
         }
+
+        None
     }
 
     fn cleanup_udp_peers(&self) {
@@ -904,10 +1023,10 @@ async fn inbound_relay_task(
                 match data {
                     Some(bytes) => {
                         // Wake as soon as recv frees channel capacity. Waiting
-                        // for write_all can stall the poll loop behind a slow
+                        // for the host write can stall the poll loop behind a slow
                         // host client.
                         shared.proxy_wake.wake();
-                        if let Err(e) = tx.write_all(&bytes).await {
+                        if let Err(e) = write_host_response(&mut tx, &bytes).await {
                             tracing::debug!(error = %e, "write to host client failed");
                             break;
                         }
@@ -954,6 +1073,27 @@ async fn inbound_relay_task(
                 break;
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Bound each stalled write, renewing the deadline whenever bytes reach the host socket.
+async fn write_host_response(tx: &mut OwnedWriteHalf, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written = tokio::time::timeout(HOST_WRITE_IDLE_TIMEOUT, tx.write(bytes))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "published-port response write stalled for 30 seconds",
+                )
+            })??;
+
+        if written == 0 {
+            return Err(ErrorKind::WriteZero.into());
+        }
+        bytes = &bytes[written..];
     }
 
     Ok(())
@@ -1024,6 +1164,10 @@ mod tests {
     /// host once TIME-WAIT expires and the relay is dropped must fail.
     const PROMPT_STEPS: usize = 100;
 
+    /// Tiny real host TCP windows can take seconds to reopen and drain on Linux.
+    /// Use 1 ms simulated steps so this wait stays below guest TIME-WAIT expiry.
+    const HOST_DRAIN_STEPS: usize = 5000;
+
     /// Step budget for relay cleanup, which may wait out TIME-WAIT.
     const CLEANUP_STEPS: usize = 2000;
 
@@ -1036,6 +1180,8 @@ mod tests {
         guest: SocketHandle,
         shared: Arc<SharedState>,
         now: SmolInstant,
+        periodic_cleanup: bool,
+        step_millis: u64,
     }
 
     impl Harness {
@@ -1066,7 +1212,11 @@ mod tests {
                 guest_ipv4: Some(Ipv4Addr::LOCALHOST),
                 guest_ipv6: None,
                 ephemeral_port: Arc::new(AtomicU16::new(UDP_EPHEMERAL_PORT_START)),
-                max_inbound: 256,
+                max_inbound: NonZeroUsize::new(256),
+                time_wait: VecDeque::new(),
+
+                tcp_ports: HashSet::new(),
+                last_capacity_warning: None,
                 udp_routes: Arc::new(Mutex::new(HashMap::new())),
             };
 
@@ -1078,11 +1228,17 @@ mod tests {
                 guest,
                 shared: Arc::new(SharedState::new(4)),
                 now: SmolInstant::from_millis(0),
+                periodic_cleanup: true,
+                step_millis: STEP_MILLIS,
             }
         }
 
         /// Queues a connection for the publisher and returns the host client end.
         async fn connect_host(&mut self) -> TcpStream {
+            self.connect_host_with_send_buffer(None).await
+        }
+
+        async fn connect_host_with_send_buffer(&mut self, send_buffer: Option<usize>) -> TcpStream {
             let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
                 .await
                 .unwrap();
@@ -1090,6 +1246,14 @@ mod tests {
                 .await
                 .unwrap();
             let (stream, _) = listener.accept().await.unwrap();
+            if let Some(size) = send_buffer {
+                socket2::SockRef::from(&stream)
+                    .set_send_buffer_size(size)
+                    .unwrap();
+                socket2::SockRef::from(&client)
+                    .set_recv_buffer_size(size)
+                    .unwrap();
+            }
             self.publisher
                 ._inbound_tx
                 .try_send(InboundConnection {
@@ -1102,7 +1266,7 @@ mod tests {
 
         /// One poll-loop pass, then give the relay tasks time to run.
         async fn step(&mut self) {
-            self.now += SmolDuration::from_millis(STEP_MILLIS);
+            self.now += SmolDuration::from_millis(self.step_millis);
             self.iface
                 .poll(self.now, &mut self.device, &mut self.sockets);
             self.publisher.accept_inbound(
@@ -1114,7 +1278,9 @@ mod tests {
             self.publisher.relay_data(&mut self.sockets);
             self.iface
                 .poll(self.now, &mut self.device, &mut self.sockets);
-            self.publisher.cleanup_closed(&mut self.sockets);
+            if self.periodic_cleanup {
+                self.publisher.cleanup_closed(&mut self.sockets);
+            }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
@@ -1171,7 +1337,7 @@ mod tests {
 
         async fn assert_relays_cleaned_up(&mut self) {
             self.run_until("publisher to drop the relay", CLEANUP_STEPS, |h| {
-                h.publisher.connections.is_empty()
+                h.publisher.connections.is_empty() && h.publisher.time_wait.is_empty()
             })
             .await;
             assert_eq!(
@@ -1205,6 +1371,7 @@ mod tests {
             let mut publisher = PortPublisher::new(
                 &[],
                 TcpAcceptQueueSize::DEFAULT,
+                None,
                 Some(Ipv4Addr::new(10, 0, 0, 1)),
                 None,
                 Some(Ipv4Addr::new(10, 0, 0, 2)),
@@ -1231,6 +1398,7 @@ mod tests {
             let (from_host, to_guest) = mpsc::channel(CHANNEL_CAPACITY);
             publisher.connections.push(InboundRelay {
                 handle,
+                host_finished: Arc::new(AtomicBool::new(true)),
                 to_host: Some(to_host),
                 read_buf: None,
                 from_host: to_guest,
@@ -1252,6 +1420,320 @@ mod tests {
             network
                 .check_drain(|sockets| publisher.relay_data(sockets), &payload, stalled)
                 .await;
+        }
+    }
+
+    /// Admission reclaims a completed flow even before the periodic cleanup tick.
+    #[tokio::test]
+    async fn closed_connection_is_reclaimed_before_admission() {
+        let mut h = Harness::new();
+        h.periodic_cleanup = false;
+        h.publisher.max_inbound = NonZeroUsize::new(1);
+        let first = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+        h.guest().send_slice(b"done").unwrap();
+        h.guest().close();
+        let reader = spawn_read_to_end(first);
+        h.run_until("response", PROMPT_STEPS, |_| reader.is_finished())
+            .await;
+        assert_eq!(reader.await.unwrap(), b"done");
+        h.run_until("publisher close", PROMPT_STEPS, |h| {
+            h.publisher.connections.iter().any(|relay| {
+                h.sockets.get::<tcp::Socket>(relay.handle).state() == tcp::State::Closed
+            })
+        })
+        .await;
+
+        // Use another guest listener: the first guest itself is in TIME-WAIT.
+        let mut guest = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_SIZE]),
+            tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_SIZE]),
+        );
+        guest.listen(TEST_GUEST_PORT).unwrap();
+        h.guest = h.sockets.add(guest);
+        let mut second = h.connect_host().await;
+        second.write_all(b"next request").await.unwrap();
+        second.shutdown().await.unwrap();
+        h.wait_for_guest_accept().await;
+        assert_eq!(h.guest_recv_to_eof().await, b"next request");
+    }
+
+    /// Completed host-first closes must not consume the active connection budget.
+    #[tokio::test]
+    async fn time_wait_does_not_block_the_next_published_connection() {
+        let mut h = Harness::new();
+        h.publisher.max_inbound = NonZeroUsize::new(1);
+        let mut first = h.connect_host().await;
+        h.wait_for_guest_accept().await;
+        first.shutdown().await.unwrap();
+        assert!(h.guest_recv_to_eof().await.is_empty());
+        h.guest().send_slice(b"first response").unwrap();
+        h.guest().close();
+        let reader = spawn_read_to_end(first);
+        h.run_until("first response", PROMPT_STEPS, |_| reader.is_finished())
+            .await;
+        assert_eq!(reader.await.unwrap(), b"first response");
+        h.run_until("guest close", PROMPT_STEPS, |h| {
+            h.guest().state() == tcp::State::Closed
+        })
+        .await;
+        assert!(h.sockets.iter().any(|(_, socket)| {
+            matches!(socket, smoltcp::socket::Socket::Tcp(socket) if socket.state() == tcp::State::TimeWait)
+        }));
+
+        h.guest().listen(TEST_GUEST_PORT).unwrap();
+        let mut second = h.connect_host().await;
+        second.write_all(b"next request").await.unwrap();
+        second.shutdown().await.unwrap();
+        h.wait_for_guest_accept().await;
+        assert_eq!(h.guest_recv_to_eof().await, b"next request");
+        h.guest().send_slice(b"second response").unwrap();
+        h.guest().close();
+        let reader = spawn_read_to_end(second);
+        h.run_until("second response", PROMPT_STEPS, |_| reader.is_finished())
+            .await;
+        assert_eq!(reader.await.unwrap(), b"second response");
+    }
+
+    /// Retention stays bounded during churn, while every completed response arrives intact.
+    #[tokio::test]
+    async fn time_wait_queue_evicts_oldest_after_responses_drain() {
+        let mut h = Harness::new();
+        h.publisher.max_inbound = NonZeroUsize::new(1);
+        // Complete enough connections to overflow the real retention bound
+        // without advancing simulated time past the shutdown timer.
+        h.step_millis = 1;
+        let mut finished = Vec::new();
+        for i in 0..MAX_RETAINED_INBOUND_TCP_CONNECTIONS + 3 {
+            if i > 0 {
+                h.guest().listen(TEST_GUEST_PORT).unwrap();
+            }
+            let mut client = h.connect_host().await;
+            h.wait_for_guest_accept().await;
+            let handle = h.publisher.connections[0].handle;
+            client.shutdown().await.unwrap();
+            assert!(h.guest_recv_to_eof().await.is_empty());
+            let response = vec![i as u8; 32768];
+            h.guest().send_slice(&response).unwrap();
+            h.guest().close();
+            let reader = spawn_read_to_end(client);
+            h.run_until("complete response", PROMPT_STEPS, |_| reader.is_finished())
+                .await;
+            assert_eq!(reader.await.unwrap(), response);
+            h.run_until("finished connection", PROMPT_STEPS, |h| {
+                h.publisher.connections.is_empty() && h.guest().state() == tcp::State::Closed
+            })
+            .await;
+            finished.push(handle);
+            let expected = &finished[finished
+                .len()
+                .saturating_sub(MAX_RETAINED_INBOUND_TCP_CONNECTIONS)..];
+            assert_eq!(
+                h.publisher.time_wait.iter().copied().collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(h.sockets.iter().count(), 1 + expected.len());
+        }
+    }
+
+    /// A finished guest cannot bypass admission while its response is blocked on the host.
+    #[tokio::test]
+    async fn time_wait_keeps_slow_host_response_in_the_active_budget() {
+        let mut h = Harness::new();
+        h.step_millis = 1;
+        h.publisher.max_inbound = NonZeroUsize::new(1);
+        let mut client = h.connect_host_with_send_buffer(Some(4096)).await;
+        h.wait_for_guest_accept().await;
+        client.shutdown().await.unwrap();
+        assert!(h.guest_recv_to_eof().await.is_empty());
+        let response = vec![42; 256 * 1024];
+        let mut written = 0;
+        h.run_until("guest response queued", PROMPT_STEPS, |h| {
+            if h.guest().can_send() {
+                written += h.guest().send_slice(&response[written..]).unwrap();
+            }
+            written == response.len()
+        })
+        .await;
+        h.guest().close();
+        h.run_until("guest shutdown", PROMPT_STEPS, |h| {
+            h.guest().state() == tcp::State::Closed
+        })
+        .await;
+        assert_eq!(h.publisher.connections.len(), 1);
+        assert!(h.publisher.time_wait.is_empty());
+        // Expiring TCP shutdown state must not free a still-blocked host relay.
+        h.now += SmolDuration::from_secs(11);
+        h.step().await;
+        assert_eq!(h.publisher.connections.len(), 1);
+        let mut rejected = h.connect_host().await;
+        h.step().await;
+        let mut byte = [0];
+        let error = tokio::time::timeout(Duration::from_secs(1), rejected.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        let reader = spawn_read_to_end(client);
+        h.run_until("host response drained", HOST_DRAIN_STEPS, |_| {
+            reader.is_finished()
+        })
+        .await;
+        assert_eq!(reader.await.unwrap(), response);
+        h.run_until("active budget released", PROMPT_STEPS, |h| {
+            h.publisher.connections.is_empty()
+        })
+        .await;
+    }
+
+    /// Continuing write progress keeps a slow response alive beyond the idle timeout.
+    #[tokio::test]
+    async fn host_response_progress_renews_the_write_deadline() {
+        let mut h = Harness::new();
+        h.step_millis = 1;
+        let mut client = h.connect_host_with_send_buffer(Some(4096)).await;
+        h.wait_for_guest_accept().await;
+        client.shutdown().await.unwrap();
+        assert!(h.guest_recv_to_eof().await.is_empty());
+
+        // Each pause is shorter than the timeout, but their total exceeds it.
+        for value in [41, 42] {
+            let response = vec![value; 256 * 1024];
+            let mut written = 0;
+            h.run_until("response queued", PROMPT_STEPS, |h| {
+                if h.guest().can_send() {
+                    written += h.guest().send_slice(&response[written..]).unwrap();
+                }
+                written == response.len()
+            })
+            .await;
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(20)).await;
+            tokio::time::resume();
+
+            let reader = tokio::spawn(async move {
+                let mut received = vec![0; response.len()];
+                client.read_exact(&mut received).await.unwrap();
+                assert_eq!(received, response);
+                client
+            });
+            h.run_until(
+                "response delivered after write progress",
+                HOST_DRAIN_STEPS,
+                |_| reader.is_finished(),
+            )
+            .await;
+            client = reader.await.unwrap();
+        }
+        h.guest().close();
+        let reader = spawn_read_to_end(client);
+        h.run_until("response EOF", PROMPT_STEPS, |_| reader.is_finished())
+            .await;
+        assert!(reader.await.unwrap().is_empty());
+    }
+
+    /// A host that stops reading cannot pin the published-port budget forever.
+    #[tokio::test]
+    async fn stalled_host_response_releases_the_active_budget() {
+        let mut h = Harness::new();
+        h.publisher.max_inbound = NonZeroUsize::new(1);
+        let mut client = h.connect_host_with_send_buffer(Some(4096)).await;
+        h.wait_for_guest_accept().await;
+        client.shutdown().await.unwrap();
+        assert!(h.guest_recv_to_eof().await.is_empty());
+        let response = vec![42; 256 * 1024];
+        let mut written = 0;
+        h.run_until("guest response queued", PROMPT_STEPS, |h| {
+            if h.guest().can_send() {
+                written += h.guest().send_slice(&response[written..]).unwrap();
+            }
+            written == response.len()
+        })
+        .await;
+        h.guest().close();
+        h.run_until("guest shutdown", PROMPT_STEPS, |h| {
+            h.guest().state() == tcp::State::Closed
+        })
+        .await;
+        assert_eq!(h.publisher.connections.len(), 1);
+
+        // Keep the client open without reading, past both shutdown and drain deadlines.
+        h.now += SmolDuration::from_secs(31);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::time::resume();
+        h.run_until("stalled response to release admission", PROMPT_STEPS, |h| {
+            h.publisher.connections.is_empty()
+        })
+        .await;
+
+        h.guest().listen(TEST_GUEST_PORT).unwrap();
+        let mut next = h.connect_host().await;
+        next.write_all(b"next request").await.unwrap();
+        next.shutdown().await.unwrap();
+        h.wait_for_guest_accept().await;
+        assert_eq!(h.guest_recv_to_eof().await, b"next request");
+        drop(client);
+    }
+
+    /// Configuration controls admission, including unlimited, without resetting live flows.
+    #[tokio::test]
+    async fn inbound_limit_controls_live_connections_and_unlimited() {
+        for (configured, attempts) in [(Some(1), 3), (Some(3), 4), (Some(0), 3), (None, 257)] {
+            let mut h = Harness::new();
+            h.publisher = PortPublisher::new(
+                &[],
+                TcpAcceptQueueSize::DEFAULT,
+                configured.map(ConnectionLimit::from),
+                Some(Ipv4Addr::LOCALHOST),
+                None,
+                None,
+                None,
+                [2, 0, 0, 0, 0, 1],
+                [2, 0, 0, 0, 0, 2],
+                Arc::new(NetworkPolicy::default()),
+                h.shared.clone(),
+                &tokio::runtime::Handle::current(),
+            );
+            let cap = configured.filter(|&value| value != 0);
+            let mut clients = Vec::new();
+            for i in 0..attempts {
+                if i > 0 {
+                    h.publisher
+                        .ephemeral_port
+                        .store(UDP_EPHEMERAL_PORT_START, Ordering::Relaxed);
+                    let mut guest = tcp::Socket::new(
+                        tcp::SocketBuffer::new(vec![0; TCP_RX_BUF_SIZE]),
+                        tcp::SocketBuffer::new(vec![0; TCP_TX_BUF_SIZE]),
+                    );
+                    guest.listen(TEST_GUEST_PORT).unwrap();
+                    h.guest = h.sockets.add(guest);
+                }
+                let mut client = h.connect_host().await;
+                h.step().await;
+                if cap.is_some_and(|cap| i >= cap) {
+                    let mut byte = [0];
+                    let error =
+                        tokio::time::timeout(Duration::from_secs(1), client.read(&mut byte))
+                            .await
+                            .unwrap()
+                            .unwrap_err();
+                    assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+                } else {
+                    h.wait_for_guest_accept().await;
+                    h.guest().send_slice(b"ok").unwrap();
+                    let reader = tokio::spawn(async move {
+                        let mut response = [0; 2];
+                        client.read_exact(&mut response).await.unwrap();
+                        assert_eq!(&response, b"ok");
+                        client
+                    });
+                    h.run_until("live response", PROMPT_STEPS, |_| reader.is_finished())
+                        .await;
+                    clients.push(reader.await.unwrap());
+                }
+            }
+            assert_eq!(clients.len(), cap.unwrap_or(attempts).min(attempts));
         }
     }
 
@@ -1606,7 +2088,11 @@ mod tests {
             guest_ipv4: Some(guest_ip),
             guest_ipv6: None,
             ephemeral_port: Arc::new(AtomicU16::new(49152)),
-            max_inbound: 256,
+            max_inbound: NonZeroUsize::new(256),
+            time_wait: VecDeque::new(),
+
+            tcp_ports: HashSet::new(),
+            last_capacity_warning: None,
             udp_routes: routes,
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);
@@ -1650,7 +2136,11 @@ mod tests {
             guest_ipv4: Some(guest_ip),
             guest_ipv6: None,
             ephemeral_port: Arc::new(AtomicU16::new(49152)),
-            max_inbound: 256,
+            max_inbound: NonZeroUsize::new(256),
+            time_wait: VecDeque::new(),
+
+            tcp_ports: HashSet::new(),
+            last_capacity_warning: None,
             udp_routes: routes,
         };
         let src = SocketAddr::new(IpAddr::V4(guest_ip), 5353);

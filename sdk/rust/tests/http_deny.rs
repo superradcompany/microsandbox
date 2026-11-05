@@ -7,6 +7,7 @@
 //!
 //!     cargo nextest run -p microsandbox --tests --run-ignored=only
 
+use microsandbox::sandbox::HttpDenyResponseFormat;
 use microsandbox::{NetworkPolicy, Sandbox};
 use microsandbox_network::policy::Rule;
 use test_utils::msb_test;
@@ -34,7 +35,13 @@ fn dns_only_policy() -> NetworkPolicy {
     policy
 }
 
-async fn spawn(name: &str, tls: bool, enabled: bool, message: Option<&str>) -> Sandbox {
+async fn spawn(
+    name: &str,
+    tls: bool,
+    enabled: bool,
+    message: Option<&str>,
+    format: HttpDenyResponseFormat,
+) -> Sandbox {
     let message = message.map(str::to_owned);
     Sandbox::builder(name)
         .image(CURL_IMAGE)
@@ -43,14 +50,22 @@ async fn spawn(name: &str, tls: bool, enabled: bool, message: Option<&str>) -> S
         .user("0")
         .replace()
         .network(move |mut n| {
-            n = n
-                .policy(dns_only_policy())
-                .http(|h| h.deny_response(enabled));
+            n = n.policy(dns_only_policy());
+            // JSON cases exercise the defaults, without configuring HTTP at all.
+            if !enabled {
+                n = n.http(|h| h.deny_response(false));
+            }
+            if format == HttpDenyResponseFormat::Text {
+                n = n.http(|h| h.deny_response_format(format));
+            }
             if tls {
                 n = n.tls(|t| t.enabled(true));
             }
             if let Some(message) = message {
-                n = n.http(|h| h.deny_message(message));
+                n = n.http(|h| match format {
+                    HttpDenyResponseFormat::Text => h.deny_message(message),
+                    HttpDenyResponseFormat::Json => h.network_deny_message(message),
+                });
             }
             n
         })
@@ -76,7 +91,10 @@ async fn probe(sb: &Sandbox, url: &str) -> (String, String) {
     let stdout = out.stdout().unwrap_or_default();
     let mut lines = stdout.lines();
     let code = lines.next().unwrap_or_default().trim().to_string();
-    let body = lines.collect::<Vec<_>>().join("\n");
+    let body = lines
+        .take_while(|line| *line != "--stderr--")
+        .collect::<Vec<_>>()
+        .join("\n");
     (code, body)
 }
 
@@ -84,11 +102,18 @@ async fn probe(sb: &Sandbox, url: &str) -> (String, String) {
 // Tests
 //--------------------------------------------------------------------------------------------------
 
-/// With the default settings, neither plaintext nor intercepted TLS returns HTTP.
+/// With responses explicitly disabled, neither plaintext nor intercepted TLS returns HTTP.
 #[msb_test]
-async fn denied_requests_fail_without_opt_in() {
+async fn denied_requests_fail_with_explicit_opt_out() {
     let name = "http-deny-default";
-    let sb = spawn(name, true, false, Some("must not enable responses")).await;
+    let sb = spawn(
+        name,
+        true,
+        false,
+        Some("must not enable responses"),
+        HttpDenyResponseFormat::Json,
+    )
+    .await;
     for scheme in ["http", "https"] {
         let (code, body) = probe(&sb, &format!("{scheme}://{DENIED_HOST}/")).await;
         assert_eq!(
@@ -103,26 +128,21 @@ async fn denied_requests_fail_without_opt_in() {
     teardown(sb, name).await;
 }
 
-/// Plain HTTP to a denied name answers 403 with the default agent note.
+/// Plain HTTP to a denied name answers 403 with a structured policy error.
 #[msb_test]
-async fn denied_plain_http_gets_403_with_agent_note() {
+async fn denied_plain_http_gets_403_with_json_error() {
     let name = "http-deny-plain";
-    let sb = spawn(name, false, true, None).await;
+    let sb = spawn(name, false, true, None, HttpDenyResponseFormat::Json).await;
 
     let (code, body) = probe(&sb, &format!("http://{DENIED_HOST}/")).await;
     assert_eq!(
         code, "403",
         "expected 403 from the gateway, got {code} ({body})"
     );
-    assert!(
-        body.contains(&format!("`{DENIED_HOST}`")),
-        "body must name the blocked host: {body}"
-    );
-    assert!(body.contains("Note to agent:"), "body: {body}");
-    assert!(
-        !body.contains("{host}"),
-        "placeholder must be rendered: {body}"
-    );
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["code"], "network_policy_denied");
+    assert_eq!(error["domain"], DENIED_HOST);
+    assert_eq!(error["message"], "Request blocked by network policy.");
 
     teardown(sb, name).await;
 }
@@ -132,47 +152,43 @@ async fn denied_plain_http_gets_403_with_agent_note() {
 #[msb_test]
 async fn denied_https_gets_403_inside_intercepted_tls() {
     let name = "http-deny-tls";
-    let sb = spawn(name, true, true, None).await;
+    let sb = spawn(name, true, true, None, HttpDenyResponseFormat::Json).await;
 
     let (code, body) = probe(&sb, &format!("https://{DENIED_HOST}/")).await;
     assert_eq!(
         code, "403",
         "expected 403 from the gateway, got {code} ({body})"
     );
-    assert!(
-        body.contains(&format!("`{DENIED_HOST}`")),
-        "body must name the blocked host: {body}"
-    );
-    assert!(
-        body.contains("not allowed by the sandbox network policy"),
-        "body must explain the policy denial: {body}"
-    );
-    assert!(body.contains("Note to agent:"), "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["code"], "network_policy_denied");
+    assert_eq!(error["domain"], DENIED_HOST);
+    assert_eq!(error["message"], "Request blocked by network policy.");
 
     teardown(sb, name).await;
 }
 
-/// `http.deny_message` replaces the body and still renders `{host}`.
+/// Custom messages are literal; the requested domain is a separate JSON field.
 #[msb_test]
-async fn custom_http_deny_message_is_rendered() {
+async fn custom_http_deny_message_is_literal() {
     let name = "http-deny-custom";
     let sb = spawn(
         name,
         true,
         true,
         Some("blocked {host}: call the AllowHost tool to request access"),
+        HttpDenyResponseFormat::Json,
     )
     .await;
 
     let (code, body) = probe(&sb, &format!("https://{DENIED_HOST}/")).await;
     assert_eq!(code, "403", "expected 403, got {code} ({body})");
-    assert!(
-        body.contains(&format!(
-            "blocked {DENIED_HOST}: call the AllowHost tool to request access"
-        )),
-        "custom body not rendered: {body}"
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["code"], "network_policy_denied");
+    assert_eq!(error["domain"], DENIED_HOST);
+    assert_eq!(
+        error["message"],
+        "blocked {host}: call the AllowHost tool to request access"
     );
-    assert!(!body.contains("Note to agent:"), "default leaked: {body}");
 
     teardown(sb, name).await;
 }
@@ -182,7 +198,7 @@ async fn custom_http_deny_message_is_rendered() {
 #[msb_test]
 async fn denied_https_without_interception_still_fails_closed() {
     let name = "http-deny-tls-off";
-    let sb = spawn(name, false, true, None).await;
+    let sb = spawn(name, false, true, None, HttpDenyResponseFormat::Json).await;
 
     let (code, body) = probe(&sb, &format!("https://{DENIED_HOST}/")).await;
     assert_ne!(code, "403", "no HTTP answer expected without interception");
@@ -191,5 +207,25 @@ async fn denied_https_without_interception_still_fails_closed() {
         "curl must fail to connect, got {code} ({body})"
     );
 
+    teardown(sb, name).await;
+}
+
+/// Legacy SDK settings keep plain-text denials on both transports.
+#[msb_test]
+async fn legacy_text_denials_preserve_custom_messages() {
+    let name = "http-deny-legacy";
+    let sb = spawn(
+        name,
+        true,
+        true,
+        Some("blocked {host}"),
+        HttpDenyResponseFormat::Text,
+    )
+    .await;
+    for scheme in ["http", "https"] {
+        let (code, body) = probe(&sb, &format!("{scheme}://{DENIED_HOST}/")).await;
+        assert_eq!(code, "403");
+        assert_eq!(body.trim_end(), "blocked example.com");
+    }
     teardown(sb, name).await;
 }

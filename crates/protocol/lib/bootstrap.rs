@@ -2,6 +2,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use microsandbox_types::ExecLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::exec::ExecRlimit;
@@ -16,6 +17,10 @@ use crate::exec::ExecRlimit;
 /// starts. The surrounding protocol envelope supplies the schema generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestBootstrap {
+    /// The host saves startup failures before acknowledging or terminating the guest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub init_failure_ack: bool,
+
     /// Block-backed root filesystem assembly, when required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_root: Option<BootstrapBlockRoot>,
@@ -74,6 +79,10 @@ pub struct GuestBootstrap {
     /// Optional PID 1 handoff after agentd finishes guest initialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_init: Option<BootstrapHandoffInit>,
+
+    /// Authoritative execution policy installed by the runtime before guest initialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_limits: Option<ExecLimits>,
 }
 
 /// Block-backed root filesystem configuration.
@@ -320,6 +329,8 @@ mod tests {
     #[test]
     fn guest_bootstrap_round_trips_transport_sensitive_values() {
         let bootstrap = GuestBootstrap {
+            exec_limits: None,
+            init_failure_ack: true,
             block_root: Some(BootstrapBlockRoot::OciErofs {
                 lower: "/dev/vda".to_string(),
                 upper: BootstrapBlockRootUpper::Tmpfs {

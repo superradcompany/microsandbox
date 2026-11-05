@@ -51,6 +51,15 @@ pub struct PySnapshotHandle {
 
 #[pymethods]
 impl PySnapshot {
+    /// Observe artifact storage through this snapshot's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let snapshot = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = snapshot.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
+        })
+    }
+
     /// Create a disk snapshot, or include memory and execution state with full=True.
     ///
     /// The artifact is installed in a snapshot group under the default snapshots
@@ -336,7 +345,7 @@ impl PySnapshot {
             let update = RustSnapshot::group_head(&selector)
                 .await
                 .map_err(to_py_err)?;
-            Python::with_gil(|py| head_update_to_py(py, &update))
+            Python::attach(|py| head_update_to_py(py, &update))
         })
     }
 
@@ -406,13 +415,13 @@ impl PySnapshot {
 
     /// Closed descriptor state kind (`"file"` or `"checkpoint"`).
     #[getter]
-    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn state_kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "SnapshotStateKind", self.inner.manifest().state.kind())
     }
 
     /// On-disk format for file state.
     #[getter]
-    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn format(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .manifest()
             .state
@@ -464,7 +473,7 @@ impl PySnapshot {
 
     /// Snapshot payload scope as a `SnapshotScope` member (`DISK` today).
     #[getter]
-    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn scope(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(
             py,
             "SnapshotScope",
@@ -579,7 +588,7 @@ impl PySnapshot {
         let snapshot = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let report = snapshot.verify().await.map_err(to_py_err)?;
-            Python::with_gil(|py| -> PyResult<PyObject> {
+            Python::attach(|py| -> PyResult<Py<PyAny>> {
                 let upper = PyDict::new(py);
                 match report.upper {
                     RustUpperVerifyStatus::NotRecorded => {
@@ -688,6 +697,15 @@ impl PySnapshot {
 
 #[pymethods]
 impl PySnapshotHandle {
+    /// Observe artifact storage through this handle's captured backend.
+    fn storage_usage<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let usage = handle.storage_usage().await.map_err(to_py_err)?;
+            Ok(crate::storage::PyStorageItemUsage::from_rust(usage))
+        })
+    }
+
     /// Local group containing this indexed snapshot.
     #[getter]
     fn group(&self) -> Option<&str> {
@@ -723,7 +741,7 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn scope(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn scope(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "SnapshotScope", format_scope(self.inner.scope()))
     }
 
@@ -733,12 +751,12 @@ impl PySnapshotHandle {
     }
 
     #[getter]
-    fn state_kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn state_kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "SnapshotStateKind", self.inner.state_kind())
     }
 
     #[getter]
-    fn format(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+    fn format(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .format()
             .map(format_str)

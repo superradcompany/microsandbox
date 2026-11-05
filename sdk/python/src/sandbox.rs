@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 use tokio::sync::Mutex;
 
 use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    extract_str_enum, is_exact_sdk_type, restore_builder_from_args, sandbox_builder_from_args,
-    str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
+    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -31,6 +31,7 @@ pub struct PySandbox {
     // Immutable identity is available even while a consuming operation holds the wrapper lock.
     stop_name: String,
     stop_identity: String,
+    local_backend: bool,
 }
 
 /// One child outcome from a capture-once batch.
@@ -90,6 +91,7 @@ impl PySandbox {
         Self {
             stop_name: inner.name().to_string(),
             stop_identity: inner.id().to_string(),
+            local_backend: inner.backend_kind().as_str() == "local",
             inner: Arc::new(Mutex::new(Some(inner))),
         }
     }
@@ -180,7 +182,7 @@ impl PySandboxStopResult {
     }
 
     #[getter]
-    fn status(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "SandboxStatus", &self.status)
     }
 
@@ -233,6 +235,38 @@ impl PySandboxTouchResult {
 
 #[pymethods]
 impl PySandbox {
+    fn get_job<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            Ok(crate::jobs::PyJob {
+                inner: sandbox.get_job(id).await.map_err(crate::jobs::job_error)?,
+            })
+        })
+    }
+    #[pyo3(signature = (*, all = false, limit = 50, cursor = None))]
+    fn list_jobs<'py>(
+        &self,
+        py: Python<'py>,
+        all: bool,
+        limit: usize,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let options = crate::jobs::list_options(all, limit, cursor)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let page = sandbox
+                .list_jobs_with(|_| options)
+                .await
+                .map_err(crate::jobs::job_error)?;
+            crate::jobs::decode(
+                "page",
+                serde_json::to_value(page).map_err(crate::jobs::invalid)?,
+            )
+        })
+    }
+
     //----------------------------------------------------------------------------------------------
     // Static Methods — Creation
     //----------------------------------------------------------------------------------------------
@@ -612,6 +646,46 @@ impl PySandbox {
         })
     }
 
+    /// Execute a command with runtime-owned I/O.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        cmd,
+        args = None,
+        *,
+        cwd = None,
+        user = None,
+        env = None,
+        timeout = None,
+        stdin = None,
+        tty = false,
+        rlimits = None,
+    ))]
+    fn exec_detached<'py>(
+        &self,
+        py: Python<'py>,
+        cmd: String,
+        args: Option<&Bound<'py, PyAny>>,
+        cwd: Option<String>,
+        user: Option<String>,
+        env: Option<HashMap<String, String>>,
+        timeout: Option<f64>,
+        stdin: Option<&Bound<'py, PyAny>>,
+        tty: bool,
+        rlimits: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let (args, opts) = parse_exec_call(args, cwd, user, env, timeout, stdin, tty, rlimits)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            let handle = sandbox
+                .exec_detached_with(&cmd, |e| apply_exec_options(e, args, opts))
+                .await
+                .map_err(crate::jobs::job_error)?;
+            Ok(crate::jobs::PyJob { inner: handle })
+        })
+    }
+
     /// Execute a command with streaming I/O.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
@@ -878,8 +952,9 @@ impl PySandbox {
     /// applying anything.
     ///
     /// `secrets` maps secret names to spec dicts with at most one of
-    /// `"env"` / `"value"` / `"store"`, plus optional `"placeholder"` and
-    /// `"allowed_hosts"`. `secrets_rm` removes secrets by name.
+    /// `"env"` / `"value"` / `"store"`, plus optional placeholder, allowed
+    /// hosts, substitution, violation action, TLS identity requirement, and
+    /// `"allow_placeholder_for"` hosts. `secrets_rm` removes secrets by name.
     #[pyo3(signature = (
         *,
         cpus = None,
@@ -894,6 +969,8 @@ impl PySandbox {
         workdir = None,
         secrets = None,
         secrets_rm = None,
+        ports = None,
+        ports_rm = None,
         policy = None,
         dry_run = false,
     ))]
@@ -913,12 +990,14 @@ impl PySandbox {
         workdir: Option<String>,
         secrets: Option<HashMap<String, HashMap<String, Py<PyAny>>>>,
         secrets_rm: Option<Vec<String>>,
+        ports: Option<Py<PyAny>>,
+        ports_rm: Option<Py<PyAny>>,
         policy: Option<Py<PyAny>>,
         dry_run: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let secrets = build_secret_patches(py, secrets)?;
-        let patch = build_modify_patch(
+        let mut patch = build_modify_patch(
             cpus,
             max_cpus,
             memory,
@@ -932,6 +1011,9 @@ impl PySandbox {
             secrets,
             secrets_rm,
         );
+        patch.ports = crate::helpers::modify_ports(ports.as_ref().map(|value| value.bind(py)))?;
+        patch.ports_remove =
+            crate::helpers::modify_ports_remove(ports_rm.as_ref().map(|value| value.bind(py)))?;
         let policy = policy
             .as_ref()
             .map(|value| extract_str_enum(value.bind(py), "ModificationPolicy"))
@@ -977,7 +1059,10 @@ impl PySandbox {
     #[pyo3(signature = (interval = 1.0))]
     fn metrics_stream<'py>(&self, py: Python<'py>, interval: f64) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let interval_dur = std::time::Duration::from_secs_f64(interval);
+        let interval_dur = optional_duration(Some(interval))?.unwrap();
+        if interval_dur.is_zero() {
+            return Err(PyValueError::new_err("metrics interval must be positive"));
+        }
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
             let stream = sandbox.metrics_stream(interval_dur);
@@ -1083,13 +1168,14 @@ impl PySandbox {
     }
 
     /// Deprecated: use fork for live execution duplication.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1099,17 +1185,18 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork(py, name, record_integrity, guest_flush)
+        self.fork(py, name, record_integrity, guest_flush, volumes)
     }
 
     /// Deprecated: use fork_many for live execution duplication.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn branch_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         PyModule::import(py, "warnings")?.call_method1(
             "warn",
@@ -1119,18 +1206,21 @@ impl PySandbox {
                 2,
             ),
         )?;
-        self.fork_many(py, names, record_integrity, guest_flush)
+        self.fork_many(py, names, record_integrity, guest_flush, volumes)
     }
 
     /// Create an independent local CoW child without a durable full snapshot.
-    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (name, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork<'py>(
         &self,
         py: Python<'py>,
         name: String,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1140,6 +1230,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             Ok(PySandbox::from_rust(
                 builder.fork().await.map_err(to_py_err)?,
             ))
@@ -1147,14 +1238,17 @@ impl PySandbox {
     }
 
     /// Capture once for all names; return an outcome for each child in input order.
-    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None))]
+    #[pyo3(signature = (names, *, record_integrity = false, guest_flush = None, volumes = None))]
     fn fork_many<'py>(
         &self,
         py: Python<'py>,
         names: Vec<String>,
         record_integrity: bool,
         guest_flush: Option<String>,
+        volumes: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let volumes =
+            prepare_fork_volumes(volumes.as_ref().map(|v| v.bind(py)), self.local_backend)?;
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let sandbox = Self::clone_sandbox(&inner).await?;
@@ -1164,6 +1258,7 @@ impl PySandbox {
             if record_integrity {
                 builder = builder.record_integrity();
             }
+            builder = apply_fork_volumes(builder, &volumes)?;
             branch_outcomes(builder.fork().await.map_err(to_py_err)?)
         })
     }
@@ -1386,7 +1481,7 @@ impl PySandbox {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let obj: PyObject = slf.into();
+        let obj: Py<PyAny> = slf.into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -1458,6 +1553,7 @@ pub(crate) fn build_modify_patch(
         workdir,
         secrets,
         secrets_remove: secrets_rm.unwrap_or_default(),
+        ..Default::default()
     }
 }
 
@@ -1482,6 +1578,11 @@ pub(crate) fn build_secret_patches(
         let mut store = None;
         let mut placeholder = None;
         let mut allowed_hosts = Vec::new();
+        let mut substitution = None;
+        let mut violation_action = None;
+        let mut require_tls_identity = None;
+        let mut allow_placeholder_for = Vec::new();
+        let mut passthrough = Vec::new();
         for (key, obj) in spec {
             let obj = obj.bind(py);
             match key.as_str() {
@@ -1496,10 +1597,70 @@ pub(crate) fn build_secret_patches(
                         ))
                     })?
                 }
+                "substitution" => {
+                    if !is_exact_sdk_type(obj, "SecretSubstitution")? {
+                        return Err(PyTypeError::new_err(format!(
+                            "secret {name:?}: \"substitution\" must be SecretSubstitution"
+                        )));
+                    }
+                    substitution =
+                        Some(microsandbox_network::secrets::config::SecretSubstitution {
+                            headers: extract_secret_bool(
+                                &name,
+                                "substitution.headers",
+                                &obj.getattr("headers")?,
+                            )?,
+                            header_fields: obj.getattr("header_fields")?.extract().map_err(|_| {
+                                PyValueError::new_err(format!(
+                                    "secret {name:?}: \"substitution.header_fields\" must be a sequence of strings"
+                                ))
+                            })?,
+                            query: extract_secret_bool(
+                                &name,
+                                "substitution.query",
+                                &obj.getattr("query")?,
+                            )?,
+                            body: extract_secret_bool(
+                                &name,
+                                "substitution.body",
+                                &obj.getattr("body")?,
+                            )?,
+                        });
+                }
+                "violation_action" => violation_action = Some(parse_violation_action_obj(obj)?),
+                "require_tls_identity" => {
+                    require_tls_identity = Some(extract_secret_bool(&name, &key, obj)?);
+                }
+                "allow_placeholder_for" | "passthrough" => {
+                    let hosts: Vec<String> = obj.extract().map_err(|_| {
+                        PyValueError::new_err(format!(
+                            "secret {name:?}: {key:?} must be a sequence of strings"
+                        ))
+                    })?;
+                    if key == "passthrough" {
+                        if !hosts.is_empty() {
+                            let kwargs = PyDict::new(py);
+                            kwargs.set_item("stacklevel", 2)?;
+                            py.import("warnings")?.call_method(
+                                "warn",
+                                (
+                                    "passthrough is deprecated; use allow_placeholder_for instead",
+                                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                                ),
+                                Some(&kwargs),
+                            )?;
+                        }
+                        passthrough = hosts;
+                    } else {
+                        allow_placeholder_for = hosts;
+                    }
+                }
                 other => {
                     return Err(PyValueError::new_err(format!(
                         "secret {name:?}: unknown key {other:?}; expected \"env\", \"value\", \
-                         \"store\", \"placeholder\", or \"allowed_hosts\""
+                         \"store\", \"placeholder\", \"allowed_hosts\", \"substitution\", \
+                         \"violation_action\", \"require_tls_identity\", \
+                         \"allow_placeholder_for\", or \"passthrough\""
                     )));
                 }
             }
@@ -1513,13 +1674,17 @@ pub(crate) fn build_secret_patches(
             (_, Some(reference)) => Some(SecretSource::Store { reference }),
             _ => None,
         };
+        allow_placeholder_for.extend(passthrough);
         patches.push(SecretModificationPatch {
             name,
             source,
             value: value.unwrap_or_default().into(),
             placeholder,
             allowed_hosts,
-            ..SecretModificationPatch::default()
+            substitution,
+            violation_action,
+            require_tls_identity,
+            passthrough_hosts: allow_placeholder_for,
         });
     }
     Ok(patches)
@@ -1550,6 +1715,15 @@ pub(crate) fn validate_secret_source_exclusivity(
 fn extract_secret_str(name: &str, key: &str, obj: &Bound<'_, PyAny>) -> PyResult<String> {
     obj.extract()
         .map_err(|_| PyValueError::new_err(format!("secret {name:?}: {key:?} must be a string")))
+}
+
+fn extract_secret_bool(name: &str, key: &str, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !obj.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "secret {name:?}: {key:?} must be a bool"
+        )));
+    }
+    obj.extract()
 }
 
 /// Parse the `policy=` kwarg into the core modification policy.
@@ -1583,7 +1757,7 @@ pub(crate) fn apply_modify_policy(
 pub(crate) async fn run_modify(
     builder: microsandbox::sandbox::SandboxModificationBuilder,
     dry_run: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let plan = if dry_run {
         builder.dry_run().await
     } else {
@@ -1592,7 +1766,7 @@ pub(crate) async fn run_modify(
     .map_err(to_py_err)?;
     let value = serde_json::to_value(&plan)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-    Python::with_gil(|py| modification_plan_to_py(py, value))
+    Python::attach(|py| modification_plan_to_py(py, value))
 }
 
 /// Drive the shared compaction builder and return its measured result as a Python dictionary.
@@ -1602,7 +1776,7 @@ pub(crate) async fn run_compact(
     dry_run: bool,
     disk: Option<String>,
     root_disk_only: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     if let Some(layers) = layers {
         builder = builder.layers(layers);
     }
@@ -1620,14 +1794,14 @@ pub(crate) async fn run_compact(
     .map_err(to_py_err)?;
     let value =
         serde_json::to_value(result).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-    Python::with_gil(|py| modification_plan_to_py(py, value))
+    Python::attach(|py| modification_plan_to_py(py, value))
 }
 
 /// Convert a serialized modification plan while restoring its closed domain types.
 ///
 /// The public shape intentionally remains a dictionary, but known discriminators
 /// must not degrade back into raw strings at the native boundary.
-fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification plan must be an object",
@@ -1649,7 +1823,7 @@ fn modification_plan_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult
 }
 
 /// Convert planned changes, selecting the correct change enum from `kind`.
-fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Array(changes) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification plan changes must be an array",
@@ -1663,7 +1837,7 @@ fn planned_changes_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<P
     Ok(PyList::new(py, changes)?.unbind().into())
 }
 
-fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized planned change must be an object",
@@ -1698,7 +1872,7 @@ fn planned_change_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py
     Ok(dict.unbind().into())
 }
 
-fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Array(statuses) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized modification resize_status must be an array",
@@ -1712,7 +1886,7 @@ fn resize_statuses_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<P
     Ok(PyList::new(py, statuses)?.unbind().into())
 }
 
-fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<PyObject> {
+fn resize_status_to_py(py: Python<'_>, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     let serde_json::Value::Object(values) = value else {
         return Err(PyRuntimeError::new_err(
             "serialized resource resize status must be an object",
@@ -1740,7 +1914,7 @@ fn serialized_enum_to_py(
     value: serde_json::Value,
     enum_name: &str,
     field: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let serde_json::Value::String(value) = value else {
         return Err(PyRuntimeError::new_err(format!(
             "serialized {field} must be a string"
@@ -1798,7 +1972,7 @@ fn parse_exec_call(
     };
 
     if let Some(args_or_options) = args {
-        if let Ok(dict) = args_or_options.downcast::<PyDict>() {
+        if let Ok(dict) = args_or_options.cast::<PyDict>() {
             validate_exec_options_keys(dict)?;
             parsed_args = parse_options_args(dict)?;
             apply_exec_options_dict(&mut opts, dict)?;
@@ -1872,7 +2046,7 @@ fn apply_exec_options_dict(opts: &mut ExecOpts, dict: &Bound<'_, PyDict>) -> PyR
     Ok(())
 }
 
-fn extract_optional_dict_value<'py, T: FromPyObject<'py>>(
+fn extract_optional_dict_value<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<Option<T>> {
@@ -1928,18 +2102,18 @@ fn parse_args(args: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
     let Some(args) = args else {
         return Ok(Vec::new());
     };
-    if args.downcast::<PyDict>().is_ok() {
+    if args.cast::<PyDict>().is_ok() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "args must be a list of strings",
         ));
     }
-    if args.downcast::<PyBytes>().is_ok() || args.extract::<String>().is_ok() {
+    if args.cast::<PyBytes>().is_ok() || args.extract::<String>().is_ok() {
         return Err(pyo3::exceptions::PyTypeError::new_err(
             "args must be a list of strings, not a string",
         ));
     }
     let list = args
-        .downcast::<PyList>()
+        .cast::<PyList>()
         .map_err(|_| pyo3::exceptions::PyTypeError::new_err("args must be a list of strings"))?;
     list.iter().map(|item| item.extract::<String>()).collect()
 }
@@ -1953,7 +2127,7 @@ fn parse_stdin(stdin: Option<&Bound<'_, PyAny>>) -> PyResult<(Option<String>, Op
         return Ok((None, None));
     };
 
-    if let Ok(bytes) = stdin.downcast::<PyBytes>() {
+    if let Ok(bytes) = stdin.cast::<PyBytes>() {
         return Ok((Some("bytes".to_string()), Some(bytes.as_bytes().to_vec())));
     }
 
@@ -1977,7 +2151,9 @@ fn normalize_stdin(
     data: Option<Vec<u8>>,
 ) -> PyResult<(Option<String>, Option<Vec<u8>>)> {
     match mode.as_str() {
-        "null" => Ok((None, None)),
+        // Absence keeps the caller's builder default; explicit null must override a retained
+        // detached pipe, just as it overrides any other explicitly configured stdin mode.
+        "null" => Ok((Some(mode), None)),
         "pipe" => Ok((Some(mode), None)),
         "bytes" => Ok((Some(mode), Some(data.unwrap_or_default()))),
         _ => Err(PyValueError::new_err(format!(
@@ -2006,7 +2182,7 @@ fn parse_rlimit(obj: &Bound<'_, PyAny>) -> PyResult<(String, u64, u64)> {
     // enum before exposing its wire value to the native execution builder.
     let dict = obj.call_method0("_to_dict")?;
     let dict = dict
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| PyRuntimeError::new_err("Rlimit._to_dict() must return a dict"))?;
     let resource = required_string_from_dict(dict, "resource")?;
     let soft = required_from_dict(dict, "soft")?;
@@ -2056,13 +2232,10 @@ fn validate_rlimit_resource(resource: &str) -> PyResult<()> {
 }
 
 fn validate_timeout(timeout_secs: Option<f64>) -> PyResult<()> {
-    if timeout_secs.is_some_and(|timeout| timeout < 0.0) {
-        return Err(PyValueError::new_err("timeout must be non-negative"));
-    }
-    Ok(())
+    optional_duration(timeout_secs).map(|_| ())
 }
 
-fn required_from_dict<'py, T: FromPyObject<'py>>(
+fn required_from_dict<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
 ) -> PyResult<T> {
@@ -2107,6 +2280,7 @@ fn apply_exec_options(
     }
     // Stdin mode.
     match opts.stdin_mode.as_deref() {
+        Some("null") => builder = builder.stdin_null(),
         Some("pipe") => builder = builder.stdin_pipe(),
         Some("bytes") => {
             if let Some(data) = opts.stdin_data {
@@ -2255,7 +2429,7 @@ impl PyPullSession {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let obj: PyObject = slf.into();
+        let obj: Py<PyAny> = slf.into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -2347,7 +2521,7 @@ impl PyPullProgressIter {
 impl PyPullEvent {
     /// Canonical kind of pull-progress event.
     #[getter]
-    fn event_type(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn event_type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "PullEventType", self.event_type)
     }
 }
@@ -2481,7 +2655,7 @@ fn convert_pull_progress(event: microsandbox::sandbox::PullProgress) -> PyPullEv
 pub(crate) fn branch_outcomes(
     outcomes: Vec<microsandbox::sandbox::ForkOutcome>,
 ) -> PyResult<Vec<PyForkOutcome>> {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         outcomes
             .into_iter()
             .map(|outcome| {
@@ -2522,6 +2696,77 @@ mod tests {
     use microsandbox::sandbox::{SecretModificationPatch, SecretSource};
 
     use super::*;
+
+    #[test]
+    fn stdin_omission_preserves_defaults_but_explicit_null_overrides_a_pipe() {
+        use microsandbox::sandbox::ExecOptionsBuilder;
+        use microsandbox::sandbox::exec::StdinMode;
+
+        for builder in [
+            ExecOptionsBuilder::default(),
+            ExecOptionsBuilder::default().stdin_pipe(),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin("null".into(), None).unwrap();
+            let options = apply_exec_options(
+                builder,
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            assert!(matches!(options.stdin, StdinMode::Null));
+        }
+        let ordinary =
+            apply_exec_options(ExecOptionsBuilder::default(), vec![], ExecOpts::default())
+                .build()
+                .unwrap();
+        assert!(matches!(ordinary.stdin, StdinMode::Null));
+        let detached = apply_exec_options(
+            ExecOptionsBuilder::default().stdin_pipe(),
+            vec![],
+            ExecOpts::default(),
+        )
+        .build()
+        .unwrap();
+        assert!(matches!(detached.stdin, StdinMode::Pipe));
+        for (mode, data) in [
+            ("pipe", None),
+            ("bytes", Some(vec![])),
+            ("bytes", Some(b"finite".to_vec())),
+        ] {
+            let (stdin_mode, stdin_data) = normalize_stdin(mode.into(), data.clone()).unwrap();
+            let options = apply_exec_options(
+                ExecOptionsBuilder::default(),
+                vec![],
+                ExecOpts {
+                    stdin_mode,
+                    stdin_data,
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap();
+            match options.stdin {
+                StdinMode::Pipe => assert_eq!(mode, "pipe"),
+                StdinMode::Bytes(bytes) => assert_eq!(Some(bytes), data),
+                StdinMode::Null => panic!("explicit pipe/bytes became null"),
+            }
+        }
+    }
+
+    #[test]
+    fn execution_timeouts_reject_non_finite_and_overflowing_values() {
+        Python::initialize();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, f64::MAX] {
+            assert!(validate_timeout(Some(value)).is_err());
+        }
+        assert!(validate_timeout(Some(0.5)).is_ok());
+        assert!(validate_timeout(Some(0.0)).is_ok());
+    }
 
     #[test]
     fn explicit_stop_duration_preserves_zero_and_fractional_seconds() {
@@ -2613,6 +2858,181 @@ mod tests {
         let patch = secret_patch("STRIPE_KEY", None, "sk_test_123");
         let debug = format!("{patch:?}");
         assert!(!debug.contains("sk_test_123"), "debug output leaks value");
+    }
+
+    #[test]
+    fn python_secret_modify_options_reach_rust_patch() {
+        let _guard = crate::helpers::tests::PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            // Load the public Python types without requiring a built extension or VM.
+            let modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let previous_package = modules.get_item("microsandbox").ok();
+            let previous_types = modules.get_item("microsandbox.types").ok();
+            let package = PyModule::new(py, "microsandbox").unwrap();
+            modules.set_item("microsandbox", &package).unwrap();
+            let types = PyModule::from_code(
+                py,
+                &std::ffi::CString::new(include_str!("../microsandbox/types.py")).unwrap(),
+                pyo3::ffi::c_str!("microsandbox/types.py"),
+                pyo3::ffi::c_str!("microsandbox.types"),
+            )
+            .unwrap();
+            package.setattr("types", &types).unwrap();
+            let parse = |expression: &str| {
+                let expression = std::ffi::CString::new(expression).unwrap();
+                let spec = py.eval(&expression, Some(&types.dict()), None).unwrap();
+                let secrets = PyDict::new(py);
+                secrets.set_item("KEY", spec).unwrap();
+                build_secret_patches(py, Some(secrets.extract().unwrap()))
+            };
+
+            let patches = parse(
+                "dict(value='private-material', allowed_hosts=['api.example.com'], \
+                 substitution=SecretSubstitution(headers=False, query=True, body=True), \
+                 violation_action=ViolationAction.BLOCK_AND_TERMINATE, \
+                 require_tls_identity=False, allow_placeholder_for=('logs.example.com',))",
+            )
+            .unwrap();
+            let patch = &patches[0];
+            let substitution = patch.substitution.as_ref().unwrap();
+            assert!(!substitution.headers);
+            assert!(substitution.query);
+            assert!(substitution.body);
+            let wire = serde_json::to_value(patch).unwrap();
+            assert_eq!(wire["require_tls_identity"], false);
+            assert_eq!(wire["violation_action"], "block-and-terminate");
+            assert_eq!(wire["passthrough_hosts"][0], "logs.example.com");
+            assert_eq!(wire["allowed_hosts"][0], "api.example.com");
+            assert!(!format!("{patch:?}").contains("private-material"));
+
+            for action in ["BLOCK", "BLOCK_AND_LOG", "BLOCK_AND_TERMINATE"] {
+                let patches =
+                    parse(&format!("dict(violation_action=ViolationAction.{action})")).unwrap();
+                assert!(patches[0].violation_action.is_some());
+            }
+            for required in ["True", "False"] {
+                let patches = parse(&format!("dict(require_tls_identity={required})")).unwrap();
+                assert_eq!(patches[0].require_tls_identity, Some(required == "True"));
+            }
+            let patches = parse("dict(substitution=SecretSubstitution())").unwrap();
+            let substitution = patches[0].substitution.as_ref().unwrap();
+            assert!(substitution.headers);
+            assert!(substitution.header_fields.is_empty());
+            assert!(!substitution.query);
+            assert!(!substitution.body);
+
+            let patches = parse(
+                "dict(substitution=SecretSubstitution(header_fields=('authorization', 'x-api-key')))",
+            )
+            .unwrap();
+            let wire = serde_json::to_value(&patches[0]).unwrap();
+            assert_eq!(
+                wire["substitution"]["header_fields"],
+                serde_json::json!(["authorization", "x-api-key"])
+            );
+
+            for expression in ["{}", "dict(value='private-material')"] {
+                let patches = parse(expression).unwrap();
+                let patch = &patches[0];
+                assert!(patch.substitution.is_none());
+                assert!(patch.violation_action.is_none());
+                assert!(patch.require_tls_identity.is_none());
+                assert!(patch.passthrough_hosts.is_empty());
+                let wire = serde_json::to_value(patch).unwrap();
+                for key in [
+                    "substitution",
+                    "violation_action",
+                    "require_tls_identity",
+                    "passthrough_hosts",
+                ] {
+                    assert!(wire.get(key).is_none());
+                }
+            }
+
+            let warnings = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let context = warnings
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let recorded = context.call_method0("__enter__").unwrap();
+            warnings.call_method1("simplefilter", ("always",)).unwrap();
+            for expression in [
+                "dict(passthrough=['legacy.example'])",
+                "dict(allow_placeholder_for=['new.example'], passthrough=['legacy.example'])",
+            ] {
+                let patches = parse(expression).unwrap();
+                assert_eq!(
+                    patches[0].passthrough_hosts.last().unwrap(),
+                    "legacy.example"
+                );
+                if expression.contains("allow_placeholder_for") {
+                    assert_eq!(patches[0].passthrough_hosts[0], "new.example");
+                }
+            }
+            assert_eq!(recorded.len().unwrap(), 2);
+            let warning = recorded.get_item(0).unwrap();
+            assert!(
+                warning
+                    .getattr("category")
+                    .unwrap()
+                    .is(&py.get_type::<pyo3::exceptions::PyDeprecationWarning>())
+            );
+            assert!(
+                warning
+                    .getattr("message")
+                    .unwrap()
+                    .str()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("allow_placeholder_for")
+            );
+            assert!(
+                parse("dict(passthrough=[])").unwrap()[0]
+                    .passthrough_hosts
+                    .is_empty()
+            );
+            assert_eq!(recorded.len().unwrap(), 2);
+            context
+                .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                .unwrap();
+
+            for expression in [
+                "dict(substitution={})",
+                "dict(substitution=None)",
+                "dict(substitution=SecretSubstitution(headers='private-material'))",
+                "dict(substitution=SecretSubstitution(query=1))",
+                "dict(substitution=SecretSubstitution(body=None))",
+                "dict(require_tls_identity=1)",
+                "dict(require_tls_identity='private-material')",
+                "dict(require_tls_identity=None)",
+                "dict(violation_action='private-material')",
+                "dict(violation_action=None)",
+                "dict(allow_placeholder_for='private-material')",
+                "dict(allow_placeholder_for=[1])",
+                "dict(passthrough=[None])",
+                "dict(unknown='private-material')",
+                "dict(env='HOST_KEY', value='private-material')",
+            ] {
+                let error = match parse(expression) {
+                    Ok(_) => panic!("malformed spec accepted: {expression}"),
+                    Err(error) => error,
+                };
+                assert!(!error.to_string().contains("private-material"));
+            }
+            for (name, previous) in [
+                ("microsandbox", previous_package),
+                ("microsandbox.types", previous_types),
+            ] {
+                if let Some(previous) = previous {
+                    modules.set_item(name, previous).unwrap();
+                } else {
+                    modules.del_item(name).unwrap();
+                }
+            }
+        });
     }
 
     #[test]

@@ -65,27 +65,24 @@ The collector reads the shared-memory registry directly:
 
 <Steps>
   <Step title="Start the collector">
-    <Tabs>
-      <Tab title="gRPC">
-        Use port `4317` for most local collectors and sidecars.
+    <CodeGroup>
+    ```sh gRPC
+    # Port 4317 is typical for local collectors and sidecars.
+    msb-metrics otel --endpoint=http://localhost:4317
+    ```
 
-        ```sh
-        msb-metrics otel --endpoint=http://localhost:4317
-        ```
-      </Tab>
-      <Tab title="HTTP">
-        Use a complete metrics endpoint, commonly on port `4318`.
-
-        ```sh
-        msb-metrics otel --endpoint=https://example.com/otlp/v1/metrics --protocol=http
-        ```
-      </Tab>
-    </Tabs>
+    ```sh HTTP
+    # Use a complete metrics endpoint, commonly on port 4318.
+    msb-metrics otel --endpoint=https://example.com/otlp/v1/metrics --protocol=http
+    ```
+    </CodeGroup>
   </Step>
   <Step title="Run a sandbox">
-    ```sh
+    <CodeGroup>
+    ```sh Shell
     msb run alpine
     ```
+    </CodeGroup>
   </Step>
   <Step title="Check your backend">
     Metrics appear after the next collection and export intervals.
@@ -97,22 +94,22 @@ The collector reads the shared-memory registry directly:
 For production, use Grafana Alloy or another local collector as a forwarder.
 You can also export directly to a hosted backend.
 
-End-to-end setup walkthroughs live under [Examples](/examples/overview):
+End-to-end setup walkthroughs live in [Guides](/how-to/overview#observability):
 
 <CardGroup cols={2}>
-  <Card title="Grafana Alloy" icon="route" href="/examples/metrics-backends/grafana-alloy">
+  <Card title="Grafana Alloy" icon="route" href="/how-to/metrics-backends/grafana-alloy">
     Forward metrics through a local Alloy process.
   </Card>
-  <Card title="Grafana Cloud" icon="cloud-arrow-up" href="/examples/metrics-backends/grafana-cloud">
+  <Card title="Grafana Cloud" icon="cloud-arrow-up" href="/how-to/metrics-backends/grafana-cloud">
     Export directly to Grafana Cloud.
   </Card>
-  <Card title="Prometheus" icon="fire" href="/examples/metrics-backends/prometheus">
+  <Card title="Prometheus" icon="fire" href="/how-to/metrics-backends/prometheus">
     Use Prometheus's native OTLP receiver.
   </Card>
-  <Card title="OpenTelemetry Collector" icon="terminal" href="/examples/metrics-backends/otel-collector">
+  <Card title="OpenTelemetry Collector" icon="terminal" href="/how-to/metrics-backends/otel-collector">
     Run a local OpenTelemetry Collector.
   </Card>
-  <Card title="Datadog" icon="chart-line" href="/examples/metrics-backends/datadog">
+  <Card title="Datadog" icon="chart-line" href="/how-to/metrics-backends/datadog">
     Export through the Datadog Agent.
   </Card>
 </CardGroup>
@@ -126,8 +123,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | Suffix | Unit | Description |
 | --- | --- | --- |
 | `cpu.utilization` | `1` | vCPU-seconds per wall-second. A fully used 2-vCPU sandbox reports `2.0`. |
-| `memory.usage` | `By` | Resident memory. |
-| `memory.limit` | `By` | Configured guest memory limit. |
+| `memory.usage` | `By` | Guest memory in use, measured against the live memory size when the runtime reports it. |
+| `memory.limit` | `By` | Effective guest memory limit: boot memory plus plugged memory. Follows live memory resizes. |
+| `memory.host_resident` | `By` | Host-resident memory backing the guest, when the VMM can report it. |
 | `disk.bytes_read` | `By` | Cumulative bytes read by the sandbox process. |
 | `disk.bytes_written` | `By` | Cumulative bytes written. |
 | `network.bytes_received` | `By` | Cumulative bytes from runtime to guest. |
@@ -137,8 +135,9 @@ Metrics use the `microsandbox.*` namespace. The table shows only the suffix.
 | `upper.host_allocated` | `By` | Host-allocated space for the writable upper image when observable. |
 | `uptime` | `s` | Sandbox uptime. |
 
-Disk and network totals are gauges containing absolute cumulative values. Use
-`rate()` in PromQL for throughput.
+During a resize, `memory.limit` follows memory as the guest adds or releases it. Usage can briefly be inaccurate or unavailable until guest statistics catch up. OTLP omits unavailable usage; stdout shows `N/A`. The limit is still reported.
+
+Sandboxes started by older runtimes report their boot allocation until restarted. Disk and network totals are cumulative gauges; use `rate()` in PromQL for throughput.
 
 ### Attributes
 
@@ -172,7 +171,8 @@ Prometheus replaces dots in OpenTelemetry names with underscores. For example,
 `user.id` becomes `user_id`, and `microsandbox.cpu.utilization` becomes
 `microsandbox_cpu_utilization`.
 
-```promql
+<CodeGroup>
+```promql promql
 # CPU by user
 sum by (user_id) (microsandbox_cpu_utilization)
 
@@ -182,6 +182,7 @@ microsandbox_cpu_utilization{user_id="alice"}
 # CPU by user in one tenant
 sum by (user_id) (microsandbox_cpu_utilization{tenant="acme"})
 ```
+</CodeGroup>
 
 ### Restarts and stops
 
@@ -211,13 +212,16 @@ All use the OTel scope `microsandbox-metrics-collector`.
 
 **Exports are flowing**
 
-```promql
+<CodeGroup>
+```promql promql
 rate(microsandbox_collector_exports_success_total[1m])
 ```
+</CodeGroup>
 
 **Export failure ratio**
 
-```promql
+<CodeGroup>
+```promql promql
 rate(microsandbox_collector_exports_failure_total[5m])
   /
 clamp_min(
@@ -226,12 +230,15 @@ clamp_min(
   1
 )
 ```
+</CodeGroup>
 
 **No successful export for five minutes**
 
-```promql
+<CodeGroup>
+```promql promql
 time() - microsandbox_collector_last_success_timestamp_seconds > 300
 ```
+</CodeGroup>
 
 ### Outages and retries
 

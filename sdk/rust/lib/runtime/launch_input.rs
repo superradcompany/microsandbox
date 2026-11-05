@@ -251,6 +251,10 @@ pub(super) fn legacy_env(bootstrap: &GuestBootstrap) -> MicrosandboxResult<Vec<S
         .expect("LaunchConfig is an object")
         .remove("bootstrap");
     check.as_object_mut().unwrap().remove("execution");
+    check
+        .as_object_mut()
+        .unwrap()
+        .remove("protected_guest_state");
     check["env"] = json!(env);
     check["workdir"] = json!(bootstrap.default_cwd);
     let mut decoded = LaunchConfig::from_json(&serde_json::to_vec(&check)?)
@@ -261,6 +265,12 @@ pub(super) fn legacy_env(bootstrap: &GuestBootstrap) -> MicrosandboxResult<Vec<S
         })?
         .bootstrap;
     decoded.default_env = bootstrap.default_env.clone();
+    // The legacy grammar cannot carry execution limits, and a cold launch on a
+    // released runtime deliberately proceeds without them: the old guest
+    // advertises none, so the SDK keeps its historical buffering. Restores
+    // that captured limits are rejected by the launch capability check before
+    // this encoder runs.
+    decoded.exec_limits = bootstrap.exec_limits;
     if decoded != *bootstrap {
         return unsupported("guest configuration requiring the typed transport");
     }

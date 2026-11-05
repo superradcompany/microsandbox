@@ -531,6 +531,8 @@ fn signal_process_group_only(pid: i32, signum: i32) -> AgentdResult<()> {
 fn exit_code(status: i32) -> i32 {
     if libc::WIFEXITED(status) {
         libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
     } else {
         -1
     }
@@ -553,6 +555,13 @@ mod tests {
     const HELPER_ENV: &str = "MSB_AGENTD_PROCESS_MANAGER_HELPER";
     const HELPER_SENTINEL: &str = "process-manager-helper-passed";
     const TEST_NAME: &str = "process::tests::reaping_is_batched_and_tracks_exit_codes";
+
+    #[test]
+    fn maps_normal_and_signal_wait_statuses_to_shell_exit_codes() {
+        assert_eq!(exit_code(42 << 8), 42);
+        assert_eq!(exit_code(libc::SIGTERM), 128 + libc::SIGTERM);
+        assert_eq!(exit_code(libc::SIGKILL), 128 + libc::SIGKILL);
+    }
 
     #[test]
     fn reaping_is_batched_and_tracks_exit_codes() {

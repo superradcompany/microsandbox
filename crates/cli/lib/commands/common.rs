@@ -15,9 +15,12 @@ use microsandbox::sandbox::{
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
+use microsandbox_network::config::{PortProtocol, PublishedPort};
+#[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 #[cfg(feature = "net")]
 use microsandbox_types::NetworkRateLimitDirection;
+use microsandbox_types::SecretSubstitution;
 
 use crate::ui;
 
@@ -147,6 +150,10 @@ pub struct SandboxOpts {
     /// Guest transparent huge-page policy selected at boot.
     #[arg(long, value_name = "POLICY", value_parser = ["always", "madvise", "never"])]
     pub thp: Option<String>,
+
+    /// Enable or disable nested virtualization. Omission uses the runtime default.
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub nested_virt: Option<bool>,
 
     /// Guest wall-clock policy: `sync` (default) keeps the guest clock in step with the
     /// host; `off` leaves it alone after boot, including across full snapshot restores.
@@ -353,7 +360,7 @@ pub struct SandboxOpts {
     pub vsock: Vec<String>,
 
     // --- Networking (requires "net" feature) ---
-    /// Forward a host port to the sandbox (HOST:GUEST, BIND_ADDR:HOST:GUEST, and /udp variants).
+    /// Forward host ports (HOST:GUEST or BIND_ADDR:HOST:GUEST, with equal-length ranges and /udp).
     #[cfg(feature = "net")]
     #[arg(short, long)]
     pub port: Vec<String>,
@@ -362,6 +369,11 @@ pub struct SandboxOpts {
     #[cfg(feature = "net")]
     #[arg(long, value_name = "DEPTH", value_parser = clap::value_parser!(u32).range(1..=i64::from(i32::MAX)))]
     pub tcp_accept_queue_size: Option<u32>,
+
+    /// Maximum active inbound TCP connections across published ports; zero is unlimited.
+    #[cfg(feature = "net")]
+    #[arg(long)]
+    pub max_inbound_tcp_connections: Option<usize>,
 
     /// Disable all network access by default. Sugar for `--net-default deny`.
     /// Combine with `--net-rule allow@<target>` entries to build an
@@ -586,6 +598,24 @@ pub struct SandboxOpts {
     )]
     pub socks5_password_env: Option<String>,
 
+    /// Username for HTTP CONNECT proxy authentication.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "USERNAME",
+        requires_all = ["proxy", "http_connect_password_env"]
+    )]
+    pub http_connect_username: Option<String>,
+
+    /// Host environment variable containing the HTTP CONNECT proxy password.
+    #[cfg(feature = "net")]
+    #[arg(
+        long,
+        value_name = "ENV_VAR",
+        requires_all = ["proxy", "http_connect_username"]
+    )]
+    pub http_connect_password_env: Option<String>,
+
     // --- TLS interception ---
     /// Intercept and inspect HTTPS traffic via a built-in TLS proxy.
     #[cfg(feature = "net")]
@@ -641,6 +671,13 @@ pub struct SandboxOpts {
     /// and stored only as a source reference, never inlined in the sandbox
     /// config. Inline `ENV=VALUE@HOST` is rejected; export the value and use
     /// `ENV[:OPTIONS]@HOST[,HOST...]`.
+    ///
+    /// OPTIONS are comma-separated: `no-headers`, `headers=[FIELD,...]`,
+    /// `query`, `body`, `passthrough=HOST`, or `passthrough=[HOST,...]`.
+    /// Headers are substituted by default; query and body substitution are off.
+    /// `headers=*` selects all headers. Passthrough sends the placeholder unchanged.
+    ///
+    /// Example: `--secret 'GH_TOKEN:passthrough=api.anthropic.com@github.com,api.github.com'`.
     #[cfg(feature = "net")]
     #[arg(long)]
     pub secret: Vec<String>,
@@ -659,9 +696,8 @@ pub(crate) struct ParsedSecret {
     pub(crate) env_var: String,
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) passthrough_hosts: Vec<String>,
-    pub(crate) substitute_headers: bool,
-    pub(crate) substitute_query: bool,
-    pub(crate) substitute_body: bool,
+    /// The substitution rule, or `None` when no substitution option was given.
+    pub(crate) substitution: Option<SecretSubstitution>,
 }
 
 /// Parsed public CLI mount options.
@@ -728,6 +764,8 @@ impl SandboxOpts {
             if self.socks4_user_id.is_some()
                 || self.socks5_username.is_some()
                 || self.socks5_password_env.is_some()
+                || self.http_connect_username.is_some()
+                || self.http_connect_password_env.is_some()
             {
                 anyhow::bail!("proxy authentication flags require --proxy");
             }
@@ -735,7 +773,7 @@ impl SandboxOpts {
         };
 
         match raw.parse::<OutboundProxy>()? {
-            OutboundProxy::HttpConnect { address } => {
+            OutboundProxy::HttpConnect { address, .. } => {
                 if self.socks4_user_id.is_some()
                     || self.socks5_username.is_some()
                     || self.socks5_password_env.is_some()
@@ -745,16 +783,38 @@ impl SandboxOpts {
                     );
                 }
 
-                Ok(Some(
-                    OutboundProxyBuilder::new()
-                        .http_connect(address.to_string())
-                        .build()?,
-                ))
+                let proxy = OutboundProxyBuilder::new().http_connect(address.to_string());
+                let proxy = match (
+                    self.http_connect_username.as_deref(),
+                    self.http_connect_password_env.as_deref(),
+                ) {
+                    (Some(username), Some(password_env)) => {
+                        proxy.credentials(username, microsandbox::SecretSource::env(password_env))
+                    }
+                    (Some(_), None) => {
+                        anyhow::bail!(
+                            "--http-connect-username requires --http-connect-password-env"
+                        )
+                    }
+                    (None, Some(_)) => {
+                        anyhow::bail!(
+                            "--http-connect-password-env requires --http-connect-username"
+                        )
+                    }
+                    (None, None) => proxy,
+                };
+                Ok(Some(proxy.build()?))
             }
             OutboundProxy::Socks4 { address, .. } => {
                 if self.socks5_username.is_some() || self.socks5_password_env.is_some() {
                     anyhow::bail!(
                         "--socks5-username and --socks5-password-env require a socks5:// proxy"
+                    );
+                }
+                if self.http_connect_username.is_some() || self.http_connect_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "--http-connect-username and --http-connect-password-env require an http:// proxy"
                     );
                 }
 
@@ -768,6 +828,12 @@ impl SandboxOpts {
             OutboundProxy::Socks5 { address, .. } => {
                 if self.socks4_user_id.is_some() {
                     anyhow::bail!("--socks4-user-id requires a socks4:// proxy");
+                }
+                if self.http_connect_username.is_some() || self.http_connect_password_env.is_some()
+                {
+                    anyhow::bail!(
+                        "--http-connect-username and --http-connect-password-env require an http:// proxy"
+                    );
                 }
 
                 let proxy = OutboundProxyBuilder::new().socks5(address.to_string());
@@ -862,6 +928,7 @@ impl SandboxOpts {
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
             || self.tcp_accept_queue_size.is_some()
+            || self.max_inbound_tcp_connections.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.tls_intercept
@@ -1057,6 +1124,7 @@ impl SandboxOpts {
             || self.memory.is_some()
             || self.max_memory.is_some()
             || self.thp.is_some()
+            || self.nested_virt.is_some()
             || self.guest_clock.is_some()
             || !self.volume.is_empty()
             || !self.mount_dir.is_empty()
@@ -1117,12 +1185,15 @@ impl SandboxOpts {
             || self.max_tcp_connections.is_some()
             || self.max_udp_connections.is_some()
             || self.tcp_accept_queue_size.is_some()
+            || self.max_inbound_tcp_connections.is_some()
             || self.net_strict.is_some()
             || self.trust_host_cas
             || self.proxy.is_some()
             || self.socks4_user_id.is_some()
             || self.socks5_username.is_some()
             || self.socks5_password_env.is_some()
+            || self.http_connect_username.is_some()
+            || self.http_connect_password_env.is_some()
             || self.tls_intercept
             || !self.tls_intercept_port.is_empty()
             || !self.tls_bypass.is_empty()
@@ -1333,6 +1404,9 @@ fn apply_sandbox_opts_inner(
     }
     if let Some(ref max_memory) = opts.max_memory {
         builder = builder.max_memory(ui::parse_size_mib(max_memory).map_err(anyhow::Error::msg)?);
+    }
+    if let Some(enabled) = opts.nested_virt {
+        builder = builder.nested_virt(enabled);
     }
     if let Some(ref thp) = opts.thp {
         let policy = thp
@@ -2035,6 +2109,14 @@ pub fn apply_explicit_disk_mount(
     builder: SandboxBuilder,
     spec: &str,
 ) -> anyhow::Result<SandboxBuilder> {
+    let (guest, mount) = parse_explicit_disk_mount(spec)?;
+    Ok(builder.volume(guest, |_| mount))
+}
+
+/// Parse a `--mount-disk` spec into its guest path and configured mount.
+///
+/// Shared by create, restore, and both fork forms.
+pub(crate) fn parse_explicit_disk_mount(spec: &str) -> anyhow::Result<(String, MountBuilder)> {
     let parsed = parse_cli_mount_spec(
         "mount-disk",
         spec,
@@ -2045,19 +2127,16 @@ pub fn apply_explicit_disk_mount(
         },
     )?;
 
-    let source = parsed.source.to_string();
     let guest = parsed.guest.to_string();
     let options = parsed.options;
-    Ok(builder.volume(guest, move |mut m| {
-        m = m.disk(&source);
-        if let Some(format) = options.format {
-            m = m.format(format);
-        }
-        if let Some(fstype) = options.fstype.as_deref() {
-            m = m.fstype(fstype);
-        }
-        apply_common_mount_options(m, options)
-    }))
+    let mut mount = MountBuilder::new(&guest).disk(parsed.source);
+    if let Some(format) = options.format {
+        mount = mount.format(format);
+    }
+    if let Some(fstype) = options.fstype.as_deref() {
+        mount = mount.fstype(fstype);
+    }
+    Ok((guest, apply_common_mount_options(mount, options)))
 }
 
 /// Apply a `--mount-named` spec to the builder.
@@ -2518,12 +2597,16 @@ fn apply_network_opts(
 
     // Port mappings.
     for port_str in &opts.port {
-        let (bind, host, guest, udp) = parse_port_mapping(port_str)?;
-        builder = if udp {
-            builder.port_udp_bind(bind, host, guest)
-        } else {
-            builder.port_bind(bind, host, guest)
-        };
+        for port in parse_port_mapping(port_str)? {
+            builder = match port.protocol {
+                PortProtocol::Udp => {
+                    builder.port_udp_bind(port.host_bind, port.host_port, port.guest_port)
+                }
+                PortProtocol::Tcp => {
+                    builder.port_bind(port.host_bind, port.host_port, port.guest_port)
+                }
+            };
+        }
     }
 
     // Some callers intentionally apply only additive ports after resolving network settings.
@@ -2534,35 +2617,24 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let mut secret_specs: Vec<ParsedSecret> = Vec::new();
-    for secret_str in &opts.secret {
-        let parsed = parse_secret(secret_str, "create")?;
-        match secret_specs
-            .iter_mut()
-            .find(|existing| existing.env_var == parsed.env_var)
-        {
-            Some(existing) => {
-                extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
-                extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
-                existing.substitute_headers &= parsed.substitute_headers;
-                existing.substitute_query |= parsed.substitute_query;
-                existing.substitute_body |= parsed.substitute_body;
-            }
-            None => secret_specs.push(parsed),
-        }
-    }
+    let secret_specs = merge_secrets(&opts.secret, "create")?;
     for secret in secret_specs {
         let env_var = secret.env_var;
         let source = microsandbox::sandbox::SecretSource::Env {
             var: env_var.clone(),
         };
+        let rule = secret.substitution.unwrap_or_default();
         builder = builder.secret(|mut s| {
+            s = s.env(&env_var).source(source);
+            // `substitute_in_header_fields` enables header substitution, so the
+            // explicit enabled/disabled switch must be applied after it.
+            if !rule.header_fields.is_empty() {
+                s = s.substitute_in_header_fields(rule.header_fields);
+            }
             s = s
-                .env(&env_var)
-                .source(source)
-                .substitute_in_headers(secret.substitute_headers)
-                .substitute_in_query(secret.substitute_query)
-                .substitute_in_body(secret.substitute_body);
+                .substitute_in_headers(rule.headers)
+                .substitute_in_query(rule.query)
+                .substitute_in_body(rule.body);
             for host in secret.allowed_hosts {
                 s = allow_secret_host(s, &host);
             }
@@ -2604,6 +2676,7 @@ fn apply_network_opts(
         let max_conn = opts.max_tcp_connections.or(opts.max_connections);
         let max_udp_conn = opts.max_udp_connections;
         let tcp_accept_queue_size = opts.tcp_accept_queue_size;
+        let max_inbound_tcp_connections = opts.max_inbound_tcp_connections;
         let ipv4_pool = opts
             .net_ipv4_pool
             .as_deref()
@@ -2667,6 +2740,9 @@ fn apply_network_opts(
             }
             if let Some(max) = max_udp_conn {
                 n = n.max_udp_connections(max);
+            }
+            if let Some(value) = max_inbound_tcp_connections {
+                n = n.max_inbound_tcp_connections(value);
             }
             if let Some(size) = tcp_accept_queue_size {
                 n = n.tcp_accept_queue_size(size);
@@ -2858,8 +2934,9 @@ fn parse_rate(
 /// - `BIND_ADDR:HOST:GUEST/udp`
 ///
 /// IPv6 bind addresses must be bracketed, e.g. `[::]:8080:80`.
+/// HOST and GUEST may be inclusive `START-END` ranges of equal length.
 #[cfg(feature = "net")]
-pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr, u16, u16, bool)> {
+pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<Vec<PublishedPort>> {
     use std::net::{IpAddr, Ipv4Addr};
 
     let (port_part, udp) = if let Some(p) = spec.strip_suffix("/udp") {
@@ -2899,16 +2976,90 @@ pub(crate) fn parse_port_mapping(spec: &str) -> anyhow::Result<(std::net::IpAddr
         }
     };
 
-    let host: u16 = host_str
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid host port: {host_str}"))?;
-    let guest: u16 = guest_str
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid guest port: {guest_str}"))?;
+    let host = parse_published_port_range(host_str, "host")?;
+    let guest = parse_published_port_range(guest_str, "guest")?;
+    let host_count = u32::from(*host.end()) - u32::from(*host.start()) + 1;
+    let guest_count = u32::from(*guest.end()) - u32::from(*guest.start()) + 1;
+    anyhow::ensure!(
+        host_count == guest_count,
+        "host and guest port ranges must have equal lengths: {host_str}:{guest_str}"
+    );
 
-    Ok((bind, host, guest, udp))
+    Ok(host
+        .zip(guest)
+        .map(|(host_port, guest_port)| PublishedPort {
+            host_bind: bind,
+            host_port,
+            guest_port,
+            protocol: if udp {
+                PortProtocol::Udp
+            } else {
+                PortProtocol::Tcp
+            },
+        })
+        .collect())
+}
+
+/// Parse a single port or an inclusive range without changing single-port semantics.
+#[cfg(feature = "net")]
+fn parse_published_port_range(
+    value: &str,
+    side: &str,
+) -> anyhow::Result<std::ops::RangeInclusive<u16>> {
+    let parse = |port: &str| {
+        port.trim()
+            .parse::<u16>()
+            .map_err(|_| anyhow::anyhow!("invalid {side} port: {value}"))
+    };
+    if let Some((start, end)) = value.trim().split_once('-') {
+        let start = parse(start)?;
+        let end = parse(end)?;
+        anyhow::ensure!(
+            start > 0 && end > 0,
+            "{side} port range endpoints must be between 1 and 65535: {value}"
+        );
+        anyhow::ensure!(start <= end, "{side} port range is reversed: {value}");
+        Ok(start..=end)
+    } else {
+        let port = parse(value)?;
+        Ok(port..=port)
+    }
+}
+
+/// Shell-quote a string, using single quotes only when necessary.
+pub(crate) fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.chars().all(|c| {
+        c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@' | ',')
+    }) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Quote an argument for a command the user copies into their terminal.
+pub(crate) fn hint_quote(s: &str) -> String {
+    if cfg!(windows) {
+        windows_quote(s)
+    } else {
+        shell_quote(s)
+    }
+}
+
+/// Double-quote a string for Command Prompt or PowerShell, only when necessary.
+fn windows_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '+' | '@')
+        })
+    {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('"', "\\\""))
+    }
 }
 
 /// Parse `--secret ENV[:OPTIONS]@HOST[,HOST...]` for `command`.
@@ -2954,16 +3105,99 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
         env_var: env_var.to_string(),
         allowed_hosts,
         passthrough_hosts: Vec::new(),
-        substitute_headers: true,
-        substitute_query: false,
-        substitute_body: false,
+        substitution: None,
     };
     if let Some(options) = options {
+        // `no-headers` and `headers=` express opposite header scopes and must
+        // not be combined into an ambiguous or silently widened secret.
+        let mut header_scope_selected = false;
+        let mut headers_disabled = false;
         for option in split_secret_options(options)? {
             match option.as_str() {
-                "no-headers" => parsed.substitute_headers = false,
-                "query" => parsed.substitute_query = true,
-                "body" => parsed.substitute_body = true,
+                "no-headers" => {
+                    if header_scope_selected {
+                        anyhow::bail!(
+                            "secret cannot combine `no-headers` with a `headers=` scope; specify only one header scope"
+                        );
+                    }
+                    headers_disabled = true;
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .headers = false;
+                }
+                "query" => {
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .query = true;
+                }
+                "body" => {
+                    parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default)
+                        .body = true;
+                }
+                value if value.starts_with("headers=") => {
+                    if headers_disabled {
+                        anyhow::bail!(
+                            "secret cannot combine `headers=` with `no-headers`; specify only one header scope"
+                        );
+                    }
+                    if header_scope_selected {
+                        anyhow::bail!("secret `headers=` scope may be specified only once");
+                    }
+                    let raw = value.trim_start_matches("headers=");
+                    let fields = raw
+                        .strip_prefix('[')
+                        .and_then(|value| value.strip_suffix(']'))
+                        .unwrap_or(raw);
+                    let mut parsed_fields: Vec<String> = Vec::new();
+                    let mut all_headers = false;
+                    for field in fields
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|field| !field.is_empty())
+                    {
+                        if field == "*" {
+                            // `headers=*` restores the default of all headers.
+                            all_headers = true;
+                            continue;
+                        }
+                        if !parsed_fields
+                            .iter()
+                            .any(|existing| existing.eq_ignore_ascii_case(field))
+                        {
+                            parsed_fields.push(field.to_string());
+                        }
+                    }
+                    // `*` means every header. Mixing it with concrete field names
+                    // is ambiguous and must not silently widen the scope to every
+                    // header (which would re-enable reflected-header secret
+                    // disclosure).
+                    if all_headers && !parsed_fields.is_empty() {
+                        anyhow::bail!(
+                            "secret header scope cannot combine `*` (all headers) with specific field names; use `headers=*` for all headers or list only the fields to substitute"
+                        );
+                    }
+                    // An empty or effectively-empty list (`headers=`, `headers=[]`,
+                    // `headers=[,,]`) must not silently select the broadest scope.
+                    if !all_headers && parsed_fields.is_empty() {
+                        anyhow::bail!(
+                            "secret header scope requires at least one field name; use `headers=*` for all headers"
+                        );
+                    }
+                    let rule = parsed
+                        .substitution
+                        .get_or_insert_with(SecretSubstitution::default);
+                    rule.headers = true;
+                    rule.header_fields = if all_headers {
+                        Vec::new()
+                    } else {
+                        parsed_fields
+                    };
+                    header_scope_selected = true;
+                }
                 value if value.starts_with("passthrough=") => {
                     let hosts = value.trim_start_matches("passthrough=");
                     let hosts = hosts
@@ -2982,16 +3216,70 @@ pub(crate) fn parse_secret(spec: &str, command: &str) -> anyhow::Result<ParsedSe
                     extend_unique(&mut parsed.passthrough_hosts, parsed_hosts);
                 }
                 other => anyhow::bail!(
-                    "invalid secret option: {other} (expected: no-headers, query, body, passthrough=HOST, or passthrough=[HOST,...])"
+                    "invalid secret option: {other} (expected: no-headers, headers=[FIELD,...], query, body, passthrough=HOST, or passthrough=[HOST,...])"
                 ),
             }
         }
     }
-    if !parsed.substitute_headers && !parsed.substitute_query && !parsed.substitute_body {
+    if parsed
+        .substitution
+        .as_ref()
+        .is_some_and(|rule| !rule.headers && !rule.query && !rule.body)
+    {
         anyhow::bail!("secret must enable at least one substitution location");
     }
 
     Ok(parsed)
+}
+
+/// Parse `--secret` flags and group them by name, so repeated
+/// `--secret NAME@HOST[,HOST...]` flags accumulate into one spec per name.
+///
+/// A flag without a substitution option leaves the other flags' rule as it is.
+/// Two rules combine: header scopes intersect (disjoint scopes disable header
+/// substitution), and query or body substitution is on when either enables it.
+pub(crate) fn merge_secrets(
+    secrets: &[String],
+    command: &str,
+) -> anyhow::Result<Vec<ParsedSecret>> {
+    let mut specs: Vec<ParsedSecret> = Vec::new();
+    for secret in secrets {
+        let parsed = parse_secret(secret, command)?;
+        let Some(existing) = specs
+            .iter_mut()
+            .find(|existing| existing.env_var == parsed.env_var)
+        else {
+            specs.push(parsed);
+            continue;
+        };
+        extend_unique(&mut existing.allowed_hosts, parsed.allowed_hosts);
+        extend_unique(&mut existing.passthrough_hosts, parsed.passthrough_hosts);
+        let Some(parsed_rule) = parsed.substitution else {
+            continue;
+        };
+        let Some(rule) = existing.substitution.as_mut() else {
+            existing.substitution = Some(parsed_rule);
+            continue;
+        };
+        rule.headers &= parsed_rule.headers;
+        if rule.headers {
+            match intersect_header_fields(&rule.header_fields, &parsed_rule.header_fields) {
+                Some(merged) => rule.header_fields = merged,
+                None => {
+                    // The scopes share no field: the empty allowlist is
+                    // equivalent to disabling header substitution and must not
+                    // fall back to substituting in every header.
+                    rule.headers = false;
+                    rule.header_fields.clear();
+                }
+            }
+        } else {
+            rule.header_fields.clear();
+        }
+        rule.query |= parsed_rule.query;
+        rule.body |= parsed_rule.body;
+    }
+    Ok(specs)
 }
 
 /// Split comma-separated secret options while retaining bracketed host lists.
@@ -3018,6 +3306,28 @@ fn split_secret_options(options: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("secret options must not be empty");
     }
     Ok(result)
+}
+
+/// Intersect two header-field allowlists, where an empty list means "all".
+///
+/// An empty list on either side means every header, so the intersection is the
+/// other list. When both sides name fields but share none, the intersection is
+/// the empty set, which this encoding cannot represent (an empty list means
+/// "all"); `None` is returned so the caller can disable header substitution,
+/// the equivalent of allowing no field, instead of widening to every header.
+fn intersect_header_fields(left: &[String], right: &[String]) -> Option<Vec<String>> {
+    if left.is_empty() {
+        return Some(right.to_vec());
+    }
+    if right.is_empty() {
+        return Some(left.to_vec());
+    }
+    let intersection: Vec<String> = left
+        .iter()
+        .filter(|field| right.iter().any(|other| other.eq_ignore_ascii_case(field)))
+        .cloned()
+        .collect();
+    (!intersection.is_empty()).then_some(intersection)
 }
 
 fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
@@ -3467,6 +3777,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn windows_quote_double_quotes_only_when_needed() {
+        assert_eq!(
+            windows_quote("API_KEY@api.example.com"),
+            "API_KEY@api.example.com"
+        );
+        assert_eq!(
+            windows_quote("API_KEY:headers=[a,b]@h"),
+            "\"API_KEY:headers=[a,b]@h\""
+        );
+        assert_eq!(windows_quote("a'b"), "\"a'b\"");
+        assert_eq!(windows_quote(""), "\"\"");
+    }
+
     #[cfg(feature = "net")]
     #[test]
     fn tcp_limit_flags_are_aliases_but_mutually_exclusive() {
@@ -3628,6 +3952,7 @@ mod tests {
 
         assert_eq!(secret.env_var, "MSB_PARSE_SECRET_TOKEN");
         assert_eq!(secret.allowed_hosts, vec!["api.example.com"]);
+        assert!(secret.substitution.is_none());
     }
 
     #[test]
@@ -3653,14 +3978,114 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!secret.substitute_headers);
-        assert!(secret.substitute_query);
-        assert!(secret.substitute_body);
+        let rule = secret.substitution.as_ref().unwrap();
+        assert!(!rule.headers);
+        assert!(rule.query);
+        assert!(rule.body);
         assert_eq!(
             secret.passthrough_hosts,
             vec!["api.anthropic.com", "example.com", "*.example.org"]
         );
         assert_eq!(secret.allowed_hosts, vec!["github.com", "api.github.com"]);
+    }
+
+    #[test]
+    fn parse_secret_supports_header_field_allowlist() {
+        let secret = parse_secret(
+            "API_KEY:headers=[authorization,x-api-key]@api.example.com",
+            "create",
+        )
+        .unwrap();
+        let rule = secret.substitution.unwrap();
+        assert!(rule.headers);
+        assert_eq!(rule.header_fields, vec!["authorization", "x-api-key"]);
+
+        // A single field does not require brackets.
+        let single =
+            parse_secret("API_KEY:headers=authorization@api.example.com", "create").unwrap();
+        assert_eq!(
+            single.substitution.unwrap().header_fields,
+            vec!["authorization"]
+        );
+
+        // `*` restores the default of every header.
+        let all = parse_secret("API_KEY:headers=*@api.example.com", "create").unwrap();
+        assert!(all.substitution.unwrap().header_fields.is_empty());
+
+        // Mixing the wildcard with concrete field names must not silently widen
+        // the scope to every header.
+        for spec in [
+            "API_KEY:headers=[authorization,*]@api.example.com",
+            "API_KEY:headers=[*,authorization]@api.example.com",
+            "API_KEY:headers=[authorization,*,x-api-key]@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("cannot combine"), "{spec}: {err}");
+        }
+
+        // Outside brackets the `*` is a separate option and is rejected too.
+        assert!(parse_secret("API_KEY:headers=authorization,*@api.example.com", "create").is_err());
+        // An empty or effectively empty list must not silently allow every header.
+        for spec in [
+            "API_KEY:headers=@api.example.com",
+            "API_KEY:headers=[]@api.example.com",
+            "API_KEY:headers=[,,]@api.example.com",
+            "API_KEY:headers=[ , ]@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("at least one field name"), "{spec}: {err}");
+        }
+
+        // `no-headers` and a `headers=` scope are opposite intents and must
+        // not be combined, regardless of order.
+        for spec in [
+            "API_KEY:headers=authorization,no-headers,query@api.example.com",
+            "API_KEY:no-headers,headers=authorization,query@api.example.com",
+            "API_KEY:headers=*,no-headers,query@api.example.com",
+        ] {
+            let err = parse_secret(spec, "create").unwrap_err().to_string();
+            assert!(err.contains("header scope"), "{spec}: {err}");
+        }
+        // The same scope may not be repeated within one declaration.
+        let err = parse_secret(
+            "API_KEY:headers=authorization,headers=x-api-key@api.example.com",
+            "create",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("only once"), "{err}");
+    }
+
+    #[test]
+    fn intersect_header_fields_maps_disjoint_scopes_to_no_substitution() {
+        // An empty list means "all", so a disjoint intersection must not be
+        // returned as an empty list: `None` tells the caller to disable header
+        // substitution rather than silently re-enable every header.
+        assert_eq!(
+            intersect_header_fields(&["authorization".to_string()], &["x-api-key".to_string()]),
+            None
+        );
+
+        // Overlapping scopes intersect case-insensitively.
+        assert_eq!(
+            intersect_header_fields(
+                &["Authorization".to_string(), "x-extra".to_string()],
+                &["authorization".to_string(), "x-api-key".to_string()],
+            ),
+            Some(vec!["Authorization".to_string()])
+        );
+
+        // An empty side means every header and yields the other scope.
+        assert_eq!(
+            intersect_header_fields(&[], &["authorization".to_string()]),
+            Some(vec!["authorization".to_string()])
+        );
+        assert_eq!(
+            intersect_header_fields(&["authorization".to_string()], &[]),
+            Some(vec!["authorization".to_string()])
+        );
+        // Both empty means every header.
+        assert_eq!(intersect_header_fields(&[], &[]), Some(Vec::new()));
     }
 
     #[test]
@@ -3727,6 +4152,38 @@ mod tests {
     }
 
     #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn apply_sandbox_opts_disjoint_header_scopes_disable_header_substitution() {
+        // Repeating `--secret` for the same variable intersects the header
+        // scopes. Disjoint scopes allow no field, which must disable header
+        // substitution rather than fall back to substituting in every header.
+        let opts = SandboxOpts {
+            secret: vec![
+                "API_KEY:headers=authorization,query@api.example.com".into(),
+                "API_KEY:headers=x-api-key@api.example.com".into(),
+            ],
+            ..Default::default()
+        };
+
+        let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let secrets = config
+            .spec
+            .network
+            .secrets
+            .expect("network secrets")
+            .secrets;
+
+        assert_eq!(secrets.len(), 1);
+        assert!(!secrets[0].substitution.headers);
+        assert!(secrets[0].substitution.header_fields.is_empty());
+        assert!(secrets[0].substitution.query);
+    }
+
+    #[cfg(feature = "net")]
     #[test]
     fn outbound_proxy_builds_socks4_user_id() {
         let opts = SandboxOpts {
@@ -3765,6 +4222,41 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn outbound_proxy_builds_http_connect_environment_credentials() {
+        let opts = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            http_connect_username: Some("sandbox".into()),
+            http_connect_password_env: Some("HTTP_CONNECT_PASSWORD".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert_eq!(json["protocol"], "http_connect");
+        assert_eq!(json["address"], "127.0.0.1:3128");
+        assert_eq!(json["credentials"]["username"], "sandbox");
+        assert_eq!(json["credentials"]["password"]["kind"], "env");
+        assert_eq!(
+            json["credentials"]["password"]["var"],
+            "HTTP_CONNECT_PASSWORD"
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn outbound_proxy_without_credentials_omits_the_wire_field() {
+        let opts = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            ..Default::default()
+        };
+
+        let proxy = opts.build_outbound_proxy().unwrap().unwrap();
+        let json = serde_json::to_value(proxy).unwrap();
+        assert!(json.get("credentials").is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn outbound_proxy_rejects_protocol_specific_auth_on_the_wrong_protocol() {
         let socks4 = SandboxOpts {
             proxy: Some("socks4://127.0.0.1:1080".into()),
@@ -3791,6 +4283,34 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires a socks4:// proxy")
+        );
+
+        let http_on_socks = SandboxOpts {
+            proxy: Some("socks5://127.0.0.1:1080".into()),
+            http_connect_username: Some("sandbox".into()),
+            http_connect_password_env: Some("HTTP_CONNECT_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            http_on_socks
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("require an http:// proxy")
+        );
+
+        let socks_on_http = SandboxOpts {
+            proxy: Some("http://127.0.0.1:3128".into()),
+            socks5_username: Some("sandbox".into()),
+            socks5_password_env: Some("SOCKS5_PASSWORD".into()),
+            ..Default::default()
+        };
+        assert!(
+            socks_on_http
+                .build_outbound_proxy()
+                .unwrap_err()
+                .to_string()
+                .contains("SOCKS authentication flags cannot be used with an http:// proxy")
         );
     }
 
@@ -3969,6 +4489,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.spec.resources.thp, TransparentHugePagePolicy::Always);
+    }
+
+    #[tokio::test]
+    async fn nested_virtualization_cli_preserves_explicit_false() {
+        for (args, expected) in [
+            (vec!["create"], None),
+            (vec!["create", "--nested-virt", "alpine"], Some(true)),
+            (vec!["create", "--nested-virt=true"], Some(true)),
+            (vec!["create", "--nested-virt=false"], Some(false)),
+        ] {
+            let matches =
+                SandboxOpts::augment_args(Command::new("create").arg(clap::Arg::new("image")))
+                    .try_get_matches_from(args)
+                    .unwrap();
+            let opts = SandboxOpts::from_arg_matches(&matches).unwrap();
+            let config = apply_sandbox_opts(SandboxBuilder::new("test").image("alpine"), &opts)
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(config.spec.resources.nested_virt, expected);
+        }
+        assert!(
+            SandboxOpts::augment_args(Command::new("create").arg(clap::Arg::new("image")))
+                .try_get_matches_from(["create", "--nested-virt=invalid"])
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -5066,41 +5613,138 @@ mod tests {
     #[cfg(feature = "net")]
     #[test]
     fn port_without_bind_defaults_to_loopback() {
-        let (bind, host, guest, udp) = parse_port_mapping("8080:80").unwrap();
-        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("8080:80").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_explicit_loopback_stays_loopback() {
-        let (bind, host, guest, udp) = parse_port_mapping("127.0.0.1:8080:80").unwrap();
-        assert_eq!(bind, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("127.0.0.1:8080:80").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_ipv4_bind() {
-        let (bind, host, guest, udp) = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
-        assert_eq!(bind, "0.0.0.0".parse::<std::net::IpAddr>().unwrap());
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(udp);
+        let ports = parse_port_mapping("0.0.0.0:8080:80/udp").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(
+            port.host_bind,
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Udp);
     }
 
     #[cfg(feature = "net")]
     #[test]
     fn port_with_bracketed_ipv6_bind() {
-        let (bind, host, guest, udp) = parse_port_mapping("[::]:8080:80/tcp").unwrap();
-        assert_eq!(bind, "::".parse::<std::net::IpAddr>().unwrap());
-        assert_eq!(host, 8080);
-        assert_eq!(guest, 80);
-        assert!(!udp);
+        let ports = parse_port_mapping("[::]:8080:80/tcp").unwrap();
+        assert_eq!(ports.len(), 1);
+        let port = &ports[0];
+        assert_eq!(port.host_bind, "::".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(port.host_port, 8080);
+        assert_eq!(port.guest_port, 80);
+        assert_eq!(port.protocol, PortProtocol::Tcp);
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_expand_in_order_with_bind_and_protocol() {
+        for (spec, bind, protocol) in [
+            ("8000-8002:80-82", "127.0.0.1", PortProtocol::Tcp),
+            ("0.0.0.0:8000-8002:80-82/udp", "0.0.0.0", PortProtocol::Udp),
+            ("[::1]:8000-8002:80-82/tcp", "::1", PortProtocol::Tcp),
+            ("[::]:8000-8002:80-82/udp", "::", PortProtocol::Udp),
+        ] {
+            let ports = parse_port_mapping(spec).unwrap();
+            assert_eq!(ports.len(), 3);
+            for (offset, port) in ports.iter().enumerate() {
+                assert_eq!(port.host_bind, bind.parse::<std::net::IpAddr>().unwrap());
+                assert_eq!(port.host_port, 8000 + offset as u16);
+                assert_eq!(port.guest_port, 80 + offset as u16);
+                assert_eq!(port.protocol, protocol);
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_cover_issue_example_and_boundaries() {
+        let ports = parse_port_mapping("0.0.0.0:10240-11264:10240-11264/udp").unwrap();
+        assert_eq!(ports.len(), 1025);
+        assert_eq!(ports.first().unwrap().host_port, 10240);
+        assert_eq!(ports.last().unwrap().guest_port, 11264);
+        for spec in ["65535:65535-65535", "65535-65535:65535", "0:80"] {
+            assert_eq!(parse_port_mapping(spec).unwrap().len(), 1);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_expand_the_full_port_space_without_binding() {
+        for suffix in ["/tcp", "/udp"] {
+            let ports = parse_port_mapping(&format!("1-65535:1-65535{suffix}")).unwrap();
+            assert_eq!(ports.len(), 65535);
+            for (offset, port) in ports.iter().enumerate() {
+                assert_eq!(port.host_port, offset as u16 + 1);
+                assert_eq!(port.guest_port, offset as u16 + 1);
+                assert_eq!(
+                    port.protocol,
+                    if suffix == "/udp" {
+                        PortProtocol::Udp
+                    } else {
+                        PortProtocol::Tcp
+                    }
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn port_ranges_reject_invalid_specs() {
+        for (spec, message) in [
+            ("8000-8002:80-81", "equal lengths"),
+            ("8000:80-81", "equal lengths"),
+            ("8000-8001:80", "equal lengths"),
+            ("8002-8000:80-82", "host port range is reversed"),
+            ("8000-8002:82-80", "guest port range is reversed"),
+            ("0-1:80-81", "range endpoints"),
+            ("8000-8001:0-1", "range endpoints"),
+            ("65535-65536:80-81", "invalid host port"),
+            ("8000-8001:65535-65536", "invalid guest port"),
+            ("-1:80", "invalid host port"),
+            ("8000-:80", "invalid host port"),
+            ("8000:80-", "invalid guest port"),
+            ("8000-8001-8002:80", "invalid host port"),
+            ("abc:80", "invalid host port"),
+            ("8000:abc", "invalid guest port"),
+            ("8000:80/sctp", "invalid guest port"),
+            ("bad:8000:80", "invalid bind address"),
+        ] {
+            let error = parse_port_mapping(spec).unwrap_err();
+            assert!(error.to_string().contains(message), "{spec}: {error}");
+        }
     }
 
     // --- parse_script_path ---

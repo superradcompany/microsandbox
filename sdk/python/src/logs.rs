@@ -40,7 +40,7 @@ pub struct PyLogEntry {
 #[pymethods]
 impl PyLogEntry {
     #[getter]
-    fn source(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn source(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "LogSource", &self.source)
     }
 

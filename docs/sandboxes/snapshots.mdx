@@ -4,7 +4,7 @@ description: Save files or running workloads and restore them into new sandboxes
 icon: "code-branch"
 ---
 
-<Tooltip tip="Cloud supports disk snapshots from stopped or crashed sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud supports disk snapshots from stopped persistent sandboxes and disk restore. Full snapshots, forking, groups, and local archives are not yet available on cloud."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Save a prepared sandbox and reuse it as a starting point. Each restore creates a new sandbox and leaves the source unchanged.
 
@@ -17,9 +17,34 @@ Disk is the default. Full adds memory and execution state; there is no memory-on
 | **Disk** | Files and owned volumes | Boots a new VM |
 | **Full** | Disk, memory, and running processes | Resumes execution |
 
+<Accordion title="Capture timeouts">
+Local captures, including Windows and macOS forks, allow up to 30 minutes. Requests are not automatically retried after an uncertain timeout.
+</Accordion>
+
+## Nested VM snapshots
+
+Full snapshots save a running inner VM alongside its sandbox. Restore resumes both; a fork creates an independent copy. Disk snapshots boot a new VM.
+
+Nesting is off by default. Enable it per sandbox with `--nested-virt` or the SDK's nesting option, or set [`sandbox_defaults.nested_virt`](/configuration#sandbox_defaults) globally.
+
+| Host | Requirements |
+| --- | --- |
+| Linux x86-64 (Intel or AMD) | Host nesting support |
+| Windows x86-64 (Intel or AMD) | Windows Hypervisor Platform nesting; enlightened VMCS on Intel |
+| Apple Silicon macOS | Hypervisor.framework nesting support |
+| Linux ARM64 / Windows ARM64 | Nested virtualization is not supported |
+
+Use a runtime and guest firmware with nested snapshot support, including guest KVM. Enabling nesting on an unsupported host fails startup; ordinary ARM64 sandboxes and snapshots are unaffected.
+
+<Accordion title="Restore compatibility">
+Restore preserves the captured nesting setting. You cannot change it or switch host architectures or hypervisor backends. Cross-host migration, external mount recovery, and network connection recovery are not guaranteed.
+
+Older runtimes that cannot enforce disabled nesting require an upgrade. On Intel Windows, the runtime requests enlightened VMCS automatically; active nested VMs using ordinary VMCS cannot be fully captured or resumed. See [Windows snapshot recovery](#recapture-an-older-windows-nested-snapshot).
+</Accordion>
+
 ## Disk snapshots
 
-Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped or crashed source. See [guest flushing](#guest-flushing) for how pending writes are handled.
+Use disk snapshots for installed dependencies, prepared workspaces, and saved files. Cloud requires a stopped persistent source. See [guest flushing](#guest-flushing) for how microsandbox handles pending writes.
 
 <Steps>
 <Step title="Prepare">
@@ -66,6 +91,15 @@ if err != nil { return err }
 
 err = baseline.Stop(ctx)
 if err != nil { return err }
+```
+
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+
+session = baseline.connect
+session.exec("pip", ["install", "requests"])
+
+baseline.stop
 ```
 
 ```bash CLI
@@ -116,6 +150,11 @@ if err != nil {
 }
 ```
 
+```ruby Ruby
+baseline = Microsandbox::Sandbox.get("baseline")
+snapshot = baseline.snapshot("ready")
+```
+
 ```bash CLI
 msb snap create ready --sandbox baseline
 ```
@@ -163,11 +202,15 @@ msb exec worker -- python -c "import requests; print(requests.__version__)"
 
 Local snapshots use `group:member` selectors, such as `baseline:ready`. For cloud, pass the snapshot object or reference; it has no client-local path.
 
+Ruby can capture basic disk snapshots, inspect and export existing snapshots, and manage saved snapshot handles. Full capture, restore, fork, import, compaction, integrity verification, and group configuration are not exposed by its current API. See the [Ruby snapshot reference](/sdk/ruby/snapshots).
+
 ## Full snapshots
 
 <Tooltip tip="Full snapshots are not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 Capture a running workload to resume its processes and memory later. A running source briefly pauses during capture, then resumes; an already-paused source stays paused.
+
+On Windows, full snapshots now preserve all tracked hardlink names for bind mounts. Runtimes that support this format can still restore the previous Windows filesystem format. Older runtimes cannot restore snapshots written with the new bind-mount format; use the updated runtime when restoring them. This does not change disk-only snapshot compatibility.
 
 <Steps>
 <Step title="Capture">
@@ -254,7 +297,7 @@ msb snap restore worker:snap --name resumed
 </Steps>
 
 - **Compatibility:** Use a compatible runtime and guest kernel. CPU and memory settings, including maximums, must match the capture.
-- **Connections:** Reconnect clients and application connections. Host-side connections and transfers are not captured; buffered process output is not replayed.
+- **Connections:** Reconnect clients and application connections. Microsandbox does not capture host-side connections or transfers, and does not replay buffered process output.
 - **Mounts:** Owned volumes are private to each child. Host bindings need explicit authorization; see [mount behavior](#mount-behavior).
 
 <Accordion title="Capture or restore fails">
@@ -330,6 +373,24 @@ msb snap restore worker:snap --name worker_b --cow-mem
 
 The first restore prepares a local memory cache; later restores reuse it. No special source setup is needed. CoW requires a full snapshot and cannot be combined with disk-only restore.
 
+<span id="migrating-restore-options" />
+
+<Accordion title="Older restore option names">
+
+The old `forked` options still enable copy-on-write memory during restore. Use these names in new code:
+
+| Deprecated name | Preferred name |
+| --- | --- |
+| CLI `--forked` | `--cow-mem` |
+| TypeScript `.forked()` | `.cowMemory()` |
+| Rust `.forked()` | `.cow_memory()` |
+| Python `forked=True` | `cow_memory=True` |
+| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` |
+
+The MCP `sandbox_restore` tool retains its `forked` input for the same memory option.
+
+</Accordion>
+
 ### Restore disk only
 
 Boot a fresh VM from a full snapshot’s saved disk without resuming its processes. You can choose different CPU and memory settings.
@@ -372,7 +433,34 @@ msb snap restore worker:snap --name rebooted --disk-only
 
 Snapshots with a tmpfs root cannot be restored disk-only.
 
+### Recapture an older Windows nested snapshot
+
+Older Intel Windows nested snapshots without enlightened VMCS state need a fresh boot with updated runtime and firmware:
+
+```bash
+msb snapshot restore worker:old --name recovered --disk-only
+```
+
+Restart your application and inner VM, finish any detached exec jobs, then capture and test a replacement:
+
+```bash
+msb snapshot create upgraded --from-sandbox recovered --full
+msb snapshot restore recovered:upgraded --name verified
+```
+
+<Accordion title="Recovery limits">
+Disk-only restore preserves saved files, but loses running processes, RAM, the inner VM's execution state, and writes buffered only in memory. It requires a disk-backed root and the base image; supply external mounts again.
+
+Recapturing a still-running old sandbox does not enable enlightened VMCS. Keep the original snapshot until the replacement is verified. Full restore never silently falls back to disk-only recovery.
+</Accordion>
+
+### Recover missing Windows timer state
+
+New Windows x86 full snapshots save PIT timer state. Older snapshots lack it and are rejected to prevent frozen clocks or hanging commands. Prefer a [disk-only restart](#recapture-an-older-windows-nested-snapshot).
+
 ### Keep the guest clock
+
+Guest-clock overrides are currently available through the CLI and Rust SDK. Other SDKs use the default policy when creating a sandbox and inherit the saved policy when restoring.
 
 By default (`sync`), the sandbox's date and time follow the host. The host updates the clock at boot, about once a minute, and when a full snapshot restores or a paused sandbox resumes.
 
@@ -380,7 +468,7 @@ With `off`, the host stops updating the clock after boot. Full restores continue
 
 <CodeGroup>
 ```rust Rust
-use microsandbox::sandbox::GuestClockPolicy;
+use microsandbox::{sandbox::GuestClockPolicy, Sandbox};
 
 let source = Sandbox::builder("worker")
     .image("alpine")
@@ -398,6 +486,8 @@ Full snapshots save this setting. Restores inherit it unless you choose `sync` t
 
 <CodeGroup>
 ```rust Rust
+use microsandbox::{sandbox::GuestClockPolicy, Sandbox};
+
 let child = Sandbox::restore("worker:snap")
     .name("child")
     .guest_clock(GuestClockPolicy::Sync)
@@ -492,33 +582,15 @@ Flushing does not save data still buffered by your application or commit databas
 
 </Accordion>
 
-## Snapshot history and branching
-
-A **generation** describes how snapshot history progresses. A **branch** describes a distinct path through that history. Taking successive snapshots advances a lineage; restoring an earlier snapshot and capturing new state creates a divergent path. A snapshot group is a namespace that can contain multiple paths, with a selected head. Branches here describe ancestry, not a separate live sandbox operation or a named branch-management API.
-
-**Forking** duplicates live execution. **Restoring** starts a sandbox from a saved snapshot. For copy-on-write memory during full restore, use `--cow-mem` in the CLI, `.cowMemory()` in TypeScript, `.cow_memory()` in Rust, `cow_memory=True` in Python, or `WithCowMemory()` in Go. The former `--forked` flag and corresponding SDK restore options remain deprecated aliases with the same behavior. CoW restore memory is off by default; live forks always use it. The MCP `sandbox_restore` tool retains its `forked` input for compatibility; it selects copy-on-write restore memory, not live forking.
-
-### Migrating restore options
-
-Existing callers can migrate gradually. Keep using the old name until you update the caller; both spellings enable the same memory policy and retain the same restore validation.
-
-| Deprecated name | Preferred name | Deprecation notice |
-| --- | --- | --- |
-| CLI `--forked` | `--cow-mem` | Warning on stderr, including with `--quiet` |
-| TypeScript `.forked()` | `.cowMemory()` | `@deprecated` annotation and a Node `DeprecationWarning` once per process through the SDK |
-| Rust `.forked()` | `.cow_memory()` | Compiler deprecation warning |
-| Python `forked=True` | `cow_memory=True` | `DeprecationWarning`, subject to Python's warning filters |
-| Go `WithForked()` / `RestoreConfig.Forked` | `WithCowMemory()` / `RestoreConfig.CowMemory` | `Deprecated:` annotations for documentation and tooling |
-
 <span id="branching" />
 
 ## Forking
 
 <Tooltip tip="Forking is not yet available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-`fork` is the live operation; the former `branch` SDK methods remain deprecated aliases.
+Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private. To start from a saved snapshot, use [restore](#full-snapshots).
 
-Create a child directly from a running or paused sandbox, without saving a reusable snapshot. Like full restore, forking preserves disk and execution state. Memory sharing is built in; each child’s writes stay private.
+The former `branch` SDK methods remain deprecated aliases for `fork`.
 
 <CodeGroup>
 ```typescript TypeScript
@@ -553,6 +625,8 @@ msb fork worker --name experiment
 </CodeGroup>
 
 The source returns to its previous running or paused state. Each child needs a new name and cannot inherit published host ports. Host mounts follow the same [binding rules](#external-mounts).
+
+A fork cannot add a new block device, but it can rebind a captured disk to a host image consistent with the captured state: `--mount-disk` in the CLI, or a disk volume in the SDK. The image is attached directly to each child, without a private copy, so batch forks shouldn't share a writable image. Use separate fork calls with separate images for writable disks. To share one image in a batch, capture the disk read-only and keep the supplied binding read-only.
 
 <Accordion title="Create several children">
 
@@ -643,7 +717,7 @@ Owned directory snapshots cannot move between Unix and Windows. Owned disks do n
 
 ### External mounts
 
-Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Full restore requires all captured external filesystems and additional disks to be available.
+Host-mounted files are not included in snapshots. Supply their host paths when restoring; owned volumes restore automatically. Restore requires a destination for every external mount the snapshot recorded, and a full restore also requires its captured additional disks, unless you opt out with `allow_missing_resources`. Older disk snapshots do not record their mounts and restore as before.
 
 For either a disk or full snapshot, mount a host directory like this:
 
@@ -693,6 +767,7 @@ Using the same host directory for the source and restored sandbox shares its fil
 <Accordion title="Advanced restore options">
 
 - **Reuse source bindings:** Restore on the same host using the source's validated mounts. Missing dependencies still cause restore to fail.
+- **Attach a host disk image:** Mount one at restore time with `--mount-disk SOURCE:DEST[:OPTIONS]` in the CLI, or the [SDK disk-mount options](/sandboxes/volumes#disk-image-volumes). A full restore accepts a disk only at a guest path captured in the snapshot.
 - **Select a captured disk:** Restore a private copy of a named disk volume. External disk images are not converted to owned volumes.
 - **Allow missing resources:** Continue without an external filesystem or additional disk. Root and owned storage must still be complete. Access to missing resources fails and may disrupt applications or make filesystems read-only.
 
@@ -913,6 +988,7 @@ for event := range events {
 result := <-results
 if result.Err != nil { return result.Err }
 resumed := result.Sandbox
+defer resumed.Close()
 ```
 
 ```bash CLI
@@ -920,6 +996,8 @@ resumed := result.Sandbox
 msb snap restore worker:snap --name resumed
 ```
 </CodeGroup>
+
+In Go, always receive the result and close its sandbox handle when finished, even if you ignore progress events. Closing a restored handle does not stop the detached sandbox; call `Stop` or `Destroy` when needed. Cancel the context to cancel the operation.
 
 Some stages have no percentage. Memory preparation has no fixed timeout; activation has a separate timeout. Set an overall deadline or use SDK cancellation when needed.
 
@@ -967,6 +1045,15 @@ err = m.Snapshot.Remove(ctx, "baseline:ready", false)
 if err != nil { return err }
 ```
 
+```ruby Ruby
+snapshots = Microsandbox::Snapshot.list
+
+saved = Microsandbox::Snapshot.open("baseline:ready")
+puts saved.digest
+
+Microsandbox::Snapshot.remove("baseline:ready")
+```
+
 ```bash CLI
 msb snap ls
 msb snap ls --group baseline
@@ -975,7 +1062,15 @@ msb snap rm baseline:ready
 ```
 </CodeGroup>
 
+<span id="snapshot-history-and-branching" />
+
 ### Snapshot groups
+
+A group keeps related snapshots together. Restore an earlier snapshot and save new changes to explore a different path while keeping the original snapshots. Choose the original group when capturing to keep the new snapshots in that group; otherwise, the group defaults to the restored sandbox’s name.
+
+Since v0.7, installed snapshot members are immutable. Creating another snapshot cannot overwrite an existing member. In SDK calls, omit `force` or set it to `false` (`False` in Python): enabling it fails even when the requested name does not exist. Use a unique or generated member name for each capture. To reuse a name, explicitly remove the existing member first; removal still checks for dependent snapshots.
+
+See the [v0.6 snapshot upgrade example](/migrations/v0.7#update-snapshot-code).
 
 Locally, `group` selects its head; `group:member` selects an exact snapshot:
 
@@ -1103,17 +1198,21 @@ await Snapshot.loadWithOptions("experiment.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("snap.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("snap.msb"),
+    LoadOpts {
         group: Some("work".into()),
         ..Default::default()
     },
 ).await?;
 
 Snapshot::load_with_options(
-    std::path::Path::new("experiment.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("experiment.msb"),
+    LoadOpts {
         group: Some("work".into()),
         set_head: true,
         ..Default::default()
@@ -1165,9 +1264,13 @@ await Snapshot.save("baseline:ready", "ready.msb", { withImage: true });
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::save("baseline:ready",
-    std::path::Path::new("ready.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("ready.msb"),
+    SaveOpts {
         with_image: true,
         ..Default::default()
     },
@@ -1185,6 +1288,10 @@ err = m.Snapshot.Save(ctx, "baseline:ready", "ready.msb",
     m.SnapshotSaveOptions{WithImage: true},
 )
 if err != nil { return err }
+```
+
+```ruby Ruby
+Microsandbox::Snapshot.save("baseline:ready", "ready.msb", with_image: true)
 ```
 
 ```bash CLI
@@ -1237,11 +1344,13 @@ const handles = await Snapshot.loadMany(
 ```
 
 ```rust Rust
+use microsandbox::{snapshot::LoadOpts, Snapshot};
+
 let archives = vec!["changes.msb".into(), "base.msb".into()];
 
 let handles = Snapshot::load_many(
     &archives,
-    microsandbox::snapshot::LoadOpts {
+    LoadOpts {
         group: Some("received".into()),
         dest: Some("/mnt/snapshots".into()),
         ..Default::default()
@@ -1291,6 +1400,10 @@ await Snapshot.save("worker:v2", "changes.msb", {
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::SaveOpts, Snapshot};
+
 Snapshot::builder("v2")
     .from_sandbox("worker")
     .full()
@@ -1298,8 +1411,8 @@ Snapshot::builder("v2")
     .await?;
 
 Snapshot::save("worker:v2",
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::SaveOpts {
+    Path::new("changes.msb"),
+    SaveOpts {
         since: Some("worker:v1".into()),
         ..Default::default()
     },
@@ -1332,6 +1445,15 @@ err = m.Snapshot.Save(ctx, "worker:v2", "changes.msb",
 if err != nil { return err }
 ```
 
+```ruby Ruby
+# Export an existing snapshot against its saved base.
+Microsandbox::Snapshot.save(
+  "worker:v2",
+  "changes.msb",
+  since: "worker:v1"
+)
+```
+
 ```bash CLI
 msb snap create v2 --sandbox worker --full
 msb snap export worker:v2 --output changes.msb --since worker:v1
@@ -1356,9 +1478,13 @@ const child = await Sandbox.restore("changes.msb")
 ```
 
 ```rust Rust
+use std::path::Path;
+
+use microsandbox::{snapshot::LoadOpts, Sandbox, Snapshot};
+
 Snapshot::load_with_options(
-    std::path::Path::new("changes.msb"),
-    microsandbox::snapshot::LoadOpts {
+    Path::new("changes.msb"),
+    LoadOpts {
         group: Some("imported".into()),
         base: Some("worker:v1".into()),
         ..Default::default()
@@ -1665,5 +1791,5 @@ msb fork worker --name child --integrity
 
 See each SDK reference for setup, imports, optional controls, and result fields.
 
-- **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), and [Go](/sdk/go/snapshots).
+- **SDKs:** [TypeScript](/sdk/typescript/snapshots), [Rust](/sdk/rust/snapshots), [Python](/sdk/python/snapshots), [Go](/sdk/go/snapshots), and [Ruby](/sdk/ruby/snapshots).
 - **CLI:** Run `msb snap --help` or `msb snap restore --help` for all options.

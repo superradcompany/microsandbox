@@ -1,6 +1,7 @@
 ---
 title: Overview
-description: Install the SDK and create your first sandbox
+"og:title": Microsandbox SDKs for TypeScript, Rust, Python, Go, and Ruby
+description: Install a microsandbox SDK, create your first microVM sandbox, and find API references for TypeScript, Rust, Python, Go, and Ruby.
 keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go SDK"]
 icon: "play"
 ---
@@ -31,29 +32,40 @@ gem install microsandbox
 ```
 </CodeGroup>
 
-Prefer to provision the runtime separately? Node supports external runtime paths but still bundles its runtime and native addon together; Rust lets you disable Cargo-time downloads and leave embedding off. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for installer and SDK setup options.
+<Accordion title="Provisioning the runtime separately">
+
+All five SDKs can use a separately provisioned runtime. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for code tabs covering each SDK’s packaging and setup requirements.
+
+</Accordion>
 
 ## Small example
 
-Create a sandbox from a container image, run a command, print the output, and stop it.
+Create a sandbox from a container image, run a command, print the output, and remove it.
 
 <CodeGroup>
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
-console.log("Output:", output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello, World!')"]);
+    console.log("Output:", output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
+use std::error::Error;
+
 use microsandbox::Sandbox;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     let sb = Sandbox::builder("hello")
         .image("python")
         .create()
@@ -63,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", output.stdout()?);
 
     sb.stop().await?;
+    Sandbox::remove("hello").await?;
     Ok(())
 }
 ```
@@ -81,6 +94,7 @@ async def main():
     print("Output:", output.stdout_text)
 
     await sb.stop()
+    await Sandbox.remove("hello")
 
 asyncio.run(main())
 ```
@@ -97,26 +111,34 @@ import (
 )
 
 func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
     ctx := context.Background()
 
     if _, err := m.EnsureRuntime(ctx, m.RuntimeConfig{}, m.InstallOptions{}); err != nil {
-        log.Fatal(err)
+        return err
     }
 
     sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     defer func() {
         _ = sb.Stop(context.Background())
         _ = sb.Close()
+        _ = m.RemoveSandbox(context.Background(), "hello")
     }()
 
     out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello, World!')"})
     if err != nil {
-        log.Fatal(err)
+        return err
     }
     fmt.Println("Output:", out.Stdout())
+    return nil
 }
 ```
 
@@ -129,6 +151,7 @@ Microsandbox::Sandbox.with("hello", image: "python") do |sandbox|
   output = sandbox.exec("python", ["-c", "print('Hello, World!')"])
   puts "Output: #{output.stdout}"
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 </CodeGroup>

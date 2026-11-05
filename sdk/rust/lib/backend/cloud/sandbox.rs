@@ -20,11 +20,11 @@ use crate::sandbox::{
     SandboxPage, SandboxStatus,
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
-use microsandbox_types::RegistryAuth;
 use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
     RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
+use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -86,8 +86,7 @@ impl CloudBackend {
         builder: SandboxBuilder,
         start: bool,
     ) -> MicrosandboxResult<Sandbox> {
-        let config = self.build_sandbox_config(builder).await?;
-        let (req, config) = cloud_create_body_and_config(config)?;
+        let (req, config) = self.build_create_request(builder).await?;
         let cloud = self.create_sandbox(&req, start).await?;
         if start {
             ensure_cloud_sandbox_ready(&cloud)?;
@@ -96,24 +95,24 @@ impl CloudBackend {
         Ok(Sandbox::from_cloud(backend, cloud, config))
     }
 
+    /// Resolve the request body and runtime config for a cloud create.
+    pub(in crate::backend) async fn build_create_request(
+        &self,
+        builder: SandboxBuilder,
+    ) -> MicrosandboxResult<(CloudCreateBody, SandboxConfig)> {
+        let config = self.build_sandbox_config(builder).await?;
+        cloud_create_body_and_config(config)
+    }
+
     /// Resolve cloud request settings for both explicit build and immediate creation.
     pub(crate) async fn build_sandbox_config(
         &self,
         mut builder: SandboxBuilder,
     ) -> MicrosandboxResult<SandboxConfig> {
-        let options = builder.prepare(Arc::new(self.clone())).await?;
-        // Cloud has no hotplug aperture. Equal maxima on concrete configs track the
-        // requested size, so let them follow any managed CPU or memory override.
-        let resources = &mut options.spec.resources;
-        if resources.max_cpus == resources.cpus {
-            resources.max_cpus = None;
-        }
-        if resources.max_memory_mib == resources.memory_mib {
-            resources.max_memory_mib = None;
-        }
+        builder.prepare(Arc::new(self.clone())).await?;
 
         // The cloud worker resolves image metadata. Device policy is applied on this client.
-        builder.finish(Some(self.config_sources()), None)
+        builder.finish_cloud(self.config_sources())
     }
 }
 
@@ -553,6 +552,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    if config.spec.resources.nested_virt == Some(true) {
+        return Err(unsupported("nested_virt (local-only)"));
+    }
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }
@@ -604,11 +606,24 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.network.nat64_prefixes != NetworkSpec::default().nat64_prefixes {
         return Err(unsupported("network.nat64_prefixes"));
     }
-    if config.spec.network.http.deny_response {
+
+    let http = &config.spec.network.http;
+    // Cloud has no HTTP denial-response configuration. Accept the local defaults
+    // so ordinary creation still works; reject enabled custom/legacy settings.
+    if http.deny_response
+        && (http.deny_response_format != HttpDenyResponseFormat::Json
+            || http.deny_message.is_some()
+            || http.network_deny_message.is_some()
+            || http.secret_deny_message.is_some())
+    {
         return Err(unsupported("network.http.deny_response (local-only)"));
     }
+
     if config.spec.network.outbound_proxy.is_some() {
         return Err(unsupported("network.outbound_proxy"));
+    }
+    if config.spec.network.max_inbound_tcp_connections.is_some() {
+        return Err(unsupported("network.max_inbound_tcp_connections"));
     }
     // Tunes published-port listeners, which the cloud create contract does not carry.
     if config.spec.network.tcp_accept_queue_size.is_some() {
@@ -817,6 +832,7 @@ mod tests {
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
     use microsandbox_types::CloudSnapshotLocation;
+    use microsandbox_types::HttpDenyResponseFormat;
 
     #[test]
     fn cloud_default_stop_timeout_covers_checkpoint_convergence() {
@@ -832,7 +848,15 @@ mod tests {
     async fn every_cloud_create_entry_point_sends_captured_file_policy() {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-        for entry in 0..6 {
+        for (entry, cpus, memory, explicit_max) in (0..6).flat_map(|entry| {
+            [
+                (1, 512, false),
+                (1, 512, true),
+                (8, 2048, false),
+                (8, 2048, true),
+            ]
+            .map(|(cpus, memory, explicit_max)| (entry, cpus, memory, explicit_max))
+        }) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -893,12 +917,17 @@ mod tests {
             );
             let backend: Arc<dyn Backend> = Arc::new(backend);
             let request = || {
-                SandboxBuilder::new("policy-request")
+                let builder = SandboxBuilder::new("policy-request")
                     .image("alpine")
-                    .cpus(8)
-                    .memory(2048)
+                    .cpus(cpus)
+                    .memory(memory)
                     .workdir("/request")
-                    .shell("/bin/request")
+                    .shell("/bin/request");
+                if explicit_max {
+                    builder.max_cpus(cpus).max_memory(memory)
+                } else {
+                    builder
+                }
             };
             let empty =
                 crate::config::layers::BackendConfig::new(Default::default(), Default::default());
@@ -979,7 +1008,12 @@ mod tests {
         let error = crate::backend::with_backend(backend, async {
             SandboxBuilder::new("http-deny-cloud")
                 .image("alpine")
-                .network(|network| network.http(|h| h.deny_response(true)))
+                .network(|network| {
+                    network.http(|h| {
+                        h.deny_response(true)
+                            .deny_response_format(HttpDenyResponseFormat::Text)
+                    })
+                })
                 .create()
                 .await
                 .err()
@@ -1004,12 +1038,37 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        let mut defaults = base_cloud_config();
+        defaults.spec.network.http = Default::default();
+        reject_dropped_cloud_create_fields(&defaults).unwrap();
+
         for message in [None, Some(""), Some("blocked {host}")] {
             let mut config = base_cloud_config();
-            config.spec.network.http.deny_message = message.map(str::to_owned);
+            config.spec.network.http.deny_response = false;
+            config.spec.network.http.deny_response_format = HttpDenyResponseFormat::Text;
+            config.spec.network.http.network_deny_message = message.map(str::to_owned);
             reject_dropped_cloud_create_fields(&config).unwrap();
             config.spec.network.http.deny_response = true;
             assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
+        }
+        for field in [
+            "deny_message",
+            "network_deny_message",
+            "secret_deny_message",
+        ] {
+            for message in ["", "Check policy."] {
+                let mut config = base_cloud_config();
+                config.spec.network.http = Default::default();
+                let http = &mut config.spec.network.http;
+                match field {
+                    "deny_message" => http.deny_message = Some(message.into()),
+                    "network_deny_message" => http.network_deny_message = Some(message.into()),
+                    "secret_deny_message" => http.secret_deny_message = Some(message.into()),
+                    _ => unreachable!(),
+                }
+                assert_unsupported_config_field(config, "network.http.deny_response (local-only)");
+            }
         }
     }
 
@@ -1296,7 +1355,9 @@ mod tests {
         config.spec.resources.memory_mib = 1024;
         config.spec.resources.max_memory_mib = 1024;
         config.spec.security_profile = microsandbox_types::SecurityProfile::Restricted;
-        config.restore_boot_overrides.security = true;
+        let mut options = crate::SandboxConfigPatch::new();
+        options.spec.security_profile = Some(config.spec.security_profile);
+        config.caller_config_overrides = Some(Box::new(options));
         config.spec.lifecycle.max_duration_secs = Some(60);
         config.spec.lifecycle.idle_timeout_secs = Some(10);
 
@@ -1481,13 +1542,16 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 12] = [
+        let cases: [(&str, ConfigMutation); 13] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("nested_virt (local-only)", |config| {
+                config.spec.resources.nested_virt = Some(true)
             }),
             ("guest_clock", |config| {
                 config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)

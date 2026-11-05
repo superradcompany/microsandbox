@@ -1,7 +1,8 @@
 ---
 title: Volume commands
+"og:title": Microsandbox CLI persistent volume commands
 sidebarTitle: "Volumes"
-description: Create and manage named volumes from the CLI
+description: Create, mount, and manage persistent sandbox volumes with the microsandbox CLI.
 icon: "hard-drive"
 ---
 
@@ -11,11 +12,13 @@ Named volumes persist independently of sandboxes. Local volumes default to `~/.m
 
 <Tooltip tip="On microsandbox cloud, create a named volume before mounting it; disk-kind volumes and size are not available, and quota must be a whole number of GiB."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```bash
+<CodeGroup>
+```bash Shell
 msb volume create my-data
 msb volume create --name my-data
 msb volume create docker-data --kind disk --size 10G
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -26,11 +29,13 @@ msb volume create docker-data --kind disk --size 10G
 
 ## msb volumes
 
-```bash
+<CodeGroup>
+```bash Shell
 msb volumes
 msb volumes --format json
 msb volumes -q               # Names only
 ```
+</CodeGroup>
 
 Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also available.
 
@@ -43,16 +48,20 @@ Expanded form: `msb volume ls`. The shorter plural alias `msb vols` is also avai
 
 <Tooltip tip="Not yet available on microsandbox cloud; read volume metadata through the SDK."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-```bash
+<CodeGroup>
+```bash Shell
 msb volume inspect my-data
 ```
+</CodeGroup>
 
 ## msb volume rm
 
-```bash
+<CodeGroup>
+```bash Shell
 msb volume rm my-data
 msb volume rm cache-1 cache-2   # Remove multiple
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -64,7 +73,8 @@ Use `NAME:GUEST_PATH` to mount a volume. Locally, missing named volumes are crea
 
 <Accordion title="Examples">
 
-```bash
+<CodeGroup>
+```bash Shell
 # Create or reuse a directory-backed named volume, then mount it
 msb run --name worker -v app-data:/data python
 
@@ -77,10 +87,11 @@ msb run --name docker-demo \
 msb run --name writer -v shared:/data alpine -- sh -c "echo hello > /data/msg.txt"
 msb run --name reader -v shared:/data alpine -- cat /data/msg.txt
 ```
+</CodeGroup>
 
 </Accordion>
 
-`--mount-named` accepts `kind=dir|disk`, disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail.
+`--mount-named` accepts a `kind` from [volume creation](#msb-volume-create), disk `size`, and directory `quota`. Disk mounts require a size. Conflicting settings on an existing volume fail.
 
 Directory and bind mounts accept paired `uid` and `gid` guest-owner fallbacks. These do not change host ownership and cannot combine with `stat-virt=off` or disk mounts.
 

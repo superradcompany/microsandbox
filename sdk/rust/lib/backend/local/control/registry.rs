@@ -1,7 +1,6 @@
 //! One bounded registry per backend, with shared setup and independent waiters.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
 use microsandbox_control_client::{
@@ -46,6 +45,7 @@ pub(super) struct Entry {
     changed: Notify,
     pub invalidated: CancellationToken,
     pub connector: Arc<dyn VerifiedControlConnector>,
+    pub job_requests: Arc<tokio::sync::Semaphore>,
 }
 
 enum EntryState {
@@ -62,8 +62,7 @@ struct Waiter(Arc<Entry>);
 
 impl ControlSessions {
     /// Called when this backend opens its database, not each time a path is reused.
-    pub fn bind_database(&self, path: &Path) -> Result<(), SharedError> {
-        let identity = Arc::new(DatabaseIdentity::capture(path).map_err(Arc::new)?);
+    pub fn bind_database(&self, identity: Arc<DatabaseIdentity>) -> Result<(), SharedError> {
         let existing = self
             .database
             .lock()
@@ -157,6 +156,7 @@ impl ControlSessions {
                     changed: Notify::new(),
                     invalidated: CancellationToken::new(),
                     connector,
+                    job_requests: Arc::new(tokio::sync::Semaphore::new(4)),
                 });
                 entries.insert(key, entry.clone());
                 (entry, true)

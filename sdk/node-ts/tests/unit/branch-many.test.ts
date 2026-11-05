@@ -22,7 +22,7 @@ describe("capture-once fork wrappers", () => {
         const source = kind === "sandbox"
           ? new Sandbox(native as never, "source") : new SandboxHandle(native as never);
         const results = await source[method](["alice", "bob"], { recordIntegrity: true, guestFlush: "required" });
-        expect(native.forkMany).toHaveBeenCalledExactlyOnceWith(["alice", "bob"], true, "required");
+        expect(native.forkMany).toHaveBeenCalledExactlyOnceWith(["alice", "bob"], true, "required", undefined);
         expect(native.fork).not.toHaveBeenCalled();
         expect(results.map(r => r.name)).toEqual(["alice", "bob"]);
         expect(results[0]!.sandbox).toBeInstanceOf(Sandbox);

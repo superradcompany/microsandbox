@@ -49,13 +49,25 @@ There are two related values to preserve:
 | Known-operation availability gate | Minimum of host generation and ready-frame generation | Minimum of generation 1 and ready-frame generation |
 | Generation emitted in native/encoded envelopes | Host's existing `PROTOCOL_VERSION` | Generation 1 |
 
-The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant remains 9 and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
+The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant is 10 (execution acknowledgements) and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
 
 Known message types have an introduction generation in `MessageType::min_protocol_version()`. `AgentProtocol::prepare` checks availability before admitting native or encoded sends. An unsupported known operation returns the shared client's unsupported-operation category without sending it or closing unrelated streams. Dynamic names and raw bytes remain available to callers who deliberately own their protocol interpretation.
 
 Rust callers inspect `client.ready().negotiated_version`, `client.ready().supports(message_type)`, `client.ready().wire_format`, and `client.ready().ready_bytes()`. Callers retaining only a generation can use `AgentProtocol::ensure_version_compat_for`. TypeScript exposes the corresponding `client.ready.negotiatedVersion`, `supports(wireName)`, `wireFormat`, and `readyBytes`. The package READMEs contain the complete previous-to-current API mappings; the active shared client does not return the old agent-specific unsupported-operation fields.
 
 Generation labels must be checked against actual historical agents. The current introduction map gates filesystem operations at generation 2. The retained v0.5.0 live evidence shows a generation-1 agent that accepts the tested raw filesystem stat operation while the checked path refuses it. That discrepancy remains an unresolved compatibility case; neither the introduction table nor a successful exec test proves every historical filesystem workflow works. Releases before v0.6.0 are outside this change's compatibility target.
+
+### Execution acknowledgements (generation 10)
+
+The runtime supplies sandbox execution limits through trusted bootstrap. The guest advertises them in `Ready.exec_limits`: maximum executions, input and output allowances, and stdin and output chunk sizes. `ExecRequest` cannot override these settings. Defaults are 128 executions, 64 KiB input, 1 MiB combined output, and 16 KiB stdin and output chunks.
+
+`core.exec.stdin.ack` reports cumulative bytes written into the child's stdin pipe. `core.exec.output.ack` reports output consumed by the application, charging payload bytes plus 256 bytes per stdout/stderr chunk. These acknowledgements replenish allowance; they do not trigger retransmission. Duplicate totals grant no additional capacity, and backwards or unsent offsets are invalid.
+
+The SDK sends stdin directly from the caller's buffer as allowance becomes available. The runtime routes pending stdin per execution under that same allowance, so it can keep reading acknowledgements without waiting for guest pipe delivery. There is no separate relay-input allowance or acknowledgement. Unread output stays in a per-execution receiving buffer. An exited command retains its execution slot until output is drained or the stream is closed and cleaned up. Terminal completion follows output consumption for controlled executions.
+
+Released older SDKs retain their existing execution behavior through the legacy path and are outside the new buffering guarantee. New SDKs connecting to a guest without the advertised policy retain historical buffering with a warning; existing sandboxes need no restart.
+
+Generation 10 remains unreleased. Intermediate generation-10 builds are not a compatibility target; the acknowledgement wire names replace their earlier `.credit` names without a separate capability version.
 
 ### Bootstrap and shutdown
 
@@ -164,6 +176,8 @@ Filesystem reads/writes and TCP streams first negotiate this format through CBOR
 
 The optional `dual-port-v1` transport profile is orthogonal to this schema. On the internal `agent-bulk` port only, each unchanged generation-8 frame is prefixed by a 128-bit client incarnation. The relay strips that prefix before forwarding the frame to an SDK. Fixed `MSBL` range-lifecycle records on the ordered control port establish the current incarnation and acknowledge its disconnect before control IDs are reused; they are decoded only after the host and guest bind `dual-port-v1`, are not `MessageType` values, and therefore do not alter the generation-8 schema. Once a transport profile ships, its framing is immutable even though it has a separate capability gate.
 
+For accepted guest-to-host bulk flows, `BulkFinish` and the terminal response share the ordered control lane. If a finish preceded the terminal, the dual-port relay waits for all bytes through its exact offset before forwarding both, even when the terminal reports failure. If no finish preceded the terminal, the relay forwards the terminal immediately and discards remaining bulk records; SDKs still reject successful filesystem reads without an exact finish. TCP terminals without a finish abort the stream and can discard data still in the bulk lane; they do not guarantee delivery of the complete received prefix. Normal TCP EOF sends a finish first and preserves all preceding data. This allows errors from existing guests to reach callers without a preceding `BulkCancel`. In either case the terminal retires the correlation, so late records cannot revive it. The host also discards in-flight input records for completed bulk operations on the same client connection, without disconnecting unrelated operations; records for unopened correlations remain invalid.
+
 - **`v`** is the generation, echoed onto each message. Same number negotiated at the handshake;
   not a per-message version. Don't gate behavior by reading it per message.
 - **`MessageType::min_protocol_version()`** (`lib/message.rs`) is the per-type label: the
@@ -211,3 +225,5 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
 - **Future:** a golden-bytes interop corpus (canonical encoded samples of each payload, asserted to
   decode under current code) and an append-only gate (a new `gen-N.json` may only add message types
   versus `gen-(N-1).json`) once a second generation exists to compare against.
+
+Full-memory restores preserve the captured guest execution policy and advertise it through the captured `core.ready`. Workload thaw messages do not carry execution settings. Disk-only restores resolve settings at guest startup.

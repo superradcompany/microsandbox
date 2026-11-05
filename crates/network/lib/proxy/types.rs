@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use super::http_connect::HttpConnectCredentials;
 use super::socks::Socks5Credentials;
 
 //--------------------------------------------------------------------------------------------------
@@ -24,6 +25,9 @@ pub enum OutboundProxy {
     HttpConnect {
         /// Proxy socket address.
         address: SocketAddr,
+        /// Optional durable username/password authentication configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<HttpConnectCredentials>,
     },
 
     /// A SOCKS4 proxy at the given address.
@@ -54,6 +58,9 @@ pub enum ResolvedOutboundProxy {
     HttpConnect {
         /// Proxy socket address.
         address: SocketAddr,
+        /// Optional resolved username/password authentication credentials.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credentials: Option<super::http_connect::ResolvedHttpConnectCredentials>,
     },
 
     /// A SOCKS4 proxy ready for TCP connections.
@@ -71,6 +78,16 @@ pub enum ResolvedOutboundProxy {
         /// Optional resolved username/password authentication credentials.
         credentials: Option<super::socks::ResolvedSocks5Credentials>,
     },
+}
+
+/// Credentials resolved at launch for the configured outbound proxy.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedProxyCredentials {
+    /// Resolved SOCKS5 username/password credentials.
+    Socks5(super::socks::ResolvedSocks5Credentials),
+    /// Resolved HTTP CONNECT username/password credentials.
+    HttpConnect(super::http_connect::ResolvedHttpConnectCredentials),
 }
 
 /// Protocol used by an [`OutboundProxy`].
@@ -118,6 +135,20 @@ pub enum OutboundProxyBuildError {
     #[error("invalid SOCKS5 credentials: {reason}")]
     InvalidSocks5Credentials {
         /// Explanation of the validation failure.
+        reason: &'static str,
+    },
+
+    /// An HTTP CONNECT username or password is invalid.
+    #[error("invalid HTTP CONNECT credentials: {reason}")]
+    InvalidHttpConnectCredentials {
+        /// Explanation of the validation failure.
+        reason: &'static str,
+    },
+
+    /// Resolved launch credentials do not match the configured outbound proxy.
+    #[error("outbound proxy credential mismatch: {reason}")]
+    ProxyCredentialMismatch {
+        /// Explanation of the mismatch.
         reason: &'static str,
     },
 }
@@ -192,7 +223,7 @@ impl ResolvedOutboundProxy {
 impl fmt::Display for OutboundProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::HttpConnect { address } => write!(f, "http://{address}"),
+            Self::HttpConnect { address, .. } => write!(f, "http://{address}"),
             Self::Socks4 { address, .. } => write!(f, "socks4://{address}"),
             Self::Socks5 { address, .. } => write!(f, "socks5://{address}"),
         }

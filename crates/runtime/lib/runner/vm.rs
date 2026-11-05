@@ -5,6 +5,7 @@
 //! `Vm::enter()` from msb_krun. It **never returns** — the VMM calls
 //! `_exit()` on guest shutdown after running exit observers.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZero;
 #[cfg(unix)]
@@ -18,14 +19,16 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
-use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, DynFileSystem};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
 use microsandbox_filesystem::{
-    HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs, StatVirtualization,
+    DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs,
+    StatVirtualization,
 };
 use microsandbox_metrics::{ActivateSlot, MetricsRegistry, ReleaseMode};
 #[cfg(feature = "net")]
 use microsandbox_network::{ResolvedNetworkConfig, network::SmoltcpNetwork};
 use microsandbox_protocol::{
+    FS_STATE_LIMIT_MAX_MIB, FS_STATE_LIMIT_MIN_MIB,
     bootstrap::{BootstrapBlockRoot, GuestBootstrap},
     codec,
     message::{Message, MessageType},
@@ -47,6 +50,9 @@ use crate::bootstrap_fs::AgentBootstrapFs;
 use crate::console::AgentConsolePipeBridge;
 use crate::console::{AgentConsoleBackend, ConsoleSharedState};
 use crate::heartbeat::{self, HeartbeatDecision, HeartbeatReader};
+use crate::ipc::RuntimeSocketPaths;
+#[cfg(unix)]
+use crate::launch::BOOTSTRAP_ROOTFS_DIR;
 use crate::launch::FileMountConfig;
 #[cfg(unix)]
 pub use crate::launch::LIFECYCLE_LOCK_FD;
@@ -284,6 +290,9 @@ pub struct VmConfig {
     /// Guest transparent huge-page policy selected at boot.
     pub thp: microsandbox_types::TransparentHugePagePolicy,
 
+    /// Expose hardware virtualization capabilities to the guest.
+    pub nested_virt: bool,
+
     /// Host control over the guest wall clock during boot, restore, and resume.
     pub guest_clock: microsandbox_types::GuestClockPolicy,
 
@@ -310,6 +319,9 @@ pub struct VmConfig {
 
     /// Host-resolved placement behavior.
     pub placement_profile: Option<microsandbox_types::PlacementProfile>,
+
+    /// Virtio-fs backend state budget in bytes; the msb_krun default when unset.
+    pub fs_state_limit_bytes: Option<u64>,
 
     /// Per-writable-raw-disk hard budget for buffered host dirty data.
     pub block_writeback_limit_bytes: Option<u64>,
@@ -368,7 +380,14 @@ pub struct VmConfig {
     pub vsock: Vec<microsandbox_types::VsockRouteSpec>,
 
     /// Pre-built filesystem backends as `(tag, backend)` pairs.
-    #[cfg(unix)]
+    ///
+    /// VM construction consumes these backends, appending them after the runtime and
+    /// ordinary mounts in the supplied order. Tags must be unique across all filesystems,
+    /// nonempty, NUL-free, and at most 36 bytes. Guest mounting is configured separately
+    /// through `bootstrap.dir_mounts` or performed by the guest.
+    ///
+    /// These in-process backends have no checkpoint resource provider: full capture/fork
+    /// is refused by resource admission, and they cannot be supplied during full restore.
     pub backends: Vec<(String, Box<dyn DynFileSystem + Send + Sync>)>,
 
     /// Path to the init binary in the guest.
@@ -460,14 +479,85 @@ type VmBuildOutput = (
 /// Public runtime endpoints held back until a restored guest is activated.
 struct RestoreEndpointPublication {
     agent_sock_path: PathBuf,
-    run_dir: PathBuf,
+    socket_paths: RuntimeSocketPaths,
     sandbox_name: String,
     control: super::control::ControlContext,
+}
+
+/// Reclaim runtime-owned bootstrap rootfs directories when a sandbox run
+/// ends without the VM having torn them down itself.
+///
+/// `Vm::enter()` never returns on success: the VMM calls `_exit()` on guest
+/// shutdown after the exit observer already reclaimed the directories, so
+/// this drop only runs on failure paths that return before the guest takes
+/// over (including `?` propagation). Reclamation is idempotent, so racing
+/// the exit observer is harmless.
+struct TrampolineRootfsGuard {
+    rootfs_dirs: Vec<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
+
+impl VmConfig {
+    /// Virtio-fs backend state budget in bytes.
+    pub fn fs_state_limit(&self) -> usize {
+        self.fs_state_limit_bytes
+            .map_or(msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES, |bytes| {
+                bytes as usize
+            })
+    }
+
+    /// Check a launch-supplied virtio-fs state budget, which the SDK configures in whole MiB.
+    pub fn validate_fs_state_limit(bytes: Option<u64>) -> Result<(), String> {
+        const MIB: u64 = 1024 * 1024;
+        let range =
+            u64::from(FS_STATE_LIMIT_MIN_MIB) * MIB..=u64::from(FS_STATE_LIMIT_MAX_MIB) * MIB;
+        match bytes {
+            Some(bytes) if !range.contains(&bytes) => Err(format!(
+                "filesystem state budget must be between {FS_STATE_LIMIT_MIN_MIB} MiB and \
+                 {FS_STATE_LIMIT_MAX_MIB} MiB, got {bytes} bytes"
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_custom_backends(&self) -> RuntimeResult<()> {
+        if self.backends.is_empty() {
+            return Ok(());
+        }
+        if self.checkpoint_restore.is_some() {
+            return Err(RuntimeError::Custom(
+                "custom filesystem backends are not supported during checkpoint restore".into(),
+            ));
+        }
+
+        let mut tags = BTreeSet::from(["/dev/root", microsandbox_protocol::RUNTIME_FS_TAG]);
+        for mount in self
+            .mounts
+            .iter()
+            .chain(self.file_mounts.iter().map(|m| &m.mount))
+        {
+            if let Some((tag, _)) = mount.split_once(':') {
+                tags.insert(tag);
+            }
+        }
+        for (tag, _) in &self.backends {
+            if tag.is_empty() || tag.len() > 36 || tag.as_bytes().contains(&0) {
+                return Err(RuntimeError::Custom(
+                    "custom filesystem tag must contain 1..36 bytes without NUL".into(),
+                ));
+            }
+            if !tags.insert(tag) {
+                return Err(RuntimeError::Custom(format!(
+                    "custom filesystem tag {tag:?} conflicts with another filesystem"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
 
 impl AgentTransportProfile {
     /// Whether this boot should provision the optional bulk port and advertise its kernel hint.
@@ -495,24 +585,21 @@ impl RestoreEndpointPublication {
         relay.bind_public_endpoint()?;
 
         #[cfg(unix)]
-        if let Err(error) = crate::ipc::publish_legacy_agent_link(
-            &self.run_dir,
-            &self.sandbox_name,
-            &self.agent_sock_path,
-        ) {
-            let _ =
-                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+        if let Err(error) = self
+            .socket_paths
+            .publish_legacy_agent_link(&self.agent_sock_path)
+        {
+            let _ = self.socket_paths.remove_canonical_artifacts();
             return Err(error.into());
         }
 
         if let Err(error) = publish_control_endpoint(
             crate::control::control_socket_path_for(&self.agent_sock_path),
             self.control,
-            &self.run_dir,
+            &self.socket_paths,
             &self.sandbox_name,
         ) {
-            let _ =
-                crate::ipc::remove_canonical_socket_artifacts(&self.run_dir, &self.sandbox_name);
+            let _ = self.socket_paths.remove_canonical_artifacts();
             return Err(error);
         }
         Ok(())
@@ -535,6 +622,7 @@ impl std::fmt::Debug for VmConfig {
             .field("max_cpus", &self.max_cpus)
             .field("max_memory_mib", &self.max_memory_mib)
             .field("placement_profile_name", &self.placement_profile_name)
+            .field("fs_state_limit_bytes", &self.fs_state_limit_bytes)
             .field(
                 "block_writeback_limit_bytes",
                 &self.block_writeback_limit_bytes,
@@ -550,7 +638,6 @@ impl std::fmt::Debug for VmConfig {
             .field("rootfs_disk_runtime_owned", &self.rootfs_disk_runtime_owned)
             .field("mounts", &self.mounts)
             .field("disks", &self.disks);
-        #[cfg(unix)]
         debug.field("backends", &format!("[{} backend(s)]", self.backends.len()));
         debug
             .field("init_path", &self.init_path)
@@ -559,6 +646,12 @@ impl std::fmt::Debug for VmConfig {
             .field("exec_args", &self.exec_args)
             .field("checkpoint_restore", &self.checkpoint_restore)
             .finish()
+    }
+}
+
+impl Drop for TrampolineRootfsGuard {
+    fn drop(&mut self) {
+        remove_trampoline_rootfs_dirs(&self.rootfs_dirs);
     }
 }
 
@@ -674,25 +767,26 @@ fn run(
         None => Arc::new(|_| {}),
     };
 
-    // Set up runtime directory.
-    std::fs::create_dir_all(&config.runtime_dir)?;
-    std::fs::create_dir_all(config.runtime_dir.join("scripts"))?;
+    // The launcher must complete admission while holding lifecycle ownership. Direct runtime
+    // entry points enforce the same boundary; there is no legacy export fallback.
+    crate::checkpoint::layout::require_ready(&config.runtime_dir).map_err(RuntimeError::Custom)?;
+    let guest_dir =
+        crate::checkpoint::layout::guest_root(&config.runtime_dir).map_err(RuntimeError::Custom)?;
+    crate::checkpoint::layout::real_directory(&guest_dir.join("scripts"), true)
+        .map_err(RuntimeError::Custom)?;
     crate::checkpoint::recover_runtime_owned_root(&config.runtime_dir, &mut config.vm).map_err(
         |error| RuntimeError::Custom(format!("recover runtime-owned root disk: {error}")),
     )?;
     recover_owned_disk_layers(&config.runtime_dir, &mut config.vm.disks)?;
     // Heartbeats are per boot, while the runtime directory persists across starts.
-    heartbeat::clear_stale(&config.runtime_dir)?;
+    heartbeat::clear_stale(&guest_dir)?;
     if config.vm.checkpoint_restore.is_some() {
-        prepare_runtime_restore_namespace(&config.runtime_dir, config.vm.rootfs_vmdk.is_some())?;
+        prepare_runtime_restore_namespace(&guest_dir, config.vm.rootfs_vmdk.is_some())?;
     }
 
+    let socket_paths = RuntimeSocketPaths::new(&config.run_dir, &config.sandbox_name);
     #[cfg(unix)]
-    crate::ipc::prepare_canonical_socket_dir(
-        &config.run_dir,
-        &config.sandbox_name,
-        &config.agent_sock_path,
-    )?;
+    socket_paths.prepare_canonical_directory(&config.agent_sock_path)?;
 
     // Create the relay and persist the run record with a single runtime hop.
     let (mut relay, db, run_db_id) = tokio_rt.block_on(async {
@@ -720,6 +814,9 @@ fn run(
         let run_db_id = insert_run(&db, config.sandbox_id, pid).await?;
         Ok::<_, RuntimeError>((relay, db, run_db_id))
     })?;
+
+    let relay_idle = relay.idle_state();
+    relay = relay.with_boot_error_log_dir(config.log_dir.clone());
 
     let writeback_disk_paths = match writeback_limited_disk_paths(&config.vm) {
         Ok(disk_paths) => disk_paths,
@@ -777,11 +874,7 @@ fn run(
 
     #[cfg(unix)]
     if config.vm.checkpoint_restore.is_none()
-        && let Err(error) = crate::ipc::publish_legacy_agent_link(
-            &config.run_dir,
-            &config.sandbox_name,
-            &config.agent_sock_path,
-        )
+        && let Err(error) = socket_paths.publish_legacy_agent_link(&config.agent_sock_path)
     {
         if let Err(release_error) = tokio_rt.block_on(writeback_guard.release(&db)) {
             tracing::warn!(%release_error, "release writeback admission after legacy endpoint publication failure");
@@ -792,8 +885,7 @@ fn run(
         let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
         // Publication is no-replace. If it collided with another legacy
         // endpoint, clean only this runtime's canonical namespace.
-        let _ =
-            crate::ipc::remove_canonical_socket_artifacts(&config.run_dir, &config.sandbox_name);
+        let _ = socket_paths.remove_canonical_artifacts();
         return Err(error.into());
     }
 
@@ -850,6 +942,7 @@ fn run(
     let exit_reason_for_observer = Arc::clone(&exit_reason);
     let exit_sock_path = config.agent_sock_path.clone();
     let exit_run_dir = config.run_dir.clone();
+    let exit_socket_paths = socket_paths.clone();
     let exit_sandbox_name = config.sandbox_name.clone();
     let exit_sandboxes_dir = config.sandboxes_dir.clone();
     let exit_log_writer = exec_log_writer.clone();
@@ -888,8 +981,14 @@ fn run(
         required: placement_required,
         numa_topology: resolved_numa_topology,
     };
+    // Reclaims the runtime-owned bootstrap rootfs directories if this run
+    // returns before the VM takes over; `enter()` never returns on success,
+    // so normal teardown is handled by the exit observer alone.
+    let mut trampoline_rootfs = TrampolineRootfsGuard {
+        rootfs_dirs: Vec::new(),
+    };
     let build_result = build_vm(
-        &config,
+        &mut config,
         console_backends,
         move |exit_code: i32| {
             use microsandbox_db::entity::sandbox as sandbox_entity;
@@ -925,8 +1024,7 @@ fn run(
                 // restartable terminal state; on failure, leave the active row
                 // for dead-PID maintenance to retry after the process exits.
                 let bound_result = crate::ipc::remove_socket_pair(&exit_sock_path);
-                let owned_result =
-                    crate::ipc::remove_sandbox_socket_artifacts(&exit_run_dir, &exit_sandbox_name);
+                let owned_result = exit_socket_paths.remove_artifacts();
                 if let Err(error) = bound_result.and(owned_result) {
                     tracing::warn!(
                         sandbox = %exit_sandbox_name,
@@ -1034,6 +1132,7 @@ fn run(
         },
         host_placement,
         writeback_limit.as_ref(),
+        &mut trampoline_rootfs.rootfs_dirs,
     );
     let (
         vm,
@@ -1066,8 +1165,7 @@ fn run(
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
-            let _ =
-                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            let _ = socket_paths.remove_artifacts();
             return Err(e);
         }
     };
@@ -1104,7 +1202,7 @@ fn run(
     // Serve every host-side control operation through one runtime-owned executor and endpoint.
     // Restore constructs the executor now but withholds both public endpoints until the guest has
     // crossed its VMGenID/workload activation barrier.
-    let restore_endpoint_publication = {
+    let (restore_endpoint_publication, managed_jobs) = {
         let control = vm.control_handle();
         #[cfg(feature = "net")]
         let secrets = _network_secrets_handle.clone();
@@ -1120,6 +1218,7 @@ fn run(
             &resolved_bootstrap,
             tokio_rt.handle().clone(),
             &config.agent_sock_path,
+            Arc::clone(&relay_idle),
             Arc::clone(&shared.workload_control),
             Arc::clone(&shared.resident_paused),
             restored_agent
@@ -1138,30 +1237,31 @@ fn run(
                 }
             },
         };
+        let managed_jobs = context.executor.jobs();
         if restored_agent.is_some() {
-            Some(RestoreEndpointPublication {
-                agent_sock_path: config.agent_sock_path.clone(),
-                run_dir: config.run_dir.clone(),
-                sandbox_name: config.sandbox_name.clone(),
-                control: context,
-            })
+            (
+                Some(RestoreEndpointPublication {
+                    agent_sock_path: config.agent_sock_path.clone(),
+                    socket_paths: socket_paths.clone(),
+                    sandbox_name: config.sandbox_name.clone(),
+                    control: context,
+                }),
+                managed_jobs,
+            )
         } else {
             if let Err(error) = publish_control_endpoint(
                 control_sock_path,
                 context,
-                &config.run_dir,
+                &socket_paths,
                 &config.sandbox_name,
             ) {
                 let _ = tokio_rt.block_on(mark_run_failed(&db, run_db_id));
                 // Preserve the colliding compatibility entry. It may belong
                 // to a still-live older runtime.
-                let _ = crate::ipc::remove_canonical_socket_artifacts(
-                    &config.run_dir,
-                    &config.sandbox_name,
-                );
+                let _ = socket_paths.remove_canonical_artifacts();
                 return Err(error);
             }
-            None
+            (None, managed_jobs)
         }
     };
 
@@ -1184,8 +1284,7 @@ fn run(
                 release_reserved_metrics_slot(config.metrics_slot.as_ref());
             }
             let _ = crate::ipc::remove_socket_pair(&config.agent_sock_path);
-            let _ =
-                crate::ipc::remove_sandbox_socket_artifacts(&config.run_dir, &config.sandbox_name);
+            let _ = socket_paths.remove_artifacts();
             return Err(e);
         }
     }
@@ -1271,6 +1370,7 @@ fn run(
     let relay_exit_handle = exit_handle.clone();
     let relay_exit_reason = Arc::clone(&exit_reason);
     let restore_control = restored_agent.as_ref().map(|_| vm.control_handle());
+    let metrics_vm_control = vm.control_handle();
     let restore_runtime_dir = config.runtime_dir.clone();
     let relay_boot_log_dir = config.log_dir.clone();
     let restore_startup_progress = startup_progress.clone();
@@ -1334,6 +1434,7 @@ fn run(
                         interval_ms,
                         max_cpus: metrics_max_cpus,
                         krun_metrics: krun_metrics_handle,
+                        vm_control: metrics_vm_control,
                         network_metrics: network_metrics_handle,
                         upper_host_path,
                     }));
@@ -1466,7 +1567,7 @@ fn run(
     // heartbeat is NOT treated as a failure here — a busy agent is still healthy,
     // and a guest that never boots is reclaimed by the relay's wait_ready path.
     {
-        let mut heartbeat_reader = HeartbeatReader::new(&config.runtime_dir);
+        let mut heartbeat_reader = HeartbeatReader::new(&guest_dir);
         let idle_timeout = config.idle_timeout_secs.map(Duration::from_secs);
         let heartbeat_exit_handle = exit_handle.clone();
         let heartbeat_reason = Arc::clone(&exit_reason);
@@ -1474,6 +1575,7 @@ fn run(
         let heartbeat_shutdown_flush_timeout = shutdown_flush_timeout;
         tokio_rt.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last_attached_session = None;
             loop {
                 interval.tick().await;
                 if heartbeat_shared
@@ -1483,9 +1585,21 @@ fn run(
                     continue;
                 }
                 let decision = heartbeat_reader.check(idle_timeout);
+                if relay_idle.has_attached_exec_sessions().await
+                    || managed_jobs.has_active_attachments()
+                {
+                    last_attached_session = Some(std::time::Instant::now());
+                    continue;
+                }
 
                 match decision {
                     HeartbeatDecision::Idle(status) => {
+                        // A caller that just detached gets a full idle interval before shutdown.
+                        if let (Some(last), Some(timeout)) = (last_attached_session, idle_timeout)
+                            && last.elapsed() < timeout
+                        {
+                            continue;
+                        }
                         let idle_secs = idle_timeout.map(|timeout| timeout.as_secs()).unwrap_or(0);
                         tracing::info!(
                             idle_secs,
@@ -1816,14 +1930,16 @@ struct VmBuildRuntime {
     startup_progress: crate::startup_progress::StartupProgressCallback,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_vm(
-    config: &Config,
+    config: &mut Config,
     console_backends: AgentConsoleBackends,
     on_exit: impl Fn(i32) + Send + 'static,
     on_placement: impl FnOnce(&msb_krun::PlacementReport) + Send + 'static,
     runtime: VmBuildRuntime,
     host_placement: HostPlacement<'_>,
     writeback_limit: Option<&msb_krun::WritebackLimit>,
+    trampoline_rootfs_dirs: &mut Vec<PathBuf>,
 ) -> RuntimeResult<VmBuildOutput> {
     let VmBuildRuntime {
         tokio_handle,
@@ -1837,7 +1953,13 @@ fn build_vm(
     // as a dedicated bulk port. Once dual-port is selected it returns to the small control queue.
     let agent_queue_size = agent_primary_queue_size(bulk_console_backend.is_some());
     let vm = &config.vm;
+    vm.validate_custom_backends()?;
     let mut owned_directory_checkpoints = std::collections::BTreeMap::new();
+    // Collects the runtime-owned bootstrap rootfs directories created for
+    // unix block-root sandboxes; the caller reclaims them if this VM is
+    // never started, and the exit observer reclaims them at teardown.
+    #[cfg(not(unix))]
+    let _ = trampoline_rootfs_dirs;
     // Decode once before constructing devices: unavailable disks need the exact
     // captured capacity/features, never guessed geometry or a temporary backing.
     let prepared_restore = vm
@@ -1849,11 +1971,13 @@ fn build_vm(
                     restore.closure.clone(),
                     &restore.checkpoint_id,
                     restore.memory_descriptor,
+                    vm.fs_state_limit(),
                 )
             } else {
                 crate::checkpoint::PreparedCheckpointRestore::open(
                     restore.closure.clone(),
                     &restore.checkpoint_root,
+                    vm.fs_state_limit(),
                 )
             }
             .map_err(|error| {
@@ -1866,6 +1990,7 @@ fn build_vm(
         })
         .transpose()?;
     let mut bootstrap = vm.bootstrap.clone();
+    bootstrap.init_failure_ack = true;
     let balloon_stats_interval = config
         .metrics_sample_interval_ms
         .map(|interval_ms| Duration::from_millis(interval_ms.get()));
@@ -1875,14 +2000,18 @@ fn build_vm(
     let bind_identity_map = BindIdentityMapRegistration::new();
 
     let kernel_cmdline = agent_kernel_cmdline(vm.thp, config.agent_transport);
+    let device_state_limits =
+        msb_krun::DeviceStateLimits::default().with_fs_state_limit(vm.fs_state_limit());
     let mut builder = VmBuilder::new()
+        .device_state_limits(device_state_limits)
         .machine(|m| {
             let mut m = m
                 .vcpus(vm.vcpus)
                 .memory_mib(vm.memory_mib as usize)
                 .max_vcpus(vm.max_cpus.max(vm.vcpus))
                 .max_memory_mib((vm.max_memory_mib.max(vm.memory_mib)) as usize)
-                .balloon_stats_interval(balloon_stats_interval);
+                .balloon_stats_interval(balloon_stats_interval)
+                .nested_virt(vm.nested_virt);
             if let Some(targets) = host_placement.vcpu_targets {
                 let affinity = targets
                     .iter()
@@ -1921,18 +2050,27 @@ fn build_vm(
 
     // Root filesystem.
     if let Some(ref rootfs_path) = vm.rootfs_path {
-        let backend = bind_rootfs_backend(rootfs_path, vm.rootfs_follow_root_symlinks)?;
+        let backend = bind_rootfs_backend(
+            rootfs_path,
+            vm.rootfs_follow_root_symlinks,
+            vm.fs_state_limit(),
+        )?;
         builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
     } else if let Some(ref vmdk_path) = vm.rootfs_vmdk {
         // EROFS fsmerge OCI rootfs: VMDK (read-only) + upper.ext4 (writable).
         #[cfg(unix)]
         {
-            let backend = bootstrap_trampoline_backend()?;
+            let (backend, rootfs_dir) = bootstrap_trampoline_backend(
+                vm.fs_state_limit(),
+                &config.sandboxes_dir.join(&config.sandbox_name),
+            )?;
+            trampoline_rootfs_dirs.push(rootfs_dir);
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
         #[cfg(windows)]
         {
             let backend = AgentBootstrapFs::new()
+                .map(|fs| fs.with_state_limit(vm.fs_state_limit()))
                 .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -1975,12 +2113,17 @@ fn build_vm(
     } else if vm.rootfs_disk_spec.is_some() || vm.rootfs_disk.is_some() {
         #[cfg(unix)]
         {
-            let backend = bootstrap_trampoline_backend()?;
+            let (backend, rootfs_dir) = bootstrap_trampoline_backend(
+                vm.fs_state_limit(),
+                &config.sandboxes_dir.join(&config.sandbox_name),
+            )?;
+            trampoline_rootfs_dirs.push(rootfs_dir);
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
         #[cfg(windows)]
         {
             let backend = AgentBootstrapFs::new()
+                .map(|fs| fs.with_state_limit(vm.fs_state_limit()))
                 .map_err(|e| RuntimeError::Custom(format!("bootstrap rootfs: {e}")))?;
             builder = builder.fs(move |fs| fs.tag("/dev/root").custom(Box::new(backend)));
         }
@@ -2028,7 +2171,11 @@ fn build_vm(
     {
         let runtime_tag = microsandbox_protocol::RUNTIME_FS_TAG.to_string();
         let cfg = PassthroughConfig {
-            root_dir: canonicalize_owned_mount_root(&config.runtime_dir)?,
+            max_state_bytes: vm.fs_state_limit(),
+            root_dir: canonicalize_owned_mount_root(
+                &crate::checkpoint::layout::guest_root(&config.runtime_dir)
+                    .map_err(RuntimeError::Custom)?,
+            )?,
             inject_init: false,
             quota_bytes: Some(microsandbox_protocol::RUNTIME_FS_QUOTA_BYTES),
             no_symlink_root: true,
@@ -2091,8 +2238,10 @@ fn build_vm(
             // failing strict validation. Keep its guest device but grant no host access.
             let tag = binding.mount.tag.clone();
             builder = builder.fs(move |fs| {
-                fs.tag(&tag)
-                    .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                fs.tag(&tag).custom(Box::new(
+                    microsandbox_filesystem::UnavailableFs::default()
+                        .with_state_limit(vm.fs_state_limit()),
+                ))
             });
             external_mount_reports.push(crate::checkpoint::ExternalMountReport {
                 guest_path: binding.mount.guest_path.clone(),
@@ -2131,6 +2280,7 @@ fn build_vm(
             });
         }
         let cfg = PassthroughConfig {
+            max_state_bytes: vm.fs_state_limit(),
             external_checkpoint: Some(external_options),
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
@@ -2162,8 +2312,10 @@ fn build_vm(
                         "external file cannot be opened: {error}; filesystem operations return EIO"
                     ));
                     builder = builder.fs(move |fs| {
-                        fs.tag(&tag)
-                            .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                        fs.tag(&tag).custom(Box::new(
+                            microsandbox_filesystem::UnavailableFs::default()
+                                .with_state_limit(vm.fs_state_limit()),
+                        ))
                     });
                     continue;
                 }
@@ -2227,8 +2379,10 @@ fn build_vm(
             {
                 let tag = binding.mount.tag.clone();
                 builder = builder.fs(move |fs| {
-                    fs.tag(&tag)
-                        .custom(Box::new(microsandbox_filesystem::UnavailableFs::default()))
+                    fs.tag(&tag).custom(Box::new(
+                        microsandbox_filesystem::UnavailableFs::default()
+                            .with_state_limit(vm.fs_state_limit()),
+                    ))
                 });
                 external_mount_reports.push(crate::checkpoint::ExternalMountReport {
                     guest_path: binding.mount.guest_path.clone(),
@@ -2294,6 +2448,7 @@ fn build_vm(
             });
         }
         let cfg = PassthroughConfig {
+            max_state_bytes: vm.fs_state_limit(),
             root_dir: host_path.clone(),
             external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
             owned_checkpoint,
@@ -2315,7 +2470,7 @@ fn build_vm(
             Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
                 && matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotADirectory) => {
                 external_mount_reports.last_mut().expect("restore report").unavailable = Some(format!("external export cannot be opened: {error}; filesystem operations return EIO"));
-                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default())));
+                builder = builder.fs(move |fs| fs.tag(&tag).custom(Box::new(microsandbox_filesystem::UnavailableFs::default().with_state_limit(vm.fs_state_limit()))));
                 continue;
             }
             result => result,
@@ -2576,13 +2731,26 @@ fn build_vm(
         let net_backend = network.take_backend();
 
         {
-            let tls_dir = config.runtime_dir.join("tls");
-            let _ = std::fs::create_dir_all(&tls_dir);
+            let tls_dir = crate::checkpoint::layout::guest_root(&config.runtime_dir)
+                .map_err(RuntimeError::Custom)?
+                .join("tls");
+            // A direct runtime start can encounter files left by a previous guest. Validate
+            // the parent and replace final names atomically instead of following guest links.
+            crate::checkpoint::layout::real_directory(&tls_dir, true)
+                .map_err(RuntimeError::Custom)?;
             if let Some(ca_pem) = network.ca_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("ca.pem"), &ca_pem);
+                crate::checkpoint::layout::write_guest_certificate(
+                    &tls_dir.join("ca.pem"),
+                    ca_pem.as_ref(),
+                )
+                .map_err(RuntimeError::Custom)?;
             }
             if let Some(host_cas_pem) = network.host_cas_cert_pem() {
-                let _ = std::fs::write(tls_dir.join("host-cas.pem"), &host_cas_pem);
+                crate::checkpoint::layout::write_guest_certificate(
+                    &tls_dir.join("host-cas.pem"),
+                    host_cas_pem.as_ref(),
+                )
+                .map_err(RuntimeError::Custom)?;
             }
         }
 
@@ -2666,8 +2834,18 @@ fn build_vm(
         });
     }
 
-    // Exit observer — runs synchronously before _exit() for DB cleanup.
+    // Exit observer — runs synchronously before _exit() for DB cleanup. On
+    // unix it also reclaims the runtime-owned bootstrap rootfs first, so the
+    // host does not accumulate one leaked trampoline directory per run.
+    #[cfg(unix)]
+    let on_exit = trampoline_rootfs_cleanup_on_exit(trampoline_rootfs_dirs.clone(), on_exit);
     builder = builder.on_placement(on_placement).on_exit(on_exit);
+
+    // Append without shifting the transport identities of existing filesystem mounts.
+    // Transfer ownership only after the configuration has been borrowed for setup.
+    for (tag, backend) in config.vm.backends.drain(..) {
+        builder = builder.fs(move |fs| fs.tag(&tag).custom(backend));
+    }
 
     let mut vm = builder
         .build()
@@ -2734,37 +2912,33 @@ fn encode_bootstrap_frame(bootstrap: &GuestBootstrap) -> RuntimeResult<Vec<u8>> 
 fn publish_control_endpoint(
     control_sock_path: PathBuf,
     context: super::control::ControlContext,
-    run_dir: &Path,
+    socket_paths: &RuntimeSocketPaths,
     sandbox_name: &str,
 ) -> RuntimeResult<()> {
     // Windows uses named pipes and has no legacy Unix socket link to publish.
     #[cfg(not(unix))]
-    let _ = (run_dir, sandbox_name);
+    let _ = (socket_paths, sandbox_name);
 
-    match super::control::spawn_control_listener(control_sock_path.clone(), context) {
-        Ok(()) => {
-            #[cfg(unix)]
-            if let Err(error) =
-                crate::ipc::publish_legacy_control_link(run_dir, sandbox_name, &control_sock_path)
-            {
-                if error.kind() == std::io::ErrorKind::InvalidInput {
-                    tracing::warn!(
-                        "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
-                    );
-                } else {
-                    return Err(error.into());
-                }
-            }
-        }
-        Err(error) => {
-            // Live control has historically been an optional capability. Keep
-            // ordinary launches running when the listener itself is unavailable.
-            tracing::warn!(
-                "failed to start runtime control listener at {}: {error}",
-                control_sock_path.display()
-            );
-        }
+    // Live control has historically been an optional capability. Keep ordinary
+    // launches running when the listener itself is unavailable.
+    if let Err(error) = super::control::spawn_control_listener(control_sock_path.clone(), context) {
+        tracing::warn!(
+            "failed to start runtime control listener at {}: {error}",
+            control_sock_path.display()
+        );
+        return Ok(());
     }
+
+    #[cfg(unix)]
+    if let Err(error) = socket_paths.publish_legacy_control_link(&control_sock_path) {
+        if error.kind() != std::io::ErrorKind::InvalidInput {
+            return Err(error.into());
+        }
+        tracing::warn!(
+            "legacy runtime control endpoint is unavailable for {sandbox_name}: {error}"
+        );
+    }
+
     Ok(())
 }
 
@@ -2897,22 +3071,80 @@ fn macos_maxfilesperproc() -> Option<libc::rlim_t> {
 /// A restored virtio-fs session retains their inode numbers, so the destination
 /// provider must recreate the same pathname namespace before backend restore.
 #[cfg(unix)]
-fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
-    let trampoline = tempfile::tempdir()?;
+fn bootstrap_trampoline_backend(
+    limit: usize,
+    sandbox_dir: &Path,
+) -> RuntimeResult<(PassthroughFs, PathBuf)> {
+    let parent = sandbox_dir.join(BOOTSTRAP_ROOTFS_DIR);
+    std::fs::create_dir_all(&parent).map_err(|error| {
+        RuntimeError::Custom(format!("create bootstrap trampoline directory: {error}"))
+    })?;
+
+    let trampoline = tempfile::tempdir_in(parent)?;
     for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
         std::fs::create_dir(trampoline.path().join(directory)).map_err(|error| {
             RuntimeError::Custom(format!("create bootstrap mountpoint {directory}: {error}"))
         })?;
     }
     let cfg = PassthroughConfig {
+        max_state_bytes: limit,
         root_dir: canonicalize_owned_mount_root(trampoline.path())?,
         no_symlink_root: true,
         ..Default::default()
     };
     let backend = PassthroughFs::new(cfg)
         .map_err(|error| RuntimeError::Custom(format!("trampoline rootfs: {error}")))?;
+    // keep() disables the TempDir auto-cleanup so the bootstrap rootfs
+    // outlives this function; the caller owns reclamation from here on
+    // (see `TrampolineRootfsGuard` and the exit-observer chaining in
+    // `build_vm`).
+    let rootfs_dir = trampoline.path().to_path_buf();
     let _ = trampoline.keep();
-    Ok(backend)
+    Ok((backend, rootfs_dir))
+}
+
+/// Remove runtime-owned bootstrap rootfs directories (see
+/// `bootstrap_trampoline_backend`).
+///
+/// An already-removed directory is success: the exit observer and the
+/// failure-path guard may both attempt reclamation, and forced teardown can
+/// race the host temporary-directory maintenance. No directory is created on
+/// non-unix platforms, so this is a no-op there.
+fn remove_trampoline_rootfs_dirs(rootfs_dirs: &[PathBuf]) {
+    #[cfg(unix)]
+    {
+        for rootfs_dir in rootfs_dirs {
+            if let Err(error) = std::fs::remove_dir_all(rootfs_dir)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    ?error,
+                    ?rootfs_dir,
+                    "failed to remove bootstrap trampoline rootfs"
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = rootfs_dirs;
+    }
+}
+
+/// Chain bootstrap rootfs reclamation in front of the exit observer.
+///
+/// The observer runs synchronously on the VMM thread before `_exit()`, so the
+/// runtime-owned directories are reclaimed on both normal and forced teardown
+/// while the original cleanup (DB state, sockets) still runs last.
+#[cfg(unix)]
+fn trampoline_rootfs_cleanup_on_exit(
+    rootfs_dirs: Vec<PathBuf>,
+    on_exit: impl Fn(i32) + Send + 'static,
+) -> impl Fn(i32) + Send + 'static {
+    move |exit_code: i32| {
+        remove_trampoline_rootfs_dirs(&rootfs_dirs);
+        on_exit(exit_code)
+    }
 }
 
 /// Recreate runtime-owned paths whose guest-visible inode identities survive a full restore.
@@ -2923,12 +3155,14 @@ fn bootstrap_trampoline_backend() -> RuntimeResult<PassthroughFs> {
 /// atomically published heartbeat pathname. Existing heartbeat contents are never truncated.
 fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> RuntimeResult<()> {
     if oci_root {
-        for directory in ["rootfs/lower", "rootfs/upperfs"] {
-            std::fs::create_dir_all(runtime_dir.join(directory)).map_err(|error| {
-                RuntimeError::Custom(format!(
-                    "create restored runtime mountpoint {directory}: {error}"
-                ))
-            })?;
+        for directory in ["rootfs", "rootfs/lower", "rootfs/upperfs"] {
+            crate::checkpoint::layout::real_directory(&runtime_dir.join(directory), true).map_err(
+                |error| {
+                    RuntimeError::Custom(format!(
+                        "create restored runtime mountpoint {directory}: {error}"
+                    ))
+                },
+            )?;
         }
     }
 
@@ -2956,8 +3190,10 @@ fn prepare_runtime_restore_namespace(runtime_dir: &Path, oci_root: bool) -> Runt
 fn bind_rootfs_backend(
     rootfs_path: &Path,
     follow_root_symlinks: bool,
+    limit: usize,
 ) -> RuntimeResult<PassthroughFs> {
     let cfg = PassthroughConfig {
+        max_state_bytes: limit,
         root_dir: rootfs_path.to_path_buf(),
         no_symlink_root: !follow_root_symlinks,
         ..Default::default()
@@ -3702,7 +3938,12 @@ fn agent_kernel_cmdline(
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
+#[path = "vm_tests/custom_backends.rs"]
+mod custom_backend_tests;
+
+#[cfg(test)]
 mod tests {
+    use super::VmConfig;
     #[cfg(feature = "net")]
     use super::to_krun_network_rate_limiters;
     use super::{
@@ -3715,8 +3956,10 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{
-        BindIdentityMapRegistration, PARENT_WATCH_DETACH, ParentWatchdogSignal,
-        bind_identity_map_for_mount, bootstrap_trampoline_backend, read_parent_watchdog_signal,
+        BOOTSTRAP_ROOTFS_DIR, BindIdentityMapRegistration, PARENT_WATCH_DETACH,
+        ParentWatchdogSignal, TrampolineRootfsGuard, bind_identity_map_for_mount,
+        bootstrap_trampoline_backend, read_parent_watchdog_signal, remove_trampoline_rootfs_dirs,
+        trampoline_rootfs_cleanup_on_exit,
     };
     use super::{
         DiskMountSpec, UpperLayerSpec, UpperSpec, prepare_runtime_restore_namespace,
@@ -3750,6 +3993,33 @@ mod tests {
             readonly,
             snapshot_owned: true,
             lifecycle_owned: true,
+        }
+    }
+
+    #[test]
+    fn fs_state_limit_accepts_only_the_configurable_range() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            u64::from(microsandbox_protocol::FS_STATE_LIMIT_DEFAULT_MIB) * MIB,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES as u64
+        );
+        for bytes in [
+            None,
+            Some(MIB),
+            Some(4 * MIB),
+            Some(64 * MIB),
+            Some(4095 * MIB),
+        ] {
+            assert!(
+                VmConfig::validate_fs_state_limit(bytes).is_ok(),
+                "{bytes:?}"
+            );
+        }
+        for bytes in [0, MIB - 1, 4096 * MIB] {
+            assert!(
+                VmConfig::validate_fs_state_limit(Some(bytes)).is_err(),
+                "{bytes}"
+            );
         }
     }
 
@@ -3999,7 +4269,12 @@ mod tests {
 
         // follow=true: the tempdir path may traverse a symlinked prefix (macOS
         // `/var`); this test exercises backend behavior, not root protection.
-        let fs = bind_rootfs_backend(rootfs.path(), true).unwrap();
+        let fs = bind_rootfs_backend(
+            rootfs.path(),
+            true,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
+        .unwrap();
         fs.init(FsOptions::empty()).unwrap();
 
         let host = fs.lookup(fs_context(), 1, c"host.txt").unwrap();
@@ -4012,12 +4287,317 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bootstrap_trampoline_recreates_agent_mountpoints() {
-        let fs = bootstrap_trampoline_backend().unwrap();
+        let sandbox_dir = tempfile::tempdir().unwrap();
+        let (fs, rootfs_dir) = bootstrap_trampoline_backend(
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+            sandbox_dir.path(),
+        )
+        .unwrap();
+        let parent = sandbox_dir.path().join(BOOTSTRAP_ROOTFS_DIR);
+        assert_eq!(rootfs_dir.parent(), Some(parent.as_path()));
         fs.init(FsOptions::empty()).unwrap();
         for directory in ["dev", "sys", "proc", ".msb", "newroot"] {
             fs.lookup(fs_context(), 1, &std::ffi::CString::new(directory).unwrap())
                 .unwrap();
+            assert!(rootfs_dir.join(directory).is_dir());
         }
+
+        // `bootstrap_trampoline_backend` `keep()`s its TempDir, so hand the
+        // bootstrap rootfs back through the production reclamation path
+        // instead of leaving it in the host temp tree on every test run.
+        remove_trampoline_rootfs_dirs(std::slice::from_ref(&rootfs_dir));
+        assert!(!rootfs_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trampoline_rootfs_cleanup_on_exit_removes_dir_before_running_observer() {
+        let host = tempfile::tempdir().unwrap();
+        let rootfs_dir = host.path().join("bootstrap-rootfs");
+        std::fs::create_dir_all(rootfs_dir.join("newroot")).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+        let observer_seen_cleanup = Arc::new(std::sync::Mutex::new(false));
+        let cleanup_seen = Arc::clone(&observer_seen_cleanup);
+        let cleanup_observed = Arc::clone(&observed);
+        let closure_dir = rootfs_dir.clone();
+        let cleanup =
+            trampoline_rootfs_cleanup_on_exit(vec![rootfs_dir.clone()], move |exit_code| {
+                assert!(
+                    !closure_dir.exists(),
+                    "trampoline rootfs must be reclaimed before the exit observer runs"
+                );
+                *cleanup_seen.lock().unwrap() = true;
+                cleanup_observed.lock().unwrap().push(exit_code);
+            });
+        cleanup(7);
+
+        assert!(!rootfs_dir.exists());
+        assert!(*observer_seen_cleanup.lock().unwrap());
+        assert_eq!(*observed.lock().unwrap(), vec![7]);
+        // Only the runtime-owned rootfs is reclaimed, not its host parent.
+        assert!(host.path().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_trampoline_rootfs_dirs_tolerates_missing_directories() {
+        let host = tempfile::tempdir().unwrap();
+        let rootfs_dir = host.path().join("bootstrap-rootfs");
+        // No directories, and a path that never existed, are tolerated.
+        remove_trampoline_rootfs_dirs(&[]);
+        remove_trampoline_rootfs_dirs(std::slice::from_ref(&rootfs_dir));
+        std::fs::create_dir_all(rootfs_dir.join("dev")).unwrap();
+        std::fs::write(rootfs_dir.join("dev").join("file"), b"fixture").unwrap();
+        remove_trampoline_rootfs_dirs(std::slice::from_ref(&rootfs_dir));
+        assert!(!rootfs_dir.exists());
+        // Repeated reclamation after a real removal is still not an error.
+        remove_trampoline_rootfs_dirs(std::slice::from_ref(&rootfs_dir));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trampoline_rootfs_guard_reclaims_dirs_on_failure_paths() {
+        let host = tempfile::tempdir().unwrap();
+        let rootfs_dir = host.path().join("bootstrap-rootfs");
+        std::fs::create_dir_all(rootfs_dir.join("newroot")).unwrap();
+        let guard = TrampolineRootfsGuard {
+            rootfs_dirs: vec![rootfs_dir.clone()],
+        };
+        drop(guard);
+        assert!(!rootfs_dir.exists());
+    }
+
+    /// Minimal `Config` that reaches the trampoline-registering rootfs branches
+    /// of `build_vm`; the caller shapes the rootfs to pin which branch runs.
+    #[cfg(unix)]
+    fn build_vm_test_config(
+        scratch: &std::path::Path,
+        shape_rootfs: impl FnOnce(&mut VmConfig),
+    ) -> super::Config {
+        let mut vm = VmConfig {
+            libkrunfw_path: std::path::PathBuf::from("/nonexistent/libkrunfw.so"),
+            thp: Default::default(),
+            nested_virt: false,
+            guest_clock: Default::default(),
+            memory_cache_dir: None,
+            vcpus: 1,
+            memory_mib: 256,
+            max_cpus: 1,
+            max_memory_mib: 256,
+            cpu_placement: Default::default(),
+            placement_profile_name: None,
+            placement_profile: None,
+            fs_state_limit_bytes: None,
+            block_writeback_limit_bytes: None,
+            rootfs_path: None,
+            rootfs_follow_root_symlinks: false,
+            rootfs_disk: None,
+            rootfs_disk_format: None,
+            rootfs_disk_readonly: false,
+            rootfs_disk_spec: None,
+            rootfs_disk_runtime_owned: false,
+            rootfs_vmdk: None,
+            rootfs_upper: None,
+            rootfs_upper_spec: None,
+            mounts: Vec::new(),
+            file_mounts: Vec::new(),
+            owned_volumes: Vec::new(),
+            disks: Vec::new(),
+            vsock: Vec::new(),
+            backends: Vec::new(),
+            init_path: None,
+            bootstrap: Default::default(),
+            exec_path: None,
+            exec_args: Vec::new(),
+            #[cfg(feature = "net")]
+            network: Default::default(),
+            #[cfg(feature = "net")]
+            deployment_profile: Default::default(),
+            #[cfg(feature = "net")]
+            sandbox_slot: 1,
+            checkpoint_restore: None,
+        };
+        shape_rootfs(&mut vm);
+        super::Config {
+            agent_transport: AgentTransportProfile::default(),
+            sandbox_name: "trampoline-test".into(),
+            sandbox_id: 1,
+            log_level: None,
+            sandbox_db_path: scratch.join("sandbox.db"),
+            sandbox_db_connect_timeout_secs: 5,
+            log_dir: scratch.join("logs"),
+            runtime_dir: scratch.join("runtime"),
+            sandboxes_dir: scratch.join("sandboxes"),
+            run_dir: scratch.join("run"),
+            lifecycle_guard: crate::ipc::SandboxLifecycleGuard::from_inherited_file(
+                std::fs::File::create(scratch.join("lifecycle.lock")).unwrap(),
+            ),
+            cpu_lease_dir: scratch.join("cpu-leases"),
+            writeback_lease_dir: scratch.join("writeback-leases"),
+            block_writeback_pool_bytes: None,
+            agent_sock_path: scratch.join("agent.sock"),
+            startup_command: None,
+            startup_fd: None,
+            parent_watchdog: None,
+            forward_output: false,
+            idle_timeout_secs: None,
+            max_duration_secs: None,
+            metrics_sample_interval_ms: None,
+            metrics_slot: None,
+            vm,
+        }
+    }
+
+    /// Assert the trampoline `build_vm` registered was created through the
+    /// production bootstrap and is still owned by the caller.
+    #[cfg(unix)]
+    fn registered_trampolines(
+        trampoline_rootfs: &TrampolineRootfsGuard,
+    ) -> Vec<std::path::PathBuf> {
+        let dirs = trampoline_rootfs.rootfs_dirs.clone();
+        assert_eq!(
+            dirs.len(),
+            1,
+            "build_vm must register the trampoline it created"
+        );
+        assert!(
+            dirs[0].is_dir(),
+            "trampoline rootfs must exist while the run owns it"
+        );
+        assert!(
+            dirs[0].join("newroot").is_dir(),
+            "production bootstrap mountpoints must be present"
+        );
+        dirs
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_vm_reclaims_registered_trampoline_after_flat_root_build_failure() {
+        let scratch = tempfile::tempdir().unwrap();
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut trampoline_rootfs = TrampolineRootfsGuard {
+            rootfs_dirs: Vec::new(),
+        };
+        // An empty chain fails validate_upper_layers, which runs after the
+        // flat-root branch created and registered the bootstrap trampoline.
+        let mut config = build_vm_test_config(scratch.path(), |vm| {
+            vm.rootfs_disk_spec = Some(UpperSpec {
+                layers: Vec::new(),
+                read_only: false,
+            });
+        });
+
+        let result = super::build_vm(
+            &mut config,
+            super::AgentConsoleBackends {
+                control: crate::runner::console::AgentConsoleBackend::new(Arc::new(
+                    ConsoleSharedState::new(),
+                )),
+                bulk: None,
+            },
+            |_| {},
+            |_: &msb_krun::PlacementReport| {},
+            super::VmBuildRuntime {
+                tokio_handle: tokio_rt.handle().clone(),
+                startup_progress: Arc::new(|_| {}),
+            },
+            super::HostPlacement {
+                vcpu_targets: None,
+                required: false,
+                numa_topology: None,
+            },
+            None,
+            &mut trampoline_rootfs.rootfs_dirs,
+        );
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("empty upper chain must fail the VM build"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("upper block chain must contain at least one layer"),
+            "unexpected build failure: {error}"
+        );
+        let registered = registered_trampolines(&trampoline_rootfs);
+
+        // The failure path the sandbox process takes: build_vm returned Err
+        // before the guest could take over, so dropping the guard reclaims
+        // the registered trampoline.
+        drop(trampoline_rootfs);
+        assert!(
+            !registered[0].exists(),
+            "guard drop after a failed build must reclaim the trampoline"
+        );
+    }
+
+    /// The upper chain must be valid so the build reaches the VM builder,
+    /// past the exit wiring, instead of failing the layer validation that
+    /// runs before it.
+    #[cfg(unix)]
+    #[test]
+    fn build_vm_proceeds_past_exit_wiring_with_vmdk_trampoline() {
+        let scratch = tempfile::tempdir().unwrap();
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut trampoline_rootfs = TrampolineRootfsGuard {
+            rootfs_dirs: Vec::new(),
+        };
+        std::fs::create_dir_all(scratch.path().join("runtime")).unwrap();
+        crate::checkpoint::layout::initialize_new(&scratch.path().join("runtime")).unwrap();
+        let mut config = build_vm_test_config(scratch.path(), |vm| {
+            vm.rootfs_vmdk = Some(scratch.path().join("rootfs.vmdk"));
+            vm.rootfs_upper_spec = Some(UpperSpec {
+                layers: vec![UpperLayerSpec {
+                    path: scratch.path().join("upper.raw"),
+                    format: msb_krun::DiskImageFormat::Raw,
+                }],
+                read_only: false,
+            });
+        });
+
+        let result = super::build_vm(
+            &mut config,
+            super::AgentConsoleBackends {
+                control: crate::runner::console::AgentConsoleBackend::new(Arc::new(
+                    ConsoleSharedState::new(),
+                )),
+                bulk: None,
+            },
+            |_| {},
+            |_: &msb_krun::PlacementReport| {},
+            super::VmBuildRuntime {
+                tokio_handle: tokio_rt.handle().clone(),
+                startup_progress: Arc::new(|_| {}),
+            },
+            super::HostPlacement {
+                vcpu_targets: None,
+                required: false,
+                numa_topology: None,
+            },
+            None,
+            &mut trampoline_rootfs.rootfs_dirs,
+        );
+
+        if let Err(error) = &result {
+            assert!(
+                error.to_string().contains("build VM:"),
+                "build must fail inside the VM builder, past the exit wiring: {error}"
+            );
+        }
+        let registered = registered_trampolines(&trampoline_rootfs);
+
+        drop(trampoline_rootfs);
+        assert!(
+            !registered[0].exists(),
+            "guard drop after an unentered build must reclaim the trampoline"
+        );
     }
 
     #[test]

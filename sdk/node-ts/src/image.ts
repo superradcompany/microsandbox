@@ -35,6 +35,7 @@ export interface ImageDetail {
 }
 
 export interface ImagePruneReport {
+  readonly skippedInUse: number;
   readonly imageRefsRemoved: number;
   readonly manifestsRemoved: number;
   readonly layersRemoved: number;
@@ -86,8 +87,8 @@ export class Image {
   }
 
   /**
-   * Remove a cached image. Pass `force: true` to delete even when a
-   * sandbox references it.
+   * Remove an image reference. Force permits untagging a sandbox/snapshot dependency,
+   * while retaining its backing. Active readers are never bypassed.
    */
   static async remove(
     reference: string,
@@ -106,6 +107,7 @@ export class Image {
       fsmetaRemoved: raw.fsmetaRemoved,
       vmdkRemoved: raw.vmdkRemoved,
       bytesReclaimed: numOrNull(raw.bytesReclaimed),
+      skippedInUse: raw.skippedInUse ?? 0,
     };
   }
 

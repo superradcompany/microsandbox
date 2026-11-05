@@ -22,7 +22,7 @@ require_relative "microsandbox/errors"
 
 module Microsandbox
   class HttpBuilder
-    attr_reader :message, :response
+    attr_reader :network_message, :secret_message, :response, :format, :message
 
     def deny_response(value)
       raise TypeError, "deny_response must be true or false" unless value == true || value == false
@@ -31,10 +31,32 @@ module Microsandbox
       self
     end
 
+    def deny_response_format(value)
+      raise ArgumentError, "deny_response_format must be text or json" unless ["text", "json"].include?(value)
+
+      @format = value
+      self
+    end
+
+    # Deprecated: legacy text message with {host} substitution. Ignored in JSON mode.
     def deny_message(value)
       raise TypeError, "deny_message must be a String" unless value.is_a?(String)
 
       @message = value
+      self
+    end
+
+    def network_deny_message(value)
+      raise TypeError, "network_deny_message must be a String" unless value.is_a?(String)
+
+      @network_message = value
+      self
+    end
+
+    def secret_deny_message(value)
+      raise TypeError, "secret_deny_message must be a String" unless value.is_a?(String)
+
+      @secret_message = value
       self
     end
   end
@@ -43,14 +65,14 @@ module Microsandbox
     def http
       settings = HttpBuilder.new
       yield settings
-      http!(settings.response, settings.message)
+      http_config!(settings.response, settings.network_message, settings.secret_message, settings.format, settings.message)
       self
     end
 
     %i[
-      image cpus max_cpus memory max_memory workdir shell hostname user
+      image cpus max_cpus memory max_memory nested_virt workdir shell hostname user
       detached ephemeral max_duration idle_timeout replace root_disk
-      disable_network quiet_logs entrypoint init proxy vsock vsock_dgram
+      disable_network intercept_tls quiet_logs entrypoint init proxy vsock vsock_dgram
     ].each do |name|
       define_method(name) do |*args|
         public_send(:"#{name}!", *args)
@@ -127,3 +149,5 @@ module Microsandbox
     end
   end
 end
+
+require_relative "microsandbox/jobs"

@@ -22,24 +22,30 @@ Native sessions keep the SSH protocol boundary but do not expose a listener.
 
 ### CLI
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh devbox
 msb ssh connect devbox
 ```
+</CodeGroup>
 
 With no remote command, the CLI opens an interactive shell. With `--`, the remaining tokens become the SSH command string and run through the sandbox shell.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh devbox -- uname -a
 msb ssh devbox -- sh -lc "cd /app && npm test"
 ```
+</CodeGroup>
 
 If a sandbox name collides with an SSH subcommand such as `serve` or `authorize`, use `--name`:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh --name serve
 msb ssh --name authorize -- uptime
 ```
+</CodeGroup>
 
 ### SDK
 
@@ -92,6 +98,12 @@ if err != nil {
     return err
 }
 fmt.Print(string(output.Stdout))
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.start("devbox")
+output = sb.ssh_exec("uname -a")
+puts output.fetch("stdout")
 ```
 </CodeGroup>
 
@@ -176,32 +188,40 @@ External client mode exposes a sandbox as an SSH server for tools that already s
 
 ### Authorize a key
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh authorize --file ~/.ssh/id_ed25519.pub
 msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
 cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 ```
+</CodeGroup>
 
 microsandbox appends keys to `<MSB_HOME>/ssh/authorized_keys`.
 
 ### TCP listener
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh serve devbox
 ```
+</CodeGroup>
 
 The default listener is `127.0.0.1:2222`.
 
-```bash
+<CodeGroup>
+```bash Shell
 ssh -p 2222 root@127.0.0.1
 sftp -P 2222 root@127.0.0.1
 ```
+</CodeGroup>
 
 Choose a different bind address or port when needed:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh serve devbox --host 127.0.0.1 --port 2223
 ```
+</CodeGroup>
 
 <Note>
   Binding to `0.0.0.0` exposes the SSH listener beyond the local machine. Keep the default loopback bind unless you intentionally want remote clients to connect.
@@ -211,10 +231,12 @@ msb ssh serve devbox --host 127.0.0.1 --port 2223
 
 OpenSSH local (`-L`) and dynamic (`-D`) forwarding work through the listener:
 
-```bash
+<CodeGroup>
+```bash Shell
 ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
 ssh -p 2222 -D 1080 root@127.0.0.1
 ```
+</CodeGroup>
 
 microsandbox opens forwarded TCP connections from inside the sandbox, so destination reachability follows the sandbox's network policy. `127.0.0.1` refers to the sandbox's loopback interface rather than the host's. microsandbox does not support reverse forwarding (`-R`) or stream-local forwarding.
 
@@ -224,26 +246,30 @@ microsandbox opens forwarded TCP connections from inside the sandbox, so destina
 
 Add an entry to your `~/.ssh/config`:
 
+<CodeGroup>
 ```sshconfig ~/.ssh/config
 Host devbox.msb
   User root
   ProxyCommand msb ssh serve devbox --stdio
 ```
+</CodeGroup>
 
 The `Host` value is the alias you connect to, and `devbox` is the sandbox name passed to `msb ssh serve`.
 
 Once it is in place, the alias works with any OpenSSH-based tool:
 
-```bash
+<CodeGroup>
+```bash Shell
 ssh devbox.msb
 sftp devbox.msb
 scp ./build.tar devbox.msb:/tmp/
 rsync -av ./src/ devbox.msb:/app/
 ```
+</CodeGroup>
 
 Editors that build on OpenSSH, such as VS Code Remote-SSH, connect to the `devbox.msb` host the same way.
 
-For a walkthrough using a TCP listener, see [Using with VS Code](/examples/development/vscode), including key authorization and troubleshooting.
+For a walkthrough using a TCP listener, see [Using with VS Code](/how-to/development/vscode), including key authorization and troubleshooting.
 
 ## Inactivity timeout
 
@@ -251,13 +277,15 @@ SSH sessions disconnect after 10 minutes without SSH traffic by default. Any SSH
 
 Set a global default in `~/.microsandbox/config.json`. Use `0` to disable the timeout:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "ssh": {
     "inactivity_timeout_secs": 0
   }
 }
 ```
+</CodeGroup>
 
 Override the user-configured value for one CLI session with `--inactivity-timeout 30m`, or disable it with `--no-inactivity-timeout`. A [managed timeout](/configuration#ssh) takes precedence over these options for local and cloud sessions. Each backend retains its loaded settings; construct a new backend to pick up file changes. This does not configure the hosted cloud SSH gateway.
 
@@ -290,8 +318,14 @@ persistent = await sb.ssh().open_client(inactivity_timeout=0)
 ssh, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(30*time.Minute))
 persistent, err := sb.SSH().OpenClient(ctx, m.WithSSHClientInactivityTimeout(0))
 ```
+
+```ruby Ruby
+# Ruby sets the timeout per SSH command.
+output = sb.ssh_exec("uname -a", inactivity_timeout: 1800)
+output = sb.ssh_exec("uname -a", inactivity_timeout: 0)
+```
 </CodeGroup>
 
 ## Reference
 
-For exact SSH APIs, see [TypeScript](/sdk/typescript/ssh), [Rust](/sdk/rust/ssh), [Python](/sdk/python/ssh), or [Go](/sdk/go/ssh). For terminal workflows and serving SSH connections, see [SSH commands](/cli/ssh-commands).
+For exact SSH APIs, see [TypeScript](/sdk/typescript/ssh), [Rust](/sdk/rust/ssh), [Python](/sdk/python/ssh), [Go](/sdk/go/ssh), or [Ruby](/sdk/ruby/ssh). For terminal workflows and serving SSH connections, see [SSH commands](/cli/ssh-commands).

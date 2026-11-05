@@ -1,10 +1,30 @@
 //! Interactive attach types for terminal bridging with sandboxes.
 
+use std::{collections::VecDeque, sync::Arc};
+
+use microsandbox_protocol::{
+    exec::{
+        ExecExited, ExecFailed, ExecOutputAck, ExecStarted, ExecStderr, ExecStdin, ExecStdinAck,
+        ExecStdinError, ExecStdout,
+    },
+    message::{Message, MessageType},
+};
 use microsandbox_types::EnvVar;
+use tokio_util::task::AbortOnDropHandle;
 
-use crate::MicrosandboxResult;
+use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient};
 
-use super::exec::Rlimit;
+use super::exec::{InputWindow, Rlimit};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(unix)]
+const LEGACY_TERMINAL_READ_SIZE: usize = 1024;
+
+/// Allow large pastes while bounding memory if the guest never reads stdin.
+const MAX_TERMINAL_INPUT_BACKLOG: usize = 64 * 1024 * 1024;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -51,6 +71,40 @@ pub struct AttachOptionsBuilder {
 pub(crate) struct DetachKeys {
     /// The byte sequence that triggers detach.
     sequence: Vec<u8>,
+}
+
+/// Tracks execution flow control shared by Unix and Windows terminal bridges.
+///
+/// The terminal loops own platform-specific I/O; this state handles agent
+/// messages and records output only after the terminal accepts it.
+struct AttachProtocol {
+    /// Guest-advertised stdin capacity, absent when connected to a legacy agent.
+    input_window: Option<Arc<InputWindow>>,
+    /// Cumulative output consumed by the terminal, absent for legacy agents.
+    output_ack: Option<ExecOutputAck>,
+    #[cfg(unix)]
+    /// Read size supported by the guest, or the legacy 1 KiB size.
+    terminal_read_size: usize,
+}
+
+/// A terminal-relevant event decoded from the agent stream.
+///
+/// Missing exit and failure payloads retain the terminal bridge's existing
+/// behavior: return exit code -1 when no valid payload is available.
+enum AttachMessage {
+    Ignored,
+    Output(Vec<u8>),
+    StdinError(String),
+    Exited(Option<i32>),
+    Failed(Option<ExecFailed>),
+}
+
+/// Queues terminal input while one write waits for guest stdin credit.
+struct TerminalInput {
+    queued: VecDeque<Vec<u8>>,
+    queued_bytes: usize,
+    pending_write: Option<AbortOnDropHandle<MicrosandboxResult<()>>>,
+    closed: bool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -218,6 +272,187 @@ impl DetachKeys {
     }
 }
 
+impl AttachProtocol {
+    /// Enable flow control only when the agent advertises its limits and ack support.
+    fn new(client: &AgentClient) -> MicrosandboxResult<Self> {
+        let exec_limits = client.ready()?.exec_limits;
+        if let Some(limits) = exec_limits {
+            limits
+                .validate()
+                .map_err(|error| MicrosandboxError::Runtime(error.into()))?;
+        }
+
+        // Older agents have no execution windows and must not receive acknowledgements.
+        let flow_control_limits =
+            exec_limits.filter(|_| client.supports(MessageType::ExecOutputAck));
+        let input_window = flow_control_limits
+            .map(|limits| InputWindow::new(limits.input_limit, limits.stdin_chunk_size as usize));
+        let output_ack = flow_control_limits.map(|_| ExecOutputAck::default());
+        #[cfg(unix)]
+        let terminal_read_size = flow_control_limits.map_or(LEGACY_TERMINAL_READ_SIZE, |limits| {
+            limits.stdin_chunk_size as usize
+        });
+
+        Ok(Self {
+            input_window,
+            output_ack,
+            #[cfg(unix)]
+            terminal_read_size,
+        })
+    }
+
+    fn input_window(&self) -> Option<Arc<InputWindow>> {
+        self.input_window.clone()
+    }
+
+    #[cfg(unix)]
+    fn terminal_read_size(&self) -> usize {
+        self.terminal_read_size
+    }
+
+    /// Update flow-control state before handing terminal output or exit to the caller.
+    fn handle_message(&mut self, msg: Message) -> MicrosandboxResult<AttachMessage> {
+        match msg.t {
+            MessageType::ExecStarted => {
+                let _ = msg.payload::<ExecStarted>()?;
+                if let Some(window) = &self.input_window {
+                    window.mark_started();
+                }
+                Ok(AttachMessage::Ignored)
+            }
+            MessageType::ExecStdinAck => {
+                if let Some(window) = &self.input_window {
+                    let ack = msg.payload::<ExecStdinAck>()?;
+                    if !window.acknowledge(ack.consumed) {
+                        return Err(MicrosandboxError::Runtime(
+                            "invalid execution stdin acknowledgement".into(),
+                        ));
+                    }
+                }
+                Ok(AttachMessage::Ignored)
+            }
+            MessageType::ExecStdinError => {
+                self.close();
+                let error = msg.payload::<ExecStdinError>()?;
+                Ok(AttachMessage::StdinError(error.message))
+            }
+            MessageType::ExecStdout => {
+                let out = msg.payload::<ExecStdout>()?;
+                Ok(AttachMessage::Output(out.data))
+            }
+            MessageType::ExecStderr => {
+                let out = msg.payload::<ExecStderr>()?;
+                Ok(AttachMessage::Output(out.data))
+            }
+            MessageType::ExecExited => Ok(AttachMessage::Exited(
+                msg.payload::<ExecExited>().ok().map(|exited| exited.code),
+            )),
+            MessageType::ExecFailed => Ok(AttachMessage::Failed(msg.payload::<ExecFailed>().ok())),
+            _ => Ok(AttachMessage::Ignored),
+        }
+    }
+
+    /// Charge an output chunk after a successful terminal write.
+    ///
+    /// `ExecOutputAck::consume` also accounts for the protocol's per-chunk overhead.
+    fn output_written(&mut self, bytes: usize) -> MicrosandboxResult<bool> {
+        let Some(ack) = &mut self.output_ack else {
+            return Ok(false);
+        };
+
+        ack.consume(bytes).ok_or_else(|| {
+            MicrosandboxError::Runtime("execution output counter overflow".into())
+        })?;
+        Ok(true)
+    }
+
+    /// Release guest output credit after the platform has accepted the batch.
+    async fn acknowledge_output(&self, client: &AgentClient, id: u32) -> MicrosandboxResult<()> {
+        if let Some(ack) = &self.output_ack {
+            client.send(id, MessageType::ExecOutputAck, ack).await?;
+        }
+        Ok(())
+    }
+
+    fn close(&self) {
+        if let Some(window) = &self.input_window {
+            window.close();
+        }
+    }
+}
+
+impl TerminalInput {
+    fn new() -> Self {
+        Self {
+            queued: VecDeque::new(),
+            queued_bytes: 0,
+            pending_write: None,
+            closed: false,
+        }
+    }
+
+    /// Preserve input order while continuing to read detach keys from the terminal.
+    fn push(
+        &mut self,
+        client: &Arc<AgentClient>,
+        id: u32,
+        window: Option<Arc<InputWindow>>,
+        data: Vec<u8>,
+    ) -> MicrosandboxResult<()> {
+        // Keep reading for detach keys after the guest closes stdin, without sending more data.
+        if self.closed {
+            return Ok(());
+        }
+
+        if self.pending_write.is_none() {
+            self.pending_write = Some(spawn_stdin_write(Arc::clone(client), id, window, data));
+            return Ok(());
+        }
+
+        let queued_bytes = self.queued_bytes.checked_add(data.len()).ok_or_else(|| {
+            MicrosandboxError::Terminal("terminal input backlog size overflow".into())
+        })?;
+        if queued_bytes > MAX_TERMINAL_INPUT_BACKLOG {
+            return Err(MicrosandboxError::Terminal(
+                "terminal input backlog exceeded 64 MiB while guest stdin was blocked".into(),
+            ));
+        }
+
+        self.queued_bytes = queued_bytes;
+        self.queued.push_back(data);
+        Ok(())
+    }
+
+    /// Start the next queued write after the previous one completes.
+    fn write_completed(
+        &mut self,
+        client: &Arc<AgentClient>,
+        id: u32,
+        window: Option<Arc<InputWindow>>,
+    ) {
+        self.pending_write = None;
+
+        if let Some(data) = self.queued.pop_front() {
+            self.queued_bytes -= data.len();
+            self.pending_write = Some(spawn_stdin_write(Arc::clone(client), id, window, data));
+        }
+    }
+
+    /// Stop pending and queued input without ending the attached execution.
+    /// Returns whether stdin was open, so the terminal reports the failure once.
+    fn close(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+
+        self.closed = true;
+        self.pending_write = None;
+        self.queued.clear();
+        self.queued_bytes = 0;
+        true
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -248,6 +483,26 @@ pub(crate) fn input_contains_detach_sequence(
     false
 }
 
+/// Keep receiving agent messages while stdin waits for guest start or credit.
+fn spawn_stdin_write(
+    client: Arc<AgentClient>,
+    id: u32,
+    window: Option<Arc<InputWindow>>,
+    data: Vec<u8>,
+) -> AbortOnDropHandle<MicrosandboxResult<()>> {
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        if let Some(window) = window {
+            window.wait_started().await?;
+            window.send(&client, id, data).await
+        } else {
+            client
+                .send(id, MessageType::ExecStdin, &ExecStdin { data })
+                .await?;
+            Ok(())
+        }
+    }))
+}
+
 //--------------------------------------------------------------------------------------------------
 // Module: agent (backend-agnostic ops driven over an agent connection)
 //--------------------------------------------------------------------------------------------------
@@ -261,20 +516,22 @@ pub(crate) mod agent {
     use std::sync::Arc;
 
     use microsandbox_protocol::{
-        exec::{ExecExited, ExecResize, ExecStdin, ExecStdout},
+        exec::{ExecFailed, ExecResize},
         message::MessageType,
     };
     use tokio::io::{AsyncWriteExt, unix::AsyncFd};
 
     use crate::{
-        MicrosandboxResult,
+        MicrosandboxError, MicrosandboxResult,
         sandbox::{
             AttachOptionsBuilder, SandboxConfig, build_exec_request,
             open_nonblocking_terminal_input, read_from_fd, terminal_path_for_fd,
         },
     };
 
-    use super::{DetachKeys, input_contains_detach_sequence};
+    use super::{
+        AttachMessage, AttachProtocol, DetachKeys, TerminalInput, input_contains_detach_sequence,
+    };
 
     pub(crate) async fn attach(
         backend: &dyn crate::backend::Backend,
@@ -306,6 +563,8 @@ pub(crate) mod agent {
             rows,
             cols,
         );
+
+        let mut protocol = AttachProtocol::new(&client)?;
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         crossterm::terminal::enable_raw_mode()
@@ -318,18 +577,21 @@ pub(crate) mod agent {
             .map_err(|e| crate::MicrosandboxError::Terminal(format!("resolve tty path: {e}")))?;
         let tty_input = open_nonblocking_terminal_input(&tty_input_path)
             .map_err(|e| crate::MicrosandboxError::Terminal(format!("open tty input: {e}")))?;
-        let stdin_async = AsyncFd::new(tty_input)
+        // SAFETY: The owned terminal file keeps its non-blocking descriptor open and unchanged.
+        let stdin_async = unsafe { AsyncFd::register(tty_input) }
             .map_err(|e| crate::MicrosandboxError::Terminal(format!("async tty input: {e}")))?;
 
+        let mut input_buf = vec![0u8; protocol.terminal_read_size()];
         let mut stdout = tokio::io::stdout();
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
                 .map_err(|e| crate::MicrosandboxError::Runtime(format!("sigwinch: {e}")))?;
 
         let mut exit_code: i32 = -1;
-        let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
-        let detach_seq = detach_keys.sequence();
         let mut match_pos = 0usize;
+        let detach_seq = detach_keys.sequence();
+        let mut spawn_failure: Option<ExecFailed> = None;
+        let mut terminal_input = TerminalInput::new();
 
         loop {
             tokio::select! {
@@ -339,7 +601,6 @@ pub(crate) mod agent {
                         Err(_) => break,
                     };
 
-                    let mut input_buf = [0u8; 1024];
                     match guard.try_io(|inner| {
                         read_from_fd(inner.get_ref().as_raw_fd(), &mut input_buf)
                     }) {
@@ -351,10 +612,7 @@ pub(crate) mod agent {
                                 break;
                             }
 
-                            let payload = ExecStdin { data: data.to_vec() };
-                            if client.send(id, MessageType::ExecStdin, &payload).await.is_err() {
-                                break;
-                            }
+                            terminal_input.push(&client, id, protocol.input_window(), data.to_vec())?;
                         }
                         Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Ok(Err(_)) => break,
@@ -362,66 +620,60 @@ pub(crate) mod agent {
                     }
                 }
 
+                result = async { terminal_input.pending_write.as_mut().unwrap().await }, if terminal_input.pending_write.is_some() => {
+                    result.map_err(|error| MicrosandboxError::Runtime(format!("terminal input task failed: {error}")))??;
+                    terminal_input.write_completed(&client, id, protocol.input_window());
+                }
+
                 msg = rx.recv() => {
                     let Some(msg) = msg else {
-                        break;
+                        return Err(MicrosandboxError::Runtime(
+                            "agent connection closed during terminal attach".into(),
+                        ));
                     };
 
                     let mut should_break = false;
+                    let mut output_written = false;
+                    let mut msg = msg;
 
-                    match msg.t {
-                        MessageType::ExecStdout => {
-                            if let Ok(out) = msg.payload::<ExecStdout>() {
-                                let _ = stdout.write_all(&out.data).await;
+                    loop {
+                        match protocol.handle_message(msg)? {
+                            AttachMessage::Ignored => {}
+                            AttachMessage::Output(data) => {
+                                stdout.write_all(&data).await?;
+                                output_written |= protocol.output_written(data.len())?;
+                            }
+                            AttachMessage::StdinError(message) => {
+                                if terminal_input.close() {
+                                    stdout.write_all(format!("\r\nGuest stdin closed: {message}\r\n").as_bytes()).await?;
+                                }
+                            }
+                            AttachMessage::Exited(code) => {
+                                if let Some(code) = code {
+                                    exit_code = code;
+                                }
+                                should_break = true;
+                            }
+                            AttachMessage::Failed(failure) => {
+                                spawn_failure = failure;
+                                should_break = true;
                             }
                         }
-                        MessageType::ExecExited => {
-                            if let Ok(exited) = msg.payload::<ExecExited>() {
-                                exit_code = exited.code;
-                            }
-                            should_break = true;
+
+                        if should_break {
+                            break;
                         }
-                        MessageType::ExecFailed => {
-                            if let Ok(failed) =
-                                msg.payload::<microsandbox_protocol::exec::ExecFailed>()
-                            {
-                                spawn_failure = Some(failed);
-                            }
-                            should_break = true;
-                        }
-                        _ => {}
+                        msg = match rx.try_recv() {
+                            Ok(next) => next,
+                            Err(_) => break,
+                        };
                     }
 
-                    if !should_break {
-                        while let Ok(next) = rx.try_recv() {
-                            match next.t {
-                                MessageType::ExecStdout => {
-                                    if let Ok(out) = next.payload::<ExecStdout>() {
-                                        let _ = stdout.write_all(&out.data).await;
-                                    }
-                                }
-                                MessageType::ExecExited => {
-                                    if let Ok(exited) = next.payload::<ExecExited>() {
-                                        exit_code = exited.code;
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                MessageType::ExecFailed => {
-                                    if let Ok(failed) = next
-                                        .payload::<microsandbox_protocol::exec::ExecFailed>()
-                                    {
-                                        spawn_failure = Some(failed);
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
+                    stdout.flush().await?;
+                    // A terminal message means the guest no longer needs output credit.
+                    if output_written && !should_break {
+                        protocol.acknowledge_output(&client, id).await?;
                     }
-
-                    let _ = stdout.flush().await;
 
                     if should_break {
                         break;
@@ -437,9 +689,12 @@ pub(crate) mod agent {
             }
         }
 
+        protocol.close();
+
         if let Some(failure) = spawn_failure {
             return Err(crate::MicrosandboxError::ExecFailed(failure));
         }
+
         Ok(exit_code)
     }
 }
@@ -448,10 +703,7 @@ pub(crate) mod agent {
 pub(crate) mod agent {
     use std::sync::Arc;
 
-    use microsandbox_protocol::{
-        exec::{ExecExited, ExecResize, ExecStdin, ExecStdout},
-        message::MessageType,
-    };
+    use microsandbox_protocol::{exec::ExecResize, message::MessageType};
 
     use crate::backend::Backend;
     use crate::{
@@ -465,7 +717,9 @@ pub(crate) mod agent {
         },
     };
 
-    use super::{DetachKeys, input_contains_detach_sequence};
+    use super::{
+        AttachMessage, AttachProtocol, DetachKeys, TerminalInput, input_contains_detach_sequence,
+    };
 
     pub(crate) async fn attach(
         backend: &dyn Backend,
@@ -497,6 +751,7 @@ pub(crate) mod agent {
             rows,
             cols,
         );
+        let mut protocol = AttachProtocol::new(&client)?;
         let (id, mut rx) = client.stream(MessageType::ExecRequest, &req).await?;
 
         let mut terminal_guard = WindowsTerminalGuard::enter()?;
@@ -505,6 +760,7 @@ pub(crate) mod agent {
         let mut spawn_failure: Option<microsandbox_protocol::exec::ExecFailed> = None;
         let detach_seq = detach_keys.sequence();
         let mut match_pos = 0usize;
+        let mut terminal_input = TerminalInput::new();
 
         loop {
             tokio::select! {
@@ -515,8 +771,7 @@ pub(crate) mod agent {
                                 break;
                             }
 
-                            let payload = ExecStdin { data };
-                            let _ = client.send(id, MessageType::ExecStdin, &payload).await;
+                            terminal_input.push(&client, id, protocol.input_window(), data)?;
                         }
                         WindowsTerminalEvent::Resize { cols, rows } => {
                             let payload = ExecResize { rows, cols };
@@ -528,59 +783,57 @@ pub(crate) mod agent {
                     }
                 }
 
-                Some(msg) = rx.recv() => {
-                    let mut should_break = false;
+                result = async { terminal_input.pending_write.as_mut().unwrap().await }, if terminal_input.pending_write.is_some() => {
+                    result.map_err(|error| MicrosandboxError::Runtime(format!("terminal input task failed: {error}")))??;
+                    terminal_input.write_completed(&client, id, protocol.input_window());
+                }
 
-                    match msg.t {
-                        MessageType::ExecStdout => {
-                            if let Ok(out) = msg.payload::<ExecStdout>() {
-                                terminal_guard.write_output(&out.data)?;
+                msg = rx.recv() => {
+                    let Some(msg) = msg else {
+                        return Err(MicrosandboxError::Runtime(
+                            "agent connection closed during terminal attach".into(),
+                        ));
+                    };
+
+                    let mut should_break = false;
+                    let mut output_written = false;
+                    let mut msg = msg;
+
+                    loop {
+                        match protocol.handle_message(msg)? {
+                            AttachMessage::Ignored => {}
+                            AttachMessage::Output(data) => {
+                                terminal_guard.write_output(&data)?;
+                                output_written |= protocol.output_written(data.len())?;
+                            }
+                            AttachMessage::StdinError(message) => {
+                                if terminal_input.close() {
+                                    terminal_guard.write_output(format!("\r\nGuest stdin closed: {message}\r\n").as_bytes())?;
+                                }
+                            }
+                            AttachMessage::Exited(code) => {
+                                if let Some(code) = code {
+                                    exit_code = code;
+                                }
+                                should_break = true;
+                            }
+                            AttachMessage::Failed(failure) => {
+                                spawn_failure = failure;
+                                should_break = true;
                             }
                         }
-                        MessageType::ExecExited => {
-                            if let Ok(exited) = msg.payload::<ExecExited>() {
-                                exit_code = exited.code;
-                            }
-                            should_break = true;
+
+                        if should_break {
+                            break;
                         }
-                        MessageType::ExecFailed => {
-                            if let Ok(failed) =
-                                msg.payload::<microsandbox_protocol::exec::ExecFailed>()
-                            {
-                                spawn_failure = Some(failed);
-                            }
-                            should_break = true;
-                        }
-                        _ => {}
+                        msg = match rx.try_recv() {
+                            Ok(next) => next,
+                            Err(_) => break,
+                        };
                     }
 
-                    if !should_break {
-                        while let Ok(next) = rx.try_recv() {
-                            match next.t {
-                                MessageType::ExecStdout => {
-                                    if let Ok(out) = next.payload::<ExecStdout>() {
-                                        terminal_guard.write_output(&out.data)?;
-                                    }
-                                }
-                                MessageType::ExecExited => {
-                                    if let Ok(exited) = next.payload::<ExecExited>() {
-                                        exit_code = exited.code;
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                MessageType::ExecFailed => {
-                                    if let Ok(failed) = next
-                                        .payload::<microsandbox_protocol::exec::ExecFailed>()
-                                    {
-                                        spawn_failure = Some(failed);
-                                    }
-                                    should_break = true;
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
+                    if output_written && !should_break {
+                        protocol.acknowledge_output(&client, id).await?;
                     }
 
                     if should_break {
@@ -590,6 +843,7 @@ pub(crate) mod agent {
             }
         }
 
+        protocol.close();
         if let Some(failure) = spawn_failure {
             return Err(MicrosandboxError::ExecFailed(failure));
         }
@@ -606,7 +860,88 @@ pub(crate) mod agent {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use microsandbox_protocol::exec::EXEC_OUTPUT_EVENT_OVERHEAD;
+    use tokio::time::timeout;
+
     use super::*;
+
+    #[test]
+    fn stderr_output_consumes_guest_credit() {
+        let mut protocol = AttachProtocol {
+            input_window: None,
+            output_ack: Some(ExecOutputAck::default()),
+            #[cfg(unix)]
+            terminal_read_size: LEGACY_TERMINAL_READ_SIZE,
+        };
+        let message = Message::with_payload(
+            MessageType::ExecStderr,
+            1,
+            &ExecStderr {
+                data: b"error".to_vec(),
+            },
+        )
+        .expect("encode stderr");
+
+        let AttachMessage::Output(data) = protocol.handle_message(message).expect("decode stderr")
+        else {
+            panic!("stderr was not forwarded to the terminal");
+        };
+        assert_eq!(data, b"error");
+        assert!(protocol.output_written(data.len()).expect("credit stderr"));
+        assert_eq!(
+            protocol.output_ack.expect("output window").consumed,
+            data.len() as u64 + u64::from(EXEC_OUTPUT_EVENT_OVERHEAD)
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_error_closes_input_but_keeps_output_available() {
+        let window = InputWindow::new(64, 16);
+        let mut protocol = AttachProtocol {
+            input_window: Some(Arc::clone(&window)),
+            output_ack: Some(ExecOutputAck::default()),
+            #[cfg(unix)]
+            terminal_read_size: LEGACY_TERMINAL_READ_SIZE,
+        };
+        let error = Message::with_payload(
+            MessageType::ExecStdinError,
+            1,
+            &ExecStdinError {
+                errno: None,
+                errno_name: None,
+                message: "broken pipe".into(),
+            },
+        )
+        .expect("encode stdin error");
+
+        let AttachMessage::StdinError(message) =
+            protocol.handle_message(error).expect("handle stdin error")
+        else {
+            panic!("stdin error was not reported");
+        };
+        assert_eq!(message, "broken pipe");
+        assert!(
+            timeout(Duration::from_secs(1), window.wait_started())
+                .await
+                .expect("closed input window did not wake")
+                .is_err()
+        );
+
+        let output = Message::with_payload(
+            MessageType::ExecStdout,
+            1,
+            &ExecStdout {
+                data: b"still running".to_vec(),
+            },
+        )
+        .expect("encode stdout");
+        assert!(matches!(
+            protocol.handle_message(output).expect("handle later output"),
+            AttachMessage::Output(data) if data == b"still running"
+        ));
+    }
 
     #[test]
     fn test_detach_keys_default() {

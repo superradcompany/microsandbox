@@ -7,6 +7,8 @@
 mod external;
 mod owned;
 pub(crate) mod quota;
+#[cfg(any(target_os = "linux", windows))]
+pub(crate) mod window;
 
 #[cfg(unix)]
 mod unix;

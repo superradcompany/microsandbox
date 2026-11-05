@@ -1,6 +1,7 @@
 ---
 title: Proxies
-description: TypeScript SDK - Proxy API reference
+"og:title": TypeScript SDK Proxies reference
+description: Route outbound sandbox connections through an HTTP CONNECT, SOCKS4, or SOCKS5 proxy with the TypeScript SDK.
 ---
 
 Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`SandboxBuilder.proxy()`](#proxy). Proxy protocols are mutually exclusive.
@@ -40,7 +41,7 @@ Protocol selector passed to [`SandboxBuilder.proxy()`](#proxy).
 httpConnect(address: string): HttpConnectProxyBuilder
 ```
 
-Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only and does not support proxy authentication.
+Select an HTTP CONNECT proxy at `IP:port`. It supports TCP only. Use the returned builder to enable optional HTTP Basic authentication.
 
 ### <span id="socks4">socks4()</span>
 
@@ -84,6 +85,20 @@ Set optional SOCKS5 username/password authentication. Pass `SecretSource.env("SO
 
 The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `configJson` and the database contain the source reference but never the resolved password.
 
+## HttpConnectProxyBuilder
+
+Protocol-specific builder returned by [`OutboundProxyBuilder.httpConnect()`](#http-connect). It carries the proxy address and is finalized when returned from the `.proxy()` callback.
+
+### credentials()
+
+```typescript
+credentials(username: string, password: SecretSource): this
+```
+
+Set optional HTTP CONNECT username/password authentication. Pass `SecretSource.env("HTTP_CONNECT_PASSWORD")` as `password`. HTTP Basic permits an empty username for token-only authentication; a non-empty username must not contain `:` or control characters. The resolved password must not be empty.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `configJson` and the database contain the source reference but never the resolved password.
+
 ## SecretSource
 
 ### env()
@@ -92,17 +107,21 @@ The host environment variable is read once each time the sandbox starts. Changin
 env(variable: string): SecretSource
 ```
 
-Create a host environment-variable reference for a SOCKS5 password. Import `SecretSource` from `microsandbox`.
+Create a host environment-variable reference for a SOCKS5 or HTTP CONNECT password. Import `SecretSource` from `microsandbox`.
 
 ## OutboundProxy
 
-Discriminated outbound proxy value stored in the sandbox's durable network specification. A SOCKS5 password remains a [`SecretSource`](#secretsource) reference in this value; the resolved password is runtime-only.
+Discriminated outbound proxy value stored in the sandbox's durable network specification. A SOCKS5 or HTTP CONNECT password remains a [`SecretSource`](#secretsource) reference in this value; the resolved password is runtime-only.
 
 ```typescript
 type OutboundProxy =
   | {
       readonly protocol: "http_connect";
       readonly address: string;
+      readonly credentials?: {
+        readonly username: string;
+        readonly password: SecretSource;
+      };
     }
   | {
       readonly protocol: "socks4";

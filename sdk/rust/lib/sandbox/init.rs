@@ -113,7 +113,7 @@ pub(crate) fn validate(spec: &HandoffInit) -> MicrosandboxResult<()> {
         validate_arg(i, arg)?;
     }
     for (k, v) in &spec.env {
-        validate_env_pair(k, v)?;
+        validate_env_pair("init env", k, v)?;
     }
     Ok(())
 }
@@ -149,25 +149,25 @@ fn validate_arg(index: usize, arg: &str) -> MicrosandboxResult<()> {
     Ok(())
 }
 
-fn validate_env_pair(key: &str, value: &str) -> MicrosandboxResult<()> {
+pub(crate) fn validate_env_pair(field: &str, key: &str, value: &str) -> MicrosandboxResult<()> {
     if key.is_empty() {
-        return Err(MicrosandboxError::InvalidConfig(
-            "init env key must not be empty".into(),
-        ));
+        return Err(MicrosandboxError::InvalidConfig(format!(
+            "{field} key must not be empty"
+        )));
     }
     if key.contains('=') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init env key {key:?} must not contain '='"
+            "{field} key {key:?} must not contain '='"
         )));
     }
     if key.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init env key {key:?} must not contain NUL"
+            "{field} key {key:?} must not contain NUL"
         )));
     }
     if value.contains('\0') {
         return Err(MicrosandboxError::InvalidConfig(format!(
-            "init env value for {key:?} must not contain NUL"
+            "{field} value for {key:?} must not contain NUL"
         )));
     }
     Ok(())

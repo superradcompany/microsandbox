@@ -1,6 +1,7 @@
 ---
 title: Proxies
-description: Go SDK - Proxy API reference
+"og:title": Go SDK Proxies reference
+description: Route outbound sandbox connections through an HTTP CONNECT, SOCKS4, or SOCKS5 proxy with the Go SDK.
 ---
 
 Configure one HTTP CONNECT, SOCKS4, or SOCKS5 proxy for outbound sandbox connections with [`WithProxy`](#m-withproxy). Proxy protocols are mutually exclusive.
@@ -51,7 +52,7 @@ Construct a SOCKS4 proxy at `IP:port` for [`WithProxy`](#m-withproxy). Pass `SOC
 func HTTPConnectProxy(address string) *OutboundProxy
 ```
 
-Construct an HTTP CONNECT proxy at `IP:port` for [`WithProxy`](#m-withproxy). It supports TCP only and does not support proxy authentication.
+Construct an HTTP CONNECT proxy at `IP:port` for [`WithProxy`](#m-withproxy). It supports TCP only. Call [`Credentials`](#m-credentials) on the result to enable optional HTTP Basic authentication.
 
 ### <span className="msb-recv" id="m-socks5proxy">m.</span><span className="msb-hn">SOCKS5Proxy()</span>
 
@@ -61,15 +62,17 @@ func SOCKS5Proxy(address string) *OutboundProxy
 
 Construct a SOCKS5 proxy at `IP:port` for [`WithProxy`](#m-withproxy).
 
-### <span className="msb-recv">(*OutboundProxy).</span><span className="msb-hn">Credentials()</span>
+### <span className="msb-recv">(*OutboundProxy).</span><span className="msb-hn" id="m-credentials">Credentials()</span>
 
 ```go
 func (p *OutboundProxy) Credentials(username string, password SecretSource) *OutboundProxy
 ```
 
-Return a copy configured with SOCKS5 username/password authentication. Call this on a value returned by [`SOCKS5Proxy`](#m-socks5proxy) and pass `SecretSourceEnv("SOCKS5_PASSWORD")` as `password`.
+Return a copy configured with SOCKS5 or HTTP CONNECT username/password authentication. Call this on a value returned by [`SOCKS5Proxy`](#m-socks5proxy) or [`HTTPConnectProxy`](#m-httpconnectproxy) and pass `SecretSourceEnv("SOCKS5_PASSWORD")` or `SecretSourceEnv("HTTP_CONNECT_PASSWORD")` as `password`.
 
-The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `ConfigJSON()` and the database contain the source reference but never the resolved password. The username and resolved password must each contain 1–255 bytes.
+HTTP CONNECT accepts an empty username for token-only authentication. A non-empty username must not contain `:` or control characters.
+
+The host environment variable is read once each time the sandbox starts. Changing it affects the next start, not a sandbox that is already running. `ConfigJSON()` and the database contain the source reference but never the resolved password. For SOCKS5, the username and resolved password must each contain 1–255 bytes.
 
 ### <span className="msb-recv">m.</span><span className="msb-hn" id="m-secretsourceenv">SecretSourceEnv()</span>
 
@@ -77,7 +80,7 @@ The host environment variable is read once each time the sandbox starts. Changin
 func SecretSourceEnv(variable string) SecretSource
 ```
 
-Create a host environment-variable reference for a SOCKS5 password.
+Create a host environment-variable reference for a SOCKS5 or HTTP CONNECT password.
 
 ## OutboundProxy
 

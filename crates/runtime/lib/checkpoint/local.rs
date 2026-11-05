@@ -109,6 +109,18 @@ impl LocalBranchState {
         Ok(())
     }
 
+    /// Return the length of an existing state object without reading it.
+    pub fn object_len(root: &Path, id: &ObjectId) -> io::Result<u64> {
+        let store = LocalObjectStore::open(root).map_err(io::Error::other)?;
+        let metadata = std::fs::symlink_metadata(store.object_path(id))?;
+        if !metadata.is_file() {
+            return Err(io::Error::other(
+                "branch state object is not a regular file",
+            ));
+        }
+        Ok(metadata.len())
+    }
+
     /// Read an existing bounded state object, checking its recorded identity.
     pub fn read_object(root: &Path, id: &ObjectId, limit: u64) -> io::Result<Vec<u8>> {
         let store = LocalObjectStore::open(root).map_err(io::Error::other)?;

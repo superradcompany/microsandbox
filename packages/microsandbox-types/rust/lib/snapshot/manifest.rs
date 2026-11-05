@@ -481,6 +481,7 @@ impl Manifest {
         self.restore_defaults()?;
         self.guest_clock()?;
         self.owned_volumes()?;
+        self.external_mounts()?;
         Ok(())
     }
 
@@ -940,6 +941,28 @@ mod tests {
             serde_json::json!({"policy":"host"}),
         );
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn external_mounts_are_optional_guest_paths_and_empty_keeps_released_bytes() {
+        let mut manifest = descriptor();
+        let original = manifest.to_canonical_bytes().unwrap();
+
+        assert!(manifest.external_mounts().unwrap().is_empty());
+
+        manifest.set_external_mounts(Vec::new()).unwrap();
+
+        assert_eq!(manifest.to_canonical_bytes().unwrap(), original);
+
+        manifest
+            .set_external_mounts(vec!["/logs".into(), "/data".into(), "/data".into()])
+            .unwrap();
+        let restored = Manifest::from_bytes(&manifest.to_canonical_bytes().unwrap()).unwrap();
+
+        // Advisory only: older readers must keep restoring these snapshots.
+        assert!(manifest.requires.is_empty());
+        assert!(manifest.unsupported_requires().is_empty());
+        assert_eq!(restored.external_mounts().unwrap(), ["/data", "/logs"]);
     }
 
     #[test]

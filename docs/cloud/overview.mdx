@@ -13,11 +13,13 @@ microsandbox cloud runs your sandboxes on hosted infrastructure. The SDKs and th
 
 ## Connect
 
-```bash
+<CodeGroup>
+```bash Shell
 export MSB_BACKEND=cloud
 export MSB_API_KEY="msb_..."
 msb context
 ```
+</CodeGroup>
 
 `msb context` confirms that subsequent commands will run on cloud and shows what selected it without exposing the API key. For profiles, SDK selection, and precedence, see [Local or cloud](/operations/backends).
 
@@ -37,13 +39,18 @@ Everything from the [quickstart](/getting-started/quickstart) works unchanged. W
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .memory(512)
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
-console.log(output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"]);
+    console.log(output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -59,6 +66,7 @@ let output = sb.exec("python", ["-c", "print('Hello from the cloud!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
+Sandbox::remove("hello").await?;
 ```
 
 ```python Python
@@ -70,6 +78,7 @@ output = await sb.exec("python", ["-c", "print('Hello from the cloud!')"])
 print(output.stdout_text)
 
 await sb.stop()
+await Sandbox.remove("hello")
 ```
 
 ```go Go
@@ -80,10 +89,26 @@ sb, err := m.CreateSandbox(ctx, "hello",
 if err != nil {
     return err
 }
-defer sb.Stop(ctx)
+defer func() {
+    _ = sb.Stop(ctx)
+    _ = m.RemoveSandbox(ctx, "hello")
+}()
 
 output, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from the cloud!')"})
+if err != nil {
+    return err
+}
 fmt.Println(output.Stdout())
+```
+
+```ruby Ruby
+require "microsandbox"
+
+Microsandbox::Sandbox.with("hello", image: "python", memory: 512) do |sb|
+  output = sb.exec("python", ["-c", "print('Hello from the cloud!')"])
+  puts output.stdout
+end
+Microsandbox::Sandbox.remove("hello")
 ```
 
 ```bash CLI
@@ -128,7 +153,7 @@ Across the docs, no badge means a feature works everywhere. Exceptions use only 
 | SSH | **Limited on cloud** | Native SDK sessions and `msb ssh` work. `msb ssh serve` is local-only; reusable SDK servers require explicit key material. |
 | Images | **Limited on cloud** | OCI image references and registry credentials work. Local cache commands, host-directory or disk-image roots, plain-HTTP registries, and custom registry CAs are local-only. |
 | Reconfiguration | **Local-only** | Recreate the sandbox with the new CPU, memory, mounts, or other settings instead of using `modify`. |
-| Snapshots | **Limited on cloud** | Create and restore disk snapshots of stopped or crashed sandboxes. Live capture, full checkpoints, forking, groups, and local artifact archives remain local-only. |
+| Snapshots | **Limited on cloud** | Capture disk snapshots from stopped persistent sandboxes and restore them into new sandboxes. Live capture, full checkpoints, forking, groups, and local artifact archives remain local-only. |
 | Resource metrics | **Local-only** | Instrument the workload with an external monitoring system. |
 | Process controls | **Limited on cloud** | Graceful stop plus maximum-duration and idle-timeout policies work. Force kill, drain, ping, and touch are local-only. |
 

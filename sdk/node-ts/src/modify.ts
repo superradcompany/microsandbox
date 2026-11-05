@@ -1,4 +1,6 @@
-import type { NapiSandboxModifyOptions } from "./internal/napi.js";
+import { napi, type NapiSandboxModifyOptions } from "./internal/napi.js";
+import type { SecretSubstitution } from "./network-config.js";
+import type { ViolationAction } from "./violation-action.js";
 
 // The wire contract for these shapes is generated from the Rust types in
 // packages/microsandbox-types (see packages/microsandbox-types/typescript/src/index.ts,
@@ -73,10 +75,26 @@ export interface ModifyOptions {
   secrets?: Record<string, SecretModifySpec>;
   /** Secret names to remove. */
   secretsRemove?: string[];
+  /** Published ports to add or update; other mappings remain unchanged. */
+  ports?: ModifyPort[];
+  /** Published host endpoints to remove. */
+  portsRemove?: ModifyPortEndpoint[];
   /** Apply policy. Defaults to `"no_restart"`. */
   policy?: ModificationPolicy;
   /** Compute the plan without applying anything. Defaults to `false`. */
   dryRun?: boolean;
+}
+
+/** A published host endpoint. Defaults to loopback TCP. */
+export interface ModifyPortEndpoint {
+  hostPort: number;
+  hostBind?: string;
+  protocol?: "tcp" | "udp";
+}
+
+/** A published port to add or update. */
+export interface ModifyPort extends ModifyPortEndpoint {
+  guestPort: number;
 }
 
 /**
@@ -86,6 +104,9 @@ export interface ModifyOptions {
  * secret material; setting more than one is rejected at the native boundary.
  * Only `value` may carry raw secret material, and it never appears in the
  * returned plan.
+ *
+ * Omitted policy fields keep the stored setting. Unknown keys, here or in
+ * `substitution`, are rejected.
  */
 export interface SecretModifySpec {
   /** Resolve the value from this host environment variable at apply time. */
@@ -101,6 +122,81 @@ export interface SecretModifySpec {
    * unchanged; a new secret needs at least one.
    */
   allowedHosts?: string[];
+  /**
+   * Request locations for substitution. A supplied value replaces the whole
+   * rule; omitted locations take their defaults.
+   */
+  substitution?: SecretSubstitution;
+  /** Per-secret blocking action. */
+  violationAction?: ViolationAction;
+  /** Whether substitution requires verified TLS identity. */
+  requireTlsIdentity?: boolean;
+  /** Hosts allowed to receive the unchanged placeholder; empty leaves them unchanged. */
+  allowPlaceholderFor?: string[];
+}
+
+const SECRET_SPEC_KEYS: readonly string[] = [
+  "env",
+  "value",
+  "store",
+  "placeholder",
+  "allowedHosts",
+  "substitution",
+  "violationAction",
+  "requireTlsIdentity",
+  "allowPlaceholderFor",
+];
+const SECRET_SUBSTITUTION_KEYS: readonly string[] = [
+  "headers",
+  "headerFields",
+  "query",
+  "body",
+];
+
+/** Reject options that an older native library would accept but not apply. */
+export function requireModifyCapabilities(opts?: ModifyOptions): void {
+  if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
+    throw new Error("published-port modification requires an updated native library");
+  }
+  if (usesSecretPolicyFields(opts) && !napi.supportsSecretPolicyModification?.()) {
+    throw new Error("secret policy modification requires an updated native library");
+  }
+}
+
+/** Whether any secret spec sets a field that needs `supportsSecretPolicyModification`. */
+function usesSecretPolicyFields(opts?: ModifyOptions): boolean {
+  return Object.values(opts?.secrets ?? {}).some(
+    (spec) =>
+      spec?.substitution != null ||
+      spec?.violationAction != null ||
+      spec?.requireTlsIdentity != null ||
+      (spec?.allowPlaceholderFor?.length ?? 0) > 0,
+  );
+}
+
+/** Native code drops undeclared keys silently, so a misspelled key must fail here. */
+function rejectUnknownSecretKeys(secrets: Record<string, SecretModifySpec>): void {
+  for (const [name, spec] of Object.entries(secrets)) {
+    rejectUnknownKeys(name, spec, SECRET_SPEC_KEYS, "");
+    rejectUnknownKeys(name, spec?.substitution, SECRET_SUBSTITUTION_KEYS, "substitution.");
+  }
+}
+
+function rejectUnknownKeys(
+  name: string,
+  spec: unknown,
+  allowed: readonly string[],
+  prefix: string,
+): void {
+  if (typeof spec !== "object" || spec === null) return;
+  for (const [key, value] of Object.entries(spec)) {
+    if (value !== undefined && !allowed.includes(key)) {
+      throw new Error(
+        `secret ${JSON.stringify(name)}: unknown key ${JSON.stringify(prefix + key)}; ` +
+          `expected one of ${allowed.map((k) => JSON.stringify(prefix + k)).join(", ")}`,
+      );
+    }
+  }
 }
 
 /** Ordinary config change planned by `modify()`. */
@@ -167,6 +263,7 @@ export function modifyOptionsToNapi(
   opts?: ModifyOptions,
 ): NapiSandboxModifyOptions | undefined {
   if (!opts) return undefined;
+  if (opts.secrets) rejectUnknownSecretKeys(opts.secrets);
   return {
     cpus: opts.cpus,
     maxCpus: opts.maxCpus,
@@ -180,6 +277,8 @@ export function modifyOptionsToNapi(
     workdir: opts.workdir,
     secrets: opts.secrets,
     secretsRemove: opts.secretsRemove,
+    ports: opts.ports,
+    portsRemove: opts.portsRemove,
     policy: opts.policy,
     dryRun: opts.dryRun,
   };
