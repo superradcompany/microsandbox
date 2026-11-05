@@ -464,8 +464,18 @@ fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
 /// Decrement the reference count for an inode. Remove it from the table
 /// when the count reaches zero.
 pub(crate) fn forget_one(fs: &PassthroughFs, inode: u64, count: u64) {
+    let pinned = fs.quota.as_ref().is_some_and(|quota| quota.contains(inode));
     let mut inodes = fs.inodes.write().unwrap();
+    let count = if pinned {
+        inodes.get(&inode).map_or(0, |data| {
+            count.min(data.refcount.load(Ordering::Acquire).saturating_sub(1))
+        })
+    } else {
+        count
+    };
     forget_one_locked(&mut inodes, inode, count);
+    drop(inodes);
+    fs.quota_reconcile_inode(inode);
 }
 
 /// Decrement the reference count under an already-held write lock.

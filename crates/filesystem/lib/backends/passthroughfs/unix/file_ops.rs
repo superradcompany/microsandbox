@@ -55,9 +55,7 @@ pub(crate) fn do_open(
         return Err(platform::erofs());
     }
 
-    // Snapshot the quota baseline before any write-intent open (which may carry
-    // O_TRUNC). This precedes the file's first write, so the baseline reflects
-    // pre-guest-write state. Read-only opens never trigger the walk.
+    // Restored legacy snapshots still require their pre-mutation baseline.
     if open_flags_mutate(open_flags) {
         fs.quota_ensure_baseline();
     }
@@ -73,7 +71,22 @@ pub(crate) fn do_open(
     }
 
     // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
-    let fd = inode::open_inode_fd(fs, inode, open_flags)?;
+    let account_truncate = open_flags & libc::O_TRUNC != 0
+        && fs.quota.as_ref().is_some_and(|quota| quota.incremental());
+    let fd = inode::open_inode_fd(
+        fs,
+        inode,
+        if account_truncate {
+            open_flags & !libc::O_TRUNC
+        } else {
+            open_flags
+        },
+    )?;
+    // Apply truncation through the ledger so O_TRUNC refunds guest growth too.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if account_truncate {
+        fs.quota_truncate_on_open(inode, &file, open_flags)?;
+    }
 
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
@@ -91,8 +104,6 @@ pub(crate) fn do_open(
             let _ = host_strip_priv_bits(fd);
         }
     }
-
-    let file = unsafe { std::fs::File::from_raw_fd(fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {
@@ -157,8 +168,13 @@ pub(crate) fn do_write(
         return Err(platform::erofs());
     }
 
-    let handles = fs.handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    let data = fs
+        .handles
+        .read()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(platform::ebadf)?;
     #[cfg(target_os = "macos")]
     if data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
         return Err(platform::ebadf());
@@ -166,11 +182,21 @@ pub(crate) fn do_write(
     let f = data.file.read().unwrap();
 
     let fd = f.as_raw_fd();
-    // Charge the quota for any growth past EOF before writing, so an
-    // over-budget write is refused with ENOSPC rather than hitting the disk.
-    fs.quota_charge_to(fd, offset.saturating_add(size as u64))?;
-
-    let written = r.read_to(&f, size as usize, offset)?;
+    // Linux pwrite on an O_APPEND descriptor appends regardless of the supplied
+    // offset. Reserve against EOF while holding the shared per-inode ledger lock.
+    let append = data.flags & 0x400 != 0 && !fs.writeback.load(Ordering::Relaxed);
+    let written = fs.quota_mutate(
+        data.inode,
+        &f,
+        |before| {
+            if append {
+                before.saturating_add(size as u64)
+            } else {
+                offset.saturating_add(size as u64)
+            }
+        },
+        |_| r.read_to(&f, size as usize, offset),
+    )?;
 
     if kill_priv {
         if fs.cfg.xattr_enabled() {
@@ -240,6 +266,9 @@ pub(crate) fn do_release(
         return Ok(());
     }
 
-    fs.handles.write().unwrap().remove(&handle);
+    let removed = fs.handles.write().unwrap().remove(&handle);
+    if let Some(data) = removed {
+        fs.quota_reconcile_inode(data.inode);
+    }
     Ok(())
 }

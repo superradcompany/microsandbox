@@ -97,7 +97,7 @@ pub(crate) fn do_setattr(
         // A supplied FUSE handle is the authoritative object. In particular,
         // it remains valid after an atomic host replacement detaches the inode
         // from the namespace, when reopening by inode can no longer succeed.
-        Some(handle) => clone_handle_file(fs, handle, valid.contains(SetattrValid::SIZE))?,
+        Some(handle) => clone_handle_file(fs, ino, handle, valid.contains(SetattrValid::SIZE))?,
         None => {
             #[cfg(target_os = "linux")]
             let fd = inode::open_inode_fd(fs, ino, open_flags)?;
@@ -202,19 +202,19 @@ pub(crate) fn do_setattr(
 
     // Handle size changes via ftruncate.
     if valid.contains(SetattrValid::SIZE) {
-        // Snapshot the quota baseline before truncating — a path-based truncate
-        // reaches here without a prior `open`, so this is the write-gating point
-        // that guarantees the baseline predates the mutation.
         fs.quota_ensure_baseline();
-
-        // Quota: an extending truncate grows the file. Charge the growth past
-        // EOF before ftruncate (a shrinking truncate charges nothing).
-        fs.quota_charge_to(fd, attr.st_size.max(0) as u64)?;
-
-        let ret = unsafe { libc::ftruncate(fd, attr.st_size) };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
-        }
+        fs.quota_mutate(
+            ino,
+            &file,
+            |_| attr.st_size.max(0) as u64,
+            |_| {
+                let ret = unsafe { libc::ftruncate(fd, attr.st_size) };
+                if ret < 0 {
+                    return Err(platform::linux_error(io::Error::last_os_error()));
+                }
+                Ok(())
+            },
+        )?;
     }
 
     // Handle timestamp changes.
@@ -329,9 +329,17 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     )
 }
 
-fn clone_handle_file(fs: &PassthroughFs, handle: u64, writable: bool) -> io::Result<File> {
+fn clone_handle_file(
+    fs: &PassthroughFs,
+    inode: u64,
+    handle: u64,
+    writable: bool,
+) -> io::Result<File> {
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    if data.inode != inode {
+        return Err(platform::ebadf());
+    }
     if writable && data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
         return Err(platform::einval());
     }

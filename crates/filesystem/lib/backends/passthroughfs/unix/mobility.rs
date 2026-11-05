@@ -30,8 +30,8 @@ use sha2::{Digest, Sha256};
 
 use super::{DirSnapshot, PassthroughDirEntry, PassthroughDirHandle, PassthroughFs, inode};
 use crate::backends::{
-    mobility,
     passthroughfs::quota::QuotaState,
+    passthroughfs::quota_mobility as mobility,
     shared::{
         handle_table::HandleData,
         inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap},
@@ -138,6 +138,38 @@ pub(super) struct PreparedState {
     inodes: MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     files: BTreeMap<u64, Arc<HandleData>>,
     dirs: BTreeMap<u64, Arc<PassthroughDirHandle>>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl mobility::QuotaSnapshot for PassthroughState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.inodes.iter().map(|inode| inode.inode).collect()
+    }
+}
+
+impl mobility::QuotaSnapshot for ExternalState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.state.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.state.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.state
+            .quota_inodes()
+            .union(&self.invalid_inodes)
+            .copied()
+            .collect()
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1501,7 +1533,14 @@ mod tests {
             .unwrap()
             .0
             .unwrap();
-        source.quota.as_ref().unwrap().charge(17).unwrap();
+        {
+            let handles = source.handles.read().unwrap();
+            let open = handles[&handle].file.read().unwrap();
+            let length = open.metadata().unwrap().len() + 17;
+            source
+                .quota_mutate(file.inode, &open, |_| length, |_| open.set_len(length))
+                .unwrap();
+        }
         let encoded = capture(&source).unwrap();
 
         let destination = make(true);

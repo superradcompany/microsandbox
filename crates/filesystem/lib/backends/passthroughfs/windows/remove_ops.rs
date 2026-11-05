@@ -175,7 +175,7 @@ impl PassthroughFs {
         &self,
         path: &Path,
     ) -> io::Result<Option<PreparedOwnedUnlink>> {
-        if self.cfg.owned_checkpoint.is_none() {
+        if self.cfg.owned_checkpoint.is_none() && self.quota.is_none() {
             return Ok(None);
         }
         let data = self.inodes.read().unwrap().by_path.get(path).cloned();
@@ -227,6 +227,7 @@ impl PassthroughFs {
         if let Some(data) = inodes.by_path.remove(path) {
             self.finish_removed_alias(&mut inodes, &data);
             drop(inodes);
+            self.quota_reconcile_inode(data.inode);
             self.reap_owned_inode(data.inode);
         }
     }
@@ -300,6 +301,7 @@ impl PassthroughFs {
         }
         drop(inodes);
         if let Some(replaced) = replaced {
+            self.quota_reconcile_inode(replaced.inode);
             self.reap_owned_inode(replaced.inode);
         }
     }

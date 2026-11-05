@@ -50,6 +50,27 @@ struct DetachedInode {
 }
 
 //--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl mobility::QuotaSnapshot for OwnedState {
+    fn quota(&self) -> &Option<crate::backends::passthroughfs::quota::QuotaState> {
+        &self.linked.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<crate::backends::passthroughfs::quota::QuotaState> {
+        &mut self.linked.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.linked
+            .inodes
+            .iter()
+            .map(|inode| inode.inode)
+            .chain(self.detached.iter().map(|inode| inode.inode))
+            .collect()
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 

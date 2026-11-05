@@ -14,6 +14,7 @@ mod host_mode;
 pub(crate) mod inode;
 mod metadata;
 mod mobility;
+mod quota_ops;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -509,24 +510,6 @@ impl PassthroughFs {
     pub(crate) fn is_virtual_init_inode(&self, inode: u64) -> bool {
         self.injects_init() && inode == init_binary::INIT_INODE
     }
-
-    /// Charge the quota for growing an open file to `new_end` bytes.
-    pub(crate) fn quota_charge_to(&self, fd: std::os::fd::RawFd, new_end: u64) -> io::Result<()> {
-        if let Some(quota) = &self.quota {
-            quota.charge(new_end.saturating_sub(super::quota::fd_size(fd)))?;
-        }
-        Ok(())
-    }
-
-    /// Capture the quota baseline now if it has not been captured yet.
-    ///
-    /// The first write-intent operation pays the one-time directory walk so
-    /// pre-existing host files become baseline instead of guest growth.
-    pub(crate) fn quota_ensure_baseline(&self) {
-        if let Some(quota) = &self.quota {
-            quota.ensure_baseline();
-        }
-    }
 }
 
 impl PassthroughConfig {
@@ -680,12 +663,31 @@ impl DynFileSystem for PassthroughFs {
     fn batch_forget(&self, _ctx: Context, requests: Vec<(u64, u64)>) {
         // Single lock acquisition for all entries (O(1) instead of O(n) locks).
         // batch_forget is called with hundreds of entries after directory traversals.
+        let pinned = requests
+            .iter()
+            .map(|(ino, _)| {
+                self.quota
+                    .as_ref()
+                    .is_some_and(|quota| quota.contains(*ino))
+            })
+            .collect::<Vec<_>>();
         let mut inodes = self.inodes.write().unwrap();
-        for (ino, count) in requests {
+        for (&(ino, count), pinned) in requests.iter().zip(pinned) {
             if self.is_virtual_init_inode(ino) {
                 continue;
             }
+            let count = if pinned {
+                inodes.get(&ino).map_or(0, |data| {
+                    count.min(data.refcount.load(Ordering::Acquire).saturating_sub(1))
+                })
+            } else {
+                count
+            };
             inode::forget_one_locked(&mut inodes, ino, count);
+        }
+        drop(inodes);
+        for (ino, _) in requests {
+            self.quota_reconcile_inode(ino);
         }
     }
 

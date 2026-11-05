@@ -228,15 +228,23 @@ impl PassthroughFs {
                 let state = self.dax_files.get(&handle.file.lock().unwrap())?;
                 self.with_file_mappings_suspended(&state, || {
                     let file = handle.file.lock().unwrap();
-                    self.quota_charge_growth(metadata.len(), size)?;
-                    file.set_len(size).map_err(host_error)
+                    self.quota_mutate(
+                        inode,
+                        &file,
+                        |_| size,
+                        |_| file.set_len(size).map_err(host_error),
+                    )
                 })?;
             } else {
                 self.resize_inode(inode, || {
                     let file = self.open_inode_file(&data, LINUX_O_WRONLY as u32)?;
                     reject_reparse_metadata(&file.metadata().map_err(host_error)?)?;
-                    self.quota_charge_growth(metadata.len(), size)?;
-                    file.set_len(size).map_err(host_error)
+                    self.quota_mutate(
+                        inode,
+                        &file,
+                        |_| size,
+                        |_| file.set_len(size).map_err(host_error),
+                    )
                 })?;
             }
         }

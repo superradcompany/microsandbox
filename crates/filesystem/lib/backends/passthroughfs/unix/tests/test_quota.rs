@@ -64,7 +64,7 @@ fn baseline_files_are_not_charged() {
 }
 
 #[test]
-fn statfs_reports_baseline_plus_quota() {
+fn statfs_reports_guest_budget_without_host_baseline() {
     let limit = 64 * 1024u64;
     let baseline = 32 * 1024u64;
     let used = 16 * 1024u64;
@@ -79,8 +79,8 @@ fn statfs_reports_baseline_plus_quota() {
     let frsize = st.f_frsize as u64;
     let total = st.f_blocks as u64 * frsize;
     let avail = st.f_bavail as u64 * frsize;
-    // df total = baseline + quota; available = quota - used.
-    assert_eq!(total, baseline + limit);
+    // df reports the guest budget independently of pre-existing host data.
+    assert_eq!(total, limit);
     assert_eq!(avail, limit - used);
 }
 
@@ -94,19 +94,243 @@ fn no_quota_means_unbounded() {
 }
 
 #[test]
-fn deleting_then_rewriting_reclaims_budget() {
-    // After filling the quota and removing the file, the recount reclaims the
-    // freed space so the guest can write again — no permanent exhaustion.
-    let sb = quota_fs(64 * 1024);
+fn unlinked_open_file_stays_charged_until_guest_releases_it() {
+    let sb = quota_fs(4096);
     let (entry, handle) = sb.fuse_create_root("a").unwrap();
-    sb.fuse_write(entry.inode, handle, &vec![0u8; 64 * 1024], 0)
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
         .unwrap();
-    // Free it on the host (models the guest deleting its file).
-    std::fs::remove_file(sb.root.join("a")).unwrap();
+    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"a").unwrap();
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+    let (other, other_handle) = sb.fuse_create_root("b").unwrap();
+    assert_eq!(
+        sb.fuse_write(other.inode, other_handle, &[0], 0)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(ENOSPC)
+    );
+    sb.fs
+        .release(
+            sb.ctx(),
+            entry.inode,
+            LINUX_O_RDWR,
+            handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 0);
+    sb.fuse_write(other.inode, other_handle, &vec![0; 4096], 0)
+        .unwrap();
+}
 
-    let (entry2, handle2) = sb.fuse_create_root("b").unwrap();
-    let n = sb
-        .fuse_write(entry2.inode, handle2, &vec![0u8; 64 * 1024], 0)
+#[test]
+fn truncate_and_open_trunc_refund_without_waiting_for_quota_pressure() {
+    let sb = quota_fs(8192);
+    let (entry, handle) = sb.fuse_create_root("a").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 8192], 0)
         .unwrap();
-    assert_eq!(n, 64 * 1024);
+    let mut attr = sb
+        .fs
+        .getattr(sb.ctx(), entry.inode, Some(handle))
+        .unwrap()
+        .0;
+    attr.st_size = 4096;
+    sb.fs
+        .setattr(
+            sb.ctx(),
+            entry.inode,
+            attr,
+            Some(handle),
+            SetattrValid::SIZE,
+        )
+        .unwrap();
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 4096);
+    sb.fuse_open(entry.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 0);
+}
+
+#[test]
+fn charged_inode_survives_forget_and_hardlink_alias() {
+    let sb = quota_fs(8192);
+    let (entry, handle) = sb.fuse_create_root("a").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    sb.fs
+        .release(
+            sb.ctx(),
+            entry.inode,
+            LINUX_O_RDWR,
+            handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+    std::fs::hard_link(sb.root.join("a"), sb.root.join("alias")).unwrap();
+    let alias = sb.fs.lookup(sb.ctx(), ROOT_INODE, c"alias").unwrap();
+    assert_eq!(alias.inode, entry.inode);
+    let handle = sb.fuse_open(alias.inode, LINUX_O_RDWR).unwrap();
+    sb.fuse_write(alias.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 4096);
+    sb.fuse_write(alias.inode, handle, &vec![0; 4096], 4096)
+        .unwrap();
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 8192);
+}
+
+#[test]
+fn host_unlink_is_reclaimed_after_closed_forgotten_file() {
+    let sb = quota_fs(4096);
+    let (entry, handle) = sb.fuse_create_root("a").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    sb.fs
+        .release(
+            sb.ctx(),
+            entry.inode,
+            LINUX_O_RDWR,
+            handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+    std::fs::remove_file(sb.root.join("a")).unwrap();
+    let (other, other_handle) = sb.fuse_create_root("b").unwrap();
+    sb.fuse_write(other.inode, other_handle, &vec![0; 4096], 0)
+        .unwrap();
+}
+
+#[test]
+fn closed_charged_inode_survives_snapshot_and_restored_truncation() {
+    let sb = quota_fs(8192);
+    let (entry, handle) = sb.fuse_create_root("a").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    sb.fs
+        .release(
+            sb.ctx(),
+            entry.inode,
+            LINUX_O_RDWR,
+            handle,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    sb.fs.forget(sb.ctx(), entry.inode, 1);
+    let state = sb.fs.capture_state().unwrap();
+    let restored = PassthroughFs::new(PassthroughConfig {
+        root_dir: sb.root.clone(),
+        quota_bytes: Some(8192),
+        ..Default::default()
+    })
+    .unwrap();
+    restored.restore_state(&state).unwrap();
+    assert_eq!(restored.quota.as_ref().unwrap().used(), 4096);
+    let lookup = restored.lookup(sb.ctx(), ROOT_INODE, c"a").unwrap();
+    assert_eq!(lookup.inode, entry.inode);
+    restored
+        .open(sb.ctx(), lookup.inode, false, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert_eq!(restored.quota.as_ref().unwrap().used(), 0);
+}
+
+#[test]
+fn deleting_preexisting_host_data_does_not_refund_guest_usage() {
+    let sb = quota_fs(4096);
+    sb.host_create_file("host", &vec![0; 8192]);
+    let (entry, handle) = sb.fuse_create_root("guest").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    std::fs::remove_file(sb.root.join("host")).unwrap();
+    assert_eq!(
+        sb.fuse_write(entry.inode, handle, &[0], 4096)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(ENOSPC)
+    );
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 4096);
+}
+
+#[test]
+fn create_with_trunc_refunds_and_reports_updated_size() {
+    let sb = quota_fs(4096);
+    let (entry, handle) = sb.fuse_create_root("a").unwrap();
+    sb.fuse_write(entry.inode, handle, &vec![0; 4096], 0)
+        .unwrap();
+    let (truncated, _) = sb
+        .fuse_create_flags(ROOT_INODE, "a", 0o644, false, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert_eq!(truncated.attr.st_size, 0);
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn short_copy_and_failed_allocation_settle_quota() {
+    let sb = quota_fs(4096);
+    sb.host_create_file("source", b"abc");
+    let source = sb.fs.lookup(sb.ctx(), ROOT_INODE, c"source").unwrap();
+    let read_handle = sb.fuse_open(source.inode, 0).unwrap();
+    let (dest, write_handle) = sb.fuse_create_root("dest").unwrap();
+    let copied = sb
+        .fs
+        .copyfilerange(
+            sb.ctx(),
+            source.inode,
+            read_handle,
+            0,
+            dest.inode,
+            write_handle,
+            0,
+            4096,
+            0,
+        )
+        .unwrap();
+    assert_eq!(copied, 3);
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 3);
+    assert!(
+        sb.fs
+            .fallocate(sb.ctx(), dest.inode, write_handle, 0x8000_0000, 0, 4096)
+            .is_err()
+    );
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 3);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_backed_symlink_consumes_guest_budget() {
+    let sb = quota_fs(4);
+    let entry = sb
+        .fs
+        .symlink(
+            sb.ctx(),
+            c"four",
+            ROOT_INODE,
+            c"link",
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(entry.attr.st_size, 4);
+    assert_eq!(sb.fs.quota.as_ref().unwrap().used(), 4);
+    assert_eq!(
+        sb.fs
+            .symlink(
+                sb.ctx(),
+                c"x",
+                ROOT_INODE,
+                c"too-much",
+                Extensions::default()
+            )
+            .err()
+            .unwrap()
+            .raw_os_error(),
+        Some(ENOSPC)
+    );
+    assert!(!sb.root.join("too-much").exists());
 }

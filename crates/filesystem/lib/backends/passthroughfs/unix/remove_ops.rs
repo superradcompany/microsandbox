@@ -105,12 +105,15 @@ pub(crate) fn do_unlink(
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
+    let mut removed_inode = None;
+
     #[cfg(target_os = "linux")]
     if let Some(fd) = pre_unlink_fd {
         let alias = NamespaceAlias::new(parent, name.to_bytes());
         if let Some(alt_key) = pre_unlink_key {
             let mut inodes = fs.inodes.write().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key).cloned() {
+                removed_inode = Some(data.inode);
                 let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
                 if detached {
                     inode::store_unlinked_fd(&data, fd);
@@ -139,6 +142,7 @@ pub(crate) fn do_unlink(
             );
             let inodes = fs.inodes.read().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key) {
+                removed_inode = Some(data.inode);
                 inode::store_unlinked_fd(data, fd);
             } else {
                 // No tracked inode — close the fd.
@@ -149,6 +153,9 @@ pub(crate) fn do_unlink(
         }
     }
 
+    if let Some(inode) = removed_inode {
+        fs.quota_reconcile_inode(inode);
+    }
     Ok(())
 }
 

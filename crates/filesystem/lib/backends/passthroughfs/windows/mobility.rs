@@ -26,7 +26,7 @@ use super::{
     host_error, inode::VirtualMetadata, is_reserved_name, open_options_from_flags,
     reject_reparse_metadata,
 };
-use crate::backends::{mobility, passthroughfs::quota::QuotaState};
+use crate::backends::passthroughfs::{quota::QuotaState, quota_mobility as mobility};
 
 #[path = "owned_mobility.rs"]
 mod owned;
@@ -135,6 +135,62 @@ pub(super) struct PreparedState {
     inodes: InodeTable,
     files: BTreeMap<u64, Arc<HandleData>>,
     dirs: BTreeMap<u64, Arc<DirHandle>>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl mobility::QuotaSnapshot for PassthroughState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.inodes.iter().map(|inode| inode.inode).collect()
+    }
+}
+
+impl mobility::QuotaSnapshot for ExternalState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.state.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.state.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.state
+            .quota_inodes()
+            .union(&self.invalid_inodes)
+            .copied()
+            .collect()
+    }
+}
+
+impl mobility::QuotaSnapshot for AliasedState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.state.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.state.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.state.quota_inodes()
+    }
+}
+
+impl mobility::QuotaSnapshot for AliasedExternalState {
+    fn quota(&self) -> &Option<QuotaState> {
+        &self.external.state.quota
+    }
+    fn quota_mut(&mut self) -> &mut Option<QuotaState> {
+        &mut self.external.state.quota
+    }
+    fn quota_inodes(&self) -> BTreeSet<u64> {
+        self.external.quota_inodes()
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -394,6 +450,15 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
     let prepared = prepare(fs, bytes)?;
     if let (Some(quota), Some(state)) = (&fs.quota, &prepared.quota) {
         quota.restore_state(state)?;
+    }
+    if fs.cfg.owned_checkpoint.is_none()
+        && let Some(files) = prepared.quota.as_ref().and_then(|q| q.files.as_ref())
+    {
+        for file in files {
+            if let Some(data) = prepared.inodes.by_inode.get(&file.inode) {
+                data.lookups.fetch_add(1, Ordering::AcqRel);
+            }
+        }
     }
     *fs.inodes.write().unwrap() = prepared.inodes;
     *fs.handles.write().unwrap() = prepared.files;

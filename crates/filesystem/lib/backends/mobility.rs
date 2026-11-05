@@ -51,6 +51,16 @@ impl io::Write for BoundedWriter {
 //--------------------------------------------------------------------------------------------------
 
 pub(crate) fn encode<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> io::Result<Vec<u8>> {
+    encode_schema(kind, SCHEMA, state, limit)
+}
+
+/// Encode a backend-owned schema without changing other filesystem formats.
+pub(crate) fn encode_schema<T: Serialize>(
+    kind: &[u8; 8],
+    schema: u16,
+    state: &T,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
     let config = config::standard()
         .with_little_endian()
         .with_fixed_int_encoding();
@@ -60,7 +70,7 @@ pub(crate) fn encode<T: Serialize>(kind: &[u8; 8], state: &T, limit: usize) -> i
         exceeded: false,
     };
     writer.bytes.extend_from_slice(kind);
-    writer.bytes.extend_from_slice(&SCHEMA.to_le_bytes());
+    writer.bytes.extend_from_slice(&schema.to_le_bytes());
     if let Err(error) = bincode::serde::encode_into_std_write(state, &mut writer, config) {
         if writer.exceeded {
             return Err(io::Error::new(
@@ -82,13 +92,23 @@ pub(crate) fn decode<T: DeserializeOwned>(
     bytes: &[u8],
     limit: usize,
 ) -> io::Result<T> {
+    decode_schema(kind, SCHEMA, bytes, limit)
+}
+
+/// Decode exactly the schema selected by the owning backend.
+pub(crate) fn decode_schema<T: DeserializeOwned>(
+    kind: &[u8; 8],
+    schema: u16,
+    bytes: &[u8],
+    limit: usize,
+) -> io::Result<T> {
     if bytes.len() < HEADER_BYTES || bytes.len() > limit {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid backend state length",
         ));
     }
-    if &bytes[..8] != kind || u16::from_le_bytes(bytes[8..10].try_into().unwrap()) != SCHEMA {
+    if &bytes[..8] != kind || u16::from_le_bytes(bytes[8..10].try_into().unwrap()) != schema {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unsupported snapshot filesystem format; if this snapshot was created with a newer microsandbox runtime, upgrade to that version or newer to restore it",

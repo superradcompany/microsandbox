@@ -64,8 +64,7 @@ pub(crate) fn do_create(
         return Err(platform::eacces());
     }
 
-    // Snapshot the quota baseline before creating the file, so the new file's
-    // bytes are charged as guest growth rather than absorbed into the baseline.
+    // Retain the original pre-create baseline for legacy restored quotas.
     fs.quota_ensure_baseline();
 
     let parent_fd = inode::get_inode_fd(fs, parent)?;
@@ -75,6 +74,13 @@ pub(crate) fn do_create(
 
     let mut open_flags = inode::translate_open_flags(flags as i32);
     open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+    let account_truncate = open_flags & libc::O_TRUNC != 0
+        && fs.quota.as_ref().is_some_and(|quota| quota.incremental());
+    let create_flags = if account_truncate {
+        open_flags & !libc::O_TRUNC
+    } else {
+        open_flags
+    };
 
     // With overlay, default to conservative 0o600 and let `Mirror` widen via
     // `fchmod` after creation. Without overlay (`Off`), use the guest's request
@@ -90,7 +96,7 @@ pub(crate) fn do_create(
         libc::openat(
             parent_fd.raw(),
             name.as_ptr(),
-            open_flags,
+            create_flags,
             host_initial_mode,
         )
     };
@@ -120,11 +126,16 @@ pub(crate) fn do_create(
     // Close the fd we used for xattr, then do a proper lookup.
     unsafe { libc::close(fd) };
 
-    let entry = inode::do_lookup(fs, parent, name)?;
+    let mut entry = inode::do_lookup(fs, parent, name)?;
 
     // Reopen for the handle — strip O_CREAT since the file already exists.
     // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
-    let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+    let open_fd = inode::open_inode_fd(fs, entry.inode, create_flags & !libc::O_CREAT)?;
+    let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
+    if account_truncate {
+        fs.quota_truncate_on_open(entry.inode, &file, open_flags)?;
+        entry.attr = inode::stat_inode(fs, entry.inode)?;
+    }
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
@@ -142,8 +153,6 @@ pub(crate) fn do_create(
             let _ = super::host_mode::host_strip_priv_bits(open_fd);
         }
     }
-
-    let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {
@@ -350,30 +359,30 @@ pub(crate) fn do_symlink(
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
 
-            // Write the symlink target as file content.
-            let target = linkname.to_bytes();
-            let written =
-                unsafe { libc::write(fd, target.as_ptr() as *const libc::c_void, target.len()) };
-            if written < 0 {
-                let err = io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-                return Err(platform::linux_error(err));
-            }
-            if (written as usize) != target.len() {
-                unsafe { libc::close(fd) };
-                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-                return Err(platform::eio());
-            }
-
-            // Set override xattr with S_IFLNK.
+            let file = unsafe { std::fs::File::from_raw_fd(fd) };
             let mode = platform::MODE_LNK | 0o777;
-            if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
-                unsafe { libc::close(fd) };
+            if let Err(error) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
                 unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
-                return Err(e);
+                return Err(error);
             }
-            unsafe { libc::close(fd) };
+            let mut entry = inode::do_lookup(fs, parent, name)?;
+            let target = linkname.to_bytes();
+            let result = fs.quota_mutate(
+                entry.inode,
+                &file,
+                |_| target.len() as u64,
+                |_| {
+                    use std::io::Write;
+                    (&file).write_all(target).map_err(platform::linux_error)
+                },
+            );
+            if let Err(error) = result {
+                unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
+                inode::forget_one(fs, entry.inode, 1);
+                return Err(error);
+            }
+            entry.attr = inode::stat_inode(fs, entry.inode)?;
+            return Ok(entry);
         } else {
             // Relaxed / Off: real `symlinkat`. No overlay xattr — the host
             // sees a real symlink and the existing `patched_stat` and
