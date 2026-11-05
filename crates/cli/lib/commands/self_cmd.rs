@@ -152,7 +152,7 @@ pub struct DoctorArgs {
     pub yes: bool,
 
     /// Inspect every sandbox in the configured local home.
-    #[arg(long, group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
     pub all: bool,
 
     /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).
