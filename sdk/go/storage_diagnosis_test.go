@@ -22,6 +22,21 @@ func TestStorageDiagnosisExactBytesAndPartialResults(t *testing.T) {
 	}
 }
 
+func TestStorageDiagnosisPreviewMetadata(t *testing.T) {
+	const payload = `{"sandboxes":[{"guest_mounts":{"owned-1":"/work"},"inspection":{"preview_available":true}},{"inspection":{}}]}`
+	var report StorageDiagnosis
+	if err := json.Unmarshal([]byte(payload), &report); err != nil {
+		t.Fatal(err)
+	}
+	current, legacy := report.Sandboxes[0], report.Sandboxes[1]
+	if current.GuestMounts["owned-1"] != "/work" || !current.Inspection.PreviewAvailable {
+		t.Fatal("lost guest mount or preview availability")
+	}
+	if len(legacy.GuestMounts) != 0 || legacy.Inspection.PreviewAvailable {
+		t.Fatal("older payload invented a preview")
+	}
+}
+
 func TestStorageDiagnosisRejectsAmbiguousScopeAndCancellationBeforeLoading(t *testing.T) {
 	for _, selection := range []StorageSelection{{}, {Names: []string{}}, {Names: []string{"app"}, All: true}} {
 		if _, err := DiagnoseStorage(context.Background(), RuntimeConfig{}, selection); err == nil {

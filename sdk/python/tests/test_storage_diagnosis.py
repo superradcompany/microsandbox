@@ -20,7 +20,9 @@ async def test_scope_partial_results_and_exact_bytes(monkeypatch: pytest.MonkeyP
                 "running": True,
                 "protection_registered": True,
                 "reason": None,
+                "guest_mounts": {"owned-data": "/data"},
                 "inspection": {
+                    "preview_available": True,
                     "status": "eligible",
                     "reasons": [],
                     "estimated_bytes": 2**64 - 1,
@@ -52,6 +54,9 @@ async def test_scope_partial_results_and_exact_bytes(monkeypatch: pytest.MonkeyP
     assert json.loads(config)["home"] == "/selected"
     assert json.loads(selection) == {"named": ["app", "missing"]}
     assert report.sandboxes[0].inspection.candidates[0].virtual_size == 2**64 - 1
+    assert report.sandboxes[0].inspection.preview_available
+    assert report.sandboxes[0].guest_mounts == {"owned-data": "/data"}
+    assert report.sandboxes[1].guest_mounts == {}
     assert report.sandboxes[0].running
     assert report.sandboxes[1].reason == "not_found"
     await diagnose_storage(all_sandboxes=True)

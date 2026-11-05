@@ -80,6 +80,13 @@ pub fn verify_publication_parent(file: &File) -> io::Result<()> {
     windows::verify_policy(file, false, true)
 }
 
+/// Readable shared cache artifacts may grant read access, while their owner and all
+/// mutation rights have to remain under trusted host control.
+#[cfg(windows)]
+pub fn verify_read_source(file: &File) -> io::Result<()> {
+    windows::verify_policy(file, false, false)
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::{c_int, c_void};

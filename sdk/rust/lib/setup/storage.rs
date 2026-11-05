@@ -82,6 +82,9 @@ pub enum StorageDiagnosticReason {
 /// One requested sandbox's diagnostic result.
 #[derive(Debug, Serialize)]
 pub struct StorageSandboxDiagnosis {
+    /// Host-saved guest mount names for interactive display, keyed by disk role.
+    #[serde(skip)]
+    pub guest_mounts: std::collections::BTreeMap<String, String>,
     /// Catalog sandbox name, never a guest-provided path.
     pub name: String,
     /// Result of the bounded storage inspection.
@@ -191,21 +194,7 @@ async fn diagnose_resolved(
 ) -> MicrosandboxResult<StorageDiagnosis> {
     let names = selected_names(selection)?;
     let home = std::path::absolute(config.home())?;
-    let catalog_path = home
-        .join(microsandbox_utils::DB_SUBDIR)
-        .join(microsandbox_utils::DB_FILENAME);
-    let catalog_path =
-        microsandbox_db::private_storage::validate_database_inspection(&catalog_path)?;
-    // Do not use DbReadConnection here: it intentionally repairs permissions before opening.
-    // Filename() avoids treating a caller's path as a SQLite URI and cannot enable immutable.
-    let options = SqliteConnectOptions::new()
-        .filename(&catalog_path)
-        .read_only(true)
-        .create_if_missing(false)
-        .busy_timeout(Duration::from_secs(5));
-    let mut connection = SqliteConnection::connect_with(&options)
-        .await
-        .map_err(|_| diagnostic_error("storage inspection could not open the existing catalog"))?;
+    let mut connection = open_catalog(config).await?;
     let rows = read_catalog(&mut connection, names.as_ref()).await?;
     let preview_config = config.clone();
     let (rows, needs_aliases) = tokio::task::spawn_blocking(move || {
@@ -233,6 +222,7 @@ async fn diagnose_resolved(
         }
         for name in pending_names {
             sandboxes.push(StorageSandboxDiagnosis {
+                guest_mounts: Default::default(),
                 name,
                 status: StorageDiagnosticStatus::Unavailable,
                 running: false,
@@ -250,6 +240,24 @@ async fn diagnose_resolved(
     })
     .await
     .map_err(|_| diagnostic_error("storage inspection worker failed"))?
+}
+
+pub(crate) async fn open_catalog(config: &GlobalConfig) -> MicrosandboxResult<SqliteConnection> {
+    let path = config
+        .home()
+        .join(microsandbox_utils::DB_SUBDIR)
+        .join(microsandbox_utils::DB_FILENAME);
+    let path = microsandbox_db::private_storage::validate_database_inspection(&path)?;
+    // Normal backend reads may repair permissions. This path opens only the existing catalog
+    // and observes committed WAL data, including for the names-only interactive picker.
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(5));
+    SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|_| diagnostic_error("storage inspection could not open the existing catalog"))
 }
 
 fn selected_names(selection: StorageSelection) -> MicrosandboxResult<Option<BTreeSet<String>>> {
@@ -271,7 +279,7 @@ fn selected_names(selection: StorageSelection) -> MicrosandboxResult<Option<BTre
 
 fn needs_alias_inventory(config: &GlobalConfig, rows: &[CatalogSandbox]) -> bool {
     // Completed layouts need neither unrelated catalog inventory nor legacy disk reads.
-    // Validate every catalog name before joining a path, including --all-sandboxes rows.
+    // Validate every catalog name before joining a path, including whole-home results.
     rows.iter().any(|row| {
         if crate::sandbox::validate_sandbox_name(&row.name).is_err() || row.incomplete {
             return false;
@@ -438,6 +446,7 @@ fn inspect_sandbox(
     aliases: Option<&storage_alias_catalog::AliasCatalog>,
 ) -> StorageSandboxDiagnosis {
     let mut result = StorageSandboxDiagnosis {
+        guest_mounts: Default::default(),
         name: row.name.clone(),
         status: StorageDiagnosticStatus::Unavailable,
         running: !matches!(row.status.as_str(), "Created" | "Stopped" | "Crashed"),
@@ -463,6 +472,7 @@ fn inspect_sandbox(
         result.reason = Some(StorageDiagnosticReason::InvalidConfiguration);
         return result;
     }
+    result.guest_mounts = crate::sandbox::storage_preview::guest_mounts(&config);
     let sandbox = global.sandboxes_dir().join(&row.name);
     let inspected = crate::runtime::protected_state::bindings(
         &config,
@@ -499,6 +509,7 @@ fn inspect_sandbox(
             )?;
             if !discovery.reasons.is_empty() {
                 return Ok(Inspection {
+                    preview_available: false,
                     status: MigrationStatus::RecoveryRequired,
                     reasons: discovery.reasons,
                     candidates: Vec::new(),
@@ -560,3 +571,8 @@ mod tests;
 
 #[path = "storage_alias_catalog.rs"]
 mod storage_alias_catalog;
+
+#[path = "storage_repair.rs"]
+mod repair;
+pub use repair::{StorageRepairBlocker, storage_repair_blockers, storage_repair_targets};
+pub(crate) use repair::{preview_alias_catalog, preview_target};

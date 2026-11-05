@@ -63,6 +63,7 @@ msb self uninstall --yes      # Skip confirmation
 | Subcommand | Description |
 |------------|-------------|
 | `doctor` (alias: `check`) | Check runtime files, supported host virtualization prerequisites, and non-blocking host performance capabilities |
+| `repair [SANDBOX]` | Inspect and repair legacy sandbox storage. In a terminal, omit the name to choose a sandbox |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
@@ -91,10 +92,10 @@ A temporary clone probe checks whether flat roots can use native copy-on-write. 
 
 ### Check sandbox storage
 
-`msb doctor --storage --sandbox app` checks named sandbox storage; repeat `--sandbox` to select more, or use `--all-sandboxes` explicitly. Add `--format json` for a structured report. Storage mode does not run host probes, apply fixes, start or stop VMs, or change catalog records, permissions, or disk contents. SQLite may maintain its normal WAL read-lock sidecars. `--fix` and host-fix confirmation flags cannot be combined with storage mode.
+`msb doctor app` inspects storage for one local sandbox. Use `msb doctor --all` to inspect every sandbox in the configured home. Add `--format json` for automation. These checks read storage metadata and leave VMs running. Bare `msb doctor` checks the host.
 
-Exit codes are `0` for ready or eligible storage, `2` for blockers, required maintenance, or an incomplete migration, `3` when any sandbox could not be inspected, and `1` for a command-level failure. Running-sandbox results are provisional. Plain `msb doctor` retains its host checks without inventorying sandbox storage.
+Storage checks exit with `0` for ready or eligible storage, `2` for a blocker or incomplete migration, `3` when a sandbox could not be inspected, and `1` for a command-level failure. Results for running sandboxes are provisional.
 
-`msb recover-storage NAME` imports or resumes stopped storage without booting it. macOS legacy storage requires `--legacy-writers-stopped` after establishing the maintenance conditions in the migration guide. Explicit `--select DISK_ID=CANDIDATE_ID` choices require `--accept-selected-view`; `--format json` returns the completion report. See [protected-state migration](/migrations/v0.7#protected-sandbox-state) before choosing a view that may omit later writes.
+Run `msb self repair app` in a terminal when the report calls for repair. It guides you through stopping a blocking VM and choosing a disk view when necessary. For scripted repair and macOS maintenance requirements, see [protected sandbox state](/migrations/v0.7#protected-sandbox-state).
 
 See [Performance](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

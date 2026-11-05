@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::super::layout;
 use super::budget::ParserBudget;
 use super::io::{self, Identity};
-use super::namespace;
 use super::source::{self, Acquired, Disk};
 use super::types::{
     AliasSource, Inspection, MigrationBindings, MigrationStatus, RecoverySelection,
 };
+use super::{namespace, preview};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -52,6 +52,10 @@ struct Operation {
     /// Durable proof that every capture belongs to one continuously protected source epoch.
     #[serde(default)]
     group_captured: bool,
+    /// A reviewed operation must preserve the exact pre-normalization bytes of every
+    /// chosen layer, including after process death and source reacquisition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    reviewed_roots: Vec<Vec<String>>,
     /// Original host-created schema-1 simple preparation, if present.
     previous_layout: Option<Vec<u8>>,
 }
@@ -195,6 +199,37 @@ impl MigrationPlan {
         )
     }
 
+    pub(super) fn bind_review(
+        &mut self,
+        roots: Vec<Vec<String>>,
+        journals: &[Option<&[u8]>],
+    ) -> Result<(), String> {
+        let operation = self
+            .operation
+            .as_mut()
+            .ok_or("missing recovery selection")?;
+        // Selection is reacquired after provisional discovery. Bind its actual frozen
+        // journals to what the operator reviewed, closing the interval between the two.
+        if operation.disks.len() != journals.len()
+            || operation
+                .disks
+                .iter()
+                .zip(journals)
+                .any(|(disk, expected)| disk.journal.as_deref() != *expected)
+        {
+            return Err("reviewed disk selection changed during final acquisition".into());
+        }
+        operation.reviewed_roots = roots;
+        validate_record_bound(operation)?;
+        verify_reviewed_sources(
+            operation,
+            self.acquired
+                .as_ref()
+                .ok_or("missing pinned recovery sources")?,
+        )?;
+        self.revalidate()
+    }
+
     fn revalidate(&self) -> Result<(), String> {
         let operation = self
             .operation
@@ -333,6 +368,11 @@ impl MigrationPlan {
             }
             let file = &self.acquired.as_ref().unwrap().files[index][layer_index];
             io::capture(file, &target)?;
+            // Normalize embedded dependency names only after authenticating the bytes
+            // reviewed by the operator. The durable group certificate covers the results.
+            if let Some(roots) = operation.reviewed_roots.get(index) {
+                preview::verify_content(&io::exact(&target)?, &roots[layer_index])?;
+            }
             let (capacity, backing) = io::header(
                 &io::exact(&target)?,
                 disk.sources[layer_index].format == "qcow2",
@@ -484,23 +524,8 @@ pub fn inspect(runtime: &Path, bindings: &MigrationBindings) -> Result<Inspectio
     match plan_inner(runtime, bindings, false) {
         Ok(plan) => Ok(plan.inspection),
         Err(reason) => {
-            let sandbox = layout::host_root(runtime)?;
-            let candidates = if !sandbox.join("state-layout.json").exists()
-                && !sandbox.join(DIRECTORY).exists()
-            {
-                source::recovery_views(runtime, bindings)
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|disk| {
-                        disk.summary(&format!(
-                            "{}:{}",
-                            bindings.identity, bindings.config_revision
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                Vec::new()
-            };
+            let (candidates, preview_available) =
+                preview::inspect_candidates(runtime, bindings).unwrap_or_default();
             // Alternatives are mutually exclusive within one disk role, but every role
             // must be imported. Sum each role's largest complete candidate, with overflow checks.
             let mut per_disk = std::collections::BTreeMap::<&str, u64>::new();
@@ -514,6 +539,7 @@ pub fn inspect(runtime: &Path, bindings: &MigrationBindings) -> Result<Inspectio
                 .ok_or("recovery capture estimate exceeds its size bound")?;
             Ok(Inspection {
                 status: MigrationStatus::RecoveryRequired,
+                preview_available,
                 reasons: vec![reason],
                 candidates,
                 estimated_bytes,
@@ -598,6 +624,7 @@ fn plan_inner(
                 runtime: runtime.into(),
                 inspection: Inspection {
                     status: MigrationStatus::Ready,
+                    preview_available: false,
                     reasons: Vec::new(),
                     candidates: Vec::new(),
                     estimated_bytes: 0,
@@ -666,6 +693,7 @@ fn plan_inner(
         let mut acquired = source::reacquire(runtime, bindings, &sources)?;
         if protect_sources {
             source::protect(&mut acquired)?;
+            verify_reviewed_sources(&operation, &acquired)?;
         }
         if operation.group_captured {
             operation.bindings.aliases = bindings.aliases.clone();
@@ -765,10 +793,23 @@ fn new_plan(
         volume_ids: acquired.disks.iter().map(|_| fresh_id("vol")).collect(),
         barrier: false,
         group_captured: false,
+        reviewed_roots: Vec::new(),
         previous_layout: layout::read_optional(
             &layout::host_root(runtime)?.join("state-layout.json"),
         )?,
     };
+    validate_record_bound(&operation)?;
+    Ok(MigrationPlan {
+        runtime: runtime.into(),
+        inspection,
+        operation: Some(operation),
+        acquired: Some(acquired),
+        recorded: false,
+        _namespace: Some(namespace),
+    })
+}
+
+fn validate_record_bound(operation: &Operation) -> Result<(), String> {
     // Capture slots start as null but later hold independent file identities. Reserve their
     // largest encoding before intent/admission so a valid initial record cannot become
     // permanently unpersistable after copying. Unix object IDs contain two u64 decimals
@@ -790,7 +831,7 @@ fn new_plan(
         .iter()
         .filter(|disk| needs_capture(disk))
         .try_fold(0usize, |count, disk| count.checked_add(disk.sources.len()));
-    let initial_size = serde_json::to_vec(&operation)
+    let initial_size = serde_json::to_vec(operation)
         .map_err(|_| "cannot encode migration operation")?
         .len();
     let maximum_size = capture_count
@@ -800,14 +841,7 @@ fn new_plan(
     if maximum_size as u64 > io::MAX_METADATA {
         return Err("migration operation exceeds its metadata bound".into());
     }
-    Ok(MigrationPlan {
-        runtime: runtime.into(),
-        inspection,
-        operation: Some(operation),
-        acquired: Some(acquired),
-        recorded: false,
-        _namespace: Some(namespace),
-    })
+    Ok(())
 }
 
 pub(super) fn frozen_disks(
@@ -919,6 +953,7 @@ fn summary(status: MigrationStatus, disks: &[Disk], identity: &str) -> Result<In
     })?;
     Ok(Inspection {
         status,
+        preview_available: false,
         reasons: Vec::new(),
         candidates,
         estimated_bytes,
@@ -982,12 +1017,53 @@ fn destination_path(directory: &Path, index: usize, format: &str) -> PathBuf {
 fn fresh_id(prefix: &str) -> String {
     format!("{prefix}_{}", hex::encode(rand::random::<[u8; 16]>()))
 }
+fn verify_reviewed_sources(operation: &Operation, acquired: &Acquired) -> Result<(), String> {
+    if operation.reviewed_roots.is_empty() {
+        return Ok(());
+    }
+    for (disk, files) in acquired.disks.iter().zip(&acquired.files) {
+        let index = operation
+            .disks
+            .iter()
+            .position(|item| item.id == disk.id)
+            .ok_or("reviewed disk no longer has a configured role")?;
+        let roots = operation
+            .reviewed_roots
+            .get(index)
+            .filter(|roots| roots.len() == files.len())
+            .ok_or("incomplete reviewed disk content binding")?;
+        for (file, root) in files.iter().zip(roots) {
+            preview::verify_content(file, root)?;
+        }
+    }
+    acquired
+        .writers
+        .as_ref()
+        .ok_or("reviewed disks need writer protection")?
+        .audit()
+}
+
 fn valid_operation(operation: &Operation) -> bool {
     operation.id.len() == 32
         && operation
             .id
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && (operation.reviewed_roots.is_empty()
+            || (operation.reviewed_roots.len() == operation.disks.len()
+                && operation
+                    .reviewed_roots
+                    .iter()
+                    .zip(&operation.disks)
+                    .all(|(roots, disk)| {
+                        roots.len() == disk.sources.len()
+                            && roots.iter().all(|root| {
+                                root.strip_prefix("blake3:").is_some_and(|hash| {
+                                    hash.len() == 64
+                                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                                })
+                            })
+                    })))
         && operation.disks.len() <= 65
         && (!operation.group_captured || operation.barrier)
         && operation.captures.len() == operation.disks.len()
@@ -1845,6 +1921,167 @@ mod tests {
         assert_eq!(chain.layers[0].path, disk);
     }
 
+    fn preview_parent() -> tempfile::TempDir {
+        preview::private_preview_parent().unwrap()
+    }
+
+    #[test]
+    fn preview_distinguishes_equal_size_branches_and_adopts_reviewed_bytes_after_restart() {
+        let (_temp, runtime, bindings) = fixture();
+        let base = &bindings.root.as_ref().unwrap().path;
+        let prefix = base.parent().unwrap();
+        let left = prefix.join(format!("upper-{}.qcow2", "1".repeat(32)));
+        overlay(&left, base, "raw");
+        let staging = runtime.join(".grow-ABC123");
+        fs::create_dir(&staging).unwrap();
+        let alternate_base = staging.join("upper.ext4");
+        fs::write(&alternate_base, vec![91; 131072]).unwrap();
+        let right = staging.join(format!("upper-{}.qcow2", "2".repeat(32)));
+        overlay(&right, &alternate_base, "raw");
+        let parent = preview_parent();
+        let mut preview = preview::capture_preview(&runtime, &bindings, parent.path()).unwrap();
+        let views = preview
+            .candidates()
+            .iter()
+            .filter(|view| view.layers == 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].virtual_size, views[1].virtual_size);
+        let mut recognized = std::collections::BTreeSet::new();
+        let mut selection = None;
+        for view in views {
+            let image = preview.materialize("root", &view.id).unwrap();
+            let bytes = fs::read(&image).unwrap();
+            assert!(bytes.iter().all(|value| value == &bytes[0]));
+            recognized.insert(bytes[0]);
+            if bytes[0] == 91 {
+                selection = Some(RecoverySelection {
+                    disk_id: "root".into(),
+                    candidate_id: view.id,
+                });
+            }
+        }
+        assert_eq!(recognized, std::collections::BTreeSet::from([23, 91]));
+        let selected = [selection.unwrap()];
+        let mut migration =
+            preview::plan_previewed(&runtime, &bindings, &preview, &selected).unwrap();
+        assert!(!prefix.join(DIRECTORY).exists());
+        migration.record_intent().unwrap();
+        drop(preview);
+        drop(migration);
+        // Durable pre-normalization proofs survive the preview process; resume can only
+        // import the same private content even though every ephemeral inspection file is gone.
+        plan(&runtime, &bindings).unwrap().complete().unwrap();
+        let owned = load_runtime_owned_root_chain(&runtime).unwrap().unwrap();
+        assert_eq!(owned.layers.len(), 2);
+        assert_eq!(fs::read(&owned.layers[0].path).unwrap(), vec![91; 131072]);
+        assert_eq!(fs::read(base).unwrap(), vec![23; 131072]);
+        assert_eq!(fs::read(alternate_base).unwrap(), vec![91; 131072]);
+    }
+
+    #[test]
+    fn preview_cancel_preserves_originals_and_removes_private_copies() {
+        let (_temp, runtime, bindings) = fixture();
+        let parent = preview_parent();
+        let base = &bindings.root.as_ref().unwrap().path;
+        let stamp = io::identity(&io::exact(base).unwrap()).unwrap();
+        let sandbox = runtime.parent().unwrap();
+        let mut preview = preview::capture_preview(&runtime, &bindings, parent.path()).unwrap();
+        let id = preview.candidates()[0].id.clone();
+        let path = preview.materialize("root", &id).unwrap();
+        assert!(path.exists());
+        drop(preview);
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+        assert_eq!(io::identity(&io::exact(base).unwrap()).unwrap(), stamp);
+        for marker in [
+            "state-layout.json",
+            DIRECTORY,
+            "root-disk.json",
+            "runtime/root-disk.json",
+        ] {
+            assert!(!sandbox.join(marker).exists());
+        }
+        assert!(preview::capture_preview(&runtime, &bindings, sandbox).is_err());
+    }
+
+    #[test]
+    fn preview_stale_source_or_journal_does_not_record_intent() {
+        for change_journal in [false, true] {
+            let (_temp, runtime, bindings) = fixture();
+            let parent = preview_parent();
+            let preview = preview::capture_preview(&runtime, &bindings, parent.path()).unwrap();
+            let selection = [RecoverySelection {
+                disk_id: "root".into(),
+                candidate_id: preview.candidates()[0].id.clone(),
+            }];
+            if change_journal {
+                fs::write(runtime.join("root-disk.json"), b"changed selection").unwrap();
+            } else {
+                fs::write(&bindings.root.as_ref().unwrap().path, vec![14; 131072]).unwrap();
+            }
+            assert!(preview::plan_previewed(&runtime, &bindings, &preview, &selection).is_err());
+            assert!(!runtime.parent().unwrap().join(DIRECTORY).exists());
+            assert!(!runtime.parent().unwrap().join("state-layout.json").exists());
+        }
+    }
+
+    #[test]
+    fn preview_external_inspection_cannot_write_through_and_modified_image_requires_new_session() {
+        let (_temp, runtime, mut bindings) = fixture();
+        let external = tempfile::tempdir().unwrap();
+        let path = external.path().join("external.raw");
+        fs::write(&path, vec![83; 131072]).unwrap();
+        bindings.root.as_mut().unwrap().path = path.clone();
+        let parent = preview_parent();
+        let mut preview = preview::capture_preview(&runtime, &bindings, parent.path()).unwrap();
+        let selection = [RecoverySelection {
+            disk_id: "root".into(),
+            candidate_id: preview.candidates()[0].id.clone(),
+        }];
+        let image = preview
+            .materialize("root", &selection[0].candidate_id)
+            .unwrap();
+        assert_ne!(
+            io::identity(&io::exact(&image).unwrap()).unwrap().object,
+            io::identity(&io::exact(&path).unwrap()).unwrap().object
+        );
+        fs::write(&image, vec![44; 131072]).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), vec![83; 131072]);
+        assert!(preview::plan_previewed(&runtime, &bindings, &preview, &selection).is_err());
+        assert!(!runtime.parent().unwrap().join(DIRECTORY).exists());
+    }
+
+    #[test]
+    fn preview_content_proof_is_checked_against_pinned_bytes_on_resume() {
+        let (_temp, runtime, bindings) = fixture();
+        let parent = preview_parent();
+        let preview = preview::capture_preview(&runtime, &bindings, parent.path()).unwrap();
+        let selection = [RecoverySelection {
+            disk_id: "root".into(),
+            candidate_id: preview.candidates()[0].id.clone(),
+        }];
+        let mut migration =
+            preview::plan_previewed(&runtime, &bindings, &preview, &selection).unwrap();
+        migration.record_intent().unwrap();
+        drop(migration);
+        let file = runtime
+            .parent()
+            .unwrap()
+            .join(DIRECTORY)
+            .join("operation.json");
+        let mut retained: Operation = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        retained.reviewed_roots[0][0] = format!("blake3:{}", "0".repeat(64));
+        fs::write(file, serde_json::to_vec(&retained).unwrap()).unwrap();
+        assert!(
+            plan(&runtime, &bindings)
+                .unwrap_err_text()
+                .contains("disk bytes differ")
+        );
+        assert!(!runtime.parent().unwrap().join("state-layout.json").exists());
+    }
+
     #[test]
     fn explicit_recovery_is_identity_bound_and_never_guesses_latest() {
         let (_temp, runtime, bindings) = fixture();
@@ -2491,6 +2728,7 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("256 MiB"))
         );
+        assert!(!report.can_preview());
         let candidate = report
             .candidates
             .iter()

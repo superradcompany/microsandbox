@@ -99,8 +99,42 @@ async fn recover_local(
     name: &str,
     options: StorageRecoveryOptions,
 ) -> MicrosandboxResult<StorageRecovery> {
+    with_locked_storage(
+        crate::backend::default_backend(),
+        name,
+        async |local, config, storage| {
+            protected_state::prepare_selected(local, config, storage, &options).await?;
+            Ok(StorageRecovery {
+                name: name.into(),
+                ready: true,
+                originals_retained: true,
+            })
+        },
+    )
+    .await
+}
+
+#[cfg(feature = "local")]
+pub(super) async fn with_locked_storage<T>(
+    backend: std::sync::Arc<dyn crate::backend::Backend>,
+    name: &str,
+    action: impl AsyncFnOnce(&LocalBackend, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
+) -> MicrosandboxResult<T> {
+    with_target_locks(backend, name, async |local| {
+        with_catalog_storage(local, name, action).await
+    })
+    .await
+}
+
+/// The same lifecycle locks serve private browsing and explicit adoption. Only the latter
+/// may initialize or migrate the user's catalog.
+#[cfg(feature = "local")]
+pub(super) async fn with_target_locks<T>(
+    backend: std::sync::Arc<dyn crate::backend::Backend>,
+    name: &str,
+    action: impl AsyncFnOnce(&LocalBackend) -> MicrosandboxResult<T>,
+) -> MicrosandboxResult<T> {
     super::validate_sandbox_name(name)?;
-    let backend = crate::backend::default_backend();
     backend.info()?;
     let local = backend.as_local().ok_or_else(|| {
         MicrosandboxError::InvalidConfig("storage recovery requires the local backend".into())
@@ -114,6 +148,15 @@ async fn recover_local(
         std::time::Duration::from_secs(5),
     )
     .await?;
+    action(local).await
+}
+
+#[cfg(feature = "local")]
+async fn with_catalog_storage<T>(
+    local: &LocalBackend,
+    name: &str,
+    action: impl AsyncFnOnce(&LocalBackend, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
+) -> MicrosandboxResult<T> {
     let db = local.db().await?;
     let model = sandbox::Entity::find()
         .filter(sandbox::Column::Name.eq(name))
@@ -139,19 +182,23 @@ async fn recover_local(
     creation::require_complete(db.read(), model.id, name).await?;
     let config =
         SandboxConfig::from_stored(&model.config, model.caller_config_overrides.as_deref())?;
-    LocalBackend::validate_completed_restore(&config)?;
-    launch_contract::validate_runtime_config(&config, local.config()).await?;
+    let storage = guard_target_storage(local, name, &config).await?;
+    action(local, &config, &storage).await
+}
+
+#[cfg(feature = "local")]
+pub(super) async fn guard_target_storage(
+    local: &LocalBackend,
+    name: &str,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<CreationStorage> {
+    LocalBackend::validate_completed_restore(config)?;
+    launch_contract::validate_runtime_config(config, local.config()).await?;
     owned_volumes::wait_for_disk_release(
         &local.sandboxes_dir().join(name),
         &config.spec.mounts,
         std::time::Duration::from_secs(5),
     )
     .await?;
-    let storage = CreationStorage::acquire(local, name)?;
-    protected_state::prepare_selected(local, &config, &storage, &options).await?;
-    Ok(StorageRecovery {
-        name: name.into(),
-        ready: true,
-        originals_retained: true,
-    })
+    CreationStorage::acquire(local, name)
 }

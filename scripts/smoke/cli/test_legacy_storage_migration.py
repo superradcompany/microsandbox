@@ -112,7 +112,7 @@ class LegacyStorageMigrationTests(unittest.TestCase):
                                        legacy_writers_stopped=True)
 
                 def execute(command, **_):
-                    if command[1] in ("start", "recover-storage"):
+                    if command[1] == "start" or command[1:3] == ["self", "repair"]:
                         return subprocess.CompletedProcess(command, 1, "", "storage upgrade required")
                     return subprocess.CompletedProcess(command, 0, "", "")
 

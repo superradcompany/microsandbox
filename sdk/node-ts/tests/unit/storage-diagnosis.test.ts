@@ -22,6 +22,8 @@ describe("diagnoseStorage", () => {
     expect(JSON.parse(config)).toEqual({ home: "/selected/home" });
     expect(JSON.parse(selection)).toEqual({ named: ["app", "missing"] });
     expect(report.sandboxes[0]?.running).toBe(true);
+    expect(report.sandboxes[0]?.inspection?.previewAvailable).toBe(false);
+    expect(report.sandboxes[0]?.guestMounts).toEqual({});
     expect(report.sandboxes[0]?.inspection?.candidates[0]?.virtualSize).toBe(2n ** 64n - 1n);
     expect(report.sandboxes[1]?.reason).toBe("not_found");
     await diagnoseStorage({ allSandboxes: true });

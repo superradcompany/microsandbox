@@ -4,8 +4,8 @@ require "json"
 
 module Microsandbox
   StorageCandidate = Data.define(:id, :disk_id, :layers, :virtual_size, :estimated_bytes)
-  StorageInspection = Data.define(:status, :reasons, :candidates, :estimated_bytes)
-  StorageSandboxDiagnosis = Data.define(:name, :status, :running, :protection_registered, :reason, :inspection)
+  StorageInspection = Data.define(:status, :reasons, :candidates, :estimated_bytes, :preview_available)
+  StorageSandboxDiagnosis = Data.define(:name, :status, :running, :protection_registered, :reason, :inspection, :guest_mounts)
   StorageDiagnosis = Data.define(:home, :sandboxes, :required_runtime_capability)
   StorageRecovery = Data.define(:name, :ready, :originals_retained)
 
@@ -23,9 +23,9 @@ module Microsandbox
     report[:sandboxes] = report.fetch(:sandboxes).map do |item|
       if (inspection = item[:inspection])
         inspection[:candidates] = inspection.fetch(:candidates).map { |candidate| StorageCandidate.new(**candidate) }
-        item[:inspection] = StorageInspection.new(**inspection)
+        item[:inspection] = StorageInspection.new(**{ preview_available: false }.merge(inspection))
       end
-      StorageSandboxDiagnosis.new(**item)
+      StorageSandboxDiagnosis.new(**{ guest_mounts: {} }.merge(item))
     end
     StorageDiagnosis.new(**report)
   end

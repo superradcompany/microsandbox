@@ -208,6 +208,32 @@ pub fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Validate a digest-keyed host cache artifact before using it as an immutable guest lower.
+/// Read-only grants are allowed. An independently writable file cannot attest what boots.
+pub fn verify_read_source_authority(file: &File, _private_unix_ancestor: bool) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || inspection_reparse(&metadata) {
+        return Err(invalid("cached recovery source must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        let own = metadata.uid() == unsafe { libc::geteuid() };
+        // A 0002 producer can leave mode 0664 under a private home. The caller verified a
+        // single link and a real owner-private ancestor, including its Darwin traversal ACL.
+        // Only the current user's file qualifies. Explicit mutation ACLs are checked below.
+        if (!own && metadata.uid() != 0)
+            || (metadata.mode() & 0o022 != 0 && !(_private_unix_ancestor && own))
+        {
+            return Err(invalid("cached recovery source permits untrusted writes"));
+        }
+        #[cfg(target_os = "macos")]
+        super::macos_acl::verify_object_authority(file, "cached recovery source")?;
+    }
+    #[cfg(windows)]
+    microsandbox_utils::private_file::verify_read_source(file)?;
+    Ok(())
+}
+
 /// Validate an opened directory's namespace authority without changing its permissions.
 ///
 /// Callers must validate every actual ancestor and retain the required handles against

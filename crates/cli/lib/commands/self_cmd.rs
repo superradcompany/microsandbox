@@ -36,7 +36,9 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use super::install::is_generated_alias;
 use crate::ui;
 
+mod repair;
 mod storage_doctor;
+pub use repair::RepairArgs;
 pub use storage_doctor::{StorageDoctorExit, run_doctor_command};
 
 //--------------------------------------------------------------------------------------------------
@@ -68,9 +70,12 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
+
+    /// Repair a local sandbox without starting it.
+    Repair(RepairArgs),
 
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
@@ -133,40 +138,25 @@ pub struct WindowsSelfSwapArgs {
 
 /// Arguments for `msb doctor` and `msb self doctor`.
 #[derive(Debug, Args, Clone)]
-#[group(id = "doctor_args", multiple = true)]
 pub struct DoctorArgs {
+    /// Inspect this sandbox's storage. Omit to check the host.
+    #[arg(value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["fix", "yes"])]
+    pub sandbox: Option<String>,
+
     /// Attempt supported host virtualization setup fixes.
-    #[arg(long, conflicts_with = "storage")]
+    #[arg(long)]
     pub fix: bool,
 
-    /// Apply fixes without prompting for confirmation.
-    #[arg(long, short = 'y', conflicts_with = "storage")]
+    /// Apply host fixes without prompting for confirmation.
+    #[arg(long, short = 'y')]
     pub yes: bool,
 
-    /// Inspect selected local sandbox storage without migration or host setup probes.
-    #[arg(long, requires = "storage_scope")]
-    pub storage: bool,
+    /// Inspect every sandbox in the configured local home.
+    #[arg(long, group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    pub all: bool,
 
-    /// Sandbox to inspect; repeat to select a named set.
-    #[arg(
-        long = "sandbox",
-        requires = "storage",
-        conflicts_with = "all_sandboxes",
-        group = "storage_scope"
-    )]
-    pub sandboxes: Vec<String>,
-
-    /// Explicitly inspect every sandbox in the configured local catalog.
-    #[arg(
-        long,
-        requires = "storage",
-        conflicts_with = "sandboxes",
-        group = "storage_scope"
-    )]
-    pub all_sandboxes: bool,
-
-    /// Structured storage diagnostic output (exit 0: eligible, 2: blockers, 3: incomplete).
-    #[arg(long, requires = "storage", value_enum)]
+    /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).
+    #[arg(long, requires = "storage_scope", value_enum)]
     pub format: Option<crate::ui::OutputFormat>,
 }
 
@@ -479,6 +469,7 @@ fn parse_version(input: &str) -> anyhow::Result<Version> {
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
         SelfCommand::Doctor(args) => run_doctor_command(args).await,
+        SelfCommand::Repair(args) => repair::run(args).await,
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Downgrade(args) => run_downgrade(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,

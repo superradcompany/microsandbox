@@ -154,8 +154,12 @@ pub(super) fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
 }
 
 pub(super) fn verify_directory_authority(file: &File) -> io::Result<()> {
+    verify_object_authority(file, "storage directory")
+}
+
+pub(super) fn verify_object_authority(file: &File, context: &str) -> io::Result<()> {
     let acl = Acl::read(unsafe { acl_get_fd_np(file.as_raw_fd(), ACL_TYPE_EXTENDED) })?;
-    verify_ancestor_acl(&acl, "storage directory").map(|_| ())
+    verify_ancestor_acl(&acl, context).map(|_| ())
 }
 
 fn verify_ancestor_acl(acl: &Acl, context: &str) -> io::Result<bool> {

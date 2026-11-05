@@ -24,6 +24,8 @@ class StorageTest < Test::Unit::TestCase
     end
     report = Microsandbox.diagnose_storage(names: ["app", "missing"], home: "/selected")
     assert_equal({ "named" => ["app", "missing"] }, calls.first.last)
+    assert_equal false, report.sandboxes.first.inspection.preview_available
+    assert_equal({}, report.sandboxes.first.guest_mounts)
     assert_equal 2**64 - 1, report.sandboxes.first.inspection.candidates.first.virtual_size
     assert_equal "not_found", report.sandboxes.last.reason
     assert_raise(ArgumentError) { Microsandbox.diagnose_storage }

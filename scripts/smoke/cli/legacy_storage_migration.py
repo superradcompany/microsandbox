@@ -443,7 +443,7 @@ def verify(args):
                     if "explicit maintenance recovery" not in automatic.stderr or before != inventory(sandbox, case["external"]):
                         record(name, passed=False, error="automatic start did not safely require maintenance", stderr=automatic.stderr)
                         continue
-                result = harness.run(name + "-maintenance-recover", "recover-storage", name,
+                result = harness.run(name + "-maintenance-recover", "self", "repair", name,
                                      *maintenance, required=False)
                 # An invalid view must fail recovery itself, rather than merely failing a
                 # later boot or satisfying the missing-maintenance gate accidentally.

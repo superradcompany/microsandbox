@@ -5,7 +5,7 @@ use microsandbox::LogLevel;
 
 use super::{
     branch, copy, create, exec, inspect, jobs, list, logs, metrics, modify, pause, ping, ps,
-    recover_storage, remove, restart, restore, run, start, stop, touch, wait,
+    remove, restart, restore, run, start, stop, touch, wait,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -107,9 +107,6 @@ pub enum SandboxCommands {
 
     /// Show detailed sandbox configuration and status.
     Inspect(inspect::InspectArgs),
-
-    /// Recover stopped sandbox storage without starting a VM.
-    RecoverStorage(recover_storage::RecoverStorageArgs),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -166,6 +163,5 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
         SandboxCommands::Copy(args) => copy::run(args).await,
         SandboxCommands::Logs(args) => logs::run(args).await,
         SandboxCommands::Inspect(args) => inspect::run(args).await,
-        SandboxCommands::RecoverStorage(args) => recover_storage::run(args).await,
     }
 }

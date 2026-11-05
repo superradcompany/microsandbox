@@ -649,13 +649,20 @@ impl LocalBackend {
             cmd.creation_flags(flags);
         }
         cmd.args(visible);
+        if config.storage_reader.is_some() {
+            // An old executable rejects this argument during CLI parsing, before opening a disk,
+            // even if an installation changes after the SDK's earlier capability probe.
+            cmd.arg("--require-storage-reader");
+        }
 
         // Agentd selection is process-wide for the VMM. Forward the explicit
         // path from the resolved backend config into the child environment.
         // Managed clears also remove inherited overrides. The child validates and eagerly
         // reads the selected payload before constructing any filesystem.
         cmd.env_remove("MSB_AGENTD_PATH");
-        if let Some(path) = &global.paths.agentd {
+        if config.storage_reader.is_none()
+            && let Some(path) = &global.paths.agentd
+        {
             cmd.env("MSB_AGENTD_PATH", path);
         }
 
@@ -2658,6 +2665,7 @@ fn machine_cli_args(
 /// Build guest settings shared by launch preflight and the final payload.
 pub(crate) fn guest_bootstrap(config: &SandboxConfig) -> GuestBootstrap {
     GuestBootstrap {
+        storage_preview_oci: config.storage_reader == Some(true),
         exec_limits: Some(config.exec_limits()),
         hostname: Some(
             config

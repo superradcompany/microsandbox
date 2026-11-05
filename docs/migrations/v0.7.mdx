@@ -48,33 +48,20 @@ Update both the SDK/CLI and runtime, then retry the operation. An upgrade-requir
 
 The strict migration introduced in v0.7.12 can refuse existing snapshots, forks, owned disks, and completed disk growth or compaction. A refusal does not itself delete the disk data. Preserve the original sandbox; restoring an earlier snapshot omits writes made after that snapshot.
 
-Inspect a sandbox before retrying with updated tools:
+On Linux and Windows, eligible storage migrates automatically on the next start or stopped storage operation. If the operation asks for repair, inspect the affected sandbox and follow the guided repair in a terminal.
 
 ```bash
-msb doctor --storage --sandbox app
-# Check the whole home only when requested:
-msb doctor --storage --all-sandboxes --format json
+msb doctor app
+msb self repair app
 ```
 
-On Linux and Windows, eligible storage migrates automatically on its next start or stopped storage operation. To import it or resume an interrupted migration with unchanged inputs without booting a VM, run `msb recover-storage app`. Stop any related writers identified by the report, then retry. If the original inputs changed after an interrupted attempt, the saved plan is refused; preserve the files and plan for recovery rather than deleting them or editing journals. Original legacy files remain retained so you can verify the migrated data before cleanup. External disks remain in use at their configured paths.
+Repair identifies known VMs that must stop and asks before stopping one. On macOS, stop legacy VMs across all microsandbox homes and prevent new legacy writers until repair finishes. Confirm this in the prompt. New and already migrated sandboxes can keep running.
 
-Unsafe catalog or migration destination permissions are refused without automatic repair. Preserve the home and verify its configuration or restore a trusted backup before securing its permissions and retrying. Migration also refuses disk groups whose estimated eager parser metadata exceeds 256 MiB; this is a metadata admission limit, not a guest RAM or total process memory limit.
+If repair finds several complete versions of a disk, compare a guest file you recognize. For example, `compare /work/imports/current` shows what each view contains. Select the version you want to keep using, or enter `q` if you cannot tell. Applying a view can omit writes unique to another branch. Repair retains the original disk files. External disks continue to use their configured paths after repair.
 
-Linux and Windows reserve the selected disk files against writers during migration. On macOS, legacy migration requires explicit maintenance recovery: stop legacy VMs across every microsandbox home and prevent old-tool launches or writes to the affected storage until recovery finishes, then run:
+For automation, `msb doctor app --format json` reports disk and candidate IDs. Pass each selection to `msb self repair app` with `--select DISK_ID=CANDIDATE_ID` and acknowledge the choice with `--accept-selected-view`. On macOS, pass `--legacy-writers-stopped` only after establishing the maintenance conditions above. Pass `--format json` for a result without prompts.
 
-```bash
-msb recover-storage app --legacy-writers-stopped
-```
-
-The flag confirms that you have established these conditions; it does not stop processes or establish them for you. New and already migrated sandboxes do not require this maintenance and can keep running.
-
-If the active view cannot be determined, inspection reports complete, authorized candidates when available. Explicit recovery requires their exact disk and candidate IDs:
-
-```bash
-msb recover-storage app --select root=CANDIDATE_ID --accept-selected-view
-```
-
-On macOS, add `--legacy-writers-stopped` after establishing the maintenance conditions above. Select every required disk in the reported group. The selected view may omit later writes; candidate selection cannot repair missing disk data or bypass source validation. A changed candidate requires fresh inspection. Pending memory/device restores are separate from disk recovery and are never silently converted to a cold boot.
+An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. A candidate selection cannot supply missing bytes. Pending memory or device restores still require their execution state.
 
 Do not delete journals, guards, or migration records to bypass an error, and do not downgrade in place to obtain a backup. Downgrade remains unavailable while protected or migrating sandboxes exist. Saved-configuration errors described below are a separate problem.
 

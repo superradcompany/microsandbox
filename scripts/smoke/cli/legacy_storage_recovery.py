@@ -31,7 +31,7 @@ def verify(args):
             assert "setup_error" not in case, case
             sandbox = harness.home / "sandboxes" / name
             before = inventory(sandbox, case["external"])
-            report = harness.run(name + "-inspect", "doctor", "--storage", "--sandbox", name,
+            report = harness.run(name + "-inspect", "doctor", name,
                                  "--format", "json", required=False)
             assert report.returncode == 2, report.stderr
             entry = json.loads(report.stdout)["sandboxes"][0]
@@ -42,23 +42,23 @@ def verify(args):
             # Do not turn the harness into an arbitrary or ambiguous candidate selector.
             selected = [argument for view in choices for argument in
                         ("--select", view["disk_id"] + "=" + view["id"])]
-            rejected = harness.run(name + "-ack-required", "recover-storage", name,
+            rejected = harness.run(name + "-ack-required", "self", "repair", name,
                                    *selected, required=False)
             assert rejected.returncode != 0
-            unknown = harness.run(name + "-unknown-view", "recover-storage", name,
+            unknown = harness.run(name + "-unknown-view", "self", "repair", name,
                                   "--select", "root=view-not-authorized", "--accept-selected-view", *maintenance,
                                   required=False)
             assert 0 < unknown.returncode < 124
             assert not (sandbox / ".storage-migration").exists()
             assert before == inventory(sandbox, case["external"])
-            recovered = harness.run(name + "-recover", "recover-storage", name,
+            recovered = harness.run(name + "-recover", "self", "repair", name,
                                     *selected, "--accept-selected-view", *maintenance, "--format", "json")
             result = json.loads(recovered.stdout)
             assert result["ready"] and result["originals_retained"], result
             after = inventory(sandbox, case["external"])
             assert all(after.get(path) == digest for path, digest in before.items()), "original disk changed"
             # Repeating explicit selection on ready storage must never silently replace its view.
-            repeated = harness.run(name + "-no-replacement", "recover-storage", name,
+            repeated = harness.run(name + "-no-replacement", "self", "repair", name,
                                    *selected, "--accept-selected-view", *maintenance, required=False)
             assert repeated.returncode != 0
             assert after == inventory(sandbox, case["external"])
@@ -74,7 +74,7 @@ def verify(args):
         case = cases[name]
         sandbox = harness.home / "sandboxes" / name
         before = inventory(sandbox, case["external"])
-        refused = harness.run(name + "-no-invented-bytes", "recover-storage", name, *maintenance, required=False)
+        refused = harness.run(name + "-no-invented-bytes", "self", "repair", name, *maintenance, required=False)
         assert 0 < refused.returncode < 124
         assert before == inventory(sandbox, case["external"])
         assert not (sandbox / ".storage-migration").exists()

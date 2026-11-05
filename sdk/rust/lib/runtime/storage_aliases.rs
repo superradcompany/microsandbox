@@ -108,6 +108,7 @@ pub(crate) fn discover(
         if peer.status.has_active_runtime_state()
             && migration_layout_is_legacy(sandboxes_dir, &peer.name)
         {
+            result.related_sandbox_ids.push(peer.id);
             result.reasons.push(unclassified_writer(&peer.name));
         }
     }
@@ -323,14 +324,26 @@ pub(crate) async fn resolve(
     current_id: i32,
     bindings: &mut MigrationBindings,
 ) -> MicrosandboxResult<AliasGuards> {
+    resolve_with_catalog(backend, current_id, bindings, None).await
+}
+
+/// Explicit browsing supplies a read-only released catalog. Ownership, two-pass discovery and
+/// teardown checks stay identical to adoption; only SQL access and compatibility decoding differ.
+pub(crate) async fn resolve_with_catalog(
+    backend: &LocalBackend,
+    current_id: i32,
+    bindings: &mut MigrationBindings,
+    mut readonly: Option<&mut sea_orm::sqlx::SqliteConnection>,
+) -> MicrosandboxResult<AliasGuards> {
     if bindings.root.is_none() && bindings.owned_disks.is_empty() {
         return Ok(AliasGuards::default());
     }
-    let (sandboxes, snapshots) = catalog(backend).await?;
+    let (sandboxes, snapshots) = catalog(backend, &mut readonly).await?;
     let mut guards = AliasGuards::default();
     #[cfg(target_os = "macos")]
     let excluded =
-        exclude_unclassified_writers(backend, current_id, &sandboxes, &mut guards).await?;
+        exclude_unclassified_writers(backend, current_id, &sandboxes, &mut guards, &mut readonly)
+            .await?;
     #[cfg(not(target_os = "macos"))]
     let excluded: Vec<i32> = Vec::new();
     let first = discover(
@@ -373,12 +386,22 @@ pub(crate) async fn resolve(
         );
         // Old runtimes need not participate in all new guards. A live recorded PID therefore
         // remains a refusal even if its catalog status says Stopped (PID reuse fails closed).
-        let pools = backend.db().await?;
-        if LocalBackend::load_latest_run(pools.read(), *id)
-            .await?
-            .and_then(|run| run.pid)
-            .is_some_and(microsandbox_utils::process::pid_is_alive)
-        {
+        let pid = if let Some(db) = readonly.as_deref_mut() {
+            sea_orm::sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT pid FROM run WHERE sandbox_id=? ORDER BY id DESC LIMIT 1",
+            )
+            .bind(*id)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| failure("cannot verify related runtime process ownership"))?
+            .flatten()
+        } else {
+            let pools = backend.db().await?;
+            LocalBackend::load_latest_run(pools.read(), *id)
+                .await?
+                .and_then(|run| run.pid)
+        };
+        if pid.is_some_and(microsandbox_utils::process::pid_is_alive) {
             return Err(busy(&peer.name));
         }
     }
@@ -390,10 +413,10 @@ pub(crate) async fn resolve(
             })?,
         );
     }
-    let (current, snapshots) = catalog(backend).await?;
+    let (current, snapshots) = catalog(backend, &mut readonly).await?;
     #[cfg(target_os = "macos")]
     {
-        let latest = unclassified_writers(backend, current_id, &current).await?;
+        let latest = unclassified_writers(backend, current_id, &current, &mut readonly).await?;
         if latest != excluded {
             return Err(failure(
                 "legacy runtime set changed while acquiring migration ownership; retry",
@@ -449,8 +472,9 @@ async fn exclude_unclassified_writers(
     current_id: i32,
     sandboxes: &[CatalogSandbox],
     guards: &mut AliasGuards,
+    readonly: &mut Option<&mut sea_orm::sqlx::SqliteConnection>,
 ) -> MicrosandboxResult<Vec<i32>> {
-    let excluded = unclassified_writers(backend, current_id, sandboxes).await?;
+    let excluded = unclassified_writers(backend, current_id, sandboxes, readonly).await?;
     for id in &excluded {
         let peer = sandboxes
             .iter()
@@ -477,24 +501,43 @@ async fn unclassified_writers(
     backend: &LocalBackend,
     current_id: i32,
     sandboxes: &[CatalogSandbox],
+    readonly: &mut Option<&mut sea_orm::sqlx::SqliteConnection>,
 ) -> MicrosandboxResult<Vec<i32>> {
-    let pools = backend.db().await?;
     // Resolve the latest owner for each bounded catalog row, rather than inspecting processes
     // or scanning historical disk payloads. A terminal status does not prove process teardown.
-    let runs = pools.read().query_all_raw(Statement::from_string(DatabaseBackend::Sqlite, format!(
-        "SELECT s.id, (SELECT r.pid FROM run r WHERE r.sandbox_id=s.id ORDER BY r.id DESC LIMIT 1) AS pid FROM sandbox s LIMIT {}", MAX_ROWS + 1
-    ))).await?;
-    if runs.len() > MAX_ROWS {
+    let query = "SELECT s.id, (SELECT r.pid FROM run r WHERE r.sandbox_id=s.id ORDER BY r.id DESC LIMIT 1) AS pid FROM sandbox s LIMIT ?";
+    let limit = (MAX_ROWS + 1) as i64;
+    let pids = if let Some(db) = readonly.as_deref_mut() {
+        sea_orm::sqlx::query_as::<_, (i32, Option<i32>)>(query)
+            .bind(limit)
+            .fetch_all(db)
+            .await
+            .map_err(|_| failure("cannot verify released runtime process inventory"))?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        let pools = backend.db().await?;
+        let rows = pools
+            .read()
+            .query_all_raw(Statement::from_sql_and_values(
+                DatabaseBackend::Sqlite,
+                query,
+                [limit.into()],
+            ))
+            .await?;
+        let mut pids = BTreeMap::new();
+        for row in rows {
+            pids.insert(
+                row.try_get::<i32>("", "id")?,
+                row.try_get::<Option<i32>>("", "pid")?,
+            );
+        }
+        pids
+    };
+    if pids.len() > MAX_ROWS {
         return Err(failure(
             "legacy runtime inventory exceeds the inspection bound",
         ));
-    }
-    let mut pids = BTreeMap::new();
-    for run in runs {
-        pids.insert(
-            run.try_get::<i32>("", "id")?,
-            run.try_get::<Option<i32>>("", "pid")?,
-        );
     }
     let mut excluded = Vec::new();
     for peer in sandboxes.iter().filter(|row| row.id != current_id) {
@@ -531,7 +574,11 @@ fn unclassified_writer(name: &str) -> String {
 
 async fn catalog(
     backend: &LocalBackend,
+    readonly: &mut Option<&mut sea_orm::sqlx::SqliteConnection>,
 ) -> MicrosandboxResult<(Vec<CatalogSandbox>, Vec<CatalogSnapshot>)> {
+    if let Some(db) = readonly.as_deref_mut() {
+        return crate::setup::preview_alias_catalog(db).await;
+    }
     let pools = backend.db().await?;
     // Bound data in SQLite before materialization, not only after allocating host strings.
     let budget = pools.read().query_one_raw(Statement::from_string(DatabaseBackend::Sqlite,

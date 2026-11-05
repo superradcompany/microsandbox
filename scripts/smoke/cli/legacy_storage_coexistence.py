@@ -36,13 +36,13 @@ def verify(args):
         if sys.platform == "darwin":
             assert 0 < attempted.returncode < 124 and "explicit maintenance recovery" in attempted.stderr, attempted.stderr
             # Deliberately claiming maintenance cannot bypass a known local live peer.
-            confirmed = new.run("confirmation-does-not-bypass-live-peer", "recover-storage", "legacy-target",
+            confirmed = new.run("confirmation-does-not-bypass-live-peer", "self", "repair", "legacy-target",
                                 *maintenance, required=False)
             assert 0 < confirmed.returncode < 124 and "legacy-peer" in confirmed.stderr, confirmed.stderr
             assert before == inventory(target)
             assert not (target / "state-layout.json").exists()
             assert not (target / ".storage-migration").exists()
-            report = new.run("refusal-no-admission", "doctor", "--storage", "--sandbox", "legacy-target",
+            report = new.run("refusal-no-admission", "doctor", "legacy-target",
                              "--format", "json", required=False)
             assert report.returncode == 2, report.stderr
             assert not json.loads(report.stdout)["sandboxes"][0]["protection_registered"]
@@ -54,7 +54,7 @@ def verify(args):
 
         new.stop("legacy-peer")
         if maintenance:
-            new.run("explicit-maintenance-after-teardown", "recover-storage", "legacy-target", *maintenance)
+            new.run("explicit-maintenance-after-teardown", "self", "repair", "legacy-target", *maintenance)
         new.run("migration-after-old-teardown", "start", "legacy-target")
         new.guest("migrated-data", "legacy-target", guest_check("latest:legacy-target", protected=True))
         new.guest("protected-vm-not-stopped", "protected-peer",
@@ -91,20 +91,20 @@ def verify_cross_home_maintenance(args):
         candidate.guest("protected-memory", "protected-cross-peer", "echo protected-live >/dev/shm/cross-home")
         sandbox = candidate.home / "sandboxes/cross-target"
         before = inventory(sandbox)
-        for operation in ("start", "recover-storage"):
-            refused = candidate.run(operation + "-requires-maintenance", operation, "cross-target", required=False)
+        for command in (("start",), ("self", "repair")):
+            refused = candidate.run(command[-1] + "-requires-maintenance", *command, "cross-target", required=False)
             assert 0 < refused.returncode < 124 and "explicit maintenance recovery" in refused.stderr, refused.stderr
         assert before == inventory(sandbox)
         assert not (sandbox / ".storage-migration").exists()
         assert not (sandbox / "state-layout.json").exists()
-        report = candidate.run("cross-home-doctor", "doctor", "--storage", "--sandbox", "cross-target",
+        report = candidate.run("cross-home-doctor", "doctor", "cross-target",
                                "--format", "json", required=False)
         assert report.returncode == 2, report.stderr
         entry = json.loads(report.stdout)["sandboxes"][0]
         assert entry["status"] == "maintenance_required" and not entry["protection_registered"], entry
         old.guest("foreign-not-stopped", "foreign-legacy", 'test "$(cat /dev/shm/cross-home)" = foreign-live')
         old.stop("foreign-legacy")
-        candidate.run("cross-home-maintenance", "recover-storage", "cross-target", *maintenance)
+        candidate.run("cross-home-maintenance", "self", "repair", "cross-target", *maintenance)
         candidate.run("cross-home-start", "start", "cross-target")
         candidate.names.append("cross-target")
         candidate.guest("cross-home-data", "cross-target", guest_check("latest:cross-target", protected=True))

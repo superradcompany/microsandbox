@@ -38,10 +38,11 @@ type StorageCandidate struct {
 
 // StorageInspection is the shared engine's non-mutating inspection result.
 type StorageInspection struct {
-	Status         string             `json:"status"`
-	Reasons        []string           `json:"reasons"`
-	Candidates     []StorageCandidate `json:"candidates"`
-	EstimatedBytes uint64             `json:"estimated_bytes"`
+	Status           string             `json:"status"`
+	Reasons          []string           `json:"reasons"`
+	PreviewAvailable bool               `json:"preview_available"`
+	Candidates       []StorageCandidate `json:"candidates"`
+	EstimatedBytes   uint64             `json:"estimated_bytes"`
 }
 
 // StorageSandboxDiagnosis preserves individual errors when a requested set is inspected.
@@ -49,6 +50,7 @@ type StorageSandboxDiagnosis struct {
 	Name                 string                  `json:"name"`
 	Status               StorageDiagnosticStatus `json:"status"`
 	Running              bool                    `json:"running"`
+	GuestMounts          map[string]string       `json:"guest_mounts"`
 	ProtectionRegistered bool                    `json:"protection_registered"`
 	Reason               *string                 `json:"reason"`
 	Inspection           *StorageInspection      `json:"inspection"`

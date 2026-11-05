@@ -966,6 +966,15 @@ async fn require_capability(
     Ok(())
 }
 
+pub(crate) async fn require_storage_reader(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.storage_reader && capabilities.protected_guest_state,
+        "the embedded storage recovery reader",
+    )
+    .await
+}
+
 // Cache successful discovery for unchanged native executables. Wrappers can
 // switch their target without changing identity.
 async fn capabilities(path: &Path) -> MicrosandboxResult<Arc<LaunchCapabilities>> {

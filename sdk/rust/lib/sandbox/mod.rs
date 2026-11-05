@@ -33,6 +33,8 @@ pub(crate) mod metrics;
 mod modify;
 #[cfg(feature = "local")]
 mod patch;
+#[cfg(feature = "local")]
+pub(crate) mod storage_preview;
 mod storage_recovery;
 #[cfg(all(feature = "local", windows))]
 pub(crate) use patch::{
@@ -199,6 +201,9 @@ pub use microsandbox_types::{
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
 pub use restore_builder::RestoreBuilder;
+#[cfg(feature = "local")]
+#[doc(hidden)]
+pub use storage_preview::{StoragePreview, StoragePreviewEntry};
 pub use storage_recovery::{StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection};
 
 #[cfg(feature = "local")]

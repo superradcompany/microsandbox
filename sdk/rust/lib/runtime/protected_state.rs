@@ -92,6 +92,7 @@ pub(crate) async fn prepare_selected(
         storage,
         StoragePreparation::Existing,
         options,
+        None,
     )
     .await
 }
@@ -109,16 +110,18 @@ pub(crate) async fn prepare_launch(
         storage,
         preparation,
         &StorageRecoveryOptions::default(),
+        None,
     )
     .await
 }
 
-async fn prepare_storage(
+pub(crate) async fn prepare_storage(
     backend: &LocalBackend,
     config: &SandboxConfig,
     storage: &CreationStorage,
     preparation: StoragePreparation<'_>,
     options: &StorageRecoveryOptions,
+    preview: Option<&migration::RecoveryPreview>,
 ) -> MicrosandboxResult<()> {
     let runtime = storage.join("runtime");
     // Unaffected workloads do only the bounded normal layout checks. In particular, do not
@@ -126,7 +129,7 @@ async fn prepare_storage(
     if matches!(preparation, StoragePreparation::Existing)
         && layout::require_ready(&runtime).is_ok()
     {
-        if !options.selections.is_empty() {
+        if preview.is_some() || !options.selections.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "protected storage is already ready; legacy recovery cannot replace its current view".into(),
             ));
@@ -207,11 +210,7 @@ async fn prepare_storage(
     // for this application. Only explicit recovery may assert the required maintenance
     // window; scanning this catalog cannot establish host-wide quiescence. Keep the local
     // writer checks below as defense in depth, never as proof of this wider prerequisite.
-    if cfg!(target_os = "macos") && !options.legacy_writers_stopped {
-        return Err(MicrosandboxError::Runtime(
-            "macOS legacy storage requires explicit maintenance recovery: stop legacy VMs across all microsandbox homes and prevent old-tool launches or writes to this storage until recovery finishes; then recover with confirmation that legacy writers are stopped. New and already migrated sandboxes do not require this maintenance".into(),
-        ));
-    }
+    require_maintenance(options)?;
 
     let mut authority = bindings(config, storage.path(), id, &stored_config)?;
     // Parent checkpoints can expose an otherwise sealed ancestor through an old guest export.
@@ -226,7 +225,9 @@ async fn prepare_storage(
         })
         .collect::<Vec<_>>();
     let mut plan = filesystem_work(&config.spec.name, || {
-        if selections.is_empty() {
+        if let Some(preview) = preview {
+            migration::plan_previewed(&runtime, &authority, preview, &selections)
+        } else if selections.is_empty() {
             migration::plan(&runtime, &authority)
         } else {
             migration::plan_selected(&runtime, &authority, &selections)
@@ -244,11 +245,20 @@ async fn prepare_storage(
     filesystem_work(&config.spec.name, || plan.complete())
 }
 
+pub(crate) fn require_maintenance(options: &StorageRecoveryOptions) -> MicrosandboxResult<()> {
+    if cfg!(target_os = "macos") && !options.legacy_writers_stopped {
+        return Err(MicrosandboxError::Runtime(
+            "macOS legacy storage requires explicit maintenance recovery: stop legacy VMs across all microsandbox homes and prevent old-tool launches or writes to this storage until recovery finishes; then recover with confirmation that legacy writers are stopped. New and already migrated sandboxes do not require this maintenance".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Keep the caller's lifecycle/storage guards alive until filesystem I/O has actually stopped.
 /// A detached blocking task would outlive a cancelled future and release its borrowed guards.
 /// Multi-thread executors hand other work to a replacement thread; single-thread callers retain
 /// ownership synchronously rather than pretending a live copy has been cancelled.
-fn filesystem_work<T>(
+pub(crate) fn filesystem_work<T>(
     name: &str,
     work: impl FnOnce() -> Result<T, String>,
 ) -> MicrosandboxResult<T> {

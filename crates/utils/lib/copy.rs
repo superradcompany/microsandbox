@@ -35,7 +35,7 @@ use std::path::Path;
 use std::ptr;
 
 #[cfg(windows)]
-use crate::extent::{ExtentMap, mark_sparse};
+use crate::extent::{mark_sparse, visit_allocated_ranges};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -570,14 +570,14 @@ fn copy_windows_sparse_data(
     dst: &mut File,
     buf_size: usize,
 ) -> io::Result<WindowsSparseCopyStrategy> {
-    if let Some(map) = ExtentMap::scan_file(src)? {
+    let source = src.try_clone()?;
+    let mut buf = vec![0u8; buf_size];
+    if visit_allocated_ranges(&source, |offset, length| {
+        copy_windows_range(src, dst, offset, length, &mut buf)
+    })? {
         // NTFS can enumerate the ranges that actually occupy filesystem blocks. Copy those ranges
         // wholesale: inspecting zero/non-zero byte runs inside an allocated extent turns raw disk
         // images into millions of tiny seeks and writes.
-        let mut buf = vec![0u8; buf_size];
-        for (offset, extent_len) in map.extents {
-            copy_windows_range(src, dst, offset, extent_len, &mut buf)?;
-        }
         Ok(WindowsSparseCopyStrategy::AllocatedRanges)
     } else {
         // Filesystems without FSCTL_QUERY_ALLOCATED_RANGES cannot expose their allocation map.
@@ -991,7 +991,10 @@ mod tests {
 
         make_sparse(&src, len, &[0, 4 * 1024 * 1024]).unwrap();
         let mut src_file = File::open(&src).unwrap();
-        if ExtentMap::scan_file(&src_file).unwrap().is_none() {
+        if crate::extent::ExtentMap::scan_file(&src_file)
+            .unwrap()
+            .is_none()
+        {
             eprintln!("filesystem cannot enumerate allocated ranges; strategy not exercised");
             return;
         }

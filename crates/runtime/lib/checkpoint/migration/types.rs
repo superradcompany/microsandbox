@@ -84,6 +84,10 @@ pub struct CandidateSummary {
 pub struct Inspection {
     /// Current storage admission classification.
     pub status: MigrationStatus,
+    /// True when all discovered alternatives pass the bounded preview preflight. Existing
+    /// serialized reports lack this proof and conservatively default to unavailable.
+    #[serde(default)]
+    pub preview_available: bool,
     /// Bounded actionable reasons; metadata parser errors are not echoed.
     pub reasons: Vec<String>,
     /// Complete selected views within independently authorized disk resources.
@@ -115,4 +119,16 @@ pub struct RecoverySelection {
     pub disk_id: String,
     /// Identity-bound candidate ID returned by the inspector.
     pub candidate_id: String,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl Inspection {
+    /// A bounded complete set can provisionally be captured under fresh writer protection.
+    /// Catalog authority and VM liveness must also be established by the caller.
+    pub fn can_preview(&self) -> bool {
+        self.status == MigrationStatus::RecoveryRequired && self.preview_available
+    }
 }

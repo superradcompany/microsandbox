@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from microsandbox import _microsandbox as native
@@ -33,6 +33,7 @@ class StorageInspection:
     reasons: list[str]
     candidates: list[StorageCandidate]
     estimated_bytes: int
+    preview_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class StorageSandboxDiagnosis:
     protection_registered: bool
     reason: str | None
     inspection: StorageInspection | None
+    guest_mounts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

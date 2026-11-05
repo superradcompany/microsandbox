@@ -19,6 +19,7 @@ export interface StorageInspection {
   status: "ready" | "eligible" | "recovery-required" | "in-progress";
   reasons: string[];
   candidates: StorageCandidate[];
+  previewAvailable: boolean;
   estimatedBytes: bigint;
 }
 export interface StorageSandboxDiagnosis {
@@ -26,6 +27,7 @@ export interface StorageSandboxDiagnosis {
   status: StorageDiagnosticStatus;
   running: boolean;
   protectionRegistered: boolean;
+  guestMounts: Record<string, string>;
   reason: string | null;
   inspection: StorageInspection | null;
 }
@@ -54,9 +56,11 @@ export async function diagnoseStorage(selection: StorageSelection, config: Runti
     sandboxes: report.sandboxes.map(item => ({
       name: item.name, status: item.status, running: item.running,
       protectionRegistered: item.protection_registered, reason: item.reason,
+      guestMounts: item.guest_mounts ?? {},
       inspection: item.inspection === null ? null : {
         status: item.inspection.status, reasons: item.inspection.reasons,
         estimatedBytes: exactBytes(item.inspection.estimated_bytes),
+        previewAvailable: item.inspection.preview_available ?? false,
         candidates: item.inspection.candidates.map(candidate => ({
           id: candidate.id, diskId: candidate.disk_id, layers: candidate.layers,
           virtualSize: exactBytes(candidate.virtual_size), estimatedBytes: exactBytes(candidate.estimated_bytes),
@@ -79,8 +83,8 @@ interface WireReport {
   required_runtime_capability: string;
   sandboxes: Array<{
     name: string; status: StorageDiagnosticStatus; running: boolean;
-    protection_registered: boolean; reason: string | null;
-    inspection: null | { status: StorageInspection["status"]; reasons: string[]; estimated_bytes: string;
+    protection_registered: boolean; guest_mounts?: Record<string, string>; reason: string | null;
+    inspection: null | { status: StorageInspection["status"]; reasons: string[]; estimated_bytes: string; preview_available?: boolean;
       candidates: Array<{ id: string; disk_id: string; layers: number; virtual_size: string; estimated_bytes: string }> };
   }>;
 }

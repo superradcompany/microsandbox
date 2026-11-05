@@ -19,5 +19,5 @@ pub use storage::{
 };
 pub use storage::{
     ensure_private_database_directory, harden_database_files, prepare_database_file,
-    validate_database_inspection, verify_directory_authority,
+    validate_database_inspection, verify_directory_authority, verify_read_source_authority,
 };

@@ -202,6 +202,56 @@ impl BackendConfig {
             .get_or_init(|| Arc::new(self.global_layers().build().into_config()))
     }
 
+    /// A helper owns a separate home and never inherits user sandbox defaults or credentials.
+    /// Keep the captured administrator policy and refuse it if it redirects a private path.
+    #[cfg(feature = "local")]
+    pub(crate) fn recovery_reader(
+        &self,
+        home: &Path,
+        runtime: &crate::setup::ResolvedRuntime,
+    ) -> MicrosandboxResult<Self> {
+        let mut config = GlobalConfig {
+            home: Some(home.to_owned()),
+            ..Default::default()
+        };
+        config.paths.msb = Some(runtime.msb_path.clone());
+        config.paths.libkrunfw = Some(runtime.libkrunfw_path.clone());
+        let reader = Self::new(
+            GlobalConfigPatch::from_present_fields(config),
+            self.managed.clone(),
+        );
+        let effective = reader.resolved_config();
+        reader.require_backend(
+            BackendKind::Local,
+            Some(BackendSelectionSource::Programmatic),
+        )?;
+        if effective.home() != home
+            || [
+                effective.cache_dir(),
+                effective.sandboxes_dir(),
+                effective.volumes_dir(),
+                effective.logs_dir(),
+                effective.secrets_dir(),
+                effective.snapshots_dir(),
+            ]
+            .iter()
+            .any(|path| {
+                !path.starts_with(home)
+                    || path
+                        .components()
+                        .any(|c| c == std::path::Component::ParentDir)
+            })
+            || effective.paths.msb.as_ref() != Some(&runtime.msb_path)
+            || effective.paths.libkrunfw.as_ref() != Some(&runtime.libkrunfw_path)
+        {
+            return Err(MicrosandboxError::Runtime(
+                "managed policy cannot provide a private recovery reader home and matched runtime"
+                    .into(),
+            ));
+        }
+        Ok(reader)
+    }
+
     /// Reject malformed effective policy even when no backend is being constructed.
     pub(crate) fn validate_backend_policy(&self) -> MicrosandboxResult<()> {
         if self

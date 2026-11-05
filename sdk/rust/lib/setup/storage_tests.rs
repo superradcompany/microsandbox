@@ -38,6 +38,136 @@ async fn insert(connection: &mut SqliteConnection, name: &str, payload: &str) {
 }
 
 #[tokio::test]
+async fn storage_preview_blockers_never_authorize_an_incomplete_or_terminal_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, mut writer) = catalog(temp.path()).await;
+    let mut saved = SandboxConfig::default();
+    saved.spec.name = "target".into();
+    insert(
+        &mut writer,
+        "target",
+        &serde_json::to_string(&saved).unwrap(),
+    )
+    .await;
+    sqlx::query(
+        "CREATE TABLE run(id INTEGER PRIMARY KEY, sandbox_id INTEGER, status TEXT, pid INTEGER)",
+    )
+    .execute(&mut writer)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO run VALUES(12,1,'Running',?)")
+        .bind(std::process::id() as i64)
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sandbox SET status='Running',creation_state='creating'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let error = repair::blockers_resolved(&config, "target")
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("incomplete or inconsistent"),
+        "{error}"
+    );
+    sqlx::query("UPDATE sandbox SET status='Stopped',creation_state=NULL")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let error = repair::blockers_resolved(&config, "target")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("wait for teardown"), "{error}");
+    sqlx::query("UPDATE sandbox SET status='Running'")
+        .execute(&mut writer)
+        .await
+        .unwrap();
+    let blockers = repair::blockers_resolved(&config, "target").await.unwrap();
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].name, "target");
+}
+
+#[tokio::test]
+async fn storage_preview_cancel_preserves_released_schema_version_and_rows() {
+    use crate::backend::{BackendSelectionSource, LocalBackend};
+    use crate::config::layers::BackendConfig;
+    let temp = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
+    let scratch = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
+    let (config, mut legacy) = catalog(temp.path()).await;
+    sqlx::query("DROP TABLE protected_sandbox_state")
+        .execute(&mut legacy)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE seaql_migrations(version TEXT PRIMARY KEY, applied_at INTEGER)")
+        .execute(&mut legacy)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO seaql_migrations VALUES('released_before_protection',1)")
+        .execute(&mut legacy)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE run(id INTEGER PRIMARY KEY, sandbox_id INTEGER, status TEXT, pid INTEGER)",
+    )
+    .execute(&mut legacy)
+    .await
+    .unwrap();
+    let mut saved = SandboxConfig::default();
+    saved.spec.name = "legacy-view".into();
+    saved.spec.image = crate::sandbox::RootfsSource::Oci(microsandbox_types::OciRootfsSource {
+        reference: "example/test".into(),
+        root_disk: None,
+    });
+    let payload = serde_json::to_string(&saved).unwrap();
+    insert(&mut legacy, "legacy-view", &payload).await;
+    let sandbox = config.sandboxes_dir().join("legacy-view");
+    fs::create_dir_all(sandbox.join("runtime")).unwrap();
+    fs::write(sandbox.join("upper.ext4"), vec![23; 131_072]).unwrap();
+    let local = LocalBackend::from_backend_config(
+        BackendConfig::new(
+            GlobalConfigPatch::from_present_fields(config),
+            Default::default(),
+        ),
+        BackendSelectionSource::Programmatic,
+        None,
+    );
+    let options = crate::sandbox::StorageRecoveryOptions {
+        legacy_writers_stopped: true,
+        ..Default::default()
+    };
+    let (_, mut views) = crate::sandbox::storage_preview::capture_readonly(
+        &local,
+        "legacy-view",
+        &options,
+        scratch.path(),
+    )
+    .await
+    .unwrap();
+    let id = views.candidates()[0].id.clone();
+    let detached = views.materialize("root", &id).unwrap();
+    drop(views);
+    assert!(!detached.exists() && !sandbox.join(".storage-migration").exists());
+    let versions: Vec<String> = sqlx::query_scalar("SELECT version FROM seaql_migrations")
+        .fetch_all(&mut legacy)
+        .await
+        .unwrap();
+    assert_eq!(versions, ["released_before_protection"]);
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT name,config FROM sandbox")
+        .fetch_all(&mut legacy)
+        .await
+        .unwrap();
+    assert_eq!(rows, [("legacy-view".into(), payload)]);
+    let protected: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE name='protected_sandbox_state'",
+    )
+    .fetch_one(&mut legacy)
+    .await
+    .unwrap();
+    assert_eq!(protected, 0);
+}
+
+#[tokio::test]
 async fn inspection_reads_live_wal_without_catalog_migration_or_permission_repairs() {
     let temp = tempfile::tempdir().unwrap();
     let (config, mut writer) = catalog(temp.path()).await;

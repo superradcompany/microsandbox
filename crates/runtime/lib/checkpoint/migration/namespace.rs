@@ -16,6 +16,8 @@ use super::types::MigrationBindings;
 /// synchronous publication. Inspection uses share-all handles and retains none of them.
 pub(super) struct Guard {
     _pins: Vec<File>,
+    #[cfg(unix)]
+    private_boundaries: Vec<PathBuf>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -47,10 +49,79 @@ pub(super) fn acquire(
         optional_parent(&sandbox.join("owned-disks").join(&disk.id), &mut parents)?;
     }
 
+    acquire_parents(parents, execution, true)
+}
+
+pub(super) fn private_parent(path: &Path) -> Result<Guard, String> {
+    let guard = acquire_parents(vec![path.to_owned()], true, true)?;
+    io::verify_private_directory(path)?;
+    Ok(guard)
+}
+
+/// Unix sticky system temp directories safely admit exclusive creation of a new owner-only
+/// entry. Windows temp roots must also prevent deletion/replacement of existing children.
+pub(super) fn temporary_parent(path: &Path) -> Result<Guard, String> {
+    acquire_parents(vec![path.to_owned()], true, cfg!(windows))
+}
+
+/// Pin a regular image-cache object for the private recovery reader. This is a read-only
+/// lookup in a host-selected cache; no filename obtained from a guest is opened by this API.
+pub fn open_preview_cache_file(cache: &Path, relative: &Path) -> Result<File, String> {
+    let mut parts = relative.components();
+    let (Some(Component::Normal(role)), Some(Component::Normal(name)), None) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err("invalid recovery cache role".into());
+    };
+    let suffix = match role.to_str() {
+        Some("fsmeta" | "layers") => ".erofs",
+        Some("vmdk") => ".vmdk",
+        _ => return Err("unknown recovery cache role".into()),
+    };
+    let valid = name
+        .to_str()
+        .and_then(|n| n.strip_prefix("sha256_"))
+        .and_then(|n| n.strip_suffix(suffix))
+        .is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+    if !valid {
+        return Err("invalid digest-keyed recovery cache filename".into());
+    }
+    let parent = cache.join(role);
+    let guard = acquire_parents(vec![cache.to_owned(), parent.clone()], true, true)?;
+    let source = io::open(&io::directory(cache)?, relative)?;
+    if io::identity(&source)?.links != 1 {
+        return Err("recovery cache object has hardlink aliases".into());
+    }
+    #[cfg(unix)]
+    let private = {
+        let actual = fs::canonicalize(&parent).map_err(|error| failure(&parent, &error))?;
+        guard
+            .private_boundaries
+            .iter()
+            .any(|boundary| actual.starts_with(boundary))
+    };
+    #[cfg(not(unix))]
+    let private = false;
+    microsandbox_db::private_storage::verify_read_source_authority(&source, private)
+        .map_err(|error| format!("cached recovery disk is not host controlled: {error}"))?;
+    drop(guard);
+    Ok(source)
+}
+
+fn acquire_parents(
+    parents: Vec<PathBuf>,
+    execution: bool,
+    publication: bool,
+) -> Result<Guard, String> {
     let mut paths = BTreeMap::<PathBuf, bool>::new();
     for parent in parents {
         let absolute = std::path::absolute(&parent).map_err(|error| failure(&parent, &error))?;
-        add_ancestors(&mut paths, &absolute, true)?;
+        add_ancestors(&mut paths, &absolute, publication)?;
     }
     // Preserve legacy spellings and normal system aliases (/tmp and /var on Mac). Check
     // actual target chains AND lexical alias owners/parents; canonicalizing only the final
@@ -124,7 +195,11 @@ pub(super) fn acquire(
         #[cfg(not(windows))]
         let _ = (file, &mut pins);
     }
-    Ok(Guard { _pins: pins })
+    Ok(Guard {
+        _pins: pins,
+        #[cfg(unix)]
+        private_boundaries,
+    })
 }
 
 fn optional_parent(path: &Path, parents: &mut Vec<PathBuf>) -> Result<(), String> {
