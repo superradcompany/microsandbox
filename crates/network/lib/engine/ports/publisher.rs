@@ -281,6 +281,7 @@ impl PortPublisher {
                 .max_inbound
                 .is_some_and(|limit| self.connections.len() >= limit.get())
             {
+                shared.record_inbound_tcp_rejection();
                 self.warn_capacity("active inbound connection limit");
                 reject_with_rst(&conn.stream);
                 continue;
@@ -1734,6 +1735,10 @@ mod tests {
                 }
             }
             assert_eq!(clients.len(), cap.unwrap_or(attempts).min(attempts));
+            assert_eq!(
+                h.shared.inbound_tcp_rejected(),
+                attempts.saturating_sub(cap.unwrap_or(attempts)) as u64,
+            );
         }
     }
 
