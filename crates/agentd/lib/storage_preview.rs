@@ -93,7 +93,9 @@ fn mounted_view(path: &str, expected_magic: u64) -> io::Result<File> {
     {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { fs.assume_init() }.f_type as u64 != expected_magic
+    // libc uses an unsigned filesystem word on musl and a signed word on glibc.
+    // A shared, lossless type keeps the magic comparison identical on both targets.
+    if i128::from(unsafe { fs.assume_init() }.f_type) != i128::from(expected_magic)
         || unsafe { flags.assume_init() }.f_flag & libc::ST_RDONLY == 0
     {
         return Err(io::Error::other(

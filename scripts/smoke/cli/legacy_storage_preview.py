@@ -125,6 +125,7 @@ class Terminal:
                     stream.flush()
                     self.chunks.put(chunk)
         except (EOFError, OSError):
+            # PTYs signal normal child shutdown with EOF or an OS error, depending on the platform.
             pass
         finally:
             self.chunks.put(None)

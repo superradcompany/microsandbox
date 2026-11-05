@@ -82,8 +82,7 @@ pub enum StorageDiagnosticReason {
 /// One requested sandbox's diagnostic result.
 #[derive(Debug, Serialize)]
 pub struct StorageSandboxDiagnosis {
-    /// Host-saved guest mount names for interactive display, keyed by disk role.
-    #[serde(skip)]
+    /// Host-saved guest mount paths, keyed by the disk roles used in candidate summaries.
     pub guest_mounts: std::collections::BTreeMap<String, String>,
     /// Catalog sandbox name, never a guest-provided path.
     pub name: String,

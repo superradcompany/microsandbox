@@ -38,6 +38,75 @@ async fn insert(connection: &mut SqliteConnection, name: &str, payload: &str) {
 }
 
 #[tokio::test]
+async fn native_diagnosis_serializes_guest_mounts_from_the_selected_catalog() {
+    use std::sync::Arc;
+
+    use microsandbox_types::{
+        HostPermissions, OwnedVolumeStorage, StatVirtualization, VolumeMount, owned_volume_mount_id,
+    };
+
+    use crate::backend::{Backend, BackendSelectionSource, LocalBackend, with_backend};
+    use crate::config::layers::BackendConfig;
+
+    let home = microsandbox_runtime::checkpoint::migration::private_preview_parent().unwrap();
+    let (config, mut writer) = catalog(home.path()).await;
+    let mut saved = SandboxConfig::default();
+    saved.spec.name = "mounted".into();
+    for guest in ["/data", "/logs"] {
+        saved.spec.mounts.push(VolumeMount::Owned {
+            guest: guest.into(),
+            storage: OwnedVolumeStorage::Disk { capacity_mib: 64 },
+            options: Default::default(),
+            stat_virtualization: StatVirtualization::Strict,
+            host_permissions: HostPermissions::Private,
+        });
+    }
+    insert(
+        &mut writer,
+        "mounted",
+        &serde_json::to_string(&saved).unwrap(),
+    )
+    .await;
+    insert(&mut writer, "invalid", "invalid saved configuration").await;
+    let local = LocalBackend::from_backend_config(
+        BackendConfig::new(
+            GlobalConfigPatch::from_present_fields(config),
+            Default::default(),
+        ),
+        BackendSelectionSource::Programmatic,
+        None,
+    );
+    let backend: Arc<dyn Backend> = Arc::new(local);
+    // All four native SDKs return this exact JSON to their language decoder. Exercise the
+    // actual catalog read and wire serialization instead of constructing a report by hand.
+    let wire = with_backend(
+        backend,
+        crate::setup::binding_diagnose_storage(
+            "{}",
+            r#"{"named":["mounted","invalid","missing"]}"#,
+        ),
+    )
+    .await
+    .unwrap();
+    let report: serde_json::Value = serde_json::from_str(&wire).unwrap();
+    let items = report["sandboxes"].as_array().unwrap();
+    let mounted = items.iter().find(|item| item["name"] == "mounted").unwrap();
+    let expected = std::collections::BTreeMap::from([
+        ("root".to_owned(), "/".to_owned()),
+        (owned_volume_mount_id("/data"), "/data".to_owned()),
+        (owned_volume_mount_id("/logs"), "/logs".to_owned()),
+    ]);
+    assert_eq!(
+        mounted["guest_mounts"],
+        serde_json::to_value(expected).unwrap()
+    );
+    for name in ["invalid", "missing"] {
+        let item = items.iter().find(|item| item["name"] == name).unwrap();
+        assert_eq!(item["guest_mounts"], serde_json::json!({}));
+    }
+}
+
+#[tokio::test]
 async fn storage_preview_blockers_never_authorize_an_incomplete_or_terminal_target() {
     let temp = tempfile::tempdir().unwrap();
     let (config, mut writer) = catalog(temp.path()).await;

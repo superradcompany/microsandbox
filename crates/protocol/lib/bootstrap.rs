@@ -332,6 +332,7 @@ mod tests {
     #[test]
     fn guest_bootstrap_round_trips_transport_sensitive_values() {
         let bootstrap = GuestBootstrap {
+            storage_preview_oci: false,
             exec_limits: None,
             init_failure_ack: true,
             block_root: Some(BootstrapBlockRoot::OciErofs {
