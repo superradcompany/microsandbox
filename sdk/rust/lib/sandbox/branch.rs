@@ -3,6 +3,10 @@
 #[cfg(feature = "local")]
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "local")]
+use std::sync::Mutex;
+#[cfg(feature = "local")]
+use std::time::{Duration, Instant};
 
 #[cfg(all(feature = "local", not(target_os = "linux")))]
 use microsandbox_control_client::CreateBranch;
@@ -12,40 +16,51 @@ use microsandbox_runtime::checkpoint::LocalBranchState;
 use microsandbox_runtime::control::ControlRequest;
 #[cfg(feature = "local")]
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
+use microsandbox_types::GuestFlush;
 
 use crate::backend::Backend;
 #[cfg(feature = "local")]
-use crate::backend::LocalBackend;
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::sandbox::SandboxIdentity;
+#[cfg(feature = "local")]
+use crate::backend::{ControlSession, LocalBackend};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
-use super::{Sandbox, SandboxBuilder, SandboxHandle};
 #[cfg(feature = "local")]
-use super::{SandboxConfig, SandboxStatus, modify};
+use super::SandboxStatus;
+use super::{Sandbox, SandboxBuilder, SandboxConfig, SandboxHandle};
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Bound recovery scans across batches and rapid checkpoint chains within this SDK process.
+#[cfg(feature = "local")]
+static LAST_MEMORY_SWEEP: Mutex<Option<Instant>> = Mutex::new(None);
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Prepare a direct local fork with explicit child resource bindings.
+/// Configure a new local sandbox that starts from a running or paused sandbox's state.
 pub struct ForkBuilder {
-    guest_flush: microsandbox_types::GuestFlush,
-    backend: Arc<dyn Backend>,
-    source: String,
-    identity: SandboxIdentity,
-    pub(crate) inner: SandboxBuilder,
-    record_integrity: bool,
+    pub(super) config: ForkConfig,
 }
 
-/// Capture once and create independently owned children concurrently, returning input-order results.
+/// Configure several children that share one capture of the source sandbox.
 pub struct ForkManyBuilder {
-    guest_flush: microsandbox_types::GuestFlush,
+    pub(super) config: ForkConfig,
+    names: Vec<String>,
+}
+
+/// Settings and preparation shared by single-child and batch forks.
+pub(super) struct ForkConfig {
+    guest_flush: GuestFlush,
     backend: Arc<dyn Backend>,
     source: String,
     identity: SandboxIdentity,
-    pub(crate) inner: SandboxBuilder,
+    pub(super) inner: SandboxBuilder,
     record_integrity: bool,
-    names: Vec<String>,
 }
 
 /// Result for one requested child. Other children are not rolled back on startup failure.
@@ -137,6 +152,45 @@ impl SandboxHandle {
     }
 }
 
+impl ForkConfig {
+    fn new(
+        backend: Arc<dyn Backend>,
+        source: &str,
+        identity: SandboxIdentity,
+        name: String,
+    ) -> Self {
+        let mut inner = SandboxBuilder::new(name);
+        // A fork inherits its active environment; the creation builder's empty env is not a clear.
+        inner.config.spec.clear_env_mut();
+
+        Self {
+            backend,
+            source: source.into(),
+            identity,
+            inner,
+            record_integrity: false,
+            guest_flush: GuestFlush::Auto,
+        }
+    }
+
+    /// Resolve host paths and validate the child settings before starting a capture.
+    fn prepare(&mut self) -> MicrosandboxResult<SandboxConfig> {
+        #[cfg(feature = "local")]
+        self.inner.capture_host_paths(self.backend.as_ref())?;
+
+        let caller_config_overrides = std::mem::take(&mut self.inner.config);
+        let mut child_config = caller_config_overrides.clone().into_config();
+        child_config.caller_config_overrides = Some(Box::new(caller_config_overrides));
+
+        SandboxBuilder::validate_vsock_routes(&child_config)?;
+        if let Some(error) = self.inner.build_error.take() {
+            return Err(error);
+        }
+
+        Ok(child_config)
+    }
+}
+
 impl ForkManyBuilder {
     /// Deprecated spelling for starting live forks.
     #[deprecated(note = "use fork instead")]
@@ -145,55 +199,36 @@ impl ForkManyBuilder {
     }
 
     fn new(inner: ForkBuilder, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let ForkBuilder {
-            guest_flush,
-            backend,
-            source,
-            identity,
-            inner,
-            record_integrity,
-        } = inner;
         Self {
-            guest_flush,
-            backend,
-            source,
-            identity,
-            inner,
-            record_integrity,
+            config: inner.config,
             names: names.into_iter().map(Into::into).collect(),
         }
     }
 
     /// Select optional guest writeback for the single shared capture.
-    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
-        self.guest_flush = policy;
+    pub fn guest_flush(mut self, policy: GuestFlush) -> Self {
+        self.config.guest_flush = policy;
         self
     }
 
     /// Apply disk content integrity to the single shared capture.
     pub fn record_integrity(mut self) -> Self {
-        self.record_integrity = true;
+        self.config.record_integrity = true;
         self
     }
 
     /// Validate the batch, capture once, and return one startup outcome per name.
     /// Validation/capture failures fail the batch; later child failures do not recapture.
     pub async fn fork(mut self) -> MicrosandboxResult<Vec<ForkOutcome>> {
-        #[cfg(feature = "local")]
-        self.inner.capture_host_paths(self.backend.as_ref())?;
-        let options = self.inner.config.into_config();
-        SandboxBuilder::validate_vsock_routes(&options)?;
-        if let Some(error) = self.inner.build_error.take() {
-            return Err(error);
-        }
+        let child_config = self.config.prepare()?;
         super::branch_batch::branch_many(
-            self.backend,
-            &self.source,
-            self.identity,
-            options,
-            self.record_integrity,
+            self.config.backend,
+            &self.config.source,
+            self.config.identity,
+            child_config,
+            self.config.record_integrity,
             self.names,
-            self.guest_flush,
+            self.config.guest_flush,
         )
         .await
     }
@@ -224,49 +259,33 @@ impl ForkBuilder {
         identity: SandboxIdentity,
         name: String,
     ) -> Self {
-        let mut inner = SandboxBuilder::new(name);
-        inner.config.spec.mounts = Some(Vec::new());
-        inner.config.spec.network.ports = Some(Vec::new());
-        inner.config.spec.vsock = Default::default();
-        inner.config.spec.runtime.user = None;
         Self {
-            backend,
-            source: source.into(),
-            identity,
-            inner,
-            record_integrity: false,
-            guest_flush: microsandbox_types::GuestFlush::Auto,
+            config: ForkConfig::new(backend, source, identity, name),
         }
     }
 
     /// Require or skip optional guest writeback before this capture. Auto retains dirty RAM.
-    pub fn guest_flush(mut self, policy: microsandbox_types::GuestFlush) -> Self {
-        self.guest_flush = policy;
+    pub fn guest_flush(mut self, policy: GuestFlush) -> Self {
+        self.config.guest_flush = policy;
         self
     }
 
     /// Record disk content integrity for the captured layers. Off by default; RAM is not hashed.
     pub fn record_integrity(mut self) -> Self {
-        self.record_integrity = true;
+        self.config.record_integrity = true;
         self
     }
 
     /// Capture source execution and start an independent child; preserve source running/paused state.
     pub async fn fork(mut self) -> MicrosandboxResult<Sandbox> {
-        #[cfg(feature = "local")]
-        self.inner.capture_host_paths(self.backend.as_ref())?;
-        let options = self.inner.config.into_config();
-        SandboxBuilder::validate_vsock_routes(&options)?;
-        if let Some(error) = self.inner.build_error.take() {
-            return Err(error);
-        }
+        let child_config = self.config.prepare()?;
         branch(
-            self.backend,
-            &self.source,
-            self.identity,
-            options,
-            self.record_integrity,
-            self.guest_flush,
+            self.config.backend,
+            &self.config.source,
+            self.config.identity,
+            child_config,
+            self.config.record_integrity,
+            self.config.guest_flush,
         )
         .await
     }
@@ -279,9 +298,11 @@ impl ForkBuilder {
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<MicrosandboxResult<Sandbox>>,
     )> {
-        self.inner.capture_host_paths(self.backend.as_ref())?;
+        self.config
+            .inner
+            .capture_host_paths(self.config.backend.as_ref())?;
         let (handle, sender) = crate::progress::channel();
-        self.inner.config.creation_progress = Some(sender.downgrade());
+        self.config.inner.config.creation_progress = Some(sender.downgrade());
         let task = tokio::spawn(async move {
             let result = self.fork().await;
             drop(sender);
@@ -302,7 +323,7 @@ async fn branch(
     _identity: SandboxIdentity,
     _options: super::SandboxConfig,
     _record_integrity: bool,
-    _guest_flush: microsandbox_types::GuestFlush,
+    _guest_flush: GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     Err(MicrosandboxError::InvalidConfig(
         "direct forking requires a local backend".into(),
@@ -316,7 +337,7 @@ async fn branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
-    guest_flush: microsandbox_types::GuestFlush,
+    guest_flush: GuestFlush,
 ) -> MicrosandboxResult<Sandbox> {
     let config = prepare_branch(
         backend.clone(),
@@ -341,7 +362,7 @@ pub(super) async fn prepare_branch(
     identity: SandboxIdentity,
     options: SandboxConfig,
     record_integrity: bool,
-    guest_flush: microsandbox_types::GuestFlush,
+    guest_flush: GuestFlush,
 ) -> MicrosandboxResult<SandboxConfig> {
     let name = options.spec.name.clone();
     super::validate_sandbox_name(&name)?;
@@ -389,6 +410,9 @@ pub(super) async fn prepare_branch(
             "source uses host-backed proxy, TLS or secret resources; explicit compatible authorization is required (or dangerously_inherit_resources for this local source)".into(),
         ));
     }
+
+    config.caller_config_overrides = options.caller_config_overrides.clone();
+
     // Owned declarations contain no source host path. Retain them as the required inventory
     // until capture proves that every one has independent child backing; clear external mounts.
     config
@@ -415,7 +439,7 @@ pub(super) async fn prepare_branch(
     }
     config.external_mount_policy = options.external_mount_policy;
     config.creation_progress = options.creation_progress;
-    let session = modify::control_session_for_run(local, source, run).await?;
+    let session = local.control_session_for_run(source, run).await?;
     let capabilities = session.capabilities();
     if !capabilities.branch_create {
         return Err(MicrosandboxError::Runtime(
@@ -436,7 +460,7 @@ pub(super) async fn prepare_branch(
     config.replace_existing = false;
     config.spec.patches.clear();
     config.branch_source = Some(super::identity::BranchSource {
-        guest_flush: modify::capture_flush_policy(Some(capabilities), guest_flush, false)?,
+        guest_flush: ControlSession::capture_flush_policy(Some(capabilities), guest_flush, false)?,
         batch: None,
         record_integrity,
         name: source.into(),
@@ -453,8 +477,9 @@ pub(crate) async fn capture_child(
     local: &LocalBackend,
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
-    child: &Path,
+    child: &CreationStorage,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    crate::runtime::protected_state::require_running(local, &source.name)?;
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
         let closure = child.join(".branch-restore");
         // Only local hardlinks and small directory metadata; no background copier may
@@ -464,6 +489,7 @@ pub(crate) async fn capture_child(
         capture.state.validate_files(&closure)?;
         return adopt_capture(config, child, closure, &capture.state, capture.pin.clone()).await;
     }
+    reclaim_abandoned_memory(&local.cache_dir().join("memory"));
     let record_integrity = source.record_integrity;
     // Child reservation precedes capture; source transition ownership now excludes restart or
     // replacement until the exact selected generation has handed off its state.
@@ -481,7 +507,18 @@ pub(crate) async fn capture_child(
         &local.cache_dir().join("memory"),
         &id,
     )?;
-    tokio::fs::write(child.join(".branch-reservation"), &id).await?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let reservation_id = id.clone();
+    let worker_storage = child.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::write(reservation_path, reservation_id)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("branch reservation: {error}")))??;
+
     #[cfg(not(target_os = "linux"))]
     let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
@@ -504,20 +541,21 @@ pub(crate) async fn capture_child(
         backing: None,
     };
     #[cfg(not(target_os = "linux"))]
-    let response = modify::control_session_for_run(local, &source.name, source.run)
+    let response = local
+        .control_session_for_run(&source.name, source.run)
         .await?
-        .request(&CreateBranch(request))
+        .capture(&CreateBranch(request))
         .await
         .map_err(MicrosandboxError::ControlClient)?;
     #[cfg(target_os = "linux")]
-    let response = modify::control_request_for_run_with_memory(
-        local,
-        &source.name,
-        source.run,
-        format!("{}\n", serde_json::to_string(&request)?),
-        memory.as_ref(),
-    )
-    .await?;
+    let response = local
+        .control_request_for_run_with_memory(
+            &source.name,
+            source.run,
+            format!("{}\n", serde_json::to_string(&request)?),
+            memory.as_ref(),
+        )
+        .await?;
     local.validate_control_run(&source.name, source.run).await?;
     lineage.validate_source(local, &source.name).await?;
     let closure = child.join(".branch-restore");
@@ -557,14 +595,25 @@ pub(crate) async fn capture_child(
     // and readiness do not need to exclude later source lifecycle operations.
     drop(lineage);
     drop(_transition);
-    tokio::fs::remove_file(child.join(".branch-reservation")).await?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let worker_storage = child.clone();
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::remove_file(reservation_path)
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("branch reservation cleanup: {error}"))
+    })??;
+
     adopt_capture(config, child, closure, &state, pin).await
 }
 
 #[cfg(feature = "local")]
 async fn adopt_capture(
     config: &mut SandboxConfig,
-    child: &Path,
+    child: &CreationStorage,
     closure: std::path::PathBuf,
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
@@ -580,6 +629,10 @@ async fn adopt_capture(
     config.spec.resources.max_cpus = state.max_cpus;
     config.spec.resources.memory_mib = state.memory_mib;
     config.spec.resources.max_memory_mib = state.max_memory_mib;
+    let nested = microsandbox_runtime::checkpoint::captured_nested_virt(&state.resources)
+        .map_err(MicrosandboxError::SnapshotIntegrity)?;
+    // Forks retain captured execution state instead of the current host default.
+    config.spec.resources.nested_virt = Some(nested);
     // The captured effective address wins over launch-time pools/defaults. Each user-mode
     // network stack is isolated; host listeners were rejected before source mutation.
     config.spec.network.interface = None;
@@ -669,4 +722,120 @@ async fn adopt_capture(
     config.forked = true;
     config.suppress_launch_for_full_restore();
     Ok(pin)
+}
+
+/// Schedule crash recovery before source locking/freezing, with bounded work and scan frequency.
+#[cfg(feature = "local")]
+fn reclaim_abandoned_memory(root: &Path) {
+    let Ok(mut last) = LAST_MEMORY_SWEEP.try_lock() else {
+        return;
+    };
+    if last.is_some_and(|last| last.elapsed() < Duration::from_secs(30)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    drop(last);
+    let root = root.to_owned();
+    // Filesystem metadata and unlink may stall on cold or remote storage. Recovery is
+    // best-effort and must not occupy the async worker that drives branch capture.
+    // This shared cache sweep must not retain the child's preparation lock.
+    tokio::task::spawn_blocking(move || {
+        let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
+            branches_only: true,
+            max_entries: Some(256),
+            ..Default::default()
+        };
+        if let Err(error) = microsandbox_runtime::checkpoint::prune_memory_cache(&root, &options) {
+            tracing::debug!(%error, "deferred abandoned branch memory cleanup");
+        }
+    });
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "local"))]
+mod tests {
+    use super::*;
+
+    fn fork() -> ForkBuilder {
+        let backend = crate::test_support::local_backend(Default::default());
+        ForkBuilder::new(
+            Arc::new(backend),
+            "source",
+            SandboxIdentity::Local(1),
+            "child".into(),
+        )
+    }
+
+    fn assert_disk_mount(config: &SandboxConfig) {
+        let mounts = &config.spec.mounts;
+        assert_eq!(mounts.len(), 1);
+        assert!(matches!(
+            &mounts[0],
+            crate::sandbox::VolumeMount::DiskImage { host, guest, .. }
+                if host == Path::new("/images/seed.img") && guest == "/data"
+        ));
+        assert!(config.restore_resources.mapped.contains("/data"));
+    }
+
+    #[test]
+    fn forked_bindings_survive_persistence_and_rebuild() {
+        for explicit_mount in [false, true] {
+            let mut fork = fork();
+            if explicit_mount {
+                fork = fork.volume("/extra", |v| v.tmpfs());
+            }
+            let mut child = fork.config.prepare().unwrap();
+            child.spec.image = microsandbox_types::RootfsSource::oci("alpine");
+            child
+                .spec
+                .env
+                .push(microsandbox_types::EnvVar::new("CAPTURED", "value"));
+            let captured = SandboxBuilder::new("source")
+                .volume("/data", |v| v.tmpfs())
+                .config
+                .into_config();
+            crate::snapshot::apply_additional_disks(&mut child, captured.spec.mounts);
+            let json = serde_json::to_string(&child).unwrap();
+            let overrides = child.caller_config_overrides_json(&json).unwrap();
+            let loaded = SandboxConfig::from_stored(&json, overrides.as_deref()).unwrap();
+            let rebuilt = SandboxBuilder::from(loaded).finish(None, None).unwrap();
+
+            assert_eq!(rebuilt.spec.env, child.spec.env);
+            let mut guests: Vec<_> = rebuilt
+                .spec
+                .mounts
+                .iter()
+                .map(|mount| mount.guest())
+                .collect();
+            guests.sort_unstable();
+            assert_eq!(
+                guests,
+                if explicit_mount {
+                    vec!["/data", "/extra"]
+                } else {
+                    vec!["/data"]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn fork_and_fork_many_accept_a_host_disk_volume() {
+        let disk = |v: crate::sandbox::MountBuilder| v.disk("/images/seed.img");
+        let single = fork().volume("/data", disk);
+        assert_disk_mount(&single.config.inner.config.clone().into_config());
+        let many = ForkManyBuilder::new(fork(), ["a", "b"]).volume("/data", disk);
+        assert_disk_mount(&many.config.inner.config.clone().into_config());
+    }
+
+    #[test]
+    fn a_later_disk_volume_replaces_a_bind_at_the_same_guest_path() {
+        let builder = fork()
+            .volume("/data", |v| v.bind("/host/data"))
+            .volume("/data", |v| v.disk("/images/seed.img"));
+        assert_disk_mount(&builder.config.inner.config.clone().into_config());
+    }
 }

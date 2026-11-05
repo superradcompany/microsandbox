@@ -4,8 +4,8 @@ use clap::{Args, Subcommand};
 use microsandbox::LogLevel;
 
 use super::{
-    branch, copy, create, exec, inspect, list, logs, metrics, modify, pause, ping, ps, remove,
-    restart, restore, run, start, stop, touch, wait,
+    branch, copy, create, exec, inspect, jobs, list, logs, metrics, modify, pause, ping, ps,
+    remove, restart, restore, run, start, stop, touch, wait,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -83,6 +83,21 @@ pub enum SandboxCommands {
     /// Run a command in a running sandbox.
     Exec(exec::ExecArgs),
 
+    /// List managed command jobs in a sandbox.
+    Jobs(jobs::JobsArgs),
+
+    /// Attach to a managed job's existing input and output.
+    Attach(jobs::AttachArgs),
+
+    /// Send a Linux guest signal to a managed job's process group.
+    Signal(jobs::SignalArgs),
+
+    /// Send SIGKILL to a managed job's process group.
+    Kill(jobs::JobArgs),
+
+    /// Finish a managed job's pipe input without terminating it.
+    Eof(jobs::JobArgs),
+
     /// Copy files between the host and a sandbox.
     #[command(visible_alias = "cp")]
     Copy(copy::CopyArgs),
@@ -140,6 +155,11 @@ pub async fn run(command: SandboxCommands, log_level: Option<LogLevel>) -> anyho
         SandboxCommands::Metrics(args) => metrics::run(args).await,
         SandboxCommands::Remove(args) => remove::run(args).await,
         SandboxCommands::Exec(args) => exec::run(args).await,
+        SandboxCommands::Jobs(args) => jobs::list(args).await,
+        SandboxCommands::Attach(args) => jobs::attach(args).await,
+        SandboxCommands::Signal(args) => jobs::signal(args).await,
+        SandboxCommands::Kill(args) => jobs::kill(args).await,
+        SandboxCommands::Eof(args) => jobs::eof(args).await,
         SandboxCommands::Copy(args) => copy::run(args).await,
         SandboxCommands::Logs(args) => logs::run(args).await,
         SandboxCommands::Inspect(args) => inspect::run(args).await,

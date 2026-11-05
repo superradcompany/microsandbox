@@ -383,6 +383,8 @@ class SecretModifySpec(TypedDict, total=False):
     """Desired state for one secret passed to ``Sandbox.modify``.
 
     ``env``, ``value``, and ``store`` are mutually exclusive secret sources.
+    Omitted policy fields preserve existing settings. ``passthrough`` is a
+    deprecated alias for ``allow_placeholder_for``; both host lists are combined.
     """
 
     env: str
@@ -390,6 +392,11 @@ class SecretModifySpec(TypedDict, total=False):
     store: str
     placeholder: str
     allowed_hosts: list[str]
+    substitution: SecretSubstitution
+    violation_action: ViolationAction
+    require_tls_identity: bool
+    allow_placeholder_for: Sequence[str]
+    passthrough: Sequence[str]
 
 
 class DiskCompactionDiskResult(TypedDict):
@@ -1158,16 +1165,31 @@ class Patch:
 
 @dataclass(frozen=True, slots=True)
 class SecretSubstitution:
-    """Where in the HTTP request the secret value can be substituted."""
+    """Where in the HTTP request the secret value can be substituted.
+
+    Set ``header_fields`` to restrict header substitution to specific fields
+    (for example ``("authorization",)``). Prefer that over substituting in
+    every header: an untrusted guest can otherwise place the placeholder in a
+    header the upstream host reflects back and read the real secret.
+    """
 
     headers: bool = True
+    # Keyword-only so inserting the field does not shift the positional
+    # ``query``/``body`` arguments of existing callers.
+    header_fields: tuple[str, ...] = field(default=(), kw_only=True)
     query: bool = False
     body: bool = False
 
     def _to_dict(self) -> dict:
+        if self.header_fields and not self.headers:
+            raise ValueError(
+                "SecretSubstitution.header_fields requires headers to be enabled"
+            )
         d: dict = {}
         if not self.headers:
             d["headers"] = False
+        if self.header_fields:
+            d["header_fields"] = list(self.header_fields)
         if self.query:
             d["query"] = True
         if self.body:
@@ -1559,6 +1581,22 @@ class DnsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PortEndpoint:
+    """Published host endpoint to remove through modify(ports_rm=...)."""
+
+    host_port: int
+    bind: str = "127.0.0.1"
+    protocol: PortProtocol = PortProtocol.TCP
+
+    def _to_dict(self) -> dict:
+        return {
+            "host_port": self.host_port,
+            "bind": self.bind,
+            "protocol": _enum_value(self.protocol, PortProtocol, "PortEndpoint.protocol"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PortBinding:
     """Published host-to-guest port with an optional host bind address."""
 
@@ -1619,10 +1657,14 @@ class OutboundProxy:
     def __post_init__(self) -> None:
         if self.protocol != "socks4" and self.user_id is not None:
             raise ValueError("user_id is only supported for SOCKS4 proxies")
-        if self.protocol != "socks5" and (self.username is not None or self.password is not None):
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        if self.protocol == "socks4" and (self.username is not None or self.password is not None):
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         if (self.username is None) != (self.password is None):
-            raise ValueError("SOCKS5 username and password must be provided together")
+            if self.protocol == "socks5":
+                raise ValueError("SOCKS5 username and password must be provided together")
+            raise ValueError(
+                "HTTP CONNECT username and password must be provided together"
+            )
 
     @classmethod
     def http_connect(cls, address: str) -> OutboundProxy:
@@ -1640,9 +1682,16 @@ class OutboundProxy:
         return cls(protocol="socks5", address=address)
 
     def credentials(self, username: str, password: SecretSource) -> OutboundProxy:
-        """Set username authentication and a host-side password source."""
-        if self.protocol != "socks5":
-            raise ValueError("credentials are only supported for SOCKS5 proxies")
+        """Set username authentication and a host-side password source.
+
+        Supported for SOCKS5 and HTTP CONNECT proxies. HTTP CONNECT permits an
+        empty username for token-only authentication. The values are stored as
+        given: the backend validates them when the sandbox configuration is
+        built, where an HTTP CONNECT username containing ``:`` or control
+        characters is rejected.
+        """
+        if self.protocol == "socks4":
+            raise ValueError("credentials are only supported for SOCKS5 and HTTP CONNECT proxies")
         return OutboundProxy(
             protocol=self.protocol,
             address=self.address,
@@ -1753,16 +1802,25 @@ class VsockRoute:
 
 @dataclass(frozen=True, slots=True)
 class HttpConfig:
-    """HTTP denial response settings. ``{host}`` names the blocked host."""
+    """HTTP denial settings. Text preserves legacy behavior; JSON uses literal messages."""
 
-    deny_response: bool = False
-    """Enable readable HTTP denial responses. Disabled by default."""
+    deny_response: bool = True
+    """Enable readable HTTP denial responses. Enabled by default locally."""
 
     deny_message: str | None = None
-    """Body used when deny_response is enabled.
+    """Deprecated legacy text message with {host} substitution. Ignored in JSON mode."""
 
-    ``None`` uses the built-in message; an empty string sends no body.
+    deny_response_format: Literal["text", "json"] = field(default="json", kw_only=True)
+    """Response format. JSON requires a supporting runtime."""
+
+    network_deny_message: str | None = field(default=None, kw_only=True)
+    """Literal network-denial message. Requires deny_response and JSON mode.
+
+    ``None`` uses the default; an empty string leaves ``message`` empty.
     """
+
+    secret_deny_message: str | None = field(default=None, kw_only=True)
+    """Literal secret-denial message for JSON mode. None uses the default; empty stays empty."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1799,6 +1857,8 @@ class Network:
     max_udp_connections: int | None = field(default=None, kw_only=True)
     """UDP session limit. Defaults to unlimited for single-tenant and 1024 for
     multi-tenant; zero means unlimited."""
+    max_inbound_tcp_connections: int | None = field(default=None, kw_only=True)
+    """Active inbound TCP cap; zero is unlimited. None uses the runtime default."""
     tcp_accept_queue_size: int | None = field(default=None, kw_only=True)
     """Accept-queue depth for published TCP port listeners, 1 to 2147483647.
     Defaults to 1024; the host kernel clamps it to its own ``somaxconn``."""
@@ -1873,6 +1933,8 @@ class Network:
             d["max_tcp_connections"] = self.max_tcp_connections
         if self.max_udp_connections is not None:
             d["max_udp_connections"] = self.max_udp_connections
+        if self.max_inbound_tcp_connections is not None:
+            d["max_inbound_tcp_connections"] = self.max_inbound_tcp_connections
         if self.tcp_accept_queue_size is not None:
             d["tcp_accept_queue_size"] = self.tcp_accept_queue_size
         if self.rate_limiter is not None:
@@ -1891,11 +1953,24 @@ class Network:
                 raise TypeError("Network.http must be HttpConfig or None")
             if not isinstance(self.http.deny_response, bool):
                 raise TypeError("HttpConfig.deny_response must be a bool")
-            d["http"] = {"deny_response": self.http.deny_response}
+            if self.http.deny_response_format not in ("text", "json"):
+                raise ValueError("HttpConfig.deny_response_format must be text or json")
+            d["http"] = {
+                "deny_response": self.http.deny_response,
+                "deny_response_format": self.http.deny_response_format,
+            }
             if self.http.deny_message is not None:
                 if not isinstance(self.http.deny_message, str):
                     raise TypeError("HttpConfig.deny_message must be a str or None")
                 d["http"]["deny_message"] = self.http.deny_message
+            if self.http.network_deny_message is not None:
+                if not isinstance(self.http.network_deny_message, str):
+                    raise TypeError("HttpConfig.network_deny_message must be a str or None")
+                d["http"]["network_deny_message"] = self.http.network_deny_message
+            if self.http.secret_deny_message is not None:
+                if not isinstance(self.http.secret_deny_message, str):
+                    raise TypeError("HttpConfig.secret_deny_message must be a str or None")
+                d["http"]["secret_deny_message"] = self.http.secret_deny_message
         return d
 
 

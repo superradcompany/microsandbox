@@ -147,6 +147,7 @@ mod tests {
 pub mod cloud_manifest;
 /// Pure disk generation descriptors.
 pub mod disk;
+mod external_mounts;
 mod guest_clock;
 /// Existing legacy descriptor identity and cloud projection rules.
 pub mod legacy;
@@ -156,6 +157,7 @@ pub mod manifest;
 pub mod owned;
 mod restore_defaults;
 
+pub use external_mounts::EXTERNAL_MOUNTS_EXTENSION;
 pub use guest_clock::GUEST_CLOCK_EXTENSION;
 pub use manifest::*;
 pub use owned::{

@@ -91,7 +91,7 @@ fn assert_safe_output(output: &Output, json: bool, applied: bool) {
     } else {
         assert!(stdout.contains(&format!("$MSB_{SECRET_ENV}")));
         assert!(stdout.contains("rotated"));
-        assert!(stderr.contains("dry run"));
+        assert!(stderr.contains("Dry run"));
         assert!(stderr.contains("nothing applied"));
     }
 }

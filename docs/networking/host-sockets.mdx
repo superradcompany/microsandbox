@@ -13,23 +13,29 @@ Host sockets let a process inside a sandbox talk to a service on the host. The h
 
 Pass the host path and the port that the guest will use:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run --vsock /run/host-api.sock:5000 alpine
 ```
+</CodeGroup>
 
 Inside the sandbox, connect to host CID `2` on port `5000` with an `AF_VSOCK` socket.
 
 On Windows, pass a local named pipe instead:
 
-```powershell
+<CodeGroup>
+```powershell PowerShell
 msb run --vsock '\\.\pipe\host-api:5000' alpine
 ```
+</CodeGroup>
 
 Stream sockets are the default. On macOS and Linux, add `/dgram` when you need datagram semantics:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run --vsock /run/events.sock:5001/dgram alpine
 ```
+</CodeGroup>
 
 Datagrams are best effort and limited to 64 KiB. They require the kernel bundled with microsandbox and are not available on Windows.
 

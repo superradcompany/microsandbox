@@ -7,7 +7,8 @@ Do not apply them to other repositories or to general agent behavior outside thi
 
 - Follow these guidelines when editing code, docs, tests, examples, CI, or release files for microsandbox.
 - Prefer repository conventions over generic agent habits. When unsure, inspect nearby files and match their style.
-- Do not create branches, commit, push, tag, publish, or open pull requests unless the human explicitly asks.
+- After completing and validating requested changes, create a signed commit and push it to `main` by default unless the human explicitly says not to push or names a different destination.
+- Do not create tags, publish releases or packages, or open pull requests unless the human explicitly asks.
 - Check `git status --short --branch` before making changes. Do not overwrite or revert user work unless explicitly asked.
 
 ## Project Map
@@ -98,6 +99,12 @@ Repository layout:
 - Treat sandbox isolation, host filesystem access, networking, and secret handling as security-sensitive. Validate inputs at boundaries and avoid exposing host paths, credentials, or ambient privileges.
 - For public APIs, keep the Rust SDK, CLI, Python SDK, Node SDK, Go SDK, docs, and examples consistent when they describe the same capability.
 - Prefer explicit errors with useful context over silent fallbacks.
+
+## Protected Sandbox Storage
+
+Only `sbx/guest-state/` is exported as `/.msb`. Keep host journals, checkpoint stores, disk staging, and launch credentials outside that subtree. Guest-state contents remain untrusted: host readers must be bounded and reject symlinks/reparse points; host writers must not reuse guest-controlled links. Never add a compatibility alias that exposes host authority to the guest.
+
+The protected-layout security exception requires patched SDKs/CLIs and a runtime advertising `protected_guest_state`. Preserve catalog admission, lifecycle ownership, migration recovery records, and downgrade refusal; do not restore insecure legacy fallback behavior.
 
 ## Host Path Handling
 
@@ -199,6 +206,7 @@ path = "bin/main.rs"
   3. Sectioned items.
 - Group imports by origin, separated by blank lines: standard library first, external crates second, then `crate::` and `super::` imports.
 - Do not put `use` statements inside sections unless there is a narrow local reason, such as a test module import.
+- Strongly prefer importing types at the top of the file or test module over spelling out full module paths in signatures, patterns, and function bodies. Use an import alias for name collisions; keep qualified paths when they meaningfully clarify an otherwise ambiguous name.
 - Use the exact section delimiter shown below. Do not invent alternate Markdown-style, shorter, or decorative section headers.
 - Include only sections that contain items. Do not add empty sections just to satisfy the full order.
 - Organize Rust files with these section headers, in this order when applicable:
@@ -251,8 +259,15 @@ path = "bin/main.rs"
 - Keep items in dependency order inside a section: public surface first, private helpers later.
 - Keep docs on public types, fields, methods, functions, and modules. This repo uses `#![warn(missing_docs)]` in public crates, so new public items should explain what they are for.
 - Prefer explicit domain types over loosely typed strings, booleans, or tuples when the value crosses an API or subsystem boundary.
+- Separate logical steps with blank lines: setup, early returns, normalization, validation, operations, and final results. Apply the same spacing to test setup, actions, and assertions; do not rely on `cargo fmt` to provide it.
+- Prefer named intermediate values when an expression combines distinct steps, especially fallible lookups, parsing, and validation. Make each failure point easy to identify.
+- Keep iterator chains simple. Prefer a straightforward loop when nested closures or branching make the logic harder to follow; do not add helpers solely to hide that complexity.
+- Keep straightforward logic together. Extract helpers when they clarify a distinct responsibility or remove meaningful duplication, rather than merely shortening a function.
+- Write comments to explain intent, constraints, or non-obvious behavior rather than narrating the code.
+- Name values for what they currently represent. Avoid names that imply an action has already happened when the value describes a requirement or planned action.
 - During refactors, conflict resolution, bug fixes, and feature work, call out any expected behavior, API, or data-format changes and wait for direction when the risk is material.
 - Use `thiserror` or existing local error patterns for typed errors. Include enough context for callers to understand the failing operation.
+- Keep shared library and SDK errors interface-neutral: describe the problem and remedy without CLI flags or command syntax. Add command-specific guidance in the CLI layer.
 - In async code, avoid holding locks across `.await`. Prefer explicit ownership, short critical sections, and existing Tokio patterns in the surrounding module.
 - Keep feature-gated code close to the feature it gates and use existing `#[cfg(feature = "...")]` patterns.
 - Do not add examples under `examples/` unless requested or clearly required. Prefer tests and docs for small usage coverage.
@@ -337,7 +352,8 @@ pending guest traffic can make progress without waiting for another timer.
 
 ## Branches And Pull Requests
 
-- You may make local edits while on `main`, but do not commit directly to `main`. Start from the latest `main` when creating a contribution branch.
+- Use `main` as the default commit and push destination. Push completed work to `main` first unless the human explicitly requests another branch or says not to push.
+- Create a contribution branch only when the human requests one or when repository protections require it.
 - Use short, descriptive, kebab-case branch names. Avoid personal prefixes in shared documentation unless the maintainer asks for one.
 - Before opening a PR, compare against the intended base branch and inspect the actual diff:
 
@@ -363,7 +379,16 @@ git diff origin/main..HEAD --name-status
 
 ## Documentation And Examples
 
+- For changes under `docs/`, read [the Microsandbox docs skill](.agents/skills/microsandbox-docs/SKILL.md) for page structure, examples, version labels, and validation.
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
+- Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
+- Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
+- Do not prepend feature walkthroughs, lifecycle summaries, implementation details, or long examples to reference pages or type sections. Put API-specific details beside the relevant member and broader explanations in the usage guides; avoid duplicating those guides in the reference.
+- In SDK reference pages, wrap usage examples in a collapsed `<Accordion title="Example">`. Keep API signatures and type definitions visible outside the accordion.
+- When removing reference overviews, preserve unique signatures, constraints, result fields, and resource-cleanup requirements beside the relevant member or in the linked usage guide.
+- Omit field lists that only repeat documented builder options. Keep field references for returned data and properties not covered by the builder.
+- Do not use tables in SDK references. Use individual method and property headings with visible signatures and the existing parameter/return blocks. Group returned hash or record fields in the existing field blocks, including types, descriptions, and defaults where needed. Preserve links and existing anchors, and avoid repeating the same description above and inside a return block.
+- In Rust documentation examples, import types at the top of each snippet and use their short names in the body instead of fully qualified paths. Group standard-library imports before external-crate imports.
 - Keep examples realistic and runnable. Do not invent APIs or flags.
 - Prefer editing existing examples over adding new example projects unless the new example is requested or clearly fills a missing user workflow.
 - Documentation should describe current behavior, not future plans, unless the page is explicitly about roadmap work.

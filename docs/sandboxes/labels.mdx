@@ -50,6 +50,14 @@ sb, err := m.CreateSandbox(ctx, "worker",
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker",
+  image: "python",
+  labels: { "app" => "engine", "user.id" => "alice" }
+)
+```
+
 ```bash CLI
 msb create python --name worker \
   --label app=engine \
@@ -90,16 +98,13 @@ msb modify worker --label tier=web --label-rm stale
 ```
 </CodeGroup>
 
+On a running sandbox these changes apply live by default; a stopped sandbox saves them for its next start. See [Update labels](/sandboxes/tuning#update-labels) for how lists, metrics, and the `next_start` policy pick them up.
+
 ## Select in bulk
 
 This is where labels earn their keep. Find every sandbox carrying a label, from the CLI or an SDK; pass more than one label to require all of them (AND-matched):
 
 <CodeGroup>
-```bash CLI
-msb ps --label app=engine                    # matching sandboxes
-msb ps --label app=engine --label tier=web   # only those with both
-```
-
 ```typescript TypeScript
 const page = await Sandbox.listWith((list) => list.label("app", "engine"));
 ```
@@ -117,26 +122,37 @@ page, err := m.ListSandboxesWith(ctx,
     m.WithListLabels(map[string]string{"app": "engine"}),
 )
 ```
+
+```ruby Ruby
+page = Microsandbox::Sandbox.list(labels: { "app" => "engine" })
+```
+
+```bash CLI
+msb ps --label app=engine                    # matching sandboxes
+msb ps --label app=engine --label tier=web   # only those with both
+```
 </CodeGroup>
 
 <Tooltip tip="Label selection works on microsandbox cloud except with ping and touch, which are local-only."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 On the CLI, `--label` also drives the fleet commands directly, so you act on the whole group in one call instead of listing and looping:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb stop --label app=engine        # stop every match
 msb restart --label app=engine     # restart every match
 msb rm --force --label app=engine  # remove every match
 ```
+</CodeGroup>
 
 It works the same on `ps`, `ls`, `start`, `stop`, `restart`, `ping`, `touch`, and `rm`.
 
 ## Attribute metrics
 
-Labels flow into a sandbox's metrics as dimensions, so you can break CPU, memory, and I/O down by any label you set, for example per user or per tenant. See [Labels and per-user views](/observability/msb-metrics#labels-and-per-user-views) for the PromQL detail.
+Labels flow into a sandbox's metrics as dimensions, so you can break CPU, memory, and I/O down by any label you set, for example per user or per tenant. See [Labels in queries](/observability/msb-metrics#labels-in-queries) for the PromQL detail.
 
 High-cardinality labels can increase the number of metric series your backend stores. Suppose an image label carries a commit SHA, build timestamp, or other noisy value. Run `msb-metrics` with `--exclude-label-key <key>` to drop that label from exported metrics while keeping it in the catalog. Use `--no-labels` to disable metric labels entirely.
 
 ## Reference
 
-For exact label and sandbox-selection APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), or [Go](/sdk/go/sandbox). For label-aware fleet commands, see [Sandbox commands](/cli/sandbox-commands).
+For exact label and sandbox-selection APIs, see [TypeScript](/sdk/typescript/sandbox), [Rust](/sdk/rust/sandbox), [Python](/sdk/python/sandbox), [Go](/sdk/go/sandbox), or [Ruby](/sdk/ruby/sandbox). For label-aware fleet commands, see [Sandbox commands](/cli/sandbox-commands).

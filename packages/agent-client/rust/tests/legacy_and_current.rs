@@ -32,6 +32,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -83,6 +84,7 @@ mod tests {
             .create(&pipe_path)
             .unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -125,6 +127,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -176,6 +179,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -201,6 +205,7 @@ mod tests {
             .await
             .unwrap();
         let request = ExecRequest {
+            security: None,
             cmd: "/bin/true".into(),
             args: Vec::new(),
             env: Vec::new(),
@@ -227,7 +232,7 @@ mod tests {
 
     #[test]
     fn version_compat_across_generations() {
-        use MessageType::{ExecRequest, FsRequest};
+        use MessageType::{ExecIsolated, ExecOutputAck, ExecRequest, ExecStdinAck, FsRequest};
         // (message type, peer generation, expected allowed). Generation 1 is the
         // pre-0.5 legacy runtime (no filesystem); generation 2 introduced the
         // Fs* types; generation 6 is current.
@@ -238,6 +243,10 @@ mod tests {
             (FsRequest, 1, false),
             (FsRequest, 2, true),
             (FsRequest, 3, true),
+            (ExecOutputAck, 10, true),
+            (ExecStdinAck, 10, true),
+            (ExecIsolated, 10, false),
+            (ExecIsolated, 11, true),
         ];
         for (t, generation, allowed) in cases {
             assert_eq!(
@@ -273,6 +282,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -312,6 +322,7 @@ mod tests {
         let sock_path = temp.path().join("agent.sock");
         let listener = UnixListener::bind(&sock_path).unwrap();
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -361,6 +372,7 @@ mod tests {
 
         let (client_io, mut server_io) = tokio::io::duplex(64 * 1024);
         let ready = AgentReadyPayload {
+            exec_limits: None,
             bulk_transport: None,
             local_transport: None,
             relay_lease: None,
@@ -407,6 +419,7 @@ mod tests {
         assert!(client.ready().supports(MessageType::ExecRequest));
 
         let request = ExecRequest {
+            security: None,
             cmd: "echo".into(),
             args: vec!["hi".into()],
             env: Vec::new(),

@@ -260,6 +260,7 @@ async fn run_new(
         {
             ui::warn(&format!("failed to stop sandbox: {error}"));
         }
+        super::finish_stopped_memory_cleanup().await;
         return handle_exit(result?);
     }
 
@@ -270,6 +271,7 @@ async fn run_new(
             if let Err(e) = sandbox.stop().await {
                 ui::warn(&format!("failed to stop sandbox: {e}"));
             }
+            super::finish_stopped_memory_cleanup().await;
             return Ok(());
         }
     };
@@ -281,6 +283,7 @@ async fn run_new(
     if let Err(e) = sandbox.stop().await {
         ui::warn(&format!("failed to stop sandbox: {e}"));
     }
+    super::finish_stopped_memory_cleanup().await;
 
     handle_exit(result?)
 }
@@ -729,6 +732,40 @@ mod tests {
             socks5.sandbox.socks5_password_env.as_deref(),
             Some("SOCKS5_PASSWORD")
         );
+
+        let http = parse_run_args(&[
+            "--proxy",
+            "http://127.0.0.1:3128",
+            "--http-connect-username",
+            "sandbox",
+            "--http-connect-password-env",
+            "HTTP_CONNECT_PASSWORD",
+            "alpine",
+        ]);
+        assert_eq!(
+            http.sandbox.http_connect_username.as_deref(),
+            Some("sandbox")
+        );
+        assert_eq!(
+            http.sandbox.http_connect_password_env.as_deref(),
+            Some("HTTP_CONNECT_PASSWORD")
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn http_connect_cli_credentials_require_the_complete_pair() {
+        for auth in [
+            &["--http-connect-username", "sandbox"][..],
+            &["--http-connect-password-env", "HTTP_CONNECT_PASSWORD"][..],
+        ] {
+            let argv = ["msb", "--proxy", "http://127.0.0.1:3128"]
+                .into_iter()
+                .chain(auth.iter().copied())
+                .chain(["alpine"]);
+            let error = TestCli::try_parse_from(argv).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        }
     }
 
     #[cfg(feature = "net")]

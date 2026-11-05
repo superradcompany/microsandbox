@@ -49,7 +49,15 @@ There are two related values to preserve:
 | Known-operation availability gate | Minimum of host generation and ready-frame generation | Minimum of generation 1 and ready-frame generation |
 | Generation emitted in native/encoded envelopes | Host's existing `PROTOCOL_VERSION` | Generation 1 |
 
-The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent constant remains 9 and the standalone TypeScript client retains its existing generation 5; adding framed host control does not bump either value or imply that both client packages expose every agent operation.
+The current path historically emits the host generation even when its availability gate is lower. The extraction preserves that behavior. Do not rewrite every outgoing agent `v` to the negotiated minimum under the assumption that this would be a neutral cleanup. The Rust agent generation is now 11 for isolated workload execution, retaining generation-10 execution acknowledgements; the standalone TypeScript client retains its existing generation 5. Framed host control does not itself bump either generation or imply that both client packages expose every agent operation.
+
+Generation 11 adds `core.exec.isolated`, a session-start operation carrying an
+ordinary exec request and a required workload namespace/resource policy. The
+agent establishes this policy once, before any workload execution. Subsequent
+ordinary exec requests join that domain. Failed setup poisons the domain instead
+of admitting unrestricted commands. Existing `core.exec.request` fields and
+framing are unchanged. An agent below generation 11 is rejected by the existing
+known-operation gate, without an adapter or fallback to ordinary exec.
 
 Known message types have an introduction generation in `MessageType::min_protocol_version()`. `AgentProtocol::prepare` checks availability before admitting native or encoded sends. An unsupported known operation returns the shared client's unsupported-operation category without sending it or closing unrelated streams. Dynamic names and raw bytes remain available to callers who deliberately own their protocol interpretation.
 
@@ -57,9 +65,40 @@ Rust callers inspect `client.ready().negotiated_version`, `client.ready().suppor
 
 Generation labels must be checked against actual historical agents. The current introduction map gates filesystem operations at generation 2. The retained v0.5.0 live evidence shows a generation-1 agent that accepts the tested raw filesystem stat operation while the checked path refuses it. That discrepancy remains an unresolved compatibility case; neither the introduction table nor a successful exec test proves every historical filesystem workflow works. Releases before v0.6.0 are outside this change's compatibility target.
 
+### Execution acknowledgements (generation 10)
+
+The runtime supplies sandbox execution limits through trusted bootstrap. The guest advertises them in `Ready.exec_limits`: maximum executions, input and output allowances, and stdin and output chunk sizes. `ExecRequest` cannot override these settings. Defaults are 128 executions, 64 KiB input, 1 MiB combined output, and 16 KiB stdin and output chunks.
+
+`core.exec.stdin.ack` reports cumulative bytes written into the child's stdin pipe. `core.exec.output.ack` reports output consumed by the application, charging payload bytes plus 256 bytes per stdout/stderr chunk. These acknowledgements replenish allowance; they do not trigger retransmission. Duplicate totals grant no additional capacity, and backwards or unsent offsets are invalid.
+
+The SDK sends stdin directly from the caller's buffer as allowance becomes available. The runtime routes pending stdin per execution under that same allowance, so it can keep reading acknowledgements without waiting for guest pipe delivery. There is no separate relay-input allowance or acknowledgement. Unread output stays in a per-execution receiving buffer. An exited command retains its execution slot until output is drained or the stream is closed and cleaned up. Terminal completion follows output consumption for controlled executions.
+
+Released older SDKs retain their existing execution behavior through the legacy path and are outside the new buffering guarantee. New SDKs connecting to a guest without the advertised policy retain historical buffering with a warning; existing sandboxes need no restart.
+
+Generation 10 remains unreleased. Intermediate generation-10 builds are not a compatibility target; the acknowledgement wire names replace their earlier `.credit` names without a separate capability version.
+
 ### Bootstrap and shutdown
 
+The current OCI implementation adds an optional `security` field to
+`core.exec.request`: `no_new_privileges` plus five named capability sets.
+Absent settings retain ordinary execution; explicit empty sets drop all
+capabilities. This OCI feature targets matching current `runmsb`, `msb`, and
+embedded agentd builds, by explicit contribution scope. It does not add a
+legacy security adapter or claim enforcement by older agents, which can ignore
+the field. Recreate VMs after rebuilding the embedded agent. Existing protocol
+generations, framing, and unrelated compatibility paths are unchanged.
+
 `core.bootstrap` is a one-shot startup frame sent before the ordinary `core.ready` exchange. It configures a newly launched VM with the agent bundled by the selected build. The guest validates its minimum generation and accepts newer bootstrap generations under the existing optional-field rules. This is distinct from connecting a new SDK to an already-running old VM, and it does not prove compatibility of the host SDK/runtime launch JSON or shared database.
+
+OCI read-only roots use the required `block_root.kind = "read-only-virtiofs"`
+variant, not an optional boolean that older agents could ignore. Old agents
+reject this unknown variant rather than booting a writable root. Before using
+it, the SDK requires launch protocol 2 and `oci_readonly_root: true` from the
+selected `msb`'s `__launch-protocol` response. Missing or false capability values
+reject this new workflow. Existing writable-root bootstraps and legacy launch
+encodings are unchanged. The legacy environment encoder explicitly refuses the
+new mode. Rebuild and embed the matching guest agent when enabling this feature;
+the host capability does not certify an externally overridden agent binary.
 
 Graceful shutdown is an existing uncorrelated agent operation. The SDK preserves its zero ID, shutdown flag, selected wire generation, and empty-unit payload through an explicit packet write, awaited before closing the client. It must not use the generic `send` API, which requires a live owned stream ID. A runtime process exiting is insufficient shutdown evidence: PID fallback can exit without the guest sync needed to preserve recent root-disk writes. The [SDK packet regression test](../../sdk/rust/lib/backend/local/sandbox/shutdown_tests.rs) checks the actual current and legacy packets; live SDK stop/restart tests separately check persistence without manual sync.
 
@@ -164,6 +203,8 @@ Filesystem reads/writes and TCP streams first negotiate this format through CBOR
 
 The optional `dual-port-v1` transport profile is orthogonal to this schema. On the internal `agent-bulk` port only, each unchanged generation-8 frame is prefixed by a 128-bit client incarnation. The relay strips that prefix before forwarding the frame to an SDK. Fixed `MSBL` range-lifecycle records on the ordered control port establish the current incarnation and acknowledge its disconnect before control IDs are reused; they are decoded only after the host and guest bind `dual-port-v1`, are not `MessageType` values, and therefore do not alter the generation-8 schema. Once a transport profile ships, its framing is immutable even though it has a separate capability gate.
 
+For accepted guest-to-host bulk flows, `BulkFinish` and the terminal response share the ordered control lane. If a finish preceded the terminal, the dual-port relay waits for all bytes through its exact offset before forwarding both, even when the terminal reports failure. If no finish preceded the terminal, the relay forwards the terminal immediately and discards remaining bulk records; SDKs still reject successful filesystem reads without an exact finish. TCP terminals without a finish abort the stream and can discard data still in the bulk lane; they do not guarantee delivery of the complete received prefix. Normal TCP EOF sends a finish first and preserves all preceding data. This allows errors from existing guests to reach callers without a preceding `BulkCancel`. In either case the terminal retires the correlation, so late records cannot revive it. The host also discards in-flight input records for completed bulk operations on the same client connection, without disconnecting unrelated operations; records for unopened correlations remain invalid.
+
 - **`v`** is the generation, echoed onto each message. Same number negotiated at the handshake;
   not a per-message version. Don't gate behavior by reading it per message.
 - **`MessageType::min_protocol_version()`** (`lib/message.rs`) is the per-type label: the
@@ -211,3 +252,5 @@ sandbox echoed in its ready frame)`. Every typed send checks `min_protocol_versi
 - **Future:** a golden-bytes interop corpus (canonical encoded samples of each payload, asserted to
   decode under current code) and an append-only gate (a new `gen-N.json` may only add message types
   versus `gen-(N-1).json`) once a second generation exists to compare against.
+
+Full-memory restores preserve the captured guest execution policy and advertise it through the captured `core.ready`. Workload thaw messages do not carry execution settings. Disk-only restores resolve settings at guest startup.

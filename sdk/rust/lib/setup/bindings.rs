@@ -101,6 +101,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_lookup_allows_cloud_only_policy_but_rejects_invalid_policy() {
+        let _guard = crate::test_support::lock_env();
+        for (user, managed, valid) in [
+            (r#"{"allowed_backends":["cloud"]}"#, "{}", true),
+            ("{}", r#"{"allowed_backends":["cloud"]}"#, true),
+            (r#"{"allowed_backends":[]}"#, "{}", false),
+            ("{}", r#"{"allowed_backends":[]}"#, false),
+        ] {
+            let sources = BackendConfig::new(
+                serde_json::from_str(user).unwrap(),
+                serde_json::from_str(managed).unwrap(),
+            );
+            let result = RuntimeConfigInput::default().resolve(sources);
+
+            if valid {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().to_string().contains("allowed_backends"));
+            }
+        }
+    }
+
+    #[test]
     fn runtime_bindings_keep_process_paths_below_managed_policy() {
         let _guard = crate::test_support::lock_env();
         let previous = std::env::var_os("MSB_PATH");

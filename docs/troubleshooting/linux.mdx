@@ -10,23 +10,29 @@ microsandbox local sandboxes use hardware virtualization. On Linux, confirm that
 
 Run the installer, then open a new terminal if it updates your `PATH`:
 
-```bash
+<CodeGroup>
+```bash Shell
 curl -fsSL https://install.microsandbox.dev | sh
 ```
+</CodeGroup>
 
 ## glibc version
 
 Microsandbox Linux releases require glibc 2.28 or newer on x64 and ARM64 hosts. Check the version provided by your distribution:
 
-```bash
+<CodeGroup>
+```bash Shell
 getconf GNU_LIBC_VERSION
 ```
+</CodeGroup>
 
 If `getconf` is unavailable, inspect the first line reported by `ldd`:
 
-```bash
+<CodeGroup>
+```bash Shell
 ldd --version | head -n 1
 ```
+</CodeGroup>
 
 Use a newer glibc-based distribution if the version is below 2.28. Do not replace the system C library manually. Musl-only environments, such as a bare Alpine host, cannot run the local runtime; use a supported host or [microsandbox cloud](/cloud/overview) instead.
 
@@ -34,41 +40,51 @@ Use a newer glibc-based distribution if the version is below 2.28. Do not replac
 
 Start with the doctor command for the local setup checks:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb doctor
 ```
+</CodeGroup>
 
 If sandbox startup still fails with a KVM-related error, check the KVM module and device:
 
-```bash
+<CodeGroup>
+```bash Shell
 lsmod | grep kvm
 ls -l /dev/kvm
 ```
+</CodeGroup>
 
 An enabled Intel host usually shows `kvm_intel` and `kvm`; an enabled AMD host usually shows `kvm_amd` and `kvm`.
 
 Then confirm that your current user can read and write the KVM device:
 
-```bash
+<CodeGroup>
+```bash Shell
 [ -r /dev/kvm ] && [ -w /dev/kvm ] && echo "OK" || echo "FAIL"
 ```
+</CodeGroup>
 
 ## Missing `/dev/kvm`
 
 If `/dev/kvm` is missing, make sure CPU virtualization is enabled in firmware/UEFI and visible to Linux:
 
-```bash
+<CodeGroup>
+```bash Shell
 grep -E -c '(vmx|svm)' /proc/cpuinfo
 ```
+</CodeGroup>
 
 A `0` result usually means virtualization is disabled in firmware, unavailable on the machine, or hidden by an outer VM. After enabling virtualization in firmware, reboot and check the KVM module again.
 
 You can also try loading the host-specific KVM module:
 
-```bash
+<CodeGroup>
+```bash Shell
 sudo modprobe kvm_intel  # Intel
 sudo modprobe kvm_amd    # AMD
 ```
+</CodeGroup>
 
 If you are inside a cloud VM, CI runner, or another hypervisor, the outer environment must expose nested virtualization before `/dev/kvm` can appear.
 
@@ -76,37 +92,47 @@ If you are inside a cloud VM, CI runner, or another hypervisor, the outer enviro
 
 If `/dev/kvm` exists but sandbox startup fails with a permission error, your user probably cannot open the device. Check the device owner and group:
 
-```bash
+<CodeGroup>
+```bash Shell
 stat -c '%U %G %a %n' /dev/kvm
 ```
+</CodeGroup>
 
 Many distributions grant access through the `kvm` group. Check whether the group exists, whether `/dev/kvm` uses it, and whether your shell is already in that group:
 
-```bash
+<CodeGroup>
+```bash Shell
 getent group kvm
 ls -l /dev/kvm
 groups
 ```
+</CodeGroup>
 
 If `/dev/kvm` belongs to `kvm`, add your user to the group:
 
-```bash
+<CodeGroup>
+```bash Shell
 sudo usermod -aG kvm "$USER"
 ```
+</CodeGroup>
 
 Log out and back in after changing group membership. If you want to refresh the current shell only, `newgrp kvm` may work, but opening a new login session is the least surprising path.
 
 Some distributions use access control lists instead of group membership. If `setfacl` is available, you can grant your user read/write access directly:
 
-```bash
+<CodeGroup>
+```bash Shell
 sudo setfacl -m "u:$USER:rw" /dev/kvm
 ```
+</CodeGroup>
 
 Re-run the read/write check after changing group membership or ACLs:
 
-```bash
+<CodeGroup>
+```bash Shell
 [ -r /dev/kvm ] && [ -w /dev/kvm ] && echo "OK" || echo "FAIL"
 ```
+</CodeGroup>
 
 If your distribution uses a different group, udev rule, or enterprise policy for `/dev/kvm`, follow that local policy instead.
 
@@ -114,7 +140,7 @@ If your distribution uses a different group, udev rule, or enterprise policy for
 
 When running microsandbox inside another VM or container, the outer environment must expose hardware virtualization. Many hosted CI runners and cloud VMs do not expose nested virtualization by default.
 
-For Docker-based workflows, pass `/dev/kvm` into the container. See [Run microsandbox in Docker](/examples/docker/docker) for the container flags and host preflight.
+For Docker-based workflows, pass `/dev/kvm` into the container. See [Run microsandbox in Docker](/how-to/docker/docker) for the container flags and host preflight.
 
 ## Interrupt acceleration
 
@@ -133,17 +159,21 @@ If the capability is available but disabled, doctor prints the current-boot modu
 
 AMD:
 
-```bash
+<CodeGroup>
+```bash Shell
 sudo modprobe -r kvm_amd && sudo modprobe kvm_amd avic=1
 cat /sys/module/kvm_amd/parameters/avic
 ```
+</CodeGroup>
 
 Intel:
 
-```bash
+<CodeGroup>
+```bash Shell
 sudo modprobe -r kvm_intel && sudo modprobe kvm_intel enable_apicv=1
 cat /sys/module/kvm_intel/parameters/enable_apicv
 ```
+</CodeGroup>
 
 Do not run either command while `/dev/kvm` has users. A distribution may build KVM into the kernel, prevent module removal, or require the setting in its boot configuration instead.
 

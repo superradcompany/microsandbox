@@ -24,19 +24,22 @@ use microsandbox_protocol::bulk::{
 };
 use microsandbox_protocol::codec::{self, DecodedFrame, MAX_FRAME_SIZE};
 use microsandbox_protocol::core::{
-    ClockSync, CoreError, CoreErrorKind, InitAck, InitResolved, Ping, Pong, Ready,
-    RelayClientDisconnected, ResolvedUser, Touch, Touched, WORKLOAD_TRANSPORT_BARRIER_VERSION,
-    WORKLOAD_TRANSPORT_BULK_BYTES, WORKLOAD_TRANSPORT_BULK_FRAMES,
-    WORKLOAD_TRANSPORT_CONTROL_BYTES, WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure,
-    WorkloadFailureDisposition, WorkloadFreeze, WorkloadFrozen, WorkloadThaw, WorkloadThawed,
-    WorkloadTransportCredit, WorkloadTransportPosition,
+    ClockSync, CoreError, CoreErrorKind, InitAck, InitFailureReason, InitResolved, Ping, Pong,
+    Ready, RelayClientDisconnected, ResolvedUser, Touch, Touched,
+    WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
+    WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
+    WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFailure, WorkloadFailureDisposition, WorkloadFreeze,
+    WorkloadFrozen, WorkloadThaw, WorkloadThawMode, WorkloadThawed, WorkloadTransportCredit,
+    WorkloadTransportPosition,
 };
 use microsandbox_protocol::exec::{
-    ExecExited, ExecFailed, ExecFailureKind, ExecRequest, ExecResize, ExecSignal, ExecStarted,
-    ExecStderr, ExecStdin, ExecStdinError, ExecStdout,
+    ExecExited, ExecFailed, ExecFailureKind, ExecOutputAck, ExecRequest, ExecResize, ExecSignal,
+    ExecStarted, ExecStderr, ExecStdin, ExecStdinAck, ExecStdinError, ExecStdout,
+    MAX_EXEC_CONTROL_BYTES,
 };
 use microsandbox_protocol::fs::{FS_CHUNK_SIZE, FsData, FsRequest, FsResponse};
 use microsandbox_protocol::heartbeat::{ActivityCounters, Heartbeat};
+use microsandbox_protocol::isolation::IsolatedExecRequest;
 use microsandbox_protocol::message::{FRAME_HEADER_SIZE, Message, MessageType};
 use microsandbox_protocol::tcp::{TcpClose, TcpConnect, TcpData, TcpEof, TcpFailed};
 use microsandbox_protocol::transport::{
@@ -206,6 +209,7 @@ struct ActivityTracker {
 #[derive(Default)]
 pub struct BootConsoleState {
     input: Vec<u8>,
+    init_failure_ack: bool,
 }
 
 #[derive(Clone)]
@@ -366,7 +370,8 @@ impl ActivityTracker {
 impl BulkInputState {
     fn new(file: File) -> AgentdResult<Self> {
         Ok(Self {
-            port: AsyncFd::new(file)?,
+            // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+            port: unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?,
             read_buf: vec![0u8; BULK_SERIAL_READ_BUF_SIZE],
             input: BytesMut::new(),
         })
@@ -488,7 +493,8 @@ pub async fn run(
     set_nonblocking(port_fd)?;
 
     // A single AsyncFd tracks both readable and writable readiness.
-    let async_port = AsyncFd::new(port_file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(port_file) }.map_err(std::io::Error::from)?;
 
     // A combined port carries full raw records; a dual-port control stream does not. Size the
     // allocation from the selected topology so combined throughput does not pay four reads per
@@ -550,6 +556,8 @@ pub async fn run(
             // the runtime over the guest consoles, so the runtime injects this capability later.
             local_transport: None,
             workload_transport_barrier_version: Some(WORKLOAD_TRANSPORT_BARRIER_VERSION),
+            exec_limits: config.exec_limits,
+            workload_user_namespace: Some(true),
         },
     )
     .map_err(|e| AgentdError::ExecSession(format!("encode ready: {e}")))?;
@@ -660,6 +668,11 @@ pub async fn run(
                 if !state.output_parked && !workload.is_frozen() => {
                 if !inherited && let Err(error) = result {
                     encode_stdin_error(id, &AgentdError::Io(error), &mut serial_out_buf)?;
+                    flush_write_buf(&async_port, &mut serial_out_buf).await?;
+                }
+
+                if !inherited && let Some(session) = state.sessions.get_mut(&id) {
+                    encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
                     flush_write_buf(&async_port, &mut serial_out_buf).await?;
                 }
             }
@@ -1000,6 +1013,20 @@ pub async fn run(
                                     };
                                     Some(state.input_window.admit(lane, wire_bytes)?)
                                 };
+                                if msg.t.is_exec_control() && wire_bytes > MAX_EXEC_CONTROL_BYTES {
+                                    let out_before = serial_out_buf.len();
+                                    encode_core_error_if_supported(
+                                        &msg,
+                                        msg.id,
+                                        CoreErrorKind::InvalidPayload,
+                                        "execution control message exceeds 4 KiB".into(),
+                                        Some(msg.t.as_str().to_string()),
+                                        &mut serial_out_buf,
+                                    )?;
+                                    record_encoded_guest_messages(&serial_out_buf, out_before, &mut activity);
+                                    publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
+                                    continue;
+                                }
                                 if msg.flags != msg.t.flags() {
                                     let out_before = serial_out_buf.len();
                                     encode_core_error_if_supported(
@@ -1049,6 +1076,10 @@ pub async fn run(
                                 publish_heartbeat_snapshot(&heartbeat_tx, &state, &activity);
                             }
 
+                            // Coalesce input acknowledgements across this decoded batch.
+                            for (&id, session) in &mut state.sessions {
+                                encode_exec_stdin_ack(id, session, &mut serial_out_buf)?;
+                            }
                             // Flush any outgoing messages.
                             if !serial_out_buf.is_empty() {
                                 flush_write_buf(&async_port, &mut serial_out_buf).await?;
@@ -1114,6 +1145,8 @@ pub async fn run(
                         activity.add_exec_output_bytes(len);
                     }
                     SessionOutput::Exited(code) => {
+                        let code = state.sessions.get_mut(&id).and_then(|session| session.finish(code));
+                        let Some(code) = code else { continue; };
                         let msg = Message::with_payload(MessageType::ExecExited, id, &ExecExited { code })
                             .map_err(|e| AgentdError::ExecSession(format!("encode exited: {e}")))?;
                         codec::encode_to_buf(&msg, &mut serial_out_buf)
@@ -1231,7 +1264,8 @@ async fn bulk_writer_task(
     mut command_rx: tokio::sync::mpsc::Receiver<BulkOutputCommand>,
     activity_tx: tokio::sync::mpsc::Sender<RawActivity>,
 ) -> AgentdResult<()> {
-    let async_port = AsyncFd::new(file)?;
+    // SAFETY: File keeps the descriptor open and unchanged until AsyncFd drops it.
+    let async_port = unsafe { AsyncFd::register(file) }.map_err(std::io::Error::from)?;
     let mut generation = 0;
     let mut flows = HashMap::<(ClientIncarnation, u32), BulkWriteFlow>::new();
     let mut active = VecDeque::<(ClientIncarnation, u32)>::new();
@@ -1648,7 +1682,7 @@ pub fn open_and_bind_bulk_port() -> AgentdResult<Option<BoundBulkPort>> {
     set_nonblocking(fd)?;
 
     let connection_id = random_connection_id()?;
-    write_all_to_fd(fd, &encode_bulk_hello(connection_id), deadline)?;
+    write_all_to_fd(fd, &encode_bulk_hello(connection_id), Some(deadline))?;
 
     let mut ack = [0u8; BULK_BINDING_SIZE];
     read_exact_from_fd(fd, &mut ack, deadline, "bulk binding acknowledgement")?;
@@ -1677,8 +1711,9 @@ pub fn receive_bootstrap(port_file: &File) -> AgentdResult<(GuestBootstrap, Boot
     set_nonblocking(fd)?;
     let deadline = init_ack_deadline();
     let mut state = BootConsoleState::default();
-    let msg = read_boot_message(fd, &mut state, deadline, "guest bootstrap")?;
+    let msg = read_boot_message(fd, &mut state, Some(deadline), "guest bootstrap")?;
     let bootstrap = decode_bootstrap_message(msg)?;
+    state.init_failure_ack = bootstrap.init_failure_ack;
     Ok((bootstrap, state))
 }
 
@@ -1730,8 +1765,59 @@ pub fn report_init_context(
     let mut out = Vec::new();
     codec::encode_to_buf(&msg, &mut out)
         .map_err(|e| AgentdError::ExecSession(format!("encode init context frame: {e}")))?;
-    write_all_to_fd(fd, &out, deadline)?;
+    write_all_to_fd(fd, &out, Some(deadline))?;
     wait_for_init_ack(fd, boot_console, deadline)
+}
+
+/// Reports a fatal startup error before exiting the guest.
+///
+/// The host acknowledges only after saving the diagnostic for CLI and SDK
+/// callers. Supporting hosts control shutdown; older hosts discard the
+/// report, so only their wait is bounded.
+pub fn report_init_failure(
+    port_file: &File,
+    boot_console: &mut BootConsoleState,
+    message: &str,
+    error: &AgentdError,
+) -> AgentdResult<()> {
+    let deadline = if boot_console.init_failure_ack {
+        None
+    } else {
+        Some(Instant::now() + std::time::Duration::from_secs(2))
+    };
+    let fd = port_file.as_raw_fd();
+    set_nonblocking(fd)?;
+    let msg = Message::with_payload(
+        MessageType::CoreError,
+        0,
+        &CoreError {
+            kind: CoreErrorKind::InitializationFailed,
+            message: message.to_owned(),
+            offending_type: None,
+            init_failure: match error {
+                AgentdError::UserNotFound(_) => Some(InitFailureReason::UserNotFound),
+                AgentdError::GroupNotFound(_) => Some(InitFailureReason::GroupNotFound),
+                _ => None,
+            },
+            workload_failure: None,
+        },
+    )?;
+    let mut out = Vec::new();
+    codec::encode_to_buf(&msg, &mut out)?;
+    write_all_to_fd(fd, &out, deadline)?;
+
+    loop {
+        let ack = read_boot_message(fd, boot_console, deadline, "init failure ack")?;
+        if ack.t != MessageType::InitAck || ack.id != 0 || ack.flags != 0 {
+            return Err(AgentdError::Init(
+                "expected init failure acknowledgement".into(),
+            ));
+        }
+        if ack.payload::<InitAck>()?.failure {
+            return Ok(());
+        }
+        // A late success acknowledgement must not release a failing guest.
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -2377,9 +2463,14 @@ async fn restore_client_state(
         .extend(
             std::mem::take(&mut state.sessions)
                 .into_iter()
-                .map(|(id, mut session)| {
+                .filter_map(|(id, mut session)| {
                     session.detach_stdin();
-                    ((generation, id), session)
+                    // Completed readers already emitted their exit event. Once the old client
+                    // is detached, unread output must not keep their execution slots alive.
+                    if session.take_completed_exit().is_some() {
+                        return None;
+                    }
+                    Some(((generation, id), session))
                 }),
         );
     state.client_incarnations.clear();
@@ -2466,6 +2557,7 @@ async fn handle_message_with_charge(
                         kind: CoreErrorKind::CapabilityUnavailable,
                         message,
                         offending_type: Some(msg.t.as_str().into()),
+                        init_failure: None,
                         workload_failure: None,
                     },
                 ),
@@ -2672,7 +2764,7 @@ async fn handle_message_with_charge(
                 || (!workload.is_frozen()
                     && state.aborted_transport_attempt.as_deref() == Some(&request.attempt_id))
             {
-                if request.mode != microsandbox_protocol::core::WorkloadThawMode::Continue {
+                if request.mode != WorkloadThawMode::Continue {
                     encode_workload_error(
                         &msg,
                         &request.attempt_id,
@@ -2707,7 +2799,7 @@ async fn handle_message_with_charge(
                 codec::encode_to_buf(&reply, out_buf)?;
                 return Ok(());
             }
-            if request.mode == microsandbox_protocol::core::WorkloadThawMode::Restore
+            if request.mode == WorkloadThawMode::Restore
                 && state.restored_attempt.as_deref() != Some(&request.attempt_id)
             {
                 if let Err(error) = workload.require_frozen_attempt(&request.attempt_id) {
@@ -2746,10 +2838,54 @@ async fn handle_message_with_charge(
             }
         }
 
-        MessageType::ExecRequest => {
-            let Some(mut req) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)? else {
-                return Ok(());
+        MessageType::ExecRequest | MessageType::ExecIsolated => {
+            let mut req = if msg.t == MessageType::ExecIsolated {
+                let Some(request) =
+                    decode_payload_or_core_error::<IsolatedExecRequest>(&msg, out_buf)?
+                else {
+                    return Ok(());
+                };
+                if let Err(error) = workload.configure_isolation(request.isolation) {
+                    encode_exec_failed(
+                        msg.id,
+                        ExecFailed {
+                            kind: ExecFailureKind::Other,
+                            errno: None,
+                            errno_name: None,
+                            message: error.to_string(),
+                            stage: Some("workload_isolation".into()),
+                        },
+                        out_buf,
+                    )?;
+                    return Ok(());
+                }
+                request.process
+            } else {
+                let Some(request) = decode_payload_or_core_error::<ExecRequest>(&msg, out_buf)?
+                else {
+                    return Ok(());
+                };
+                request
             };
+            // Released peers do not acknowledge execution output. Preserve their legacy path.
+            let policy = (msg.v >= 10).then_some(config.exec_limits).flatten();
+            if let Some(policy) = policy
+                && state.sessions.len() + state.detached_sessions.len()
+                    >= policy.max_executions as usize
+            {
+                encode_exec_failed(
+                    msg.id,
+                    ExecFailed {
+                        kind: ExecFailureKind::ResourceLimit,
+                        errno: None,
+                        errno_name: None,
+                        message: "active execution limit reached".into(),
+                        stage: Some("execution_admission".into()),
+                    },
+                    out_buf,
+                )?;
+                return Ok(());
+            }
             if req.cwd.is_none() {
                 req.cwd = config.default_cwd().map(str::to_string);
             }
@@ -2792,6 +2928,7 @@ async fn handle_message_with_charge(
                 config.user.as_deref(),
                 config.security_profile,
                 workload_placement,
+                policy,
             ) {
                 Ok(session) => {
                     let reply = Message::with_payload(
@@ -2839,6 +2976,30 @@ async fn handle_message_with_charge(
                 && let Err(error) = session.enqueue_stdin(stdin.data, input_charge.take())
             {
                 encode_stdin_error(msg.id, &AgentdError::Io(error), out_buf)?;
+            }
+        }
+
+        MessageType::ExecOutputAck => {
+            let Some(ack) = decode_payload_or_core_error::<ExecOutputAck>(&msg, out_buf)? else {
+                return Ok(());
+            };
+            if let Some(session) = state.sessions.get(&msg.id)
+                && let Err(error) = session.acknowledge_output(ack.consumed)
+            {
+                eprintln!(
+                    "rejected exec output acknowledgement for {}: {error}",
+                    msg.id
+                );
+            }
+            if let Some(code) = state
+                .sessions
+                .get_mut(&msg.id)
+                .and_then(ExecSession::take_completed_exit)
+            {
+                let reply =
+                    Message::with_payload(MessageType::ExecExited, msg.id, &ExecExited { code })?;
+                codec::encode_to_buf(&reply, out_buf)?;
+                state.sessions.remove(&msg.id);
             }
         }
 
@@ -3363,6 +3524,19 @@ fn poll_pending_stdin(
     Poll::Pending
 }
 
+fn encode_exec_stdin_ack(
+    id: u32,
+    session: &mut ExecSession,
+    out_buf: &mut Vec<u8>,
+) -> AgentdResult<()> {
+    if let Some(consumed) = session.take_stdin_ack() {
+        let message =
+            Message::with_payload(MessageType::ExecStdinAck, id, &ExecStdinAck { consumed })?;
+        codec::encode_to_buf(&message, out_buf)?;
+    }
+    Ok(())
+}
+
 fn encode_stdin_error(id: u32, error: &AgentdError, out_buf: &mut Vec<u8>) -> AgentdResult<()> {
     let message =
         Message::with_payload(MessageType::ExecStdinError, id, &stdin_error_payload(error))?;
@@ -3637,6 +3811,7 @@ fn encode_core_error(
             kind,
             message,
             offending_type,
+            init_failure: None,
             workload_failure: None,
         },
     )
@@ -3677,6 +3852,7 @@ fn encode_workload_error(
             kind,
             message: error.to_string(),
             offending_type: Some(source.t.as_str().to_string()),
+            init_failure: None,
             workload_failure: Some(WorkloadFailure {
                 attempt_id: attempt_id.to_string(),
                 disposition,
@@ -3746,8 +3922,8 @@ fn errno_name(code: i32) -> Option<String> {
 }
 
 fn prepend_scripts_to_path(req: &mut microsandbox_protocol::exec::ExecRequest) {
-    // Check if the request already specifies PATH.
-    if let Some(entry) = req.env.iter_mut().find(|e| e.starts_with("PATH=")) {
+    // Entries apply in order, so the child sees the request's last PATH.
+    if let Some(entry) = req.env.iter_mut().rfind(|e| e.starts_with("PATH=")) {
         let existing = &entry["PATH=".len()..];
         *entry = format!("PATH={}", scripts_path(Some(existing)));
     } else {
@@ -3802,7 +3978,7 @@ fn read_exact_from_fd(
     label: &str,
 ) -> AgentdResult<()> {
     while !buf.is_empty() {
-        if !poll_fd_until(fd, libc::POLLIN, deadline)? {
+        if !poll_fd_until(fd, libc::POLLIN, Some(deadline))? {
             return Err(AgentdError::ExecSession(format!(
                 "timed out waiting for {label}"
             )));
@@ -3841,7 +4017,7 @@ fn wait_for_init_ack(
     boot_console: &mut BootConsoleState,
     deadline: Instant,
 ) -> AgentdResult<()> {
-    let msg = read_boot_message(fd, boot_console, deadline, "init ack")?;
+    let msg = read_boot_message(fd, boot_console, Some(deadline), "init ack")?;
     if msg.t == MessageType::InitAck {
         let _: InitAck = msg
             .payload()
@@ -3858,7 +4034,7 @@ fn wait_for_init_ack(
 fn read_boot_message(
     fd: i32,
     state: &mut BootConsoleState,
-    deadline: Instant,
+    deadline: Option<Instant>,
     context: &str,
 ) -> AgentdResult<Message> {
     let mut read_buf = [0u8; 4096];
@@ -3901,15 +4077,18 @@ fn read_boot_message(
     }
 }
 
-fn poll_fd_until(fd: i32, events: i16, deadline: Instant) -> AgentdResult<bool> {
+fn poll_fd_until(fd: i32, events: i16, deadline: Option<Instant>) -> AgentdResult<bool> {
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-
-        let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
-        let timeout_ms = if timeout_ms == 0 { 1 } else { timeout_ms };
+        let timeout_ms = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Ok(false);
+                }
+                remaining.as_millis().clamp(1, i32::MAX as u128) as i32
+            }
+            None => -1,
+        };
         let mut pfd = libc::pollfd {
             fd,
             events,
@@ -3940,7 +4119,7 @@ fn read_from_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<usize> {
     }
 }
 
-fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Instant) -> AgentdResult<()> {
+fn write_all_to_fd(fd: i32, mut buf: &[u8], deadline: Option<Instant>) -> AgentdResult<()> {
     while !buf.is_empty() {
         match write_to_fd(fd, buf) {
             Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
@@ -4111,7 +4290,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use microsandbox_protocol::message::PROTOCOL_VERSION;
+    use microsandbox_protocol::{exec::ExecLimits, message::PROTOCOL_VERSION};
 
     #[allow(clippy::too_many_arguments)]
     async fn handle_message(
@@ -4209,11 +4388,12 @@ mod tests {
 
     #[tokio::test]
     async fn transport_cut_waits_for_decoded_prefix_and_abort_is_owned_and_repeatable() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4339,6 +4519,7 @@ mod tests {
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -4576,6 +4757,7 @@ mod tests {
             };
             let mut activity = ActivityTracker::new();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -4778,11 +4960,132 @@ mod tests {
     }
 
     #[test]
+    fn init_failure_waits_for_failure_ack_after_late_success_ack() {
+        use std::io::{Read, Write};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        for ack_failure in [false, true] {
+            let (guest, mut host) = UnixStream::pair().unwrap();
+            host.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let guest = File::from(OwnedFd::from(guest));
+            let worker = std::thread::spawn(move || {
+                report_init_failure(
+                    &guest,
+                    &mut BootConsoleState::default(),
+                    "missing guest user",
+                    &AgentdError::UserNotFound("iggy".into()),
+                )
+            });
+            let mut header = [0u8; 4];
+            host.read_exact(&mut header).unwrap();
+            let mut frame = vec![0; u32::from_be_bytes(header) as usize];
+            host.read_exact(&mut frame).unwrap();
+            let mut input = header.to_vec();
+            input.extend_from_slice(&frame);
+            let report = codec::try_decode_from_buf(&mut input).unwrap().unwrap();
+            assert_eq!(report.t, MessageType::CoreError);
+            assert_eq!(
+                report.payload::<CoreError>().unwrap().init_failure,
+                Some(InitFailureReason::UserNotFound)
+            );
+            assert_eq!(
+                report.payload::<CoreError>().unwrap().message,
+                "missing guest user"
+            );
+
+            let mut acks = Vec::new();
+            for failure in [false].into_iter().chain(ack_failure.then_some(true)) {
+                codec::encode_to_buf(
+                    &Message::with_payload(MessageType::InitAck, 0, &InitAck { failure }).unwrap(),
+                    &mut acks,
+                )
+                .unwrap();
+            }
+            host.write_all(&acks).unwrap();
+            host.shutdown(std::net::Shutdown::Write).unwrap();
+            assert_eq!(worker.join().unwrap().is_ok(), ack_failure);
+        }
+    }
+
+    #[test]
+    fn init_failure_waits_for_slow_supporting_host_but_bounds_legacy_wait() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        for supported in [false, true] {
+            let (guest, mut host) = UnixStream::pair().unwrap();
+            let guest = File::from(OwnedFd::from(guest));
+            let mut bootstrap = Vec::new();
+            codec::encode_to_buf(
+                &Message::with_payload(
+                    MessageType::Bootstrap,
+                    0,
+                    &GuestBootstrap {
+                        init_failure_ack: supported,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+                &mut bootstrap,
+            )
+            .unwrap();
+            host.write_all(&bootstrap).unwrap();
+            let (done_tx, done_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let (_, mut state) = receive_bootstrap(&guest).unwrap();
+                let result = report_init_failure(
+                    &guest,
+                    &mut state,
+                    "missing user",
+                    &AgentdError::UserNotFound("iggy".into()),
+                );
+                done_tx.send(result).unwrap();
+            });
+            let report = read_boot_message(
+                host.as_raw_fd(),
+                &mut BootConsoleState::default(),
+                Some(Instant::now() + std::time::Duration::from_secs(5)),
+                "startup error",
+            )
+            .unwrap();
+            assert_eq!(report.t, MessageType::CoreError);
+
+            let result = done_rx.recv_timeout(std::time::Duration::from_secs(3));
+            if supported {
+                assert!(
+                    matches!(result, Err(mpsc::RecvTimeoutError::Timeout)),
+                    "supporting host must be allowed to save beyond the legacy timeout"
+                );
+                let mut ack = Vec::new();
+                codec::encode_to_buf(
+                    &Message::with_payload(MessageType::InitAck, 0, &InitAck { failure: true })
+                        .unwrap(),
+                    &mut ack,
+                )
+                .unwrap();
+                host.write_all(&ack).unwrap();
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+            } else {
+                assert!(result.expect("legacy host wait must be bounded").is_err());
+            }
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn coalesced_bootstrap_and_init_ack_retain_the_second_frame() {
         let bootstrap = GuestBootstrap::default();
         let bootstrap_message =
             Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
-        let ack_message = Message::with_payload(MessageType::InitAck, 0, &InitAck {}).unwrap();
+        let ack_message =
+            Message::with_payload(MessageType::InitAck, 0, &InitAck::default()).unwrap();
         let mut state = BootConsoleState::default();
         codec::encode_to_buf(&bootstrap_message, &mut state.input).unwrap();
         codec::encode_to_buf(&ack_message, &mut state.input).unwrap();
@@ -4790,7 +5093,7 @@ mod tests {
         let decoded = read_boot_message(
             -1,
             &mut state,
-            Instant::now() + std::time::Duration::from_secs(1),
+            Some(Instant::now() + std::time::Duration::from_secs(1)),
             "guest bootstrap",
         )
         .unwrap();
@@ -4975,9 +5278,11 @@ mod tests {
 
         let (mut control_source, control) = UnixStream::pair().unwrap();
         control.set_nonblocking(true).unwrap();
-        let control = AsyncFd::new(control).unwrap();
+        // SAFETY: UnixStream owns a stable descriptor for the lifetime of AsyncFd.
+        let control = unsafe { AsyncFd::register(control) }.unwrap();
         let (pipe_reader, pipe_writer) = nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).unwrap();
-        let pipe_writer = AsyncFd::new(pipe_writer).unwrap();
+        // SAFETY: OwnedFd keeps the descriptor open and unchanged until AsyncFd drops it.
+        let pipe_writer = unsafe { AsyncFd::register(pipe_writer) }.unwrap();
         // Prime the reactor, then clear the pipe's cached writable event with a real EAGAIN.
         let mut writable = pipe_writer.writable().await.unwrap();
         loop {
@@ -5478,13 +5783,12 @@ mod tests {
     }
     #[tokio::test]
     async fn restore_thaw_checks_ownership_is_idempotent_and_leaves_source_clients_alone() {
-        use microsandbox_protocol::core::WorkloadThawMode;
-
         let mut state = AgentState::default();
         let (mut sender, _output) = SessionOutputSender::channel();
         let mut activity = ActivityTracker::new();
         let heartbeat = heartbeat::HeartbeatControl::default();
         let config = AgentdConfig {
+            exec_limits: None,
             user: None,
             security_profile: Default::default(),
             default_cwd: None,
@@ -5607,7 +5911,7 @@ mod tests {
 
     #[tokio::test]
     async fn saturated_stdin_allows_thaw_and_preserves_input_and_eof() {
-        use microsandbox_protocol::core::WorkloadThawMode::{Continue, Restore};
+        use WorkloadThawMode::{Continue, Restore};
 
         // SIGSTOP provides a deterministic blocked pipe/PTY without a privileged cgroup mount.
         // Thaw must complete before external consumer progress, then accepted data drains exactly
@@ -5635,6 +5939,7 @@ mod tests {
             let mut activity = ActivityTracker::new();
             let heartbeat = heartbeat::HeartbeatControl::default();
             let config = AgentdConfig {
+                exec_limits: None,
                 user: None,
                 security_profile: Default::default(),
                 default_cwd: None,
@@ -5643,6 +5948,7 @@ mod tests {
             let mut workload = crate::workload::tests::fake_latch();
             workload.freeze("stdin-cut").unwrap();
             let request = ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
@@ -5667,6 +5973,7 @@ mod tests {
                 sender.clone(),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -5831,6 +6138,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_releases_completed_sessions_with_unread_output() {
+        for tty in [false, true] {
+            let mut state = AgentState::default();
+            let (mut sender, mut output) = SessionOutputSender::channel();
+            let mut activity = ActivityTracker::new();
+            let heartbeat = heartbeat::HeartbeatControl::default();
+            let mut workload = WorkloadLatch::unavailable("test process has no workload cgroup");
+            let config = AgentdConfig {
+                exec_limits: Some(ExecLimits {
+                    max_executions: 1,
+                    ..Default::default()
+                }),
+                user: None,
+                security_profile: Default::default(),
+                default_cwd: None,
+                default_env: Vec::new(),
+            };
+            let request = ExecRequest {
+                security: None,
+                cmd: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf retained".into()],
+                env: vec![],
+                cwd: None,
+                user: None,
+                tty,
+                rows: 24,
+                cols: 80,
+                rlimits: vec![],
+            };
+            let mut encoded = Vec::new();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 1, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            let reply = decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice()));
+            assert_eq!(reply.t, MessageType::ExecStarted, "{reply:?}");
+
+            // Consume the reader's real exit event, but leave its output unacknowledged.
+            time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let envelope = output.recv().await.unwrap();
+                    if let SessionOutput::Exited(code) = envelope.output {
+                        assert_eq!(state.sessions.get_mut(&1).unwrap().finish(code), None);
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+            restore_client_state(&mut state, &mut sender).await.unwrap();
+            encoded.clear();
+            handle_message(
+                Message::with_payload(MessageType::ExecRequest, 2, &request).unwrap(),
+                &mut state,
+                &mut activity,
+                &mut sender,
+                &mut encoded,
+                &config,
+                &mut workload,
+                &heartbeat,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                decode_reply_skipping_credit(&mut BytesMut::from(encoded.as_slice())).t,
+                MessageType::ExecStarted,
+                "completed inherited output leaked the only execution slot"
+            );
+            assert!(state.detached_sessions.is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn restore_detaches_piped_and_pty_workloads_without_killing_or_reusing_output() {
         for tty in [false, true] {
             let mut state = AgentState::default();
@@ -5849,6 +6238,7 @@ mod tests {
             )
             .unwrap();
             let request = |script: &str| ExecRequest {
+                security: None,
                 cmd: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
                 env: vec![],
@@ -5865,6 +6255,7 @@ mod tests {
                 sender.with_incarnation(Some(old_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -5900,6 +6291,7 @@ mod tests {
                 sender.with_incarnation(Some(new_owner)),
                 None,
                 crate::config::SecurityProfile::Default,
+                None,
                 None,
             )
             .unwrap();
@@ -6163,5 +6555,29 @@ mod tests {
         publish_bulk_activity(&sender, &mut pending).unwrap();
         assert_eq!(receiver.try_recv().unwrap().fs_bytes, 17);
         assert_eq!(pending.fs_bytes, 0);
+    }
+
+    #[test]
+    fn scripts_dir_goes_on_the_last_path_entry() {
+        let mut req = ExecRequest {
+            security: None,
+            cmd: "/bin/true".into(),
+            args: vec![],
+            env: vec!["PATH=/first".into(), "PATH=/last".into()],
+            cwd: None,
+            user: None,
+            tty: false,
+            rows: 24,
+            cols: 80,
+            rlimits: vec![],
+        };
+        prepend_scripts_to_path(&mut req);
+        assert_eq!(
+            req.env,
+            vec![
+                "PATH=/first".to_string(),
+                format!("PATH={}:/last", microsandbox_protocol::SCRIPTS_PATH),
+            ]
+        );
     }
 }

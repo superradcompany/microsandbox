@@ -1,4 +1,5 @@
-import { UnsupportedError } from "./errors.js";
+import { UnsupportedError, UnsupportedOperationError } from "./errors.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
 import type {
   NapiSnapshotHandle,
@@ -110,6 +111,16 @@ export class SnapshotHandle {
       (this.inner as NapiSnapshotHandle).open(),
     );
     return new Snapshot(raw);
+  }
+
+  /** Observe artifact storage on the captured backend; list-only records must be fetched first. */
+  async storageUsage(): Promise<StorageItemUsage> {
+    if (typeof (this.inner as NapiSnapshotHandle).open !== "function") {
+      throw new UnsupportedOperationError(
+        "SnapshotHandle.storageUsage() requires a native handle; fetch it with Snapshot.get() first.",
+      );
+    }
+    return storageUsageFromHandle(this.inner as NapiSnapshotHandle, "SnapshotHandle.storageUsage()");
   }
 
   /**

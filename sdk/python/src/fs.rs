@@ -309,7 +309,7 @@ impl PyFsWriteSink {
 
     fn __aenter__<'py>(slf: Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let obj: PyObject = slf.into();
+        let obj: Py<PyAny> = slf.into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(obj) })
     }
 
@@ -370,7 +370,7 @@ pub struct PyFsMetadata {
 #[pymethods]
 impl PyFsEntry {
     #[getter]
-    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "FsEntryKind", &self.kind)
     }
 }
@@ -378,7 +378,7 @@ impl PyFsEntry {
 #[pymethods]
 impl PyFsMetadata {
     #[getter]
-    fn kind(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn kind(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         str_enum_member(py, "FsEntryKind", &self.kind)
     }
 }

@@ -67,7 +67,7 @@ For defense-in-depth *inside* the guest, opt into the **restricted security prof
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
     .image("python")
-    .user("app")
+    .user("1000:1000")
     .security("restricted")
     .create();
 ```
@@ -77,7 +77,7 @@ use microsandbox::{Sandbox, SecurityProfile};
 
 let sb = Sandbox::builder("worker")
     .image("python")
-    .user("app")
+    .user("1000:1000")
     .security(SecurityProfile::Restricted)
     .create()
     .await?;
@@ -89,21 +89,29 @@ from microsandbox import Sandbox, SecurityProfile
 sb = await Sandbox.create(
     "worker",
     image="python",
-    user="app",
-    security_profile=SecurityProfile.RESTRICTED,
+    user="1000:1000",
+    security=SecurityProfile.RESTRICTED,
 )
 ```
 
 ```go Go
 sb, err := m.CreateSandbox(ctx, "worker",
     m.WithImage("python"),
-    m.WithUser("app"),
+    m.WithUser("1000:1000"),
     m.WithSecurityProfile(m.SecurityProfileRestricted),
 )
 ```
 
+```ruby Ruby
+sb = Microsandbox::Sandbox.create(
+  "worker", image: "python", user: "1000:1000"
+)
+# Ruby supports the non-root user option, but does not expose
+# the restricted security-profile option shown in the other tabs.
+```
+
 ```bash CLI
-msb create python --name worker --user app --security restricted
+msb create python --name worker --user 1000:1000 --security restricted
 ```
 </CodeGroup>
 

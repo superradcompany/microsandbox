@@ -93,7 +93,7 @@ pub enum BackendSelectionSource {
     /// Selected explicitly by `MSB_BACKEND`.
     #[serde(rename = "MSB_BACKEND")]
     MsbBackend,
-    /// Selected implicitly by a non-empty `MSB_API_KEY`.
+    /// Legacy diagnostic value. API credentials no longer select a backend.
     #[serde(rename = "MSB_API_KEY")]
     MsbApiKey,
     /// Selected by the profile named in `MSB_PROFILE`.
@@ -130,6 +130,21 @@ pub struct BackendInfo {
 //--------------------------------------------------------------------------------------------------
 
 impl BackendKind {
+    pub(crate) fn is_available(self) -> bool {
+        match self {
+            Self::Local => cfg!(feature = "local"),
+            Self::Cloud => cfg!(feature = "cloud"),
+        }
+    }
+
+    pub(crate) fn require_available(self) -> crate::MicrosandboxResult<()> {
+        if self.is_available() {
+            Ok(())
+        } else {
+            Err(crate::config::backend::feature_disabled(self.as_str()))
+        }
+    }
+
     /// Stable lowercase name used by language bindings and diagnostics.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -208,7 +223,8 @@ pub fn default_backend() -> Arc<dyn Backend> {
 ///
 /// Like [`default_backend`], the first call freezes ambient environment and
 /// profile resolution for the process.
-pub fn default_backend_info() -> BackendInfo {
+/// Returns the configuration error if the selected backend could not be constructed.
+pub fn default_backend_info() -> crate::MicrosandboxResult<BackendInfo> {
     default_backend().info()
 }
 
@@ -261,6 +277,17 @@ mod tests {
         // check the kind is one of the known variants.
         let b = default_backend();
         assert!(matches!(b.kind(), BackendKind::Local | BackendKind::Cloud));
+    }
+
+    #[tokio::test]
+    async fn backend_info_preserves_configuration_errors() {
+        let backend: Arc<dyn Backend> = Arc::new(misconfigured::ConfigurationErrorBackend::new(
+            crate::MicrosandboxError::InvalidConfig("local backend is prohibited".into()),
+        ));
+        let error = with_backend(backend, async { default_backend_info() })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("local backend is prohibited"));
     }
 
     #[tokio::test]

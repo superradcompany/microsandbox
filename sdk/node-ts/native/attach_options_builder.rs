@@ -117,27 +117,30 @@ impl JsAttachOptionsBuilder {
     }
 
     #[napi]
-    pub fn rlimit(&mut self, resource: String, limit: u32) -> Result<&Self> {
+    pub fn rlimit(&mut self, resource: String, limit: f64) -> Result<&Self> {
+        let limit = crate::numeric::safe_integer(limit, "limit")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit(res, limit as u64));
+        self.inner = Some(prev.rlimit(res, limit));
         self.rlimits.push(JsRlimit {
             resource,
-            soft: limit,
-            hard: limit,
+            soft: limit as f64,
+            hard: limit as f64,
         });
         Ok(self)
     }
 
     #[napi(js_name = "rlimitRange")]
-    pub fn rlimit_range(&mut self, resource: String, soft: u32, hard: u32) -> Result<&Self> {
+    pub fn rlimit_range(&mut self, resource: String, soft: f64, hard: f64) -> Result<&Self> {
+        let soft = crate::numeric::safe_integer(soft, "soft")?;
+        let hard = crate::numeric::safe_integer(hard, "hard")?;
         let res = parse_rlimit_resource(&resource)?;
         let prev = self.take_inner();
-        self.inner = Some(prev.rlimit_range(res, soft as u64, hard as u64));
+        self.inner = Some(prev.rlimit_range(res, soft, hard));
         self.rlimits.push(JsRlimit {
             resource,
-            soft,
-            hard,
+            soft: soft as f64,
+            hard: hard as f64,
         });
         Ok(self)
     }

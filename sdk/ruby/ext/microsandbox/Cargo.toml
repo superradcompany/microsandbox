@@ -1,8 +1,8 @@
 [package]
 name = "microsandbox-ruby"
-version = "0.7.6"
+version = "0.7.11"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Ruby bindings for the microsandbox Rust SDK."
 license = "Apache-2.0"
 repository = "https://github.com/superradcompany/microsandbox"
@@ -22,5 +22,8 @@ strip = false
 
 [dependencies]
 magnus = "0.8.2"
-microsandbox_core = { package = "microsandbox", version = "=0.7.6", default-features = false, features = ["cloud", "local", "net", "ssh"] }
+microsandbox_core = { package = "microsandbox", version = "=0.7.11", default-features = false, features = ["cloud", "local", "net", "ssh"] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "time"] }
+serde = "1"
+serde_json = "1"
+futures = "0.3"

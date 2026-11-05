@@ -96,9 +96,13 @@ func (s *Sandbox) Exec(ctx context.Context, cmd string, args []string, opts ...E
 	}, nil
 }
 
-// Shell runs `/bin/sh -c command` in the sandbox. This call blocks until the command exits.
+// Shell runs command with the configured shell (default /bin/sh) and waits for exit.
 func (s *Sandbox) Shell(ctx context.Context, command string, opts ...ExecOption) (*ExecOutput, error) {
-	return s.Exec(ctx, "/bin/sh", []string{"-c", command}, opts...)
+	shell, err := s.inner.ShellPath(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return s.Exec(ctx, shell, []string{"-c", command}, opts...)
 }
 
 // ExecEventKind identifies what an ExecEvent carries.
@@ -293,10 +297,14 @@ func (s *Sandbox) ExecDefaultStream(ctx context.Context, opts ...ExecOption) (*E
 	return &ExecHandle{inner: handle}, nil
 }
 
-// ShellStream runs `/bin/sh -c command` with streaming output.
+// ShellStream runs command with the configured shell (default /bin/sh) and streams output.
 //
 // This call is nonblocking, the handle returns immediately and the stream starts
 // in the background.
 func (s *Sandbox) ShellStream(ctx context.Context, command string, opts ...ExecOption) (*ExecHandle, error) {
-	return s.ExecStream(ctx, "/bin/sh", []string{"-c", command}, opts...)
+	shell, err := s.inner.ShellPath(ctx)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return s.ExecStream(ctx, shell, []string{"-c", command}, opts...)
 }

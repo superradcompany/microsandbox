@@ -5,7 +5,7 @@
     "url": "git+https://github.com/superradcompany/microsandbox.git",
     "directory": "packages/control-client/typescript"
   },
-  "version": "0.7.6",
+  "version": "0.7.11",
   "type": "module",
   "license": "Apache-2.0",
   "engines": { "node": ">=22" },
@@ -20,12 +20,12 @@
     "test": "vitest run tests --no-file-parallelism"
   },
   "dependencies": {
-    "@microsandbox/protocol-client": "0.7.6",
-    "@microsandbox/types": "0.7.6"
+    "@microsandbox/protocol-client": "0.7.11",
+    "@microsandbox/types": "0.7.11"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
     "typescript": "^5.6",
-    "vitest": "^4.1"
+    "vitest": "^4.1.12"
   }
 }

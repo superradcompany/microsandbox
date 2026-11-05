@@ -25,7 +25,7 @@ jobs:
         with:
           toolchain: nightly
 
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: cargo-fuzz
 
@@ -47,7 +47,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: sdk/rust/fuzz/artifacts/

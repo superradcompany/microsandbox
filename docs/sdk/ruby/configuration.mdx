@@ -1,0 +1,204 @@
+---
+title: Configuration
+"og:title": Ruby SDK Configuration reference
+description: Select a backend and configure the local runtime with the Ruby SDK.
+---
+
+See [Runtime setup](/sdk/setup) and [Cloud](/cloud/overview) for setup examples.
+
+## Microsandbox
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">version</span>
+
+```ruby
+Microsandbox.version # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">SDK version.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">installed?</span>
+
+```ruby
+Microsandbox.installed? # => Boolean
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Whether a complete local runtime installation is available.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">install()</span>
+
+```ruby
+Microsandbox.install # => nil
+```
+
+Install the local runtime using the global configuration.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">default_backend_kind</span>
+
+```ruby
+Microsandbox.default_backend_kind # => String
+```
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Current backend: local or cloud.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_local_backend!()</span>
+
+```ruby
+Microsandbox.use_local_backend! # => nil
+```
+
+Select the local backend for subsequent operations.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">set_runtime_msb_path()</span>
+
+```ruby
+Microsandbox.set_runtime_msb_path(path) # => nil
+```
+
+Override the process-wide msb path. Set it before creating local sandboxes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path to the runtime executable.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">set_runtime_libkrunfw_path()</span>
+
+```ruby
+Microsandbox.set_runtime_libkrunfw_path(path) # => nil
+```
+
+Override the process-wide libkrunfw path. Set it before creating local sandboxes.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>path</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Path to the kernel firmware library.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_cloud_backend!()</span>
+
+```ruby
+Microsandbox.use_cloud_backend!(api_key, url: nil) # => nil
+```
+
+<Accordion title="Example">
+
+```ruby
+Microsandbox.use_cloud_backend!(ENV.fetch("MSB_API_KEY"))
+```
+
+</Accordion>
+
+Select the cloud backend for subsequent operations.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>api_key</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Cloud API key.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>url</code><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Optional API URL; nil uses the default cloud endpoint.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox.</span><span className="msb-hn">use_cloud_profile!()</span>
+
+```ruby
+Microsandbox.use_cloud_profile!(name) # => nil
+```
+
+Select a named cloud profile.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Configured cloud profile name.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><span className="msb-type">nil</span></div>
+    <div className="msb-param-desc">No return value.</div>
+  </div>
+</div>

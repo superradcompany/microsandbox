@@ -95,6 +95,10 @@ pub struct NetworkConfig {
     #[serde(rename = "max_connections", alias = "max_tcp_connections")]
     pub max_tcp_connections: Option<ConnectionLimit>,
 
+    /// Active inbound TCP connection cap across published ports. Omitted uses the runtime default; zero is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inbound_tcp_connections: Option<ConnectionLimit>,
+
     /// UDP relay session cap. Omitted is unlimited for single-tenant and 1024 for multi-tenant; zero means unlimited.
     #[serde(default)]
     pub max_udp_connections: Option<ConnectionLimit>,
@@ -329,6 +333,7 @@ impl Default for NetworkConfig {
             max_tcp_connections: None,
             max_udp_connections: None,
             tcp_accept_queue_size: None,
+            max_inbound_tcp_connections: None,
             rate_limiter: None,
             nat64_prefixes: default_nat64_prefixes(),
             trust_host_cas: false,
@@ -511,30 +516,82 @@ mod tests {
 
     #[test]
     fn http_config_uses_nested_wire_contract() {
-        for (raw, expected) in [
-            (r#"{}"#, None),
-            (r#"{"http":{}}"#, None),
-            (r#"{"http":{"deny_message":null}}"#, None),
-            (r#"{"http":{"deny_message":""}}"#, Some("")),
+        let defaults = NetworkConfig::default();
+        assert!(defaults.http.deny_response);
+        assert_eq!(
+            defaults.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        let wire = serde_json::to_value(&defaults).unwrap();
+        let restored: NetworkConfig = serde_json::from_value(wire).unwrap();
+        assert!(restored.http.deny_response);
+        assert_eq!(
+            restored.http.deny_response_format,
+            microsandbox_types::HttpDenyResponseFormat::Json
+        );
+        for (raw, enabled, format) in [
             (
-                r#"{"http":{"deny_message":"blocked {host}"}}"#,
-                Some("blocked {host}"),
+                r#"{}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{}}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{"deny_response":false}}"#,
+                false,
+                microsandbox_types::HttpDenyResponseFormat::Json,
+            ),
+            (
+                r#"{"http":{"deny_response_format":"text"}}"#,
+                true,
+                microsandbox_types::HttpDenyResponseFormat::Text,
             ),
         ] {
             let config: NetworkConfig = serde_json::from_str(raw).unwrap();
-            assert_eq!(config.http.deny_message.as_deref(), expected);
-            assert!(!config.http.deny_response);
+            let spec: microsandbox_types::NetworkSpec = serde_json::from_str(raw).unwrap();
+            for http in [config.http, spec.http] {
+                assert_eq!(http.deny_response, enabled, "{raw}");
+                assert_eq!(http.deny_response_format, format, "{raw}");
+            }
+        }
+        for (raw, expected) in [
+            (r#"{}"#, None),
+            (r#"{"http":{}}"#, None),
+            (r#"{"http":{"network_deny_message":null}}"#, None),
+            (r#"{"http":{"network_deny_message":""}}"#, Some("")),
+            (
+                r#"{"http":{"network_deny_message":"blocked {host}"}}"#,
+                Some("blocked {host}"),
+            ),
+        ] {
+            let mut input: serde_json::Value = serde_json::from_str(raw).unwrap();
+            input["http"]["secret_deny_message"] = serde_json::json!("Check secret access.");
+            let config: NetworkConfig = serde_json::from_value(input).unwrap();
+            assert_eq!(config.http.network_deny_message.as_deref(), expected);
+            assert_eq!(
+                config.http.secret_deny_message.as_deref(),
+                Some("Check secret access.")
+            );
+            assert!(config.http.deny_response);
             let wire = serde_json::to_value(&config).unwrap();
             assert!(wire.get("http_deny_message").is_none());
             assert_eq!(
-                wire["http"].get("deny_message"),
+                wire["http"].get("network_deny_message"),
                 expected.map(serde_json::Value::from).as_ref()
             );
             let spec: microsandbox_types::NetworkSpec = serde_json::from_value(wire).unwrap();
-            assert_eq!(spec.http.deny_message.as_deref(), expected);
+            assert_eq!(spec.http.network_deny_message.as_deref(), expected);
             let restored: NetworkConfig =
                 serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
-            assert_eq!(restored.http.deny_message.as_deref(), expected);
+            assert_eq!(restored.http.network_deny_message.as_deref(), expected);
+            assert_eq!(
+                restored.http.secret_deny_message.as_deref(),
+                Some("Check secret access.")
+            );
         }
     }
 
@@ -569,6 +626,42 @@ mod tests {
             serde_json::json!({
                 "protocol": "socks5",
                 "address": "127.0.0.1:1080",
+            })
+        );
+
+        let round_tripped: NetworkConfig =
+            serde_json::from_value(serde_json::to_value(&wire).unwrap()).unwrap();
+        assert_eq!(round_tripped.outbound_proxy, config.outbound_proxy);
+    }
+
+    #[test]
+    fn http_connect_credentials_round_trip_through_wire_network_spec() {
+        use crate::proxy::{OutboundProxyBuilder, OutboundProxyConfig};
+
+        let config = NetworkConfig {
+            outbound_proxy: Some(
+                OutboundProxyBuilder::new()
+                    .http_connect("127.0.0.1:3128")
+                    .credentials(
+                        "sandbox",
+                        microsandbox_types::SecretSource::env("HTTP_CONNECT_PASSWORD"),
+                    )
+                    .build()
+                    .unwrap(),
+            ),
+            ..NetworkConfig::default()
+        };
+
+        let wire: microsandbox_types::NetworkSpec =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(
+            wire.outbound_proxy,
+            Some(microsandbox_types::OutboundProxy::HttpConnect {
+                address: "127.0.0.1:3128".to_string(),
+                credentials: Some(microsandbox_types::HttpConnectCredentials {
+                    username: "sandbox".to_string(),
+                    password: microsandbox_types::SecretSource::env("HTTP_CONNECT_PASSWORD"),
+                }),
             })
         );
 
@@ -693,6 +786,26 @@ mod tests {
 #[cfg(test)]
 mod connection_limit_tests {
     use super::*;
+
+    #[test]
+    fn published_tcp_limits_preserve_intent_through_saved_spec() {
+        for cap in [None, Some(0), Some(4096)] {
+            let wire = serde_json::json!({"max_inbound_tcp_connections": cap});
+            let config: NetworkConfig = serde_json::from_value(wire).unwrap();
+            let spec: microsandbox_types::NetworkSpec =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(spec.max_inbound_tcp_connections, cap);
+            let back: NetworkConfig =
+                serde_json::from_value(serde_json::to_value(spec).unwrap()).unwrap();
+            assert_eq!(
+                back.max_inbound_tcp_connections,
+                cap.map(ConnectionLimit::from)
+            );
+        }
+
+        let omitted = serde_json::to_value(NetworkConfig::default()).unwrap();
+        assert!(omitted.get("max_inbound_tcp_connections").is_none());
+    }
 
     #[test]
     fn wire_connection_limits_preserve_default_and_unlimited_through_spec() {

@@ -60,6 +60,16 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          unsigned char *buf,
                          uintptr_t buf_len);
 
+/**
+ * Capability marker for published-port modification in the Go bindings.
+ */
+bool msb_supports_port_modification(void);
+
+/**
+ * Capability marker for secret policy modification in the Go bindings.
+ */
+bool msb_supports_secret_policy_modification(void);
+
 char *msb_sandbox_lookup(uint64_t cancel_id,
                          const char *name,
                          unsigned char *buf,
@@ -1063,6 +1073,24 @@ char *msb_creation_progress_recv(uint64_t cancel_id,
 char *msb_creation_progress_close(uint64_t id, unsigned char *buf, uintptr_t len);
 
 /**
+ * Return the configured shell from the bound sandbox, including connected/restored handles.
+ */
+char *msb_sandbox_shell_path(uint64_t cancel_id,
+                             Handle handle,
+                             unsigned char *buf,
+                             uintptr_t buf_len);
+
+/**
+ * Run a cancellable managed-job operation. Cancellation never terminates a job.
+ * The caller supplies borrowed request text and a writable output buffer.
+ */
+char *msb_jobs(uint64_t cancel_id,
+               uint64_t sandbox_handle,
+               const char *request,
+               unsigned char *buf,
+               uintptr_t buf_len);
+
+/**
  * Restore a detached sandbox through a dedicated C entry point.
  */
 char *msb_sandbox_restore(uint64_t cancel_id,
@@ -1080,6 +1108,27 @@ char *msb_sandbox_restore(uint64_t cancel_id,
 char *msb_runtime_setup(uint64_t cancel_id,
                         const char *operation,
                         const char *config_json,
+                        const char *options_json,
+                        unsigned char *buf,
+                        uintptr_t buf_len);
+
+/**
+ * Observe one live sandbox through its retained native backend and stable identity.
+ */
+char *msb_sandbox_storage_usage(uint64_t cancel_id,
+                                uint64_t handle,
+                                unsigned char *buf,
+                                uintptr_t buf_len);
+
+/**
+ * Observe the selected backend's storage, returning the shared Rust report as JSON.
+ */
+char *msb_storage_usage(uint64_t cancel_id, unsigned char *buf, uintptr_t buf_len);
+
+/**
+ * Prune unused runtime RAM using explicit JSON options; no interactive confirmation is performed.
+ */
+char *msb_storage_prune(uint64_t cancel_id,
                         const char *options_json,
                         unsigned char *buf,
                         uintptr_t buf_len);

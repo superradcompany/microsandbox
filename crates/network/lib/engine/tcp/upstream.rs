@@ -57,10 +57,7 @@ impl UpstreamTcpTarget {
         shared: &SharedState,
         outbound_proxy: Option<&ResolvedOutboundProxy>,
     ) -> io::Result<TcpStream> {
-        let result = match outbound_proxy {
-            Some(proxy) => proxy.connect(self.primary).await,
-            None => self.dial().await,
-        };
+        let result = self.open(outbound_proxy).await;
         let stream = match result {
             Ok(stream) => stream,
             Err(error) => {
@@ -74,6 +71,17 @@ impl UpstreamTcpTarget {
         proxy_connect.mark_connected();
 
         Ok(stream)
+    }
+
+    /// Dial directly or through `outbound_proxy`, leaving status updates to the caller.
+    pub(crate) async fn open(
+        self,
+        outbound_proxy: Option<&ResolvedOutboundProxy>,
+    ) -> io::Result<TcpStream> {
+        match outbound_proxy {
+            Some(proxy) => proxy.connect(self.primary).await,
+            None => self.dial().await,
+        }
     }
 
     async fn dial(self) -> io::Result<TcpStream> {

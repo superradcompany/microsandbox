@@ -7,13 +7,16 @@
 pub(crate) mod handle;
 pub(crate) mod launch_contract;
 mod launch_input;
+mod lifecycle;
 #[cfg(feature = "net")]
 mod network_slot;
 pub(crate) mod owned_volumes;
 #[cfg(windows)]
 pub(crate) mod ownership;
+mod sockets;
 // The pure identity helpers stay compiled (and unit-tested) on every platform;
 // only Windows has call sites outside the tests.
+pub(crate) mod protected_state;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) mod reap;
 pub(crate) mod spawn;
@@ -23,13 +26,11 @@ pub(crate) mod spawn;
 //--------------------------------------------------------------------------------------------------
 
 pub use handle::ProcessHandle;
-pub use spawn::{SpawnMode, spawn_sandbox};
-pub(crate) use spawn::{
-    acquire_sandbox_lifecycle_guard, ensure_named_volumes, remove_sandbox_socket_artifacts_at,
-    remove_sandbox_socket_artifacts_for, resolve_sandbox_agent_socket_path,
-    resolve_sandbox_agent_socket_path_for, rollback_created_named_volumes,
-    sandbox_agent_socket_path_candidates, sandbox_agent_socket_path_candidates_for,
+pub(crate) use lifecycle::acquire_sandbox_lifecycle_guard;
+pub(crate) use sockets::{
+    default_agent_socket_paths, remove_socket_artifacts_at, resolve_agent_socket_path,
 };
+pub use spawn::{SpawnMode, spawn_sandbox};
 
 /// Resolve the host-side path of a sandbox's agentd relay socket by name.
 ///
@@ -43,5 +44,5 @@ pub(crate) use spawn::{
 /// The path is derived from `name` and the configured home; the sandbox need
 /// not be running.
 pub fn agent_socket_path(name: &str) -> crate::MicrosandboxResult<std::path::PathBuf> {
-    resolve_sandbox_agent_socket_path(name)
+    resolve_agent_socket_path(name)
 }

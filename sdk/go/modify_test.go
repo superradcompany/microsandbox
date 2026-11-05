@@ -270,3 +270,161 @@ func TestParseModificationPlan(t *testing.T) {
 		t.Fatalf("resize status = %+v", plan.ResizeStatus)
 	}
 }
+
+func TestModifyPortWireDefaultsAndExplicitRemoval(t *testing.T) {
+	out := marshalModifyRequest(t, ModifyOptions{
+		Ports:       []PortBinding{{HostPort: 8080, GuestPort: 80}},
+		PortsRemove: []PortEndpoint{{Bind: "::1", HostPort: 5353, Protocol: PortProtocolUDP}},
+	})
+	patch := out["patch"].(map[string]any)
+	port := patch["ports"].([]any)[0].(map[string]any)
+	if port["host_bind"] != "127.0.0.1" || port["protocol"] != "tcp" || port["guest_port"] != float64(80) {
+		t.Fatalf("unexpected port wire mapping: %v", port)
+	}
+	removal := patch["ports_remove"].([]any)[0].(map[string]any)
+	if removal["host_bind"] != "::1" || removal["protocol"] != "udp" || removal["host_port"] != float64(5353) {
+		t.Fatalf("unexpected removal: %v", removal)
+	}
+	if _, present := removal["guest_port"]; present {
+		t.Fatal("removal must not include a guest destination")
+	}
+}
+
+func secretWire(t *testing.T, spec SecretModifySpec) map[string]any {
+	t.Helper()
+	out := marshalModifyRequest(t, ModifyOptions{
+		Secrets: map[string]SecretModifySpec{"API_KEY": spec},
+	})
+	return out["patch"].(map[string]any)["secrets"].([]any)[0].(map[string]any)
+}
+
+func TestModifyRequestJSONSecretPolicyFields(t *testing.T) {
+	headers := false
+	requireTLS := false
+	entry := secretWire(t, SecretModifySpec{
+		Substitution: &SecretSubstitution{
+			Headers:      &headers,
+			HeaderFields: []string{"authorization"},
+			Query:        true,
+			Body:         true,
+		},
+		AllowPlaceholderFor: []string{"echo.example.com"},
+		ViolationAction:     ViolationActionBlockAndTerminate,
+		RequireTLSIdentity:  &requireTLS,
+	})
+
+	sub := entry["substitution"].(map[string]any)
+	if sub["headers"] != false || sub["query"] != true || sub["body"] != true {
+		t.Fatalf("substitution = %v", sub)
+	}
+	fields := sub["header_fields"].([]any)
+	if len(fields) != 1 || fields[0] != "authorization" {
+		t.Fatalf("header_fields = %v", sub["header_fields"])
+	}
+	passthrough := entry["passthrough_hosts"].([]any)
+	if len(passthrough) != 1 || passthrough[0] != "echo.example.com" {
+		t.Fatalf("passthrough_hosts = %v", entry["passthrough_hosts"])
+	}
+	if _, present := entry["allow_placeholder_for"]; present {
+		t.Fatalf("AllowPlaceholderFor must be sent as passthrough_hosts; got %v", entry)
+	}
+	if entry["violation_action"] != "block-and-terminate" {
+		t.Fatalf("violation_action = %v", entry["violation_action"])
+	}
+	if value, present := entry["require_tls_identity"]; !present || value != false {
+		t.Fatalf("require_tls_identity false must be sent; got %v", entry)
+	}
+}
+
+func TestModifyRequestJSONSecretPolicyOmitted(t *testing.T) {
+	entry := secretWire(t, SecretModifySpec{AllowedHosts: []string{"api.example.com"}})
+	for _, key := range []string{"substitution", "passthrough_hosts", "violation_action", "require_tls_identity"} {
+		if _, present := entry[key]; present {
+			t.Fatalf("%s must be omitted when unset; got %v", key, entry)
+		}
+	}
+}
+
+func TestModifyRequestJSONSubstitutionDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []string
+	}{
+		{"nil HeaderFields", nil},
+		{"empty HeaderFields", []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := buildModifyRequestJSON(ModifyOptions{
+				Secrets: map[string]SecretModifySpec{
+					"API_KEY": {Substitution: &SecretSubstitution{HeaderFields: tc.fields, Query: true}},
+				},
+			})
+			if err != nil {
+				t.Fatalf("buildModifyRequestJSON: %v", err)
+			}
+			want := `"substitution":{"headers":true,"header_fields":[],"query":true,"body":false}`
+			if !strings.Contains(raw, want) {
+				t.Fatalf("expected %s in %s", want, raw)
+			}
+		})
+	}
+}
+
+func TestModifyRequestJSONSecretViolationActionSnakeCase(t *testing.T) {
+	raw, err := buildModifyRequestJSON(ModifyOptions{
+		Secrets: map[string]SecretModifySpec{
+			"STRIPE_KEY": {ViolationAction: "block_and_terminate"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildModifyRequestJSON: %v", err)
+	}
+	if want := `"violation_action":"block_and_terminate"`; !strings.Contains(raw, want) {
+		t.Fatalf("expected %s in %s", want, raw)
+	}
+}
+
+func TestModifyRequestJSONSecretViolationActionInvalid(t *testing.T) {
+	_, err := buildModifyRequestJSON(ModifyOptions{
+		Secrets: map[string]SecretModifySpec{
+			"STRIPE_KEY": {Value: "sk_test_123", ViolationAction: "explode"},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected unknown ViolationAction to be rejected")
+	}
+	if !strings.Contains(err.Error(), `secret "STRIPE_KEY"`) || !strings.Contains(err.Error(), "ViolationAction") {
+		t.Fatalf("error must name the secret and the field; got %v", err)
+	}
+	if strings.Contains(err.Error(), "sk_test_123") {
+		t.Fatalf("error message leaks the secret value")
+	}
+}
+
+func TestSecretPolicyRequested(t *testing.T) {
+	requireTLS := true
+	for _, tc := range []struct {
+		name string
+		spec SecretModifySpec
+		want bool
+	}{
+		{"material and hosts only", SecretModifySpec{Env: "HOST_VAR", Placeholder: "$K", AllowedHosts: []string{"a.example.com"}}, false},
+		{"Substitution", SecretModifySpec{Substitution: &SecretSubstitution{}}, true},
+		{"AllowPlaceholderFor", SecretModifySpec{AllowPlaceholderFor: []string{"a.example.com"}}, true},
+		{"ViolationAction", SecretModifySpec{ViolationAction: ViolationActionBlock}, true},
+		{"RequireTLSIdentity", SecretModifySpec{RequireTLSIdentity: &requireTLS}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := ModifyOptions{Secrets: map[string]SecretModifySpec{
+				"PLAIN":   {Value: "v"},
+				"API_KEY": tc.spec,
+			}}
+			if got := secretPolicyRequested(opts); got != tc.want {
+				t.Fatalf("secretPolicyRequested = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if secretPolicyRequested(ModifyOptions{}) {
+		t.Fatalf("secretPolicyRequested must be false without secrets")
+	}
+}

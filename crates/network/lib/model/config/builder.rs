@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::{
-    NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig, ScopedUpstreamCaCert,
-    ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
+    HttpDenyResponseFormat, NetworkRateLimitDirection, NetworkRateLimiterConfig, RateLimiterConfig,
+    ScopedUpstreamCaCert, ScopedVerifyUpstream, TlsConfig, TokenBucketConfig,
 };
 use microsandbox_utils::size::Bytes;
 use zeroize::Zeroizing;
@@ -118,22 +118,42 @@ enum RefillTimeError {
 //--------------------------------------------------------------------------------------------------
 
 impl HttpBuilder {
-    /// Create HTTP settings with denial responses disabled.
+    /// Create HTTP settings with JSON denial responses enabled.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Enable readable HTTP denial responses. Disabled by default.
+    /// Enable readable HTTP denial responses. Enabled by default locally.
     pub fn deny_response(mut self, enabled: bool) -> Self {
         self.config.deny_response = enabled;
         self
     }
 
-    /// Set the denied HTTP/HTTPS response body. `{host}` names the blocked host.
-    /// Requires `deny_response(true)`. An empty message produces an empty body;
-    /// omission uses the default.
+    /// Choose the response format. Defaults to JSON.
+    pub fn deny_response_format(mut self, format: HttpDenyResponseFormat) -> Self {
+        self.config.deny_response_format = format;
+        self
+    }
+
+    /// Set the legacy text message, substituting `{host}`. Ignored in JSON mode.
+    /// Deprecated: prefer JSON mode and `network_deny_message` for new integrations.
     pub fn deny_message(mut self, message: impl Into<String>) -> Self {
         self.config.deny_message = Some(message.into());
+        self
+    }
+
+    /// Set the network-denial JSON `message`. Used as-is.
+    /// Requires `deny_response(true)` and JSON mode. An empty message preserves the code with an empty `message`;
+    /// omission uses the default.
+    pub fn network_deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.network_deny_message = Some(message.into());
+        self
+    }
+
+    /// Set the literal secret-denial JSON message. Requires `deny_response(true)` and JSON mode.
+    /// Omission uses the default; an empty string leaves `message` empty.
+    pub fn secret_deny_message(mut self, message: impl Into<String>) -> Self {
+        self.config.secret_deny_message = Some(message.into());
         self
     }
 
@@ -311,6 +331,12 @@ impl NetworkBuilder {
     /// Set the TCP connection cap; zero explicitly selects unlimited.
     pub fn max_tcp_connections(mut self, max: usize) -> Self {
         self.config.max_tcp_connections = Some(ConnectionLimit::from(max));
+        self
+    }
+
+    /// Set the active inbound TCP cap across all published ports; zero selects unlimited.
+    pub fn max_inbound_tcp_connections(mut self, max: usize) -> Self {
+        self.config.max_inbound_tcp_connections = Some(ConnectionLimit::from(max));
         self
     }
 
@@ -725,6 +751,26 @@ impl SecretBuilder {
     /// Configure header substitution (default: true).
     pub fn substitute_in_headers(mut self, enabled: bool) -> Self {
         self.substitution.headers = enabled;
+        self
+    }
+
+    /// Restrict header substitution to specific header field names.
+    ///
+    /// Enables header substitution and substitutes the placeholder only in the
+    /// named fields (matched ASCII case-insensitively). Passing an empty list
+    /// restores the default of substituting in every header field. Names must
+    /// be valid HTTP field names.
+    ///
+    /// Prefer restricting to the intended credential header (for example
+    /// `authorization`). Substituting in every header lets an untrusted guest
+    /// put the placeholder in a header the upstream host echoes back, which
+    /// can leak the real secret to the guest through that response.
+    pub fn substitute_in_header_fields(
+        mut self,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.substitution.headers = true;
+        self.substitution.header_fields = fields.into_iter().map(Into::into).collect();
         self
     }
 

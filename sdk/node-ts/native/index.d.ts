@@ -230,12 +230,25 @@ export type JsFsWriteSink = FsWriteSink
 export declare class HttpBuilder {
   /** Create default HTTP settings. */
   constructor()
-  /** Enable readable HTTP denial responses. Disabled by default. */
+  /** Enable readable HTTP denial responses. Enabled by default locally. */
   denyResponse(enabled: boolean): this
-  /** Set the body used when denyResponse is enabled, substituting `{host}`. */
+  /** Choose text or json (default). JSON requires a supporting runtime. */
+  denyResponseFormat(format: 'text' | 'json'): this
+  /** Deprecated: legacy text message with {host} substitution. Ignored in JSON mode. */
   denyMessage(message: string): this
+  /** Set the network-denial JSON message in JSON mode without interpolation. Requires denyResponse. */
+  networkDenyMessage(message: string): this
+  /** Set the literal secret-denial JSON message. Requires denyResponse and JSON mode. */
+  secretDenyMessage(message: string): this
 }
 export type JsHttpBuilder = HttpBuilder
+
+/** Builds an HTTP CONNECT outbound proxy. */
+export declare class HttpConnectProxyBuilder {
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
+}
+export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
 
 /**
  * Fluent builder for an explicit rootfs image source.
@@ -341,6 +354,33 @@ export declare class InterfaceOverridesBuilder {
   ipv6(address: string): this
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
+
+export declare class Job {
+  get id(): string
+  inspect(): Promise<string>
+  wait(): Promise<string>
+  signal(signal: number): Promise<void>
+  kill(): Promise<void>
+  eof(): Promise<void>
+  logs(options: string): Promise<string>
+  logStream(options: string): Promise<JobLogStream>
+  attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
+}
+export type JsJob = Job
+
+export declare class JobAttachment {
+  recv(): Promise<string | null>
+  writeStdin(data: Buffer): Promise<void>
+  resize(rows: number, cols: number): Promise<void>
+  detach(): Promise<void>
+}
+export type JsJobAttachment = JobAttachment
+
+export declare class JobLogStream {
+  next(): Promise<string | null>
+  close(): Promise<void>
+}
+export type JsJobLogStream = JobLogStream
 
 /**
  * A streaming subscription for sandbox log entries.
@@ -509,10 +549,8 @@ export declare class NetworkBuilder {
   /** 4-arg shorthand: add a secret with explicit placeholder. */
   secretEnv(envVar: string, value: string, placeholder: string, allowedHost: string): this
   /**
-   * 3-arg shorthand matching the Rust core's `secret_env(env_var,
-   * value, allowed_host)`. The placeholder defaults to the original
-   * value (env-var injection only — header injection is disabled
-   * without an explicit placeholder).
+   * Add a secret using the same generated placeholder as SandboxBuilder.
+   * Enables TLS interception while preserving existing TLS settings.
    */
   secretEnvSimple(envVar: string, value: string, allowedHost: string): this
   /**
@@ -533,6 +571,8 @@ export declare class NetworkBuilder {
    * 1024; the host kernel clamps it to its own somaxconn.
    */
   tcpAcceptQueueSize(size: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -630,9 +670,6 @@ export declare class OutboundProxyBuilder {
   socks5(address: string): Socks5ProxyBuilder
 }
 export type JsOutboundProxyBuilder = OutboundProxyBuilder
-
-/** Builds an HTTP CONNECT outbound proxy. */
-export declare class HttpConnectProxyBuilder {}
 
 /** Fluent builder for an ordered list of pre-boot rootfs patches. */
 export declare class PatchBuilder {
@@ -818,6 +855,8 @@ export declare class RestoreBuilder {
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
   /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
   tcpAcceptQueueSize(size: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -1011,6 +1050,13 @@ export type JsRuleDestinationBuilder = RuleDestinationBuilder
  * to the guest VM and can execute commands, access the filesystem, and query metrics.
  */
 export declare class Sandbox {
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
+  /** Launch with runtime-owned I/O, retaining pipe input by default. */
+  execDetached(cmd: string, args?: Array<string> | undefined | null): Promise<Job>
+  execDetachedWithBuilder(cmd: string, builder: ExecOptionsBuilder): Promise<Job>
   /**
    * Start an existing stopped sandbox (attached mode).
    *
@@ -1124,13 +1170,13 @@ export declare class Sandbox {
   /** Warnings for unmapped external filesystems and accepted restore mismatches. */
   restoreWarnings(): Promise<Array<ExternalMountWarning>>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1238,6 +1284,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
@@ -1328,6 +1376,11 @@ export declare class SandboxBuilder {
   pullPolicy(policy: string): this
   /** Disable networking entirely. */
   disableNetwork(): this
+  /**
+   * Enable TLS interception, preserving existing network and TLS settings.
+   * Does not re-enable disabled networking. Later network() callbacks preserve settings unless changed.
+   */
+  interceptTls(): this
   /** Configure networking via a callback. */
   network(configure: (arg: NetworkBuilder) => NetworkBuilder): this
   /** Configure the single proxy used for outbound sandbox connections. */
@@ -1466,6 +1519,10 @@ export type JsSandboxFsOps = SandboxFsOps
  * Does NOT hold a live connection — use `connect()` or `start()` to get a live `Sandbox`.
  */
 export declare class SandboxHandle {
+  /** Retrieve a retained managed job in this sandbox. */
+  getJob(id: string): Promise<Job>
+  /** List bounded managed-job metadata without creating processes. */
+  listJobs(all: boolean, limit: number, cursor?: string | undefined | null): Promise<string>
   /** Sandbox name. Names are limited to 128 UTF-8 bytes. */
   get name(): string
   /** Stable backend-assigned identity for this persisted sandbox. */
@@ -1478,6 +1535,8 @@ export declare class SandboxHandle {
   get configJson(): string
   /** Return a fresh handle for the same sandbox. */
   refresh(): Promise<SandboxHandle>
+  /** Observe this sandbox's managed directory through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   /** Creation timestamp as ms since Unix epoch. */
   get createdAt(): number | null
   /** Last update timestamp as ms since Unix epoch. */
@@ -1529,13 +1588,13 @@ export declare class SandboxHandle {
    */
   stop(): Promise<void>
   /** @deprecated Use fork for live execution duplication. */
-  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  branch(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** @deprecated Use forkMany for live execution duplication. */
-  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  branchMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Create an independent local CoW child without a durable full snapshot. */
-  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Sandbox>
+  fork(name: string, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Sandbox>
   /** Capture once and return individual child startup outcomes. */
-  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null): Promise<Array<JsBranchOutcome>>
+  forkMany(names: Array<string>, recordIntegrity?: boolean | undefined | null, guestFlush?: string | undefined | null, volumes?: Array<MountBuilder> | undefined | null): Promise<Array<JsBranchOutcome>>
   /** Explicit resident pause through host control. */
   pause(guestFlush?: string | undefined | null): Promise<void>
   /** Explicit resident resume through host control. */
@@ -1616,6 +1675,15 @@ export declare class SecretBuilder {
   allowPassthroughFor(host: string): this
   /** Configure header substitution (default: true). */
   substituteInHeaders(enabled: boolean): this
+  /**
+   * Enable header substitution but restrict it to the given header fields.
+   *
+   * An empty list restores the default of substituting in every header.
+   * Prefer restricting to the credential header the API reads: substituting
+   * in every header lets an untrusted guest place the placeholder in a
+   * header the upstream host reflects back, leaking the real secret.
+   */
+  substituteInHeaderFields(fields: Array<string>): this
   /** Configure URL query parameter substitution (default: false). */
   substituteInQuery(enabled: boolean): this
   /** Configure request body substitution (default: false). */
@@ -1710,6 +1778,8 @@ export declare class Snapshot {
   copyTo(outputArchivePath: string): JsSnapshotCopyBuilder
   /** Verify this snapshot's recorded payload integrity. */
   verify(): Promise<SnapshotVerifyReport>
+  /** Observe this artifact's storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
 }
 export type JsSnapshot = Snapshot
 
@@ -1779,6 +1849,8 @@ export type JsSnapshotCopyBuilder = SnapshotCopyBuilder
 
 /** Lightweight snapshot handle returned by the active backend. */
 export declare class SnapshotHandle {
+  /** Observe this artifact's storage through its captured backend. */
+  storageUsage(): Promise<StorageItemUsageJs>
   get group(): string | null
   get headUpdate(): HeadUpdate | null
   get id(): string
@@ -2142,12 +2214,13 @@ export interface ImagePruneReportJs {
   layersRemoved: number
   fsmetaRemoved: number
   vmdkRemoved: number
+  skippedInUse: number
   bytesReclaimed?: number
 }
 
 /**
- * Remove a cached image. Pass `force = true` to delete even when a
- * sandbox references it.
+ * Remove an image reference. Force permits untagging dependencies while retaining
+ * their backing; active storage operations are never bypassed.
  */
 export declare function imageRemove(reference: string, force?: boolean | undefined | null): Promise<void>
 
@@ -2274,6 +2347,41 @@ export interface LogStreamOptions {
    * new entries as they are written.
    */
   follow?: boolean
+}
+
+/** Per-file reclamation result, including ownership exclusions and errors. */
+export interface MemoryCacheEntryJs {
+  path: string
+  kind: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  state: string
+  error?: string
+}
+
+/** Runtime RAM pruning report; logical removal does not imply physical reclamation. */
+export interface MemoryCacheReportJs {
+  dryRun: boolean
+  entries: Array<MemoryCacheEntryJs>
+  filesRemoved: number
+  logicalBytesRemoved: bigint
+  physicalBytesReclaimed?: bigint
+  truncated: boolean
+}
+
+/** Published port to add or update. Defaults to loopback TCP. */
+export interface ModifyPort {
+  hostPort: number
+  guestPort: number
+  hostBind?: string
+  protocol?: string
+}
+
+/** Published host endpoint to remove. Defaults to loopback TCP. */
+export interface ModifyPortEndpoint {
+  hostPort: number
+  hostBind?: string
+  protocol?: string
 }
 
 export interface NetworkPolicy {
@@ -2491,6 +2599,8 @@ export interface SandboxModifyOptions {
   workdir?: string
   secrets?: Record<string, SecretModifySpec>
   secretsRemove?: Array<string>
+  ports?: Array<ModifyPort>
+  portsRemove?: Array<ModifyPortEndpoint>
   policy?: string
   dryRun?: boolean
 }
@@ -2568,6 +2678,8 @@ export interface SecretEntry {
   passthroughHosts: Array<string>
   /** Require verified TLS identity before substituting (default: true). */
   requireTlsIdentity: boolean
+  /** Per-secret override of the network violation action. */
+  violationAction?: string
   /** Where the secret may be injected into requests. */
   substitution: SecretSubstitution
 }
@@ -2577,6 +2689,9 @@ export interface SecretEntry {
  * secret name. `env` / `value` / `store` are mutually exclusive ways to
  * provide the secret material; setting more than one is rejected at the
  * boundary. Only `value` may carry raw secret material.
+ *
+ * Omitted policy fields keep the stored setting; a supplied `substitution`
+ * replaces the whole rule.
  */
 export interface SecretModifySpec {
   env?: string
@@ -2584,6 +2699,21 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+  substitution?: SecretModifySubstitution
+  violationAction?: string
+  requireTlsIdentity?: boolean
+  allowPlaceholderFor?: Array<string>
+}
+
+/**
+ * Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+ * take the create defaults.
+ */
+export interface SecretModifySubstitution {
+  headers?: boolean
+  headerFields?: Array<string>
+  query?: boolean
+  body?: boolean
 }
 
 /** Host-side source for secret material. */
@@ -2597,6 +2727,8 @@ export interface SecretSourceInput {
 /** Injection sites for a secret value. */
 export interface SecretSubstitution {
   headers: boolean
+  /** When non-empty, restrict header substitution to these field names. */
+  headerFields: Array<string>
   query: boolean
   body: boolean
 }
@@ -2738,6 +2870,45 @@ export interface StdinMode {
   data?: Array<number>
 }
 
+/** Counts and observed bytes in one managed storage category. */
+export interface StorageCategoryUsageJs {
+  count?: number
+  inUse?: number
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  reclaimableLogicalBytes?: bigint
+  items: Array<StorageItemUsageJs>
+  notes: Array<string>
+}
+
+/** One object's storage usage and retention explanations. */
+export interface StorageItemUsageJs {
+  name: string
+  path: string
+  logicalBytes?: bigint
+  allocatedBytes?: bigint
+  inUse?: boolean
+  reclaimable?: boolean
+  reasons: Array<string>
+}
+
+/** Inspect or remove unused published runtime RAM; never remove durable state or locks. */
+export declare function storagePrune(dryRun?: boolean | undefined | null, olderThanSeconds?: number | undefined | null): Promise<MemoryCacheReportJs>
+
+/** Observe storage in the selected local backend without removing files. */
+export declare function storageUsage(): Promise<StorageUsageJs>
+
+/** Aggregate storage usage. Unknown measurements remain nullable. */
+export interface StorageUsageJs {
+  images: StorageCategoryUsageJs
+  snapshots: StorageCategoryUsageJs
+  sandboxes: StorageCategoryUsageJs
+  volumes: StorageCategoryUsageJs
+  branchMemory: StorageCategoryUsageJs
+  snapshotMemory: StorageCategoryUsageJs
+  notes: Array<string>
+}
+
 /**
  * Result of opening a stream: the protocol correlation id (for follow-up
  * sends) and an opaque stream handle (for `streamNext` / `streamClose`).
@@ -2748,6 +2919,12 @@ export interface StreamOpenResult {
   /** Opaque stream handle. Pass to `streamNext()` and `streamClose()`. */
   handle: bigint
 }
+
+/** Whether this native library understands published-port modification. */
+export declare function supportsPortModification(): boolean
+
+/** Whether this native library applies secret policy fields in modify specs. */
+export declare function supportsSecretPolicyModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

@@ -40,9 +40,11 @@ rm -rf "${HOME}/go/pkg/mod" "${HOME}/.cache/go-build"
 # Keep this unprivileged and limited to the current runner user's files.
 # 'msb*' not 'msb-*': tests also leave hyphen-less dirs (msbperf,
 # msbtest1128, msbunmount) that a 'msb-*' glob never reclaims (#1162).
+# The rootfs, managed-job, and Go integration fixtures also leave .tmp*,
+# mjh-*, and go-full-* directories behind after interrupted runs.
 find /tmp -mindepth 1 -maxdepth 1 -type d \
   -uid "$(id -u)" \
-  \( -name 'msb*' -o -name 'TestSandbox*' -o -name 'go-build*' -o -name 'cbh-*' -o -name 'nextest-archive-*' \) \
+  \( -name 'msb*' -o -name 'TestSandbox*' -o -name 'go-build*' -o -name 'cbh-*' -o -name 'nextest-archive-*' -o -name '.tmp*' -o -name 'mjh-*' -o -name 'go-full-*' \) \
   -mmin +120 -exec rm -rf {} + 2>/dev/null || true
 
 find /tmp -mindepth 1 -maxdepth 1 -type d \

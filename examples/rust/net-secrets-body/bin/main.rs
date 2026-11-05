@@ -14,19 +14,24 @@ const SECRET: &str = "sk-real-secret-value-12345";
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host_ip = local_ip().to_string();
 
-    let handle = server::spawn(HOSTNAME, PORT).await?;
+    let handle = server::spawn(HOSTNAME, PORT, SECRET).await?;
     println!("[server] Listening on https://{host_ip}:{PORT}");
 
     let sb = sandbox::create(SECRET, HOSTNAME, PORT, &handle.ca_cert_path).await?;
 
-    let out = sb.shell("echo $API_KEY").await?;
-    println!("[guest]  API_KEY = {}", out.stdout()?.trim());
-
     let response = sandbox::post_secret(&sb, HOSTNAME, &host_ip, PORT).await?;
-    println!("[guest]  Server responded: {response}");
-
     sb.stop().await?;
     Sandbox::remove("net-secrets-body").await?;
+
+    let confirmation: serde_json::Value = serde_json::from_str(&response)?;
+    if confirmation
+        .get("received_key")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return Err(std::io::Error::other("secret substitution failed").into());
+    }
+    println!("[guest]  Secret substitution confirmed");
 
     Ok(())
 }

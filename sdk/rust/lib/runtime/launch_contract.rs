@@ -10,7 +10,7 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime},
 };
 
@@ -18,6 +18,8 @@ use std::{
 use microsandbox_network::policy::{Action, Destination, Direction};
 use microsandbox_protocol::bootstrap::*;
 use microsandbox_runtime::launch::{LaunchCapabilities, LaunchConfig};
+#[cfg(feature = "net")]
+use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types::compat as types_compat;
 use microsandbox_types::{
     CpuPlacement, RootDisk, RootfsSource, TransparentHugePagePolicy, VolumeMount,
@@ -38,6 +40,8 @@ use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig, config::Global
 //--------------------------------------------------------------------------------------------------
 
 static CONTRACTS: LazyLock<Mutex<HashMap<PathBuf, CachedContract>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CAPABILITIES: LazyLock<Mutex<HashMap<PathBuf, CachedCapabilities>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_VERSION_OUTPUT: u64 = 4096;
@@ -71,6 +75,12 @@ struct CachedContract {
     _file: File,
 }
 
+struct CachedCapabilities {
+    identity: FileIdentity,
+    capabilities: Arc<LaunchCapabilities>,
+    _file: File,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -84,6 +94,15 @@ impl LaunchContract {
         msb_path: &Path,
         network: &microsandbox_network::config::NetworkConfig,
     ) -> MicrosandboxResult<()> {
+        if self.machine && network.max_inbound_tcp_connections.is_some() {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.max_inbound_tcp_connections,
+                "inbound tcp connection limits",
+            )
+            .await?;
+        }
+
         if self.machine && network.tcp_accept_queue_size.is_some() {
             require_tcp_accept_queue_size(msb_path).await?;
         }
@@ -98,6 +117,23 @@ impl LaunchContract {
                 msb_path,
                 |capabilities| capabilities.http_connect_proxy,
                 "HTTP CONNECT outbound proxies",
+            )
+            .await?;
+        }
+
+        if self.machine
+            && matches!(
+                network.outbound_proxy,
+                Some(microsandbox_network::OutboundProxy::HttpConnect {
+                    credentials: Some(_),
+                    ..
+                })
+            )
+        {
+            require_capability(
+                msb_path,
+                |capabilities| capabilities.http_connect_proxy_auth,
+                "HTTP CONNECT proxy authentication",
             )
             .await?;
         }
@@ -131,6 +167,9 @@ impl LaunchContract {
 
         if network.max_udp_connections.is_some() {
             return unsupported("UDP connection limits");
+        }
+        if network.max_inbound_tcp_connections.is_some() {
+            return unsupported("inbound tcp connection limits");
         }
         if network.tcp_accept_queue_size.is_some() {
             return unsupported("TCP accept queue size");
@@ -177,6 +216,25 @@ impl LaunchContract {
 
     /// Encode a launch for the selected executable without discarding unsupported intent.
     pub(crate) fn encode(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
+        // Check capabilities before the machine fast path so the gate is applied
+        // uniformly. `header_fields` is true only for the current build, which is
+        // the only contract that can carry the field; every historical contract
+        // drops it and would substitute in every header.
+        #[cfg(feature = "net")]
+        if !self.header_fields()
+            && launch.network.as_ref().is_some_and(|network| {
+                network
+                    .config()
+                    .secrets
+                    .secrets
+                    .iter()
+                    .any(|secret| !secret.substitution.header_fields.is_empty())
+            })
+        {
+            // Historical contracts drop the nested allowlist and would substitute
+            // in every header, silently losing the requested confidentiality scope.
+            return unsupported("per-header secret substitution scope");
+        }
         #[cfg(feature = "net")]
         if let Some(network) = &launch.network {
             self.validate_network(network.config(), launch.deployment_profile)?;
@@ -185,7 +243,13 @@ impl LaunchContract {
             return self.to_previous_version(launch);
         }
 
-        let value = serde_json::to_value(launch)?;
+        let mut value = serde_json::to_value(launch)?;
+        if !launch.nested_virt.unwrap_or(false) {
+            value
+                .as_object_mut()
+                .expect("launch config object")
+                .remove("nested_virt");
+        }
         #[cfg(feature = "net")]
         let value = {
             let mut value = value;
@@ -204,12 +268,51 @@ impl LaunchContract {
         Ok(value)
     }
 
+    /// Send default-off policy explicitly when the selected runtime supports it.
+    pub(crate) async fn encode_for_runtime(
+        self,
+        path: &Path,
+        launch: &LaunchConfig,
+    ) -> MicrosandboxResult<Value> {
+        let mut value = self.encode(launch)?;
+        if launch.nested_virt == Some(true) {
+            validate_nested_host(capabilities(path).await?.as_ref())?;
+        }
+
+        if self.machine && launch.nested_virt != Some(true) {
+            let capabilities = capabilities(path).await?;
+            if !capabilities.protocols.contains(&2) {
+                if launch.nested_virt.is_none() {
+                    return Ok(value);
+                }
+                return Err(MicrosandboxError::Runtime(upgrade_required(
+                    "nested virtualization policy",
+                )));
+            }
+
+            if capabilities.nested_virt.is_some() {
+                value["nested_virt"] = false.into();
+            }
+        }
+
+        Ok(value)
+    }
+
     fn to_previous_version(self, launch: &LaunchConfig) -> MicrosandboxResult<Value> {
+        if launch.nested_virt == Some(true)
+            || (launch.nested_virt == Some(false)
+                && cfg!(all(target_os = "linux", target_arch = "x86_64")))
+        {
+            return unsupported("nested virtualization policy");
+        }
         if launch.execution != microsandbox_runtime::launch::ExecutionIntent::Boot {
             return unsupported("execution restore");
         }
         if !launch.guest_clock.is_sync() {
             return unsupported("guest clock policy");
+        }
+        if launch.fs_state_limit_bytes.is_some() {
+            return unsupported("filesystem state budget");
         }
         if !launch.owned_volumes.is_empty() {
             return unsupported("sandbox-owned volumes");
@@ -226,7 +329,13 @@ impl LaunchContract {
         }
         let mut value = serde_json::to_value(launch)?;
         let fields = value.as_object_mut().expect("launch config object");
-        for key in ["execution", "checkpoint_restore", "memory_cache_dir"] {
+        for key in [
+            "protected_guest_state",
+            "execution",
+            "checkpoint_restore",
+            "memory_cache_dir",
+            "nested_virt",
+        ] {
             fields.remove(key);
         }
         let rootfs = fields["rootfs"].as_object_mut().expect("rootfs object");
@@ -337,6 +446,18 @@ impl LaunchContract {
         Ok(())
     }
 
+    /// Whether this launch contract supports per-header secret substitution
+    /// scopes (`SecretSubstitution.header_fields`).
+    ///
+    /// The allowlist was added to the machine-protocol launch input, and only
+    /// the exact current build selects that protocol: `from_version` rejects
+    /// every other runtime (including 0.7.0/0.7.1) before encoding, so no
+    /// released 0.7.x contract reaches here without support. If a future
+    /// compatibility range ever admits an older machine-protocol runtime, this
+    /// capability must key off the runtime version instead of `machine`.
+    pub fn header_fields(self) -> bool {
+        self.machine
+    }
     fn from_version(version: &Version) -> MicrosandboxResult<Self> {
         if version.major == 0 && version.minor == 6 && version.patch <= 18 && version.pre.is_empty()
         {
@@ -353,6 +474,15 @@ impl LaunchContract {
 
     /// Check SDK launch intent before preparation can replace an existing sandbox.
     pub(crate) fn validate_launch_intent(self, config: &SandboxConfig) -> MicrosandboxResult<()> {
+        #[cfg(feature = "oci-runtime")]
+        if super::spawn::oci_readonly_root(config)
+            && (!matches!(config.spec.image, crate::sandbox::RootfsSource::Bind { .. })
+                || config.checkpoint_restore.is_some())
+        {
+            return Err(MicrosandboxError::InvalidConfig(
+                "OCI read-only rootfs requires a directory root and cannot be restored".into(),
+            ));
+        }
         #[cfg(feature = "net")]
         self.validate_network(
             &config.local_network_config()?,
@@ -384,6 +514,7 @@ impl LaunchContract {
             cpu_placement: resources.cpu_placement,
             placement_profile_name: resources.placement_profile.clone(),
             thp: resources.thp,
+            nested_virt: resources.nested_virt,
             guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
             vsock: config.spec.vsock.routes.clone(),
             owned_volumes: config
@@ -459,6 +590,14 @@ impl LaunchContract {
     }
 }
 
+impl LaunchContract {
+    /// Runtimes from v0.6.7 refuse a bind root that goes through a symlink unless
+    /// the mount sets `follow_root_symlinks`; earlier ones always follow it.
+    pub(crate) fn refuses_symlinked_bind_roots(&self) -> bool {
+        self.machine || self.patch >= 7
+    }
+}
+
 impl FileIdentity {
     fn capture(file: &File) -> std::io::Result<Self> {
         let metadata = file.metadata()?;
@@ -506,10 +645,35 @@ pub(crate) async fn validate_runtime_config(
     })?;
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
-        Err(MicrosandboxError::RuntimeNotInstalled(_)) => return Ok(()),
+        #[cfg(feature = "embed-binaries")]
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt == Some(true) =>
+        {
+            // Keep first-use installation working, but discover host support
+            // before replacement can remove the existing sandbox.
+            crate::setup::ensure_runtime(
+                global,
+                crate::setup::InstallOptions {
+                    source: crate::setup::InstallSource::EmbeddedArchive,
+                    ..Default::default()
+                },
+            )
+            .await?
+        }
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt != Some(true) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
+    require_protected_guest_state(&runtime.msb_path).await?;
+    #[cfg(feature = "oci-runtime")]
+    if super::spawn::oci_readonly_root(config) {
+        require_oci_readonly_root(&runtime.msb_path).await?;
+    }
     let contract = resolve(&runtime.msb_path).await?;
+    validate_nested_virt(&runtime.msb_path, config, contract).await?;
     contract.validate_launch_intent(config)?;
     #[cfg(feature = "net")]
     validate_http_deny_response(&runtime.msb_path, config).await?;
@@ -518,7 +682,9 @@ pub(crate) async fn validate_runtime_config(
     contract
         .require_network_capabilities(&runtime.msb_path, &network)
         .await?;
+    validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
+    validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
 }
 
@@ -598,14 +764,19 @@ pub(crate) async fn validate_http_deny_response(
     path: &Path,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<()> {
-    if !config.spec.network.http.deny_response {
+    if !config.spec.network.enabled || !config.spec.network.http.deny_response {
         return Ok(());
     }
     let supported = bounded_probe(path, "__launch-protocol")
         .await
         .ok()
         .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
-        .is_some_and(|capabilities| capabilities.http_deny_message);
+        .is_some_and(
+            |capabilities| match config.spec.network.http.deny_response_format {
+                HttpDenyResponseFormat::Text => capabilities.http_deny_message,
+                HttpDenyResponseFormat::Json => capabilities.http_deny_json,
+            },
+        );
     if !supported {
         return Err(MicrosandboxError::unsupported(
             crate::error::Operation::SandboxStart,
@@ -615,6 +786,81 @@ pub(crate) async fn validate_http_deny_response(
         ));
     }
     Ok(())
+}
+
+/// Refuse runtimes that would ignore the requested hardware virtualization policy.
+pub(crate) async fn validate_nested_virt(
+    path: &Path,
+    config: &SandboxConfig,
+    contract: LaunchContract,
+) -> MicrosandboxResult<()> {
+    let enabled = config.spec.resources.nested_virt.unwrap_or(false);
+    // Legacy encoding cannot carry an explicit enable, including wrappers around
+    // new runtimes. Never infer support from historical VMX exposure.
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) && !enabled {
+        return Ok(());
+    }
+
+    if let Ok(capabilities) = capabilities(path).await
+        && capabilities.protocols.contains(&2)
+        && capabilities.nested_virt.is_some()
+    {
+        if enabled {
+            validate_nested_host(&capabilities)?;
+        }
+        if !contract.machine {
+            return unsupported("nested virtualization policy through a legacy runtime or wrapper");
+        }
+        return Ok(());
+    }
+    if !enabled
+        && contract.machine
+        && probe(path)
+            .await
+            .is_ok_and(|version| version >= Version::new(0, 7, 7))
+    {
+        // v0.7.7 masks VMX/SVM even without the new toggle; its reader omits false.
+        return Ok(());
+    }
+    Err(MicrosandboxError::Runtime(upgrade_required(
+        "nested virtualization policy",
+    )))
+}
+
+fn validate_nested_host(capabilities: &LaunchCapabilities) -> MicrosandboxResult<()> {
+    if !capabilities.protocols.contains(&2) || capabilities.nested_virt.is_none() {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "nested virtualization policy",
+        )));
+    }
+    match capabilities.nested_virt {
+        Some(true) => Ok(()),
+        Some(false) => Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(
+                "nested virtualization is unavailable on this host or backend".into(),
+            ),
+        )),
+        None => Err(MicrosandboxError::Runtime(upgrade_required(
+            "nested virtualization policy",
+        ))),
+    }
+}
+
+/// A memory snapshot with a captured execution policy needs a runtime that can honor it.
+pub(crate) async fn validate_exec_limits(
+    path: &Path,
+    config: &SandboxConfig,
+) -> MicrosandboxResult<()> {
+    let captured_policy = config
+        .restore_resources
+        .agent_ready
+        .as_ref()
+        .and_then(|ready| ready.exec_limits);
+    if captured_policy.is_none() {
+        return Ok(());
+    }
+    require_capability(path, |capabilities| capabilities.exec_limits, "exec").await
 }
 
 /// Probe guest clock support only when the caller turns host synchronization off.
@@ -646,6 +892,33 @@ pub(crate) async fn validate_guest_clock(
     Ok(())
 }
 
+/// Probe filesystem state budget support only when the budget differs from the default.
+/// Runtimes that predate the capability would otherwise keep the default budget silently.
+pub(crate) async fn validate_fs_state_limit(
+    path: &Path,
+    global: &GlobalConfig,
+) -> MicrosandboxResult<()> {
+    if global.fs_state_limit_override().is_none() {
+        return Ok(());
+    }
+    let supported = bounded_probe(path, "__launch-protocol")
+        .await
+        .ok()
+        .and_then(|output| serde_json::from_slice::<LaunchCapabilities>(&output).ok())
+        .is_some_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.fs_state_limit
+        });
+    if !supported {
+        return Err(MicrosandboxError::unsupported(
+            crate::error::Operation::SandboxStart,
+            crate::error::UnsupportedReason::NotAvailable(upgrade_required(
+                "snapshots.max_filesystem_state_mib",
+            )),
+        ));
+    }
+    Ok(())
+}
+
 /// Probe only the new combination. Ordinary starts/restores keep their cached,
 /// process-free discovery path, and old runtimes still accept their existing wire.
 pub(crate) async fn require_restore_backing(path: &Path) -> MicrosandboxResult<()> {
@@ -669,22 +942,131 @@ async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
     .await
 }
 
+/// This is a security prerequisite for every start, rather than an optional feature.
+/// Probe failures are refusals too: older executables may not recognize the probe command.
+pub(crate) async fn require_protected_guest_state(path: &Path) -> MicrosandboxResult<()> {
+    let result = bounded_probe(path, "__launch-protocol").await;
+    let supported = result.as_ref().ok().is_some_and(|output| {
+        serde_json::from_slice::<LaunchCapabilities>(output).is_ok_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.protected_guest_state
+        })
+    });
+    if supported {
+        return Ok(());
+    }
+    let detail = result
+        .err()
+        .map(|error| format!(" Probe failed: {error}."))
+        .unwrap_or_default();
+    Err(MicrosandboxError::Runtime(format!(
+        "upgrade required: selected runtime {} does not advertise protected sandbox state. \
+         Update the runtime in the configured home, or select a patched runtime explicitly, \
+         then retry. Updating the SDK alone may leave an older installed runtime selected.{detail}",
+        path.display()
+    )))
+}
+
 async fn require_capability(
     path: &Path,
     advertised: impl FnOnce(&LaunchCapabilities) -> bool,
     feature: &str,
 ) -> MicrosandboxResult<()> {
-    let output = bounded_probe(path, "__launch-protocol").await?;
-    let supported = serde_json::from_slice::<LaunchCapabilities>(&output)
-        .is_ok_and(|capabilities| capabilities.protocols.contains(&2) && advertised(&capabilities));
+    let capabilities = capabilities(path).await?;
+    let supported = capabilities.protocols.contains(&2) && advertised(&capabilities);
     if !supported {
         return Err(MicrosandboxError::Runtime(upgrade_required(feature)));
     }
     Ok(())
 }
 
+// Cache successful discovery for unchanged native executables. Wrappers can
+// switch their target without changing identity.
+async fn capabilities(path: &Path) -> MicrosandboxResult<Arc<LaunchCapabilities>> {
+    let path = std::fs::canonicalize(path)?;
+    let file = File::open(&path)?;
+    let identity = FileIdentity::capture(&file)?;
+    let mut magic = [0; 2];
+    let wrapper = (&file).read(&mut magic)? == 2 && magic == *b"#!";
+    if wrapper {
+        return Ok(Arc::new(serde_json::from_slice(
+            &bounded_probe(&path, "__launch-protocol").await?,
+        )?));
+    }
+    {
+        let cached = CAPABILITIES.lock().await;
+        if let Some(entry) = cached.get(&path).filter(|entry| entry.identity == identity) {
+            return Ok(entry.capabilities.clone());
+        }
+    }
+    let capabilities = Arc::new(serde_json::from_slice::<LaunchCapabilities>(
+        &bounded_probe(&path, "__launch-protocol").await?,
+    )?);
+    if FileIdentity::capture(&File::open(&path)?)? != identity
+        || FileIdentity::capture(&file)? != identity
+    {
+        return Err(MicrosandboxError::Runtime(
+            "runtime executable changed during capability discovery".into(),
+        ));
+    }
+    let mut cached = CAPABILITIES.lock().await;
+    if cached.len() >= 64 {
+        cached.clear();
+    }
+    cached.insert(
+        path,
+        CachedCapabilities {
+            identity,
+            capabilities: capabilities.clone(),
+            _file: file,
+        },
+    );
+    Ok(capabilities)
+}
+
 async fn probe(path: &Path) -> MicrosandboxResult<Version> {
     parse_version(&bounded_probe(path, "--version").await?)
+}
+
+/// Refuse older or feature-disabled runtimes before launching a read-only root.
+#[cfg(feature = "oci-runtime")]
+pub(crate) async fn require_oci_readonly_root(path: &Path) -> MicrosandboxResult<()> {
+    let output = bounded_probe(path, "__launch-protocol").await?;
+    let supported =
+        serde_json::from_slice::<LaunchCapabilities>(&output).is_ok_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.oci_readonly_root
+        });
+    if !supported {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "OCI read-only rootfs",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "oci-runtime")]
+pub(crate) async fn require_oci_isolation(path: &Path) -> MicrosandboxResult<()> {
+    let output = bounded_probe(path, "__launch-protocol").await?;
+    if !serde_json::from_slice::<LaunchCapabilities>(&output)
+        .is_ok_and(|capabilities| capabilities.protocols.contains(&2) && capabilities.oci_isolation)
+    {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "OCI workload isolation",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "oci-runtime")]
+pub(crate) async fn require_oci_user_namespace(path: &Path) -> MicrosandboxResult<()> {
+    let output = bounded_probe(path, "__launch-protocol").await?;
+    if !serde_json::from_slice::<LaunchCapabilities>(&output).is_ok_and(|capabilities| {
+        capabilities.protocols.contains(&2) && capabilities.oci_user_namespace
+    }) {
+        return Err(MicrosandboxError::Runtime(upgrade_required(
+            "OCI application user namespaces",
+        )));
+    }
+    Ok(())
 }
 
 async fn bounded_probe(path: &Path, argument: &str) -> MicrosandboxResult<Vec<u8>> {
@@ -757,6 +1139,16 @@ fn upgrade_required(feature: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn symlinked_bind_roots_are_only_refused_from_the_enforcing_runtime() {
+        let contract = |patch, machine| LaunchContract { patch, machine };
+        assert!(!contract(0, false).refuses_symlinked_bind_roots());
+        assert!(!contract(6, false).refuses_symlinked_bind_roots());
+        assert!(contract(7, false).refuses_symlinked_bind_roots());
+        assert!(contract(18, false).refuses_symlinked_bind_roots());
+        assert!(contract(0, true).refuses_symlinked_bind_roots());
+    }
+
     #[cfg(unix)]
     #[test]
     fn launch_checks_ignore_sdk_only_saved_metadata() {
@@ -801,6 +1193,36 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn protected_state_probe_fails_closed_and_identifies_the_selected_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, response) in [
+            ("old", "printf '%s' '{\"protocols\":[2,1]}'"),
+            (
+                "disabled",
+                "printf '%s' '{\"protocols\":[2],\"protected_guest_state\":false}'",
+            ),
+            ("malformed", "printf '%s' 'invalid response'"),
+            ("unknown-command", "exit 2"),
+        ] {
+            let executable = script(directory.path(), name, response);
+            let error = require_protected_guest_state(&executable)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("upgrade required"), "{error}");
+            assert!(error.contains(&executable.display().to_string()), "{error}");
+            assert!(error.contains("Updating the SDK alone"), "{error}");
+        }
+        let patched = script(
+            directory.path(),
+            "patched",
+            "printf '%s' '{\"protocols\":[2],\"protected_guest_state\":true}'",
+        );
+        require_protected_guest_state(&patched).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn required_backing_probe_distinguishes_old_and_capable_runtimes() {
         let dir = tempfile::tempdir().unwrap();
         let old = script(
@@ -823,6 +1245,114 @@ mod tests {
             "printf '%s' '{\"protocols\":[2],\"required_restore_backing\":\"true\"}'",
         );
         assert!(require_restore_backing(&malformed).await.is_err());
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[tokio::test]
+    async fn readonly_root_probe_refuses_old_and_feature_disabled_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, response, accepted) in [
+            ("old", r#"{"protocols":[2,1]}"#, false),
+            (
+                "disabled",
+                r#"{"protocols":[2],"oci_readonly_root":false}"#,
+                false,
+            ),
+            (
+                "supported",
+                r#"{"protocols":[2],"oci_readonly_root":true}"#,
+                true,
+            ),
+            (
+                "wrong-generation",
+                r#"{"protocols":[1],"oci_readonly_root":true}"#,
+                false,
+            ),
+            (
+                "malformed",
+                r#"{"protocols":[2],"oci_readonly_root":"true"}"#,
+                false,
+            ),
+        ] {
+            let executable = script(dir.path(), name, &format!("printf '%s' '{response}'"));
+            let result = require_oci_readonly_root(&executable).await;
+            assert_eq!(result.is_ok(), accepted, "{name}");
+            if let Err(error) = result {
+                assert!(error.to_string().contains("upgrade msb"));
+            }
+        }
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[tokio::test]
+    async fn isolation_probe_requires_explicit_support() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, response, accepted) in [
+            ("absent", r#"{"protocols":[2,1]}"#, false),
+            (
+                "disabled",
+                r#"{"protocols":[2],"oci_isolation":false}"#,
+                false,
+            ),
+            (
+                "supported",
+                r#"{"protocols":[2],"oci_isolation":true}"#,
+                true,
+            ),
+            (
+                "wrong-protocol",
+                r#"{"protocols":[1],"oci_isolation":true}"#,
+                false,
+            ),
+            (
+                "malformed",
+                r#"{"protocols":[2],"oci_isolation":"true"}"#,
+                false,
+            ),
+        ] {
+            let executable = script(dir.path(), name, &format!("printf '%s' '{response}'"));
+            let result = require_oci_isolation(&executable).await;
+            assert_eq!(result.is_ok(), accepted, "{name}");
+            if let Err(error) = result {
+                assert!(error.to_string().contains("upgrade msb"));
+            }
+        }
+    }
+
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[tokio::test]
+    async fn user_namespace_probe_rejects_old_and_malformed_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, response, accepted) in [
+            ("old", r#"{"protocols":[2],"oci_isolation":true}"#, false),
+            (
+                "disabled",
+                r#"{"protocols":[2],"oci_user_namespace":false}"#,
+                false,
+            ),
+            (
+                "supported",
+                r#"{"protocols":[2],"oci_user_namespace":true}"#,
+                true,
+            ),
+            (
+                "wrong-protocol",
+                r#"{"protocols":[1],"oci_user_namespace":true}"#,
+                false,
+            ),
+            (
+                "malformed",
+                r#"{"protocols":[2],"oci_user_namespace":"true"}"#,
+                false,
+            ),
+        ] {
+            let executable = script(dir.path(), name, &format!("printf '%s' '{response}'"));
+            let result = require_oci_user_namespace(&executable).await;
+            assert_eq!(result.is_ok(), accepted, "{name}");
+            if let Err(error) = result {
+                assert!(error.to_string().contains("upgrade msb"));
+            }
+        }
     }
 
     #[cfg(all(unix, feature = "net"))]
@@ -857,6 +1387,58 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Explicit published-port overrides require support; omission leaves runtime defaults alone.
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn published_tcp_overrides_require_advertised_support() {
+        use microsandbox_network::config::NetworkConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(dir.path(), "old", "printf '%s' '{\"protocols\":[2,1]}'");
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        machine
+            .require_network_capabilities(&dir.path().join("absent"), &NetworkConfig::default())
+            .await
+            .unwrap();
+        for (key, value) in [
+            ("max_inbound_tcp_connections", 0),
+            ("max_inbound_tcp_connections", 512),
+        ] {
+            let network: NetworkConfig = serde_json::from_value(json!({key: value})).unwrap();
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("upgrade msb"), "{error}");
+            let new = script(
+                dir.path(),
+                "supported",
+                &format!("printf '%s' '{}'", json!({"protocols": [2,1], key: true})),
+            );
+            machine
+                .require_network_capabilities(&new, &network)
+                .await
+                .unwrap();
+            for patch in 0..=18 {
+                let legacy = LaunchContract {
+                    patch,
+                    machine: false,
+                };
+                assert!(
+                    legacy
+                        .validate_network(
+                            &network,
+                            microsandbox_types::DeploymentProfile::SingleTenant
+                        )
+                        .is_err()
+                );
+            }
+        }
     }
 
     /// The check create runs before `replace` touches its target: refuse a v0.7.x-shaped
@@ -898,6 +1480,69 @@ mod tests {
             .unwrap();
         legacy
             .require_network_capabilities(&absent, &tuned)
+            .await
+            .unwrap();
+    }
+
+    #[cfg(all(unix, feature = "net"))]
+    #[tokio::test]
+    async fn http_connect_credentials_require_runtime_support_before_launch() {
+        use microsandbox_network::config::NetworkConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let network: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {
+                "protocol": "http_connect",
+                "address": "127.0.0.1:3128",
+                "credentials": {
+                    "username": "proxy-user",
+                    "password": {"kind": "env", "var": "HTTP_CONNECT_PASSWORD"}
+                }
+            }
+        }))
+        .unwrap();
+        let machine = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        // A runtime that supports HTTP CONNECT but not its credentials would drop
+        // them and connect unauthenticated, so the launch must be refused.
+        for response in [
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":false}'"#,
+        ] {
+            let old = script(dir.path(), "unsupported-http-connect-auth", response);
+            let error = machine
+                .require_network_capabilities(&old, &network)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("HTTP CONNECT"), "{error}");
+            assert!(error.to_string().contains("upgrade msb"), "{error}");
+        }
+
+        let supported = script(
+            dir.path(),
+            "supported-http-connect-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true,"http_connect_proxy_auth":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&supported, &network)
+            .await
+            .unwrap();
+
+        // An unauthenticated HTTP CONNECT proxy must not require the auth capability.
+        let plain: NetworkConfig = serde_json::from_value(json!({
+            "outbound_proxy": {"protocol": "http_connect", "address": "127.0.0.1:3128"}
+        }))
+        .unwrap();
+        let without_auth = script(
+            dir.path(),
+            "http-connect-without-auth",
+            r#"printf '%s' '{"protocols":[2,1],"http_connect_proxy":true}'"#,
+        );
+        machine
+            .require_network_capabilities(&without_auth, &plain)
             .await
             .unwrap();
     }
@@ -975,24 +1620,46 @@ mod tests {
             "../db/fixtures/config-0.6.18.json"
         ))
         .unwrap();
+        // A disabled network needs no response capability, even with the new defaults.
+        config.spec.network.enabled = false;
+        config.spec.network.http = Default::default();
+        validate_http_deny_response(&dir.path().join("no-probe"), &config)
+            .await
+            .unwrap();
+        config.spec.network.enabled = true;
+        config.spec.network.http.deny_response = false;
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Text;
         // Disabled responses must avoid probing, including on an old runtime.
         validate_http_deny_response(&dir.path().join("no-probe"), &config)
             .await
             .unwrap();
-        config.spec.network.http.deny_message = Some("dormant custom message".into());
+        config.spec.network.http.network_deny_message = Some("dormant custom message".into());
+        config.spec.network.http.secret_deny_message = Some("dormant secret message".into());
         validate_http_deny_response(&dir.path().join("no-probe"), &config)
             .await
             .unwrap();
         config.spec.network.http.deny_response = true;
+        let legacy = script(
+            dir.path(),
+            "legacy-denial",
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+        );
+        // New SDKs retain the old runtime contract in text mode.
+        config.spec.network.http.deny_message = Some("blocked {host}".into());
+        validate_http_deny_response(&legacy, &config).await.unwrap();
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Json;
         for response in [
             "exit 1",
             r#"printf '%s' '{"protocols":[2,1]}'"#,
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":false}'"#,
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":"true"}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":"true"}'"#,
         ] {
             let path = script(dir.path(), "unsupported-denial", response);
             for message in [None, Some(""), Some("blocked {host}")] {
-                config.spec.network.http.deny_message = message.map(str::to_owned);
+                config.spec.network.http.network_deny_message = message.map(str::to_owned);
                 let error = validate_http_deny_response(&path, &config)
                     .await
                     .unwrap_err();
@@ -1003,9 +1670,239 @@ mod tests {
         let path = script(
             dir.path(),
             "supports-denial",
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true,"http_deny_json":true}'"#,
         );
         validate_http_deny_response(&path, &config).await.unwrap();
+        config.spec.network.http.deny_response_format =
+            microsandbox_types::HttpDenyResponseFormat::Text;
+        validate_http_deny_response(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nested_virt_requires_a_runtime_that_honors_the_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_enabled = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+        for version in ["0.6.0", "0.6.18", "0.7.7"] {
+            let capabilities = if version == "0.7.7" {
+                r#"printf '%s' '{"protocols":[2,1]}'"#
+            } else {
+                "exit 1"
+            };
+            let path = script(
+                dir.path(),
+                version,
+                &format!(
+                    r#"case "$1" in --version) printf 'msb {version}';; *) {capabilities};; esac"#
+                ),
+            );
+            // Machine runtimes are identified by embedded binary metadata;
+            // the shell fixture only models their capability/version responses.
+            let contract = if version == "0.7.7" {
+                LaunchContract {
+                    patch: 18,
+                    machine: true,
+                }
+            } else {
+                resolve(&path).await.unwrap()
+            };
+            for requested in [None, Some(false), Some(true)] {
+                let mut config = crate::test_support::fixtures::decode(include_str!(
+                    "../db/fixtures/config-0.6.0.json"
+                ))
+                .unwrap();
+                config.spec.resources.nested_virt = requested;
+                let expected = requested != Some(true) && (!legacy_enabled || version == "0.7.7");
+                let result = validate_nested_virt(&path, &config, contract).await;
+                assert_eq!(result.is_ok(), expected, "{version}: {requested:?}");
+                if expected {
+                    contract.validate_launch_intent(&config).unwrap();
+                    let payload = contract
+                        .encode_for_runtime(
+                            &path,
+                            &LaunchConfig {
+                                nested_virt: config.spec.resources.nested_virt,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    assert!(payload.get("nested_virt").is_none());
+                    assert!(payload.get("nested_virt_auto").is_none());
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("nested virtualization policy")
+                    );
+                }
+            }
+        }
+
+        let path = script(
+            dir.path(),
+            "nested-supported",
+            r#"printf '%s' '{"protocols":[2,1],"nested_virt":true}'"#,
+        );
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        for requested in [None, Some(false), Some(true)] {
+            let mut config = crate::test_support::fixtures::decode(include_str!(
+                "../db/fixtures/config-0.6.0.json"
+            ))
+            .unwrap();
+            config.spec.resources.nested_virt = requested;
+            validate_nested_virt(&path, &config, contract)
+                .await
+                .unwrap();
+            let payload = LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .encode_for_runtime(
+                &path,
+                &LaunchConfig {
+                    nested_virt: requested,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                payload.get("nested_virt"),
+                Some(&serde_json::Value::Bool(requested.unwrap_or(false)))
+            );
+            assert_eq!(payload.get("nested_virt_auto"), None);
+        }
+
+        // A capable runtime behind a legacy wrapper still cannot receive a
+        // policy that its selected wire contract discards.
+        let legacy = LaunchContract {
+            machine: false,
+            ..contract
+        };
+        for enabled in [false, true] {
+            let mut config = SandboxConfig::default();
+            config.spec.resources.nested_virt = Some(enabled);
+            let expected = !enabled && !legacy_enabled;
+
+            assert_eq!(
+                validate_nested_virt(&path, &config, legacy).await.is_ok(),
+                expected,
+                "legacy wrapper: {enabled}",
+            );
+            assert_eq!(
+                legacy
+                    .encode_for_runtime(
+                        &path,
+                        &LaunchConfig {
+                            nested_virt: Some(enabled),
+                            ..Default::default()
+                        }
+                    )
+                    .await
+                    .is_ok(),
+                expected,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_nesting_rejects_unsupported_hosts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = SandboxConfig::default();
+        config.spec.resources.nested_virt = Some(true);
+        let contract = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+
+        for (host_support, expected) in [
+            (
+                ",\"nested_virt\":false",
+                "nested virtualization is unavailable",
+            ),
+            ("", "nested virtualization policy"),
+        ] {
+            let path = script(
+                dir.path(),
+                "unsupported-host",
+                &format!(r#"printf '%s' '{{"protocols":[2,1]{host_support}}}'"#),
+            );
+            let error = validate_nested_virt(&path, &config, contract)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains(expected), "{error}");
+
+            // A host without nesting still accepts and receives an explicit disable.
+            if !host_support.is_empty() {
+                config.spec.resources.nested_virt = Some(false);
+                validate_nested_virt(&path, &config, contract)
+                    .await
+                    .unwrap();
+                let payload = contract
+                    .encode_for_runtime(&path, &LaunchConfig::default())
+                    .await
+                    .unwrap();
+                assert_eq!(payload["nested_virt"], false);
+                config.spec.resources.nested_virt = Some(true);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captured_execution_policy_requires_a_capable_runtime() {
+        use crate::config::layers::BackendConfig;
+        use crate::sandbox::SandboxBuilder;
+        use microsandbox_protocol::core::Ready;
+        use microsandbox_types::ExecLimits;
+
+        let sources = BackendConfig::new(Default::default(), Default::default())
+            .prepare_for_local_backend(Default::default())
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let old = script(
+            dir.path(),
+            "old-exec",
+            r#"printf '%s' '{"protocols":[2,1]}'"#,
+        );
+        let current = script(
+            dir.path(),
+            "current-exec",
+            r#"printf '%s' '{"protocols":[2,1],"exec_limits":true}'"#,
+        );
+
+        let mut config = SandboxBuilder::new("compatibility")
+            .image("alpine")
+            .finish(Some(&sources), None)
+            .unwrap();
+
+        // A cold boot carries only built-in defaults; any released runtime accepts it.
+        validate_exec_limits(&old, &config).await.unwrap();
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A memory restore with a captured policy needs a runtime that can honor it.
+        config.restore_resources.agent_ready = Some(Ready {
+            exec_limits: Some(ExecLimits::default()),
+            ..Default::default()
+        });
+        let result = validate_exec_limits(&old, &config).await;
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("exec"));
+            assert!(error.to_string().contains("upgrade"));
+        }
+        validate_exec_limits(&current, &config).await.unwrap();
+
+        // A captured guest without an advertised policy keeps the legacy path.
+        config.restore_resources.agent_ready = Some(Ready::default());
+        validate_exec_limits(&old, &config).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1026,7 +1923,7 @@ mod tests {
         config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off);
         for response in [
             "exit 1",
-            r#"printf '%s' '{"protocols":[2,1],"http_deny_message":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"http_deny_json":true}'"#,
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":false}'"#,
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":"true"}'"#,
         ] {
@@ -1041,6 +1938,40 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
         );
         validate_guest_clock(&path, &config).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fs_state_limit_requires_an_explicit_runtime_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut global = GlobalConfig::default();
+        // The default budget must avoid probing, including on an old runtime.
+        validate_fs_state_limit(&dir.path().join("no-probe"), &global)
+            .await
+            .unwrap();
+        global.snapshots.max_filesystem_state_mib = 64;
+        for response in [
+            "exit 1",
+            r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":false}'"#,
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":"true"}'"#,
+            r#"printf '%s' '{"protocols":[1],"fs_state_limit":true}'"#,
+        ] {
+            let path = script(dir.path(), "unsupported-fs-state", response);
+            let error = validate_fs_state_limit(&path, &global).await.unwrap_err();
+            assert!(matches!(error, MicrosandboxError::Unsupported { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib")
+            );
+        }
+        let path = script(
+            dir.path(),
+            "supports-fs-state",
+            r#"printf '%s' '{"protocols":[2,1],"fs_state_limit":true}'"#,
+        );
+        validate_fs_state_limit(&path, &global).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1487,6 +2418,72 @@ mod encoding {
 
     #[cfg(feature = "net")]
     #[test]
+    fn header_fields_require_current_launch_contract() {
+        let network: microsandbox_network::ResolvedNetworkConfig = serde_json::from_value(json!({
+            "config": {
+                "secrets": {
+                    "secrets": [{
+                        "env_var": "TOKEN",
+                        "value": "secret",
+                        "placeholder": "$KEY",
+                        "allowed_hosts": [{"exact": "api.example.com"}],
+                        "substitution": {"headers": true, "header_fields": ["authorization"]},
+                    }],
+                },
+            },
+            "outbound_proxy": null,
+        }))
+        .unwrap();
+        let launch = LaunchConfig {
+            network: Some(network),
+            ..Default::default()
+        };
+
+        // The current contract carries the allowlist as-is.
+        assert!(
+            LaunchContract {
+                patch: 18,
+                machine: true,
+            }
+            .header_fields()
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+        }
+        .encode(&launch)
+        .unwrap();
+        assert_eq!(
+            current["network"]["config"]["secrets"]["secrets"][0]["substitution"]["header_fields"],
+            json!(["authorization"])
+        );
+
+        // Historical runtimes lack the nested allowlist and would fall back to
+        // substituting in every header; refuse instead of broadening the scope.
+        for patch in 0..=18 {
+            assert!(
+                !LaunchContract {
+                    patch,
+                    machine: false,
+                }
+                .header_fields()
+            );
+            let err = LaunchContract {
+                patch,
+                machine: false,
+            }
+            .encode(&launch)
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("per-header secret substitution scope"),
+                "{err}"
+            );
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn legacy_network_limits_reject_changed_meanings_before_launch() {
         use microsandbox_network::config::{EnvNetworkSecretResolver, NetworkConfig};
         use microsandbox_types::DeploymentProfile;
@@ -1618,6 +2615,9 @@ mod encoding {
             }],
             default_cwd: Some("/work".into()),
             security_profile: BootstrapSecurityProfile::Restricted,
+            // Real launches always carry the built-in limits; the legacy
+            // grammar must encode such a bootstrap by omitting them.
+            exec_limits: Some(microsandbox_types::ExecLimits::default()),
             ..Default::default()
         };
         for patch in [0, 4, 8, 9] {
@@ -1849,6 +2849,35 @@ mod protocol {
                 .as_object()
                 .unwrap()
                 .contains_key("guest_clock")
+        );
+    }
+
+    #[test]
+    fn legacy_codec_refuses_a_non_default_filesystem_state_budget() {
+        let config = LaunchConfig {
+            fs_state_limit_bytes: Some(64 * 1024 * 1024),
+            ..Default::default()
+        };
+        assert!(
+            encode_bytes(&config, LEGACY)
+                .unwrap_err()
+                .contains("requires a newer runtime launch contract")
+        );
+        let current = LaunchContract {
+            patch: 18,
+            machine: true,
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&encode_bytes(&config, current).unwrap()).unwrap()["fs_state_limit_bytes"],
+            64 * 1024 * 1024
+        );
+        let default = encode_bytes(&LaunchConfig::default(), current).unwrap();
+        assert!(
+            !serde_json::from_slice::<Value>(&default)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("fs_state_limit_bytes")
         );
     }
 

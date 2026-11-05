@@ -65,6 +65,13 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_raise(ArgumentError) do
       Microsandbox::OutboundProxy.socks5("127.0.0.1:1080").user_id("sandbox")
     end
+    assert_raise(ArgumentError) do
+      Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128").user_id("sandbox")
+    end
+
+    http_connect = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+      .credentials("sandbox", Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD"))
+    assert_instance_of Microsandbox::OutboundProxy, http_connect
   end
 
   def test_secret_source_rejects_an_empty_environment_variable
@@ -95,6 +102,17 @@ class MicrosandboxTest < Test::Unit::TestCase
 
     assert_match(/invalid SOCKS4 user ID/, socks4_error.message)
     assert_match(/invalid SOCKS5 credentials/, socks5_error.message)
+  end
+
+  def test_create_applies_http_connect_credentials
+    proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+      .credentials("user:name", Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD"))
+
+    error = assert_raise(Microsandbox::NetworkPolicyError) do
+      Microsandbox::Sandbox.create("ruby-test", proxy: proxy)
+    end
+
+    assert_match(/invalid HTTP CONNECT credentials/, error.message)
   end
 
   def test_unknown_create_keyword_is_rejected_before_runtime_start
@@ -145,8 +163,11 @@ class MicrosandboxTest < Test::Unit::TestCase
       constant.is_a?(Class) && constant < Microsandbox::Error
     end
 
-    assert_equal ERROR_CLASSES.sort, defined_classes.sort
-    ERROR_CLASSES.each do |name|
+    # JobError carries a code from the managed-job operation, while ERROR_CLASSES
+    # contains the fixed-code errors checked by test_error_codes_are_unique_kebab_case.
+    expected_classes = ERROR_CLASSES + [:JobError]
+    assert_equal expected_classes.sort, defined_classes.sort
+    expected_classes.each do |name|
       assert_equal Microsandbox::Error, Microsandbox.const_get(name).superclass, name
     end
   end
@@ -218,18 +239,26 @@ class MicrosandboxTest < Test::Unit::TestCase
     assert_equal backend_kind, Microsandbox.default_backend_kind
   end
 
-  def test_http_deny_message_reaches_cloud_validation
+  def test_http_deny_messages_reach_cloud_validation
     script = <<~RUBY
       require "microsandbox"
       Microsandbox.use_cloud_backend!("test-key", url: "http://127.0.0.1:9")
       settings = Microsandbox::HttpBuilder.new
-      settings.deny_message("dormant")
+      settings.deny_message("legacy {host}").deny_response_format("json")
+      abort "legacy config lost" unless settings.message == "legacy {host}" && settings.format == "json"
+      settings.network_deny_message("dormant").secret_deny_message("secret")
+      abort "secret message lost" unless settings.secret_message == "secret"
       abort "message enabled responses" unless settings.response.nil?
       settings.deny_response(true).deny_response(false)
       abort "disable ignored" unless settings.response == false
       operations = [
-        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true }) },
-        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_message("blocked {host}") }.create }
+        -> {
+          builder = Microsandbox::Sandbox.builder("ruby-test").image("alpine")
+          builder.http!(true, "legacy {host}")
+          builder.create
+        },
+        -> { Microsandbox::Sandbox.create("ruby-test", image: "alpine", http: { deny_response: true, deny_response_format: "json", deny_message: "legacy", network_deny_message: "network", secret_deny_message: "secret" }) },
+        -> { Microsandbox::Sandbox.builder("ruby-test").image("alpine").http { |h| h.deny_response(true).deny_response_format("json").deny_message("legacy").network_deny_message("blocked {host}").secret_deny_message("secret") }.create }
       ]
       operations.each do |operation|
         begin
@@ -245,7 +274,7 @@ class MicrosandboxTest < Test::Unit::TestCase
     output = IO.popen([RbConfig.ruby, "-I", lib, "-e", script], &:read)
 
     assert_true $?.success?
-    assert_equal ["rejected", "rejected"], output.lines(chomp: true)
+    assert_equal ["rejected", "rejected", "rejected"], output.lines(chomp: true)
   end
 
   def test_with_is_available

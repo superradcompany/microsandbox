@@ -77,6 +77,10 @@ pub struct GrowRootDisk(pub RootDiskGrow);
 #[derive(Debug, Clone)]
 pub struct CompactDisks(pub DiskCompact);
 
+/// Capability-probed managed-job extension. No legacy mutation fallback exists.
+#[derive(Debug, Clone)]
+pub struct ManageJob(pub microsandbox_protocol::jobs::JobRequest);
+
 //--------------------------------------------------------------------------------------------------
 // Methods
 //--------------------------------------------------------------------------------------------------
@@ -111,6 +115,29 @@ impl UpdateSecrets {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Request<ControlProtocol> for ManageJob {
+    type Response = microsandbox_protocol::jobs::JobResponse;
+    type Error = ControlClientError;
+    fn message(&self) -> ControlClientResult<EncodedMessage> {
+        prepared(microsandbox_protocol::jobs::JOB_REQUEST, &self.0)
+    }
+    fn decode(&self, response: Message) -> ControlClientResult<Self::Response> {
+        checked(response, 2, microsandbox_protocol::jobs::JOB_RESPONSE)
+    }
+}
+
+impl CompatibleControlRequest for ManageJob {
+    fn min_generation(&self) -> u8 {
+        2
+    }
+    fn compatibility_json_bytes(&self) -> ControlClientResult<Zeroizing<Vec<u8>>> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+    fn decode_compatibility_json(&self, _reply: JsonReply) -> ControlClientResult<Self::Response> {
+        Err(ControlClientError::UnsupportedMode)
+    }
+}
 
 impl Request<ControlProtocol> for GetCapabilities {
     type Response = Capabilities;

@@ -2,13 +2,16 @@
 
 #[cfg(feature = "runner")]
 mod additional_disk;
+mod cache_storage;
 #[cfg(feature = "runner")]
 mod capture_pipeline;
 mod compaction;
 #[cfg(feature = "runner")]
 mod coordinator;
 mod disk;
+mod execution;
 mod external_mounts;
+pub mod layout;
 mod local;
 #[cfg(feature = "runner")]
 mod local_disk;
@@ -26,6 +29,10 @@ mod restore;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
+pub use cache_storage::{
+    MemoryCacheEntry, MemoryCacheKind, MemoryCacheReport, MemoryCacheState, MemoryPruneOptions,
+    MemoryPruneSession, inspect_memory_cache, prune_memory_cache,
+};
 pub use compaction::compact_stopped_disks;
 #[cfg(feature = "runner")]
 pub(crate) use coordinator::{CheckpointCoordinator, CheckpointResult, UserPause};
@@ -35,6 +42,7 @@ pub use disk::{
     DiskCompactionResult, RuntimeOwnedRootChain, RuntimeOwnedRootLayer, compact_stopped_root,
     grow_stopped_root, load_runtime_owned_root_chain, recover_stopped_root_growth,
 };
+pub use execution::captured_nested_virt;
 pub use external_mounts::ExternalMountAuthorization;
 pub use local::LocalBranchState;
 pub use local_memory::{LocalMemory, LocalMemoryPin, LocalMemoryReservation};

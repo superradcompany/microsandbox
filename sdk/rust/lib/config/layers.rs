@@ -9,9 +9,11 @@ use super::{
     GlobalConfig, GlobalConfigPatch, OciSandboxDefaultsPatch, PathsConfigPatch,
     persistence::ManagedConfig, registry::RegistrySettingsPatch,
 };
+use crate::backend::{BackendKind, BackendSelectionSource};
+use crate::sandbox::restore_resources::RestoreResources;
 #[cfg(feature = "ssh")]
 use crate::sandbox::ssh::SshTimeoutPatch;
-use crate::{MicrosandboxResult, SandboxConfigPatch};
+use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfigPatch};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -105,6 +107,7 @@ impl BackendConfig {
 
     /// Prepare local settings once, then validate and cache the complete result.
     /// Cloud profile lookup does not prepare local runtime paths or validate local defaults.
+    /// Runtime lookup and diagnostics also use this; callers enforce backend permission separately.
     pub(crate) fn prepare_for_local_backend(
         mut self,
         mut builder: GlobalConfigPatch,
@@ -147,7 +150,10 @@ impl BackendConfig {
         let mut resolved = self.global_layers().build().into_config();
         super::runtime_paths::resolve(&mut resolved)?;
         resolved.validate_sandbox_defaults()?;
+        resolved.validate_snapshots()?;
         self.resolved = OnceLock::from(Arc::new(resolved));
+        self.validate_backend_policy()?;
+
         Ok(self)
     }
 
@@ -170,6 +176,67 @@ impl BackendConfig {
             .get_or_init(|| Arc::new(self.global_layers().build().into_config()))
     }
 
+    /// Reject malformed effective policy even when no backend is being constructed.
+    pub(crate) fn validate_backend_policy(&self) -> MicrosandboxResult<()> {
+        if self
+            .resolved_config()
+            .allowed_backends
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err(self.backend_policy_error("allowed_backends must not be empty"));
+        }
+
+        Ok(())
+    }
+
+    /// Check permission independently of backend selection and credential resolution.
+    pub(crate) fn require_backend(
+        &self,
+        kind: BackendKind,
+        source: Option<BackendSelectionSource>,
+    ) -> MicrosandboxResult<()> {
+        self.validate_backend_policy()?;
+        if let Some(allowed) = &self.resolved_config().allowed_backends
+            && !allowed.contains(&kind)
+        {
+            let allowed = allowed
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = source
+                .unwrap_or(BackendSelectionSource::Programmatic)
+                .as_str();
+            return Err(self.backend_policy_error(&format!(
+                "{} backend selected by {source} is disabled; allowed backends: {allowed}",
+                kind.as_str(),
+            )));
+        }
+        Ok(())
+    }
+
+    fn backend_policy_error(&self, detail: &str) -> MicrosandboxError {
+        let (source, path, remedy) = if self.managed.allowed_backends.is_some() {
+            (
+                "managed config",
+                &self.managed_file,
+                "contact your administrator",
+            )
+        } else {
+            (
+                "user config",
+                &self.defaults_file,
+                "edit allowed_backends in your user config",
+            )
+        };
+        let path = path
+            .as_ref()
+            .map(|path| format!(" `{}`", path.display()))
+            .unwrap_or_default();
+        MicrosandboxError::InvalidConfig(format!("{detail} ({source}{path}); {remedy}"))
+    }
+
     /// Supply the stored settings with administrator overrides already included.
     pub(crate) fn global_layers(&self) -> ConfigLayers<GlobalConfigPatch> {
         ConfigLayers::new(self.defaults.clone(), self.managed.clone())
@@ -181,6 +248,15 @@ impl BackendConfig {
             SandboxConfigPatch::from_defaults(&self.defaults),
             SandboxConfigPatch::from_managed(&self.managed),
         )
+    }
+
+    /// Managed overrides must be enforceable on the captured guest; the managed
+    /// patch is private to this type, so the check lives behind this accessor.
+    pub(crate) fn validate_managed_against_snapshot(
+        &self,
+        restore: &RestoreResources,
+    ) -> MicrosandboxResult<()> {
+        restore.validate_settings(&SandboxConfigPatch::from_managed(&self.managed))
     }
 
     /// Supply registry settings and auth policy for the requested host.
@@ -266,6 +342,89 @@ mod tests {
     use super::*;
     use crate::config::SandboxDefaultsPatch;
     use microsandbox_types::{RootDisk, SandboxResourcesPatch, SandboxSpecPatch};
+
+    #[test]
+    fn backend_policy_replaces_inherits_and_clears_without_rerouting() {
+        use serde_json::json;
+
+        for (user, managed, local, cloud) in [
+            (json!({}), json!({}), true, true),
+            (json!({"allowed_backends": null}), json!({}), true, true),
+            (
+                json!({"allowed_backends": ["local"]}),
+                json!({}),
+                true,
+                false,
+            ),
+            (
+                json!({"allowed_backends": ["cloud"]}),
+                json!({}),
+                false,
+                true,
+            ),
+            (
+                json!({"allowed_backends": ["local", "cloud"]}),
+                json!({}),
+                true,
+                true,
+            ),
+            (
+                json!({"allowed_backends": ["local"]}),
+                json!({"allowed_backends": ["cloud"]}),
+                false,
+                true,
+            ),
+            (
+                json!({"allowed_backends": []}),
+                json!({"allowed_backends": null}),
+                true,
+                true,
+            ),
+            (json!({"allowed_backends": []}), json!({}), false, false),
+            (json!({}), json!({"allowed_backends": []}), false, false),
+        ] {
+            let config = BackendConfig::new(
+                serde_json::from_value(user.clone()).unwrap(),
+                serde_json::from_value(managed.clone()).unwrap(),
+            );
+            for (kind, allowed) in [(BackendKind::Local, local), (BackendKind::Cloud, cloud)] {
+                assert_eq!(
+                    config.require_backend(kind, None).is_ok(),
+                    allowed,
+                    "user={user}, managed={managed}, kind={kind:?}"
+                );
+            }
+        }
+        assert!(
+            serde_json::from_value::<GlobalConfigPatch>(json!({"allowed_backends":["typo"]}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn policy_errors_explain_source_selection_and_recovery() {
+        for managed in [false, true] {
+            let patch = GlobalConfigPatch::new().allowed_backends(vec![BackendKind::Cloud]);
+            let config = if managed {
+                BackendConfig::new(Default::default(), patch)
+            } else {
+                BackendConfig::new(patch, Default::default())
+            };
+            let error = config
+                .require_backend(BackendKind::Local, Some(BackendSelectionSource::MsbBackend))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("local backend selected by MSB_BACKEND is disabled"));
+            assert!(error.contains("allowed backends: cloud"));
+            if managed {
+                assert!(error.contains("managed config"));
+                assert!(error.contains("contact your administrator"));
+            } else {
+                assert!(error.contains("user config"));
+                assert!(error.contains("edit allowed_backends"));
+            }
+        }
+    }
 
     #[test]
     fn file_path_layers_keep_their_bases_and_managed_precedence() {
@@ -722,5 +881,47 @@ mod tests {
         assert_eq!(earlier.sandbox_defaults.workdir, None);
         assert_eq!(earlier.registries.hosts.len(), 1);
         assert!(!earlier.registries.hosts["admin.example"].insecure);
+    }
+
+    #[test]
+    fn snapshot_budget_obeys_layers_and_rejects_invalid_values() {
+        let user: GlobalConfigPatch =
+            serde_json::from_str(r#"{"snapshots":{"max_filesystem_state_mib":16}}"#).unwrap();
+        let managed: GlobalConfigPatch =
+            serde_json::from_str(r#"{"snapshots":{"max_filesystem_state_mib":64}}"#).unwrap();
+        let builder = GlobalConfigPatch::new()
+            .snapshots(crate::config::SnapshotsConfigPatch::new().max_filesystem_state_mib(32));
+        let backend = BackendConfig::new(user.clone(), GlobalConfigPatch::new())
+            .prepare_for_local_backend(builder.clone())
+            .unwrap();
+        assert_eq!(
+            backend.resolved_config().snapshots.max_filesystem_state_mib,
+            32
+        );
+        let backend = BackendConfig::new(user, managed)
+            .prepare_for_local_backend(builder)
+            .unwrap();
+        assert_eq!(
+            backend.resolved_config().snapshots.max_filesystem_state_mib,
+            64
+        );
+        assert_eq!(
+            GlobalConfig::default().snapshots.max_filesystem_state_mib,
+            4
+        );
+        for mib in [0, 4096, u32::MAX] {
+            let patch = GlobalConfigPatch::new().snapshots(
+                crate::config::SnapshotsConfigPatch::new().max_filesystem_state_mib(mib),
+            );
+            let error = BackendConfig::new(patch, GlobalConfigPatch::new())
+                .prepare_for_local_backend(GlobalConfigPatch::new())
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("snapshots.max_filesystem_state_mib")
+            );
+        }
     }
 }

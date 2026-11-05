@@ -1,10 +1,11 @@
 ---
-title: Corporate networking
+title: Configure company networking
+sidebarTitle: Configure networking
 description: Use company routing, DNS, certificates, and registries with local sandboxes
 icon: "network-wired"
 ---
 
-Connect local sandboxes to your company's existing network. Configure routing, private DNS, and certificate trust, then verify access from the CLI and SDKs.
+With a [working local installation](/enterprise/prepare-environment), connect a pilot sandbox to your company's services. Work through routing, DNS, destination access, certificates, and registries, then verify the complete path.
 
 <Frame>
   <img className="block dark:hidden" src="/images/enterprise/corporate-networking-light.svg" alt="Guest connections cross the microVM boundary into the host runtime, then use host routing directly or through an optional HTTP CONNECT or SOCKS proxy. DNS and host image downloads follow separate paths that can also be covered by host VPN or traffic steering policy." />
@@ -29,7 +30,8 @@ Connect the company network client on the host and confirm an approved service i
 
 For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's reachable `IP:port`:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "version": 1,
   "overrides": {
@@ -42,8 +44,9 @@ For an HTTP CONNECT proxy, add this to `managed.json`, using your listener's rea
   }
 }
 ```
+</CodeGroup>
 
-A managed proxy replaces per-sandbox proxy settings, including SOCKS credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
+A managed proxy replaces per-sandbox proxy settings, including SOCKS and HTTP CONNECT credentials; `null` clears them. It does not enable disabled networking or route DNS and host image downloads. Cloud creation fails while a proxy is enforced because cloud does not support outbound proxies. HTTP CONNECT and SOCKS4 carry TCP only; SOCKS5 also supports non-DNS UDP. See [proxy authentication and limits](/networking/outbound-proxy).
 
 Use CLI and SDK releases that support the selected proxy protocol. Older releases reject the HTTP CONNECT protocol as unknown.
 
@@ -68,7 +71,8 @@ The sandbox's DNS forwarder runs on the host. By default, it uses host DNS. Set 
 
 Replace the two resolver addresses, service IP, and hostname below with your company's values. Cache the Alpine image first:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run alpine --pull never \
   --dns-nameserver 10.20.0.53 \
   --dns-nameserver 10.20.0.54 \
@@ -77,6 +81,7 @@ msb run alpine --pull never \
   --net-rule "allow@dns,allow@10.20.30.40" \
   -- nslookup service.corp.example
 ```
+</CodeGroup>
 
 - **Resolver failover:** servers are tried in order after a timeout or connection failure. A DNS response such as `REFUSED` or `SERVFAIL` does not trigger failover.
 - **Split DNS:** macOS supplies its primary resolver list, not per-domain VPN resolver selection. An explicit nameserver handles sandbox lookups; it does not recreate the host's split-DNS rules. Use an approved resolver that can answer the names the workload needs.
@@ -133,7 +138,8 @@ Enable microsandbox [TLS interception](/networking/tls) when you need HTTP inspe
 
 Configure image pulls separately from guest traffic. Add your registry, corporate CA bundle, and credential reference to `managed.json`:
 
-```json
+<CodeGroup>
+```json JSON
 {
   "version": 1,
   "overrides": {
@@ -152,6 +158,7 @@ Configure image pulls separately from guest traffic. Add your registry, corporat
   }
 }
 ```
+</CodeGroup>
 
 Replace the sample host and CA path. Make the PEM bundle administrator-owned and employee-readable, and provision the token separately in the CLI or SDK process's environment.
 
@@ -167,7 +174,8 @@ For a guest connection back to a host service, use [`host.microsandbox.internal`
 
 Use the same company values from the DNS check to test an approved HTTPS endpoint:
 
-```bash
+<CodeGroup>
+```bash Shell
 msb run alpine --pull never \
   --dns-nameserver 10.20.0.53 \
   --dns-nameserver 10.20.0.54 \
@@ -175,6 +183,7 @@ msb run alpine --pull never \
   --net-rule "allow@dns,allow@10.20.30.40" \
   --trust-host-cas -- wget -qO- https://service.corp.example/health
 ```
+</CodeGroup>
 
 Provider examples assume an enrolled host client and are not validated integrations. Before rollout, check each path in a pilot environment:
 
@@ -186,3 +195,19 @@ Provider examples assume an enrolled host client and are not validated integrati
 | Connect to a published development port | Reachable only on the intended host interface |
 
 Repeat with the employees' SDKs and after a VPN reconnect. Recreate test sandboxes when checking changed resolver settings.
+
+## Troubleshoot by connection
+
+| Symptom | Check first | Team to involve |
+| --- | --- | --- |
+| Policy fails to load or has no effect | Reported file path and permissions, CLI/SDK version, and whether the backend predates the update | Device management |
+| Image pull fails | Host registry access, credentials, and registry CA settings | Registry or network administrators |
+| Private name does not resolve | Configured resolver, VPN state, and returned addresses | DNS or VPN administrators |
+| Name resolves but connection fails | Sandbox destination rules, private-address exceptions, host routes, and proxy logs | Application and network teams |
+| TLS verification fails | Certificate issuer and trust store for the failing connection | Certificate or network administrators |
+
+For a support report, include the CLI/SDK versions, OS, exact error, failing hostname, and whether the same request works on the host. Include `msb doctor` output for local runtime problems. Remove credentials and sensitive company details before sharing logs.
+
+## Next step
+
+[Enforce team settings](/enterprise/managed-configuration) to turn supported choices into administrator policy. Keep per-sandbox settings in your application or sandbox configuration.

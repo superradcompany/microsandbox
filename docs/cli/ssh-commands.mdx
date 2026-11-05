@@ -1,21 +1,24 @@
 ---
 title: SSH commands
+"og:title": Microsandbox CLI SSH commands
 sidebarTitle: "SSH"
-description: Connect to and serve sandboxes over SSH
+description: Connect to running sandboxes and serve SSH endpoints with the microsandbox CLI.
 icon: "lock"
 ---
 
-SSH commands expose sandbox shells, remote commands, and SFTP through the SSH protocol. For usage flows, see [SSH](/sandboxes/ssh).
+See [SSH](/sandboxes/ssh) for shell, remote command, and SFTP workflows.
 
 ## msb ssh
 
 Start a native SSH client session into a sandbox. With no remote command, this opens an interactive shell. With `--`, the remaining tokens are joined into the remote shell command.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh devbox
 msb ssh devbox -- uname -a
 msb ssh --name serve -- uptime
 ```
+</CodeGroup>
 
 | Argument | Description |
 |----------|-------------|
@@ -29,11 +32,13 @@ msb ssh --name serve -- uptime
 
 Add a public key to microsandbox's SSH authorization file.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh authorize --file ~/.ssh/id_ed25519.pub
 msb ssh authorize --key "ssh-ed25519 AAAA... user@host"
 cat ~/.ssh/id_ed25519.pub | msb ssh authorize --stdin
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -49,11 +54,13 @@ The default authorization file is `<MSB_HOME>/ssh/authorized_keys`, or `~/.micro
 
 Serve a sandbox over SSH for external OpenSSH, SFTP, local TCP forwarding, dynamic TCP forwarding, or `ProxyCommand` clients.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh serve devbox
 msb ssh serve devbox --host 127.0.0.1 --port 2222
 msb ssh serve devbox --stdio
 ```
+</CodeGroup>
 
 | Flag | Description |
 |------|-------------|
@@ -65,30 +72,36 @@ msb ssh serve devbox --stdio
 
 Listener mode accepts ordinary OpenSSH clients:
 
-```bash
+<CodeGroup>
+```bash Shell
 ssh -p 2222 root@127.0.0.1
 sftp -P 2222 root@127.0.0.1
 ssh -p 2222 -L 8080:127.0.0.1:80 root@127.0.0.1
 ssh -p 2222 -D 1080 root@127.0.0.1
 ```
+</CodeGroup>
 
 Forwarded TCP connections originate inside the guest through microsandbox's agent. Sandbox network policy still applies, and guest loopback addresses refer to the sandbox, not the host. Reverse forwarding (`-R`) and stream-local forwarding are not supported.
 
 `--stdio` is for clients that spawn `msb` as a transport bridge:
 
-```sshconfig
+<CodeGroup>
+```sshconfig SSH config
 Host devbox.msb
   User root
   ProxyCommand msb ssh serve devbox --stdio
 ```
+</CodeGroup>
 
 ## msb ssh connect
 
 Explicit form of [`msb ssh`](#msb-ssh), with the same arguments and options.
 
-```bash
+<CodeGroup>
+```bash Shell
 msb ssh connect devbox
 ```
+</CodeGroup>
 
 All SSH commands inherit `ssh.inactivity_timeout_secs` from user configuration when neither timeout flag is present. The built-in default is 10 minutes. A [managed timeout](/configuration#ssh) takes precedence over both flags, including `--no-inactivity-timeout`, for local and cloud sessions.
 

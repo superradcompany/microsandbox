@@ -1,10 +1,11 @@
 ---
 title: Volumes
-description: Go SDK - Volume API reference
+"og:title": Go SDK Volumes reference
+description: Create and mount persistent sandbox volumes with the Go SDK.
 keywords: ["Go SDK", "Go volumes", "microsandbox volumes"]
 ---
 
-Create, manage, and mount named volumes. See [Volumes](/sandboxes/volumes) for usage examples.
+See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Local filesystem paths
 
@@ -21,24 +22,6 @@ err = fs.Write(ctx, "nested/config", data)  // Explicitly select the other file.
 
 Ordinary contained `..` paths remain supported. `RemoveAll(ctx, ".")` and `RemoveAll(ctx, "")` delete the local volume directory and its contents. If the root itself is a symlink, they unlink that root link and preserve its target, matching Go's previous behavior. Descendant links never cause deletion outside the volume.
 
-## Sandbox-owned mounts
-
-Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
-
-```go
-sb, err := m.CreateSandbox(ctx, "worker",
-    m.WithImage("python"),
-    m.WithMounts(map[string]m.MountConfig{
-        "/cache": m.Mount.Owned(m.OwnedVolumeOptions{QuotaMiB: 2048}),
-        "/data": m.Mount.Owned(m.OwnedVolumeOptions{
-            Kind: m.VolumeKindDisk, SizeMiB: 10240,
-        }),
-    }),
-)
-```
-
-`OwnedVolumeOptions.Kind` defaults to `VolumeKindDir`; `QuotaMiB` applies only to directories. `VolumeKindDisk` creates raw ext4 and requires positive `SizeMiB`. Common flags are `Readonly`, `Noexec`, `Nosuid`, and `Nodev`. `StatVirtualization`, `HostPermissions`, and `Owner` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
-
 ## Functions
 
 #### <span className="msb-recv"></span><span className="msb-hn">GetDefaultVolume()</span>
@@ -51,11 +34,15 @@ func GetDefaultVolume(ctx context.Context) (*VolumeHandle, error)
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `FS()`. The local backend returns `ErrUnsupportedOperation`; it never substitutes a directory from the caller's machine.
 
+<Accordion title="Example">
+
 ```go
 volume, err := m.GetDefaultVolume(ctx)
 err = volume.FS().WriteString(ctx, "customers/acme.json", `{"active":true}`)
 contents, err := volume.FS().ReadString(ctx, "customers/acme.json")
 ```
+
+</Accordion>
 
 #### <span className="msb-recv"></span><span className="msb-hn">CreateVolume()</span>
 
@@ -308,7 +295,7 @@ Return the host filesystem path of the volume's data directory.
 func (h *VolumeHandle) Kind() VolumeKind
 ```
 
-Return the volume storage kind: [`VolumeKindDir`](#volumekind) or [`VolumeKindDisk`](#volumekind).
+Return the volume storage kind. See [`VolumeKind`](#volumekind).
 
 <p className="msb-label">Returns</p>
 
@@ -402,7 +389,13 @@ Delete this volume. All sandboxes using it must be stopped. Equivalent to [`Remo
 
 ## VolumeFs
 
-Local operations follow paths through an opened volume directory, including symlink targets and missing parents. Paths that escape the volume return `ErrPathEscape`; valid in-volume symlinks remain usable. Removing a final symlink unlinks the link itself. `Remove(ctx, ".")` and `Remove(ctx, "")` delete an empty root; `RemoveAll` also deletes its contents. After the root disappears, `Exists` returns `false, nil`, and `Mkdir` can recreate the root and missing parents. Local OS failures retain `*os.PathError` and their native error number, so `errors.Is` checks against `syscall.Errno` and the standard `os` error predicates continue to work. Local operations require the matching updated native SDK library; older libraries return `ErrUnsupportedOperation` with an upgrade instruction.
+Local operations follow paths through an opened volume directory, including symlink targets and missing parents. Paths that escape the volume return `ErrPathEscape`; valid in-volume symlinks remain usable.
+
+Removing a final symlink unlinks the link itself. `Remove(ctx, ".")` and `Remove(ctx, "")` delete an empty root; `RemoveAll` also deletes its contents. After the root disappears, `Exists` returns `false, nil`, and `Mkdir` can recreate the root and missing parents.
+
+Local OS failures retain `*os.PathError` and their native error number, so `errors.Is` checks against `syscall.Errno` and the standard `os` error predicates continue to work.
+
+Local operations require the matching updated native SDK library; older libraries return `ErrUnsupportedOperation` with an upgrade instruction.
 
 <p className="msb-backref">Returned by <a href="#v-fs">Volume.FS()</a> · <a href="#h-fs">VolumeHandle.FS()</a></p>
 
@@ -532,7 +525,7 @@ Functional options passed to [`CreateVolume`](#createvolume), plus the [`Mount`]
 func WithVolumeKind(kind VolumeKind) VolumeOption
 ```
 
-Select the volume kind. Valid values are [`VolumeKindDir`](#volumekind) (default) and [`VolumeKindDisk`](#volumekind).
+Select the [`VolumeKind`](#volumekind). Defaults to `VolumeKindDir`.
 
 <p className="msb-label">Parameters</p>
 
@@ -691,7 +684,9 @@ sb, err := m.CreateSandbox(ctx, "worker",
 
 </Accordion>
 
-Mount a named persistent volume with explicit sandbox-time existence behavior. [`NamedVolumeOptions.Mode`](#namedvolumeoptions) accepts `"existing"` (default), `"create"`, or `"ensure-exists"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume; it errors when the existing volume has a different kind, quota, or capacity than requested, and never mutates existing volume metadata.
+Mount a named persistent volume with explicit sandbox-time existence behavior. See [`NamedVolumeOptions.Mode`](#namedvolumeoptions) for accepted values; the default is `"existing"`. `Mode: "create"` fails when the named volume already exists. `Mode: "ensure-exists"` creates the volume if it is missing and reuses a compatible existing volume. It errors when the existing volume has a different kind, quota, or capacity than requested.
+
+It never mutates existing volume metadata.
 
 <p className="msb-label">Parameters</p>
 
@@ -770,6 +765,16 @@ Mount a host disk image as a virtio-blk device. Supports raw, qcow2, and vmdk fo
   </div>
 </div>
 
+#### <span className="msb-recv">Mount.</span><span className="msb-hn">Owned()</span>
+
+```go
+func (mountFactory) Owned(opts OwnedVolumeOptions) MountConfig
+```
+
+Use `Mount.Owned(OwnedVolumeOptions)` for local storage allocated for one sandbox. It starts empty, survives stop/start and reboot, and is deleted with the sandbox. Owned mounts do not appear in `ListVolumes()` and cannot be shared or removed independently. Cloud rejects owned mounts.
+
+`OwnedVolumeOptions.Kind` defaults to `VolumeKindDir`; `QuotaMiB` applies only to directories. `VolumeKindDisk` creates raw ext4 and requires positive `SizeMiB`. Common flags are `Readonly`, `Noexec`, `Nosuid`, and `Nodev`. `StatVirtualization`, `HostPermissions`, and `Owner` apply only to directories. No host path or volume name is accepted. Mounting over an existing image directory hides its contents without copying them.
+
 ## MountConfig
 
 Mount configuration produced by the [`Mount`](#options) factory.
@@ -792,13 +797,13 @@ Volume name for named mounts
 
 `string`
 
-Provisioning mode for named mounts (`"existing"`, `"create"`, `"ensure-exists"`)
+Provisioning mode for named mounts. See [`NamedVolumeOptions.Mode`](#namedvolumeoptions).
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">NamedKind</span>
 
 `string`
 
-Kind for provisioned named mounts (`"dir"` or `"disk"`)
+Storage kind for provisioned named mounts. See [`VolumeKind`](#volumekind).
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">QuotaMiB</span>
 
@@ -877,7 +882,6 @@ Per-mount host-permission propagation policy (bind / named only)
 `*MountOwner`
 
 Guest owner fallback for host files without a per-file stat override (bind / directory-backed named only)
-
 
 #### <span className="msb-recv">mount.</span><span className="msb-hn">Kind()</span>
 
@@ -1035,3 +1039,23 @@ Tuning struct for [`Mount.Disk`](#mount-disk).
 | `Noexec` | `bool` | Prevent direct execution from the mount |
 | `Nosuid` | `bool` | Ignore setuid and setgid privilege elevation from files on the mount |
 | `Nodev` | `bool` | Ignore device files on the mount |
+
+### OwnedVolumeOptions
+
+```go
+type OwnedVolumeOptions struct {
+	Kind     VolumeKind
+	SizeMiB  uint32 // Required positive capacity for disk storage.
+	QuotaMiB uint32 // Directory quota; zero leaves the quota unset.
+	Readonly bool
+	Noexec   bool
+	Nosuid   bool
+	Nodev    bool
+	// Metadata policies and Owner apply only to directory storage.
+	StatVirtualization StatVirtualization
+	HostPermissions    HostPermissions
+	Owner              *MountOwner
+}
+```
+
+Options for [`Mount.Owned()`](#mount-owned). `Kind` defaults to `VolumeKindDir`; directory quota `0` means no quota. Disk storage requires positive `SizeMiB`.

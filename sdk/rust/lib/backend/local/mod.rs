@@ -17,13 +17,15 @@
 
 #[cfg(test)]
 mod config_paths;
-mod control;
+pub(crate) mod control;
 mod control_lookup;
+pub(crate) mod creation;
 mod database;
 pub(crate) mod host_paths;
 mod metrics_lookup;
 mod sandbox;
 pub(crate) mod snapshot;
+pub(crate) mod volume;
 
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -50,6 +52,7 @@ use microsandbox_utils::process_lock::{lock_exclusive, open_lock_file, unlock};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
 
+use self::control::identity::DatabaseIdentity;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
@@ -170,11 +173,15 @@ impl LocalBackend {
                     &self.config().snapshots_dir(),
                 )
                 .await?;
+                let identity = Arc::new(
+                    DatabaseIdentity::capture(db_dir.join(microsandbox_utils::DB_FILENAME))
+                        .await
+                        .map_err(|error| MicrosandboxError::ControlClient(Arc::new(error)))?,
+                );
                 self.control_sessions
-                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))
+                    .bind_database(identity.clone())
                     .map_err(MicrosandboxError::ControlClient)?;
-                self.metrics_lookup
-                    .bind_database(&db_dir.join(microsandbox_utils::DB_FILENAME))?;
+                self.metrics_lookup.bind_database(identity)?;
                 Ok(pools)
             })
             .await
@@ -482,6 +489,7 @@ impl LocalBackendBuilder {
         let path = self.config_path.unwrap_or_else(crate::config::config_path);
         let config = BackendConfig::load_from(&path, self.managed_config_path.as_deref())?
             .prepare_for_local_backend(self.config)?;
+        config.require_backend(BackendKind::Local, None)?;
 
         Ok(LocalBackend::from_backend_config(
             config,
@@ -515,13 +523,13 @@ impl Backend for LocalBackend {
         BackendKind::Local
     }
 
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
+    fn info(&self) -> crate::MicrosandboxResult<BackendInfo> {
+        Ok(BackendInfo {
             kind: BackendKind::Local,
             api_url: None,
             source: self.selection_source,
             profile: self.profile.clone(),
-        }
+        })
     }
 
     fn sandboxes(&self) -> &dyn SandboxBackend {
@@ -548,7 +556,7 @@ impl Backend for LocalBackend {
         Box::pin(async move {
             let mut last_error = None;
 
-            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+            for sock_path in self.agent_socket_paths(name) {
                 if !agent_endpoint_may_exist(&sock_path) {
                     continue;
                 }
@@ -613,7 +621,7 @@ async fn connect_catalog(
     database: &DatabaseConfig,
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
-    tokio::fs::create_dir_all(db_dir).await?;
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
     refuse_incomplete_self_downgrade(db_dir)?;
 
@@ -748,8 +756,8 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
             .or_else(|| applied.first())
             .map(String::as_str)
             .unwrap_or("<missing migration>");
-        return Err(MicrosandboxError::Runtime(format!(
-            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        return Err(database::newer_schema_error(&format!(
+            "applied migration {version:?} is not recognized by this version"
         )));
     }
 
@@ -1051,6 +1059,23 @@ mod tests {
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&db_dir).unwrap().permissions().mode() & 0o777,
+                microsandbox_db::pool::PRIVATE_DATABASE_DIRECTORY_MODE
+            );
+            assert_eq!(
+                std::fs::metadata(db_dir.join(microsandbox_utils::DB_FILENAME))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                microsandbox_db::pool::PRIVATE_DATABASE_FILE_MODE
+            );
+        }
 
         // All migrated tables should be present.
         let rows = conn
@@ -1076,6 +1101,7 @@ mod tests {
             "manifest",
             "manifest_layer",
             "memory_allocation_node",
+            "protected_sandbox_state",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -1227,7 +1253,10 @@ mod tests {
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("database schema is newer"));
+        assert!(
+            err.to_string()
+                .contains("newer or unrecognized database schema")
+        );
     }
 
     #[tokio::test]
@@ -1729,6 +1758,69 @@ mod tests {
     }
 
     #[test]
+    fn local_construction_checks_final_policy_without_creating_home_or_database() {
+        let _env_guard = crate::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("runtime");
+        let user = dir.path().join("config.json");
+        let managed = dir.path().join("managed.json");
+        for (ordinary, enforced, builder_policy, allowed) in [
+            (
+                r#"{"allowed_backends":["cloud"]}"#,
+                r#"{"overrides":{}}"#,
+                None,
+                false,
+            ),
+            (
+                r#"{"allowed_backends":["local"]}"#,
+                r#"{"overrides":{"allowed_backends":["cloud"]}}"#,
+                None,
+                false,
+            ),
+            (
+                r#"{"allowed_backends":[]}"#,
+                r#"{"overrides":{}}"#,
+                None,
+                false,
+            ),
+            (
+                "{}",
+                r#"{"overrides":{}}"#,
+                Some(vec![BackendKind::Cloud]),
+                false,
+            ),
+            (
+                "{}",
+                r#"{"overrides":{"allowed_backends":["local"]}}"#,
+                Some(vec![BackendKind::Cloud]),
+                true,
+            ),
+        ] {
+            std::fs::write(&user, ordinary).unwrap();
+            std::fs::write(&managed, enforced).unwrap();
+            let mut builder = LocalBackend::builder()
+                .config_path(&user)
+                .managed_config_path(&managed)
+                .home(&home);
+            if let Some(policy) = builder_policy {
+                builder.config.allowed_backends_mut(policy);
+            }
+
+            let result = builder.build_lazy();
+            if allowed {
+                assert!(result.unwrap().db.get().is_none());
+            } else {
+                let error = result.err().unwrap();
+                assert!(
+                    error.to_string().contains("allowed_backends")
+                        || error.to_string().contains("allowed backends")
+                );
+            }
+            assert!(!home.exists());
+        }
+    }
+
+    #[test]
     fn build_lazy_rejects_invalid_persisted_config() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join("config.json");
@@ -1805,6 +1897,7 @@ mod tests {
                 cpu_placement: microsandbox_types::CpuPlacement::Spread,
                 placement_profile: None,
                 thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                nested_virt: None,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),

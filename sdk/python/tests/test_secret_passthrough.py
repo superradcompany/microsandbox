@@ -50,3 +50,41 @@ def test_placeholder_permission_aliases_are_additive() -> None:
             passthrough=("legacy.example",),
         )
     assert secret._to_dict()["passthrough"] == ["new.example", "legacy.example"]
+
+
+def test_secret_substitution_header_fields_serialize() -> None:
+    secret = Secret.env(
+        "API_KEY",
+        value="sk-abc",
+        allow=("api.github.com",),
+        substitution=SecretSubstitution(
+            header_fields=("authorization", "x-api-key")
+        ),
+    )
+
+    assert secret._to_dict()["substitution"] == {
+        "header_fields": ["authorization", "x-api-key"]
+    }
+
+
+def test_secret_substitution_header_fields_is_keyword_only() -> None:
+    # ``header_fields`` is keyword-only, so the historical positional order
+    # (headers, query, body) is unchanged: ``SecretSubstitution(False, True)``
+    # still means headers disabled and query substitution enabled.
+    substitution = SecretSubstitution(False, True)
+    assert substitution.headers is False
+    assert substitution.query is True
+    assert substitution.body is False
+    assert substitution.header_fields == ()
+    with pytest.raises(TypeError):
+        SecretSubstitution(True, False, False, ("authorization",))
+
+    scoped = SecretSubstitution(headers=True, header_fields=("authorization",))
+    assert scoped._to_dict() == {
+        "header_fields": ["authorization"],
+    }
+
+    # An allowlist cannot be combined with a disabled header scope: it would be
+    # inert, so reject it instead of silently dropping the restriction.
+    with pytest.raises(ValueError, match="header_fields requires headers"):
+        SecretSubstitution(headers=False, header_fields=("authorization",))._to_dict()

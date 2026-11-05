@@ -68,21 +68,6 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         assert opened.digest == snapshot.digest
         assert opened.state_kind is SnapshotStateKind.FILE
 
-        copied_archive = tmp_path / "copied.tar.zst"
-        await (
-            snapshot.copy_to(copied_archive)
-            .labels({"environment": "test"})
-            .record_integrity(True)
-            .save()
-        )
-        copied_handle = await Snapshot.load(
-            copied_archive,
-            dest=tmp_path / "copied-artifact",
-        )
-        copied = await copied_handle.open()
-        assert copied.labels == {"environment": "test"}
-        assert (await copied.verify())["upper"]["kind"] == "verified"
-
         snapshots = await Snapshot.list()
         assert any(item.digest == snapshot.digest for item in snapshots)
 
@@ -108,6 +93,23 @@ async def test_snapshot_create_open_list_and_boot(sandbox_name, tmp_path, source
         out = await fork.shell("cat /etc/alpine-release")
         assert out.success is True
         assert out.stdout_text.strip()
+
+        # Restore by ID while it still identifies one local artifact. Importing the copy
+        # below intentionally makes that selector ambiguous.
+        copied_archive = tmp_path / "copied.tar.zst"
+        await (
+            snapshot.copy_to(copied_archive)
+            .labels({"environment": "test"})
+            .record_integrity(True)
+            .save()
+        )
+        copied_handle = await Snapshot.load(
+            copied_archive,
+            dest=tmp_path / "copied-artifact",
+        )
+        copied = await copied_handle.open()
+        assert copied.labels == {"environment": "test"}
+        assert (await copied.verify())["upper"]["kind"] == "verified"
     finally:
         if copied_handle is not None:
             with suppress(Exception):

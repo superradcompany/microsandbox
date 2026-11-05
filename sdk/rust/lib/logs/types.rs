@@ -43,6 +43,9 @@ pub struct BootError {
     pub stage: BootErrorStage,
     /// Operating-system error number, when one was available.
     pub errno: Option<i32>,
+    /// Typed guest startup failure used for actionable hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<super::InitFailureReason>,
     /// Human-readable failure message.
     pub message: String,
 }

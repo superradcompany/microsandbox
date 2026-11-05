@@ -73,6 +73,11 @@ pub struct MachineArgs {
     #[arg(long = "startup-fd", hide = true)]
     pub startup_fd: Option<i32>,
 
+    /// Terminal inherited for the startup workload.
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    #[arg(long = "oci-console-fd", hide = true)]
+    pub oci_console_fd: Option<i32>,
+
     /// Inherited descriptor owning this sandbox's lifecycle lock.
     #[cfg(unix)]
     #[arg(long = "lifecycle-lock-fd", hide = true)]
@@ -191,6 +196,14 @@ pub fn run(args: MachineArgs) -> ! {
             std::process::exit(2);
         }
     };
+    #[cfg(all(unix, feature = "oci-runtime"))]
+    let startup_console = match args.oci_console_fd.map(startup_console_from_fd).transpose() {
+        Ok(fd) => fd,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(2);
+        }
+    };
     let run_dir = launch_run_dir(&launch);
     #[cfg(unix)]
     let lifecycle_guard = match args.lifecycle_lock_fd {
@@ -218,6 +231,7 @@ pub fn run(args: MachineArgs) -> ! {
                 eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
                 std::process::exit(2);
             });
+    let nested_virt = launch.resolve_nested_virt();
     let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
@@ -314,9 +328,14 @@ pub fn run(args: MachineArgs) -> ! {
         );
         std::process::exit(2);
     }
+    if let Err(err) = VmConfig::validate_fs_state_limit(launch.fs_state_limit_bytes) {
+        eprintln!("{err}");
+        std::process::exit(2);
+    }
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        nested_virt,
         guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
@@ -329,6 +348,7 @@ pub fn run(args: MachineArgs) -> ! {
         cpu_placement: launch.cpu_placement,
         placement_profile_name: launch.placement_profile_name,
         placement_profile: launch.placement_profile,
+        fs_state_limit_bytes: launch.fs_state_limit_bytes,
         block_writeback_limit_bytes: launch.block_writeback_limit_bytes,
         rootfs_path: launch.rootfs.path,
         rootfs_follow_root_symlinks: launch.rootfs.follow_root_symlinks,
@@ -353,7 +373,6 @@ pub fn run(args: MachineArgs) -> ! {
         file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
-        #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
         bootstrap: launch.bootstrap,
@@ -387,6 +406,8 @@ pub fn run(args: MachineArgs) -> ! {
         startup_command: launch.startup,
         #[cfg(unix)]
         startup_fd,
+        #[cfg(all(unix, feature = "oci-runtime"))]
+        startup_console,
         #[cfg(windows)]
         startup_pipe: args.startup_pipe,
         #[cfg(unix)]
@@ -459,6 +480,9 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
     } else {
         LaunchConfig::decode(&bytes)?
     };
+    if !config.protected_guest_state {
+        return Err("upgrade required: this runtime requires a patched SDK or CLI that prepares protected sandbox state; update the launching application and retry".into());
+    }
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
     {
         return Err("--restore and launch execution intent disagree".into());
@@ -495,6 +519,21 @@ fn parent_watchdog_from_fd(fd: i32) -> Result<OwnedFd, String> {
 #[cfg(unix)]
 fn startup_from_fd(fd: i32) -> Result<OwnedFd, String> {
     validate_pipe_fd(fd, microsandbox_runtime::vm::STARTUP_FD, "startup-fd")?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(all(unix, feature = "oci-runtime"))]
+fn startup_console_from_fd(fd: i32) -> Result<OwnedFd, String> {
+    validate_open_fd(
+        fd,
+        microsandbox_runtime::vm::OCI_CONSOLE_FD,
+        "oci-console-fd",
+    )?;
+    if unsafe { libc::isatty(fd) } != 1 {
+        return Err(format!(
+            "invalid --oci-console-fd {fd}: fd is not a terminal"
+        ));
+    }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
@@ -804,6 +843,8 @@ mod tests {
             parent_watch_fd: None,
             #[cfg(unix)]
             startup_fd: None,
+            #[cfg(all(unix, feature = "oci-runtime"))]
+            oci_console_fd: None,
             #[cfg(unix)]
             lifecycle_lock_fd: None,
             #[cfg(windows)]
@@ -889,6 +930,7 @@ mod tests {
         use std::io::Write;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             db_path: PathBuf::from("/tmp/x.db"),
             bootstrap: GuestBootstrap {
                 default_env: vec![BootstrapEnvVar {
@@ -929,6 +971,24 @@ mod tests {
     }
 
     #[test]
+    fn patched_runtime_refuses_unprotected_modern_launch() {
+        for omitted in [false, true] {
+            let mut value = serde_json::to_value(LaunchConfig::default()).unwrap();
+            if omitted {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("protected_guest_state");
+            }
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+            let error =
+                load_launch_config(&args_with(None, Some(file.path().to_path_buf()))).unwrap_err();
+            assert!(error.contains("upgrade required") && error.contains("SDK or CLI"));
+        }
+    }
+
+    #[test]
     fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let bytes = include_bytes!("../../runtime/tests/fixtures/launch-v0.6.18.json");
@@ -936,12 +996,16 @@ mod tests {
         let mut args = args_with(None, Some(file.path().to_path_buf()));
         assert!(load_launch_config(&args).is_err());
         args.legacy_launch = true;
-        assert!(load_launch_config(&args).is_ok());
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("upgrade required")
+        );
         args.restore = true;
         assert!(
             load_launch_config(&args)
                 .unwrap_err()
-                .contains("intent disagree")
+                .contains("upgrade required")
         );
     }
 
@@ -949,8 +1013,14 @@ mod tests {
     fn restore_argument_cannot_select_a_fresh_boot() {
         use std::io::Write;
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&serde_json::to_vec(&LaunchConfig::default()).unwrap())
-            .unwrap();
+        file.write_all(
+            &serde_json::to_vec(&LaunchConfig {
+                protected_guest_state: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let mut args = args_with(None, Some(file.path().to_path_buf()));
         args.restore = true;
         assert!(
@@ -965,6 +1035,7 @@ mod tests {
         use std::io::Write;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
             agent_sock: PathBuf::from("/tmp/msb/run/agent/legacy.sock"),
             ..Default::default()
@@ -985,6 +1056,7 @@ mod tests {
     #[test]
     fn test_old_fallback_launch_config_infers_run_dir_from_sandbox_root() {
         let launch = LaunchConfig {
+            protected_guest_state: true,
             sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
             agent_sock: PathBuf::from("/tmp/msb/sandboxes/demo/runtime/agent.sock"),
             ..Default::default()
@@ -1000,6 +1072,7 @@ mod tests {
         use std::os::fd::IntoRawFd;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             bootstrap: microsandbox_protocol::bootstrap::GuestBootstrap {
                 default_cwd: Some("/srv".to_string()),
                 ..Default::default()

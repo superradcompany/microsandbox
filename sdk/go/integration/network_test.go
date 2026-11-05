@@ -167,6 +167,8 @@ func TestCustomPolicyPortRange(t *testing.T) {
 		microsandbox.WithImage(goIntegrationImage),
 		microsandbox.WithNetwork(&microsandbox.NetworkConfig{
 			DefaultEgress: microsandbox.PolicyActionDeny,
+			// This test checks TCP rejection rather than an HTTP denial response.
+			HTTP: &microsandbox.HTTPConfig{DenyResponse: false},
 			Rules: []microsandbox.PolicyRule{
 				{
 					Action:    microsandbox.PolicyActionAllow,

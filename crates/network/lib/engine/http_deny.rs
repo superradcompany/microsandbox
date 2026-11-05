@@ -4,6 +4,8 @@
 //! proxy answers the guest with `403 Forbidden` so clients surface a readable
 //! error instead of a bare connection reset.
 
+use serde_json::json;
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -15,7 +17,14 @@ pub const HOST_PLACEHOLDER: &str = "{host}";
 pub const DEFAULT_HTTP_DENY_MESSAGE: &str = "\
 This host is not allowed by the sandbox network policy config.\n\
 \n\
-Note to agent: `{host}` is not in the allowed-host list. Ask the user to add it to the sandbox network allow list.\n";
+Note to agent: `{host}` is not in the allowed-host list. \
+Ask the user to add it to the sandbox network allow list.\n";
+
+/// Default JSON network-denial message.
+pub const NETWORK_JSON_DENY_MESSAGE: &str = "Request blocked by network policy.";
+
+/// Explanation for a placeholder rejected by the secret policy.
+pub(crate) const SECRET_HTTP_DENY_MESSAGE: &str = "Request blocked by secret policy.";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -74,16 +83,39 @@ pub fn http_forbidden_response(body: &str) -> Vec<u8> {
     response
 }
 
+/// Build an HTTP/1.1 403 with a stable network-policy code and JSON message and requested domain.
+pub fn json_http_forbidden_response(message: &str, host: &str) -> Vec<u8> {
+    forbidden_response("network_policy_denied", message, host)
+}
+
+/// Build an HTTP/1.1 403 with a stable JSON error for a secret-policy violation.
+pub(crate) fn secret_http_forbidden_response(message: &str, host: &str) -> Vec<u8> {
+    forbidden_response("secret_policy_denied", message, host)
+}
+
+fn forbidden_response(code: &str, message: &str, host: &str) -> Vec<u8> {
+    // Serialize custom messages so quotes, control characters and Unicode
+    // remain message content rather than changing the error envelope.
+    let domain = (!host.is_empty()).then_some(host);
+    let json = json!({ "code": code, "message": message, "domain": domain }).to_string();
+    let body = json.as_bytes();
+    let mut response = Vec::with_capacity(128 + body.len());
+    response.extend_from_slice(b"HTTP/1.1 403 Forbidden\r\n");
+    response.extend_from_slice(b"Content-Type: application/json\r\n");
+    response.extend_from_slice(b"Connection: close\r\n");
+    response.extend_from_slice(b"Cache-Control: no-store\r\n");
+    response.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    response.extend_from_slice(body);
+    response
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DEFAULT_HTTP_DENY_MESSAGE, classify_http_request, http_forbidden_response,
-        render_http_deny_message,
-    };
+    use super::{classify_http_request, json_http_forbidden_response};
 
     #[test]
     fn classification_requires_a_complete_http1_request_line() {
@@ -120,27 +152,33 @@ mod tests {
     }
 
     #[test]
-    fn default_message_names_the_blocked_host() {
-        let body = render_http_deny_message(DEFAULT_HTTP_DENY_MESSAGE, "evil.example");
-        assert!(body.contains("`evil.example`"));
-        assert!(body.contains("Note to agent:"));
-        assert!(!body.contains("{host}"));
-    }
-
-    #[test]
-    fn empty_host_falls_back_to_this_host() {
-        let body = render_http_deny_message("blocked: {host}", "  ");
-        assert_eq!(body, "blocked: this host");
-    }
-
-    #[test]
-    fn forbidden_response_is_http11_with_the_body() {
-        let response = http_forbidden_response("nope\n");
-        let text = std::str::from_utf8(&response).unwrap();
-        assert!(text.starts_with("HTTP/1.1 403 Forbidden\r\n"));
-        assert!(text.contains("Content-Type: text/plain; charset=utf-8\r\n"));
-        assert!(text.contains("Connection: close\r\n"));
-        assert!(text.ends_with("\r\n\r\nnope\n"));
-        assert!(text.contains("Content-Length: 5\r\n"));
+    fn forbidden_response_is_http11_with_a_json_error() {
+        for (message, host, expected_domain) in [
+            ("nope\n", "example.com", Some("example.com")),
+            ("", "", None),
+            (
+                "blocked \"example.com\": use C:\\policy\n雪\t\u{0000}",
+                "example.com",
+                Some("example.com"),
+            ),
+        ] {
+            let response = json_http_forbidden_response(message, host);
+            let text = std::str::from_utf8(&response).unwrap();
+            let (headers, body) = text.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+            assert!(headers.contains("Content-Type: application/json\r\n"));
+            assert!(headers.contains("Connection: close\r\n"));
+            let error: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(error["code"], "network_policy_denied");
+            assert_eq!(error["message"], message);
+            assert_eq!(error["domain"], serde_json::json!(expected_domain));
+            let content_length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(content_length, body.len());
+        }
     }
 }

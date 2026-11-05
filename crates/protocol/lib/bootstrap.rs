@@ -2,9 +2,17 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use microsandbox_types::ExecLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::exec::ExecRlimit;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Virtiofs export used as the immutable lower layer of an OCI read-only root.
+pub const READ_ONLY_ROOTFS_TAG: &str = "msb-readonly-root";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,7 +24,11 @@ use crate::exec::ExecRlimit;
 /// starts. The surrounding protocol envelope supplies the schema generation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestBootstrap {
-    /// Block-backed root filesystem assembly, when required.
+    /// The host saves startup failures before acknowledging or terminating the guest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub init_failure_ack: bool,
+
+    /// Guest root filesystem assembly, when required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_root: Option<BootstrapBlockRoot>,
 
@@ -74,12 +86,22 @@ pub struct GuestBootstrap {
     /// Optional PID 1 handoff after agentd finishes guest initialization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_init: Option<BootstrapHandoffInit>,
+
+    /// Authoritative execution policy installed by the runtime before guest initialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_limits: Option<ExecLimits>,
 }
 
-/// Block-backed root filesystem configuration.
+/// Guest root filesystem assembly configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum BootstrapBlockRoot {
+    /// An immutable virtiofs lower with a temporary boot overlay, sealed before ready.
+    ///
+    /// The export uses [`READ_ONLY_ROOTFS_TAG`]. A distinct variant makes older
+    /// agents reject this request rather than silently boot a writable root.
+    ReadOnlyVirtiofs,
+
     /// A single filesystem image mounted as the guest root.
     DiskImage {
         /// Guest block-device path.
@@ -318,8 +340,40 @@ mod tests {
     };
 
     #[test]
+    fn readonly_root_uses_a_distinct_required_bootstrap_variant() {
+        let bootstrap = GuestBootstrap {
+            init_failure_ack: true,
+            block_root: Some(BootstrapBlockRoot::ReadOnlyVirtiofs),
+            ..GuestBootstrap::default()
+        };
+        let message = Message::with_payload(MessageType::Bootstrap, 0, &bootstrap).unwrap();
+        let decoded = message.payload::<GuestBootstrap>().unwrap();
+        assert_eq!(decoded, bootstrap);
+        let json = serde_json::to_value(&bootstrap).unwrap();
+        assert_eq!(json["init_failure_ack"], true);
+        assert_eq!(json["block_root"]["kind"], "read-only-virtiofs");
+
+        // Historical agents only knew these two variants. Unknown intent must fail closed.
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "kebab-case")]
+        enum PreviousBlockRoot {
+            DiskImage {
+                #[serde(rename = "device")]
+                _device: String,
+            },
+            OciErofs {
+                #[serde(rename = "lower")]
+                _lower: String,
+            },
+        }
+        assert!(serde_json::from_value::<PreviousBlockRoot>(json["block_root"].clone()).is_err());
+    }
+
+    #[test]
     fn guest_bootstrap_round_trips_transport_sensitive_values() {
         let bootstrap = GuestBootstrap {
+            exec_limits: None,
+            init_failure_ack: true,
             block_root: Some(BootstrapBlockRoot::OciErofs {
                 lower: "/dev/vda".to_string(),
                 upper: BootstrapBlockRootUpper::Tmpfs {

@@ -1,0 +1,124 @@
+---
+title: Configuration
+"og:title": Rust SDK configuration reference
+description: Read global settings and configure local backends with the Rust SDK.
+---
+
+See [Global configuration](/configuration) for file fields and defaults, and [Runtime setup](/sdk/setup) for installation.
+
+## GlobalConfigPatch
+
+### load()
+
+```rust
+fn load() -> MicrosandboxResult<Self>
+```
+
+Read saved user settings while preserving omitted fields and explicit clears. A missing file returns an empty patch. Defaults and managed overrides are applied later.
+
+### save()
+
+```rust
+fn save(&self) -> MicrosandboxResult<()>
+```
+
+Save the patch without filling in defaults. Omitted fields stay omitted and explicit clears are preserved. Unknown user fields are ignored on load and discarded on save.
+
+## GlobalConfig
+
+Resolved settings after layering. Use [`LocalBackend::config()`](#config) to read the effective configuration for a backend.
+
+## LocalBackend
+
+### config()
+
+```rust
+fn config(&self) -> &GlobalConfig
+```
+
+Read the settings retained by this backend. Existing handles keep their configuration when files or process defaults change.
+
+### Runtime paths
+
+Inspect the active config and resolve runtime paths with the same precedence used by sandbox startup:
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{config::config, setup::resolve_runtime};
+
+let cfg = config()?;
+let runtime = resolve_runtime(&cfg)?;
+let msb = &runtime.msb_path;
+let libkrunfw = &runtime.libkrunfw_path;
+```
+
+</Accordion>
+
+When your code owns an explicit local backend, prefer the backend-owned config:
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::{setup::resolve_runtime, LocalBackend};
+
+let backend = LocalBackend::builder()
+    .home("/tmp/msb-home")
+    .build()
+    .await?;
+
+let cfg = backend.config();
+let runtime = resolve_runtime(cfg)?;
+```
+
+</Accordion>
+
+`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
+
+`LocalBackendBuilder::build_lazy()` now returns `Result<LocalBackend>`. It replaces `try_build_lazy()`, and `LocalBackend` no longer implements `Default`; use `LocalBackend::lazy()?` instead.
+
+For a long-lived process, construct a new backend to pick up configuration changes. Installing it with `set_default_backend` affects future operations; existing sandbox and volume handles retain their original backend. Construct the replacement successfully before installing it.
+
+## LocalBackendBuilder
+
+### config_path()
+
+```rust
+fn config_path(self, path: impl Into<PathBuf>) -> Self
+```
+
+Read a specific user configuration file without changing `MSB_CONFIG_PATH`. Managed settings still apply. The builder's `home()` selects data storage; it does not select the configuration file. Backend-selection helpers and synchronous constructors remain synchronous.
+
+<Accordion title="Example">
+
+```rust
+use microsandbox::LocalBackend;
+
+let backend = LocalBackend::builder()
+    .config_path("/etc/my-app/microsandbox.json")
+    .build_lazy()?;
+```
+
+</Accordion>
+
+### deployment_profile()
+
+```rust
+fn deployment_profile(self, profile: DeploymentProfile) -> Self
+```
+
+Set the authoritative deployment profile for this backend. It takes precedence over the user configuration file and each sandbox's requested profile on create and restart. Managed settings retain precedence. See [deployment profiles](/configuration#deployment_profile) for behavior.
+
+### ssh_inactivity_timeout_secs()
+
+```rust
+fn ssh_inactivity_timeout_secs(self, secs: u64) -> Self
+```
+
+Override the user-configured SSH inactivity timeout. Zero disables it; managed settings retain precedence. See [SSH settings](/configuration#ssh) for when the value is captured.
+
+## Sandbox configuration patches
+
+Use [`SandboxBuilder::overlay()`](/sdk/rust/sandbox#sandbox-overlay) to override individual settings or explicitly clear an inherited working directory. These choices survive `SandboxBuilder::from(config)` and local database reloads. Without saved caller overrides, `workdir: None` still means omitted.
+
+Edit settings through builder setters, `overlay()`, or sandbox modification APIs; saved overrides can overwrite direct edits to a resolved `SandboxConfig`. See [configuration layering](/configuration#sandbox_defaults) for precedence and backend differences.

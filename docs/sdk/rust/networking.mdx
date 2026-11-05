@@ -1,34 +1,13 @@
 ---
 title: Networking
-description: Rust SDK - Network API reference
+"og:title": Rust SDK Networking reference
+description: Configure sandbox network policies with the Rust SDK.
 keywords: ["Rust SDK", "Rust networking", "microsandbox networking"]
 ---
 
-Configure sandbox networking. See [Networking](/networking/overview) for usage and policy concepts.
+See [Networking](/networking/overview) for network policies, DNS, TLS, and port publishing.
 
 ## NetworkPolicy
-
-<p className="msb-backref">Built by <a href="#networkpolicybuilder">NetworkPolicy::builder()</a> · used by <a href="#network-policy">policy()</a></p>
-
-Ordered rules with per-direction defaults.
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_egress</span>
-
-[`Action`](#action)
-
-Action when no egress-applicable rule matches
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">default_ingress</span>
-
-[`Action`](#action)
-
-Action when no ingress-applicable rule matches
-
-#### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">rules</span>
-
-`Vec<`[`Rule`](#rule)`>`
-
-Ordered rules; first match wins per direction
 
 #### <span className="msb-recv">NetworkPolicy::</span><span className="msb-hn">builder()</span>
 
@@ -49,7 +28,7 @@ let policy = NetworkPolicy::builder()
 
 </Accordion>
 
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). The primary construction path. String inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) are stored raw and parsed at [`build()`](#policy-build), so the chain stays clean and the first parse or validation failure surfaces as [`BuildError`](#builderror).
+Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. [`build()`](#policy-build) validates string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) and returns a [`BuildError`](#builderror) for invalid input.
 
 <p className="msb-label">Returns</p>
 
@@ -247,7 +226,7 @@ Set both `default_egress` and `default_ingress` to [`Allow`](#action).
 fn default_egress(self, action: Action) -> Self
 ```
 
-Per-direction override for the egress default action.
+Set the action when no egress rule matches.
 
 <p className="msb-label">Parameters</p>
 
@@ -264,7 +243,7 @@ Per-direction override for the egress default action.
 fn default_ingress(self, action: Action) -> Self
 ```
 
-Per-direction override for the ingress default action.
+Set the action when no ingress rule matches.
 
 <p className="msb-label">Parameters</p>
 
@@ -342,7 +321,7 @@ Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](
 fn build(self) -> Result<NetworkPolicy, BuildError>
 ```
 
-Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair (a rule fully covered by an earlier one in the same direction; only `Ip` / `Cidr` / `Group` destinations are checked). Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
+Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair, meaning a rule fully covered by an earlier one in the same direction. The shadow check covers only `Ip` / `Cidr` / `Group` destinations. Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
 
 <p className="msb-label">Returns</p>
 
@@ -849,24 +828,23 @@ Whether to ship the host's trusted root CAs into the guest at boot. Default: `fa
 
 ```rust
 fn http(self, configure: impl FnOnce(HttpBuilder) -> HttpBuilder) -> Self
-
-// Within the callback:
-fn deny_response(self, enabled: bool) -> Self
-fn deny_message(self, message: impl Into<String>) -> Self
 ```
 
-Denial responses are disabled by default. Call `deny_response(true)` to return `403 Forbidden` for supported HTTP requests, including HTTPS on intercepted ports. Optionally set `deny_message` to customize the body; `{host}` names the blocked hostname. Setting a message alone does not enable responses. Enabling requires a supporting local runtime; cloud rejects it. See [What a denied HTTP request sees](/networking/overview#what-a-denied-http-request-sees).
+Configure HTTP denial responses. See [`HttpBuilder`](#httpbuilder).
 
-`HttpBuilder::build()` returns `HttpConfig`, stored in `NetworkConfig.http`:
+<Accordion title="Example">
 
 ```rust
-pub struct HttpConfig {
-    pub deny_response: bool,
-    pub deny_message: Option<String>,
-}
+use microsandbox::{Sandbox, sandbox::HttpDenyResponseFormat};
+
+let sb = Sandbox::builder("agent")
+    .image("python")
+    .network(|n| n.http(|h| h.deny_response(true).deny_response_format(HttpDenyResponseFormat::Json).network_deny_message("Request blocked.")))
+    .create()
+    .await?;
 ```
 
-When enabled, `None` uses the built-in message; `Some(String::new())` sends an empty body.
+</Accordion>
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">strict()</span>
 
@@ -876,13 +854,31 @@ fn strict(self, enabled: bool) -> Self
 
 Require hostname-based policy allows to use an inspectable request authority. Default: `true`. Plain HTTP exposes that authority in `Host`; HTTPS only exposes it when TLS interception is enabled and not bypassed. Without that visibility, strict mode denies HTTPS that would otherwise be allowed only by a hostname rule.
 
+#### <span className="msb-recv">network.</span><span className="msb-hn">max_inbound_tcp_connections()</span>
+
+```rust
+fn max_inbound_tcp_connections(self, max: usize) -> Self
+```
+
+Limit active inbound TCP connections across published ports; `0` means unlimited. When omitted, the runtime defaults to unlimited in **0.7.9+**, or **256** in older versions. Local-only; unsupported overrides fail with an upgrade-required error.
+
+`RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same setter for the child's published ports.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">tcp_accept_queue_size()</span>
 
 ```rust
 fn tcp_accept_queue_size(self, size: u32) -> Self
 ```
 
-Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror). Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections — such as a reverse proxy fanning out one page load — exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default). Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
+Set how many not-yet-accepted connections each published TCP port's host listener queues. Default: `1024`. Accepts `1..=i32::MAX`; other values record [`BuildError::InvalidTcpAcceptQueueSize`](#builderror).
+
+<Accordion title="Queue behavior and host limits">
+
+Connections arriving while the queue is full never reach the sandbox, so raise this when a burst of parallel connections, such as a reverse proxy fanning out one page load, exceeds it. The host kernel caps the effective depth at `net.core.somaxconn` on Linux (4,096 by default) or `kern.ipc.somaxconn` on macOS (128 by default).
+
+</Accordion>
+
+Runtimes that predate the setting are refused with an upgrade-required error rather than silently ignoring it.
 
 `RestoreBuilder`, `ForkBuilder`, and `ForkManyBuilder` expose the same `tcp_accept_queue_size()` for the listeners a child publishes.
 
@@ -919,7 +915,7 @@ Set the runtime UDP relay session limit. Omission is unlimited in single-tenant 
 fn max_tcp_connections(self, max: usize) -> Self
 ```
 
-Limit the maximum number of concurrent TCP connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides. See [deployment profiles](/networking/overview#deployment-profiles) for historical TCP limits and defaults.
+Limit the maximum number of concurrent TCP connections from the sandbox. When omitted, single-tenant mode is unlimited and multi-tenant mode defaults to 1,024. A positive value overrides the default; passing zero explicitly selects unlimited in either mode. Hosting services are responsible for restricting tenant overrides. See [deployment profiles](/networking/overview#connection-limits) for historical TCP limits and defaults.
 
 For dedicated snapshot restore, `RestoreBuilder::max_tcp_connections` and `RestoreBuilder::max_udp_connections` set the destination limits. `RestoreBuilder::max_connections` remains a deprecated TCP alias; the last TCP setter call wins.
 
@@ -1012,7 +1008,7 @@ Override the guest interface settings wholesale: MAC, MTU, IPv4/IPv6 addresses, 
 fn enabled(self, enabled: bool) -> Self
 ```
 
-Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#sandbox-disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicy-none).
+Enable or disable networking. Default: `true`. To fully turn networking off, prefer [`SandboxBuilder::disable_network()`](/sdk/rust/sandbox#sandbox-disable_network), which also sets the policy to [`NetworkPolicy::none()`](#networkpolicynone).
 
 #### <span className="msb-recv">network.</span><span className="msb-hn">secret_violation_action()</span>
 
@@ -1182,6 +1178,74 @@ fn verify_upstream_for(
 Whether the proxy verifies upstream server certificates only when the upstream SNI matches `pattern`. Pattern syntax matches [`bypass()`](#tls-bypass): exact hosts and `*.suffix` wildcards are supported. Setting `verify` to `false` is the proxy-side equivalent of `curl -k` for matching hosts; TLS interception still runs.
 
 
+## HttpBuilder
+
+#### <span className="msb-recv">HttpBuilder::</span><span className="msb-hn">new()</span>
+
+```rust
+fn new() -> Self
+```
+
+Create HTTP settings with JSON denial responses enabled. [`network.http()`](#network-http) supplies this builder automatically.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_response()</span>
+
+<Tooltip tip="HTTP denial responses are not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn deny_response(self, enabled: bool) -> Self
+```
+
+Enable denial responses for supported HTTP/1.x requests. Default: `true`, with JSON responses. Set `false` to close denied connections without a response. HTTPS requires TLS interception. Requires a supporting local runtime; cloud behavior is unchanged. See [HTTP denial responses](/networking/overview#http-denial-responses).
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_response_format()</span>
+
+```rust
+fn deny_response_format(self, format: HttpDenyResponseFormat) -> Self
+```
+
+Choose `HttpDenyResponseFormat::Text` or `Json` (default). JSON mode requires a supporting runtime.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">deny_message()</span>
+
+```rust
+fn deny_message(self, message: impl Into<String>) -> Self
+```
+
+Deprecated legacy text message with `{host}` substitution. Ignored in JSON mode; use `network_deny_message` there.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">network_deny_message()</span>
+
+```rust
+fn network_deny_message(self, message: impl Into<String>) -> Self
+```
+
+Set the network-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `deny_response(true)` and JSON mode.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">secret_deny_message()</span>
+
+```rust
+fn secret_deny_message(self, message: impl Into<String>) -> Self
+```
+
+Set the secret-denial JSON `message`. Custom messages are used as-is. Omission uses the default message; an empty string leaves `message` empty. Requires `deny_response(true)` and JSON mode.
+
+#### <span className="msb-recv">http.</span><span className="msb-hn">build()</span>
+
+```rust
+fn build(self) -> HttpConfig
+
+pub struct HttpConfig {
+    pub deny_response: bool,
+    pub deny_response_format: HttpDenyResponseFormat,
+    pub deny_message: Option<String>,
+    pub network_deny_message: Option<String>,
+    pub secret_deny_message: Option<String>,
+}
+```
+
+Return the HTTP configuration stored in `NetworkConfig.http`. [`network.http()`](#network-http) calls this automatically.
+
 ## NetworkRateLimiterBuilder
 
 Groups local rate limits by traffic direction. Supplied to [`NetworkBuilder::rate_limiter()`](#network-rate_limiter).
@@ -1206,7 +1270,7 @@ Configure the runtime-to-guest direction.
 
 Builder for one direction's rate limiter, supplied to [`NetworkRateLimiterBuilder::egress()`](#egress) or [`ingress()`](#ingress). A limiter caps bandwidth (bytes) and packet rate (frames) independently; leaving a bucket unset leaves that dimension unlimited. Buckets start full plus their one-time burst and refill continuously. Every setter returns `Self`.
 
-Validation runs at `NetworkBuilder::build()`: a limiter with neither bucket, a zero bucket size or refill interval, a burst without its bucket, or a refill interval that does not fit in u64 milliseconds surfaces as [`BuildError`](#builderror).
+Validation runs at `NetworkBuilder::build()`. Each of these surfaces as [`BuildError`](#builderror): a limiter with neither bucket, a zero bucket size or refill interval, a burst without its bucket, or a refill interval that does not fit in u64 milliseconds.
 
 #### <span className="msb-recv">.</span><span className="msb-hn">bandwidth()</span>
 
@@ -1276,13 +1340,13 @@ Target filter
 
 #### <span className="msb-recv">Rule::</span><span className="msb-hn">protocols</span>
 
-`Vec<`[`Protocol`](#protocol)`>`
+[`Vec<Protocol>`](#protocol)
 
 Set semantics; empty = any protocol
 
 #### <span className="msb-recv">Rule::</span><span className="msb-hn">ports</span>
 
-`Vec<`[`PortRange`](#portrange)`>`
+[`Vec<PortRange>`](#portrange)
 
 Set semantics; empty = any port
 
@@ -1378,7 +1442,6 @@ Start port (inclusive)
 
 End port (inclusive)
 
-
 #### <span className="msb-recv">PortRange::</span><span className="msb-hn">single()</span>
 
 ```rust
@@ -1431,7 +1494,7 @@ Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are reject
 
 ### NetworkProfile
 
-Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicy-from_profiles).
+Composable high-level access category accepted by [`NetworkPolicy::from_profiles()`](#networkpolicyfrom_profiles).
 
 | Variant | Access |
 |---------|--------|

@@ -5,6 +5,8 @@ use std::time::Duration;
 use clap::Args;
 use microsandbox::sandbox::{Sandbox, SandboxStatus, SandboxStopResult};
 
+use crate::ui::OutputFormat;
+
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
@@ -15,13 +17,17 @@ pub struct WaitArgs {
     /// Sandbox to wait for.
     pub name: String,
 
+    /// Wait for a managed job instead of sandbox shutdown.
+    #[arg(long)]
+    pub job: Option<String>,
+
     /// Stop waiting after this duration (e.g. 30s, 5m, 1h).
     #[arg(short = 't', long)]
     pub timeout: Option<String>,
 
     /// Output format (json). Exit code and signal are currently unavailable.
-    #[arg(long, value_name = "FORMAT", value_parser = ["json"])]
-    pub format: Option<String>,
+    #[arg(long, value_name = "FORMAT", value_enum)]
+    pub format: Option<OutputFormat>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -30,6 +36,15 @@ pub struct WaitArgs {
 
 /// Execute the `msb wait` command.
 pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
+    if let Some(job) = &args.job {
+        return super::jobs::wait(
+            &args.name,
+            job,
+            args.timeout.as_deref(),
+            args.format == Some(OutputFormat::Json),
+        )
+        .await;
+    }
     let wait = async {
         let handle = Sandbox::get(&args.name).await?;
         anyhow::Ok(handle.wait_until_stopped().await?)
@@ -42,7 +57,7 @@ pub async fn run(args: WaitArgs) -> anyhow::Result<()> {
         wait.await?
     };
 
-    print_result(&result, args.format.as_deref() == Some("json"))?;
+    print_result(&result, args.format == Some(OutputFormat::Json))?;
     Ok(())
 }
 
@@ -107,7 +122,7 @@ mod tests {
 
         assert_eq!(args.name, "worker");
         assert_eq!(args.timeout.as_deref(), Some("30s"));
-        assert_eq!(args.format.as_deref(), Some("json"));
+        assert_eq!(args.format, Some(OutputFormat::Json));
     }
 
     #[test]

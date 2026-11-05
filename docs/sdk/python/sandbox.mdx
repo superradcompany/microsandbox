@@ -1,55 +1,15 @@
 ---
 title: Sandbox
-description: Python SDK - Sandbox API reference
+"og:title": Python SDK Sandbox reference
+description: Create and manage microVM sandboxes with the Python SDK.
 keywords: ["Python SDK", "Python sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-For local runtime installation and verification, see [Runtime setup](/sdk/setup#install-and-verify).
+<span id="forking" />
 
-## Reuse and restart sandboxes
-
-```python
-await Sandbox.connect_or_create(name, **kwargs) -> Sandbox
-await handle.connect_or_start(detached=False) -> Sandbox
-await handle.wait_for_status(status) -> SandboxHandle
-await handle.restart(force=False, timeout=None, detached=False) -> Sandbox
-await handle.destroy(force=False, timeout=None) -> None
-await sandbox.id -> str
-handle.id -> str
-```
-
-Use `connect_or_create` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Creation arguments apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `id`. If the name is removed and reused, an old receiver raises `SandboxReplacedError` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
-
-## Forking
-
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### fork() and fork_many()
-
-```python
-async def fork(self, name: str, *, record_integrity: bool = False,
-               guest_flush: GuestFlush | None = None) -> Sandbox: ...
-async def fork_many(self, names: list[str], *, record_integrity: bool = False,
-                    guest_flush: GuestFlush | None = None) -> list[ForkOutcome]: ...
-```
-
-`record_integrity` records disk hashes. `guest_flush` accepts `GuestFlush.AUTO`, `REQUIRED`, or `SKIP`; omitting it uses `AUTO`. Import `GuestFlush` from `microsandbox`.
-
-### ForkOutcome
-
-| Property | Meaning |
-| --- | --- |
-| `name` | Requested child name |
-| `sandbox` | Started `Sandbox`, or `None` on failure |
-| `error` | Exception on failure, or `None` on success |
-
-`branch()` and `branch_many()` remain deprecated aliases and emit `DeprecationWarning`. `BranchOutcome` aliases `ForkOutcome`.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/python/snapshots#forking) for live fork methods.
 
 ## Sandbox
 
@@ -124,6 +84,8 @@ async with await Sandbox.create("my-sandbox", image="alpine") as sb:
 Create and boot a sandbox. Keyword arguments provide individual config fields; see [`SandboxConfig`](#sandboxconfig) for the full set. Pulls the image if needed, boots the VM, starts the guest agent, and waits until it is ready to accept commands. Sandbox names must be non-empty and no longer than 128 UTF-8 bytes.
 
 The returned `Sandbox` is an async context manager. On the local backend, `async with` guarantees cleanup: exit kills the sandbox and removes its persisted state. Cloud handles do not own the host process, so stop or remove them explicitly before leaving the context.
+
+Pass `intercept_tls=True` to enable [TLS interception](/networking/tls) while preserving supplied network settings. `False` leaves them unchanged.
 
 <p className="msb-label">Parameters</p>
 
@@ -594,10 +556,17 @@ async def modify(
     workdir: str | None = None,
     secrets: Mapping[str, SecretModifySpec] | None = None,
     secrets_rm: list[str] | None = None,
+    ports: Mapping[int, int] | Sequence[PortBinding] | None = None,
+    ports_rm: Sequence[PortEndpoint] | None = None,
     policy: ModificationPolicy | None = None,
     dry_run: bool = False,
 ) -> SandboxModificationPlan
 ```
+
+Published ports can be added or updated with `ports`, preserving other mappings. Remove an
+endpoint with `ports_rm=[PortEndpoint(host_port=8080)]`. `PortEndpoint` accepts optional
+`bind` and `protocol` fields, defaulting to loopback TCP. Port changes require restart or
+next-start policy on a running sandbox. See [published port changes](/sandboxes/tuning#change-published-ports).
 
 <Accordion title="Example">
 
@@ -645,9 +614,15 @@ await sb.modify(secrets_rm=["OLD_API_KEY"])
 
 Plan or apply a configuration change. The returned plan uses [`ModificationDisposition`](#modificationdisposition) to classify when each change takes effect.
 
-`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart. `root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`cpus` and `memory` resize live within the `max_cpus` / `max_memory` ceilings; raising a ceiling requires a restart.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`env`, `value`, or `store`) and may also set `placeholder` and `allowed_hosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `secrets_rm`.
+`root_disk_size` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+
+Secrets are keyed by name. Each `SecretModifySpec` can set one source (`env`, `value`, or `store`) and optional settings listed below. Omitted fields stay unchanged. Plans never include secret values. Use `secrets_rm` to remove secrets.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `policy=ModificationPolicy.RESTART` to apply now, or `policy=ModificationPolicy.NEXT_START` to save for the next start. Omitted options keep their current settings.
 
 The returned [`SandboxModificationPlan`](#sandboxmodificationplan) is a typed dictionary:
 
@@ -1384,13 +1359,13 @@ Raw JSON configuration
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">created_at</span>
 
-`float | None`
+`float \| None`
 
 Creation timestamp (ms since epoch)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">updated_at</span>
 
-`float | None`
+`float \| None`
 
 Last update timestamp (ms since epoch)
 
@@ -1658,7 +1633,7 @@ Stream captured log entries (works without starting)
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 snapshot(name)
@@ -1723,7 +1698,7 @@ Where the chunk came from
 
 #### <span className="msb-recv">entry.</span><span className="msb-hn">session_id</span>
 
-`int | None`
+`int \| None`
 
 Relay-monotonic session id; `None` for `"system"` entries
 
@@ -1844,8 +1819,8 @@ The keyword arguments accepted by [`create()`](#sandbox-create) and [`create_wit
 | init | `str \| `[`InitConfig`](#initconfig)` \| `[`InitOptions`](#initoptions) | - | Hand off PID 1 to a guest init binary. See [Custom init system](/sandboxes/bootstrap#custom-init-system) and [`InitConfig`](#initconfig) for accepted shapes |
 | replace | `bool` | `False` | Replace an existing sandbox with the same name (10s SIGTERM grace, then SIGKILL) |
 | replace_with_timeout | `float` | `10` | Seconds to wait after `SIGTERM` before escalating to `SIGKILL` (`0` skips `SIGTERM`). Implies `replace=True` |
-| max_duration | `float` | - | Maximum sandbox lifetime in seconds |
-| idle_timeout | `float` | - | Idle timeout in seconds |
+| max_duration | `float` | - | Maximum sandbox lifetime in seconds; finite and non-negative, rounded up to whole seconds |
+| idle_timeout | `float` | - | Idle timeout in seconds; finite and non-negative, rounded up to whole seconds |
 | ephemeral | `bool` | `False` | If `True`, the sandbox and all its persisted state are removed automatically once it stops, rather than left on disk for restart |
 | env | `Mapping[str, str]` | `{}` | Environment variables visible to all commands |
 | labels | `Mapping[str, str]` | `{}` | User-defined labels attached to the sandbox. Filter with [`list_with()`](#sandbox-list_with); see [Select in bulk](/sandboxes/labels#select-in-bulk). Keys starting with `sandbox.`, `microsandbox.`, or `service.` are reserved and rejected |
@@ -2020,7 +1995,7 @@ Controls how sandbox modifications that cannot apply live are handled.
 
 <p className="msb-backref">Used by <a href="#sb-modify">modify(secrets=...)</a></p>
 
-Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the placeholder or allowed hosts.
+Desired state for one secret. `env`, `value`, and `store` are mutually exclusive sources. Omit all three to update only the supplied policy or placeholder fields.
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -2029,6 +2004,11 @@ Desired state for one secret. `env`, `value`, and `store` are mutually exclusive
 | `store` | `str` | Reserved for a host-side secret store reference; currently unsupported |
 | `placeholder` | `str` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
 | `allowed_hosts` | `list[str]` | Desired allowed host patterns. A new secret requires at least one; an empty list leaves existing hosts unchanged |
+| `substitution` | [`SecretSubstitution`](/sdk/python/secrets#secretsubstitution) | Desired substitution locations. Omission preserves the existing policy; new secrets default to headers only |
+| `violation_action` | [`ViolationAction`](/sdk/python/secrets#violationaction) | Per-secret blocking action. Omission preserves the existing override |
+| `require_tls_identity` | `bool` | Whether substitution requires verified TLS identity. Omission preserves the existing setting; new secrets default to `True`. Explicit `False` disables this requirement |
+| `allow_placeholder_for` | `Sequence[str]` | Hosts permitted to receive unchanged placeholders. A nonempty sequence replaces existing passthrough hosts; an empty sequence leaves them unchanged |
+| `passthrough` | `Sequence[str]` | Deprecated alias for `allow_placeholder_for`. Nonempty values emit `DeprecationWarning`; when both keys are supplied, their sequences are combined |
 
 ### SandboxModificationPlan
 
@@ -2287,3 +2267,11 @@ Discriminator returned by [`PullEvent.event_type`](#pullevent).
 | `PullEventType.STITCH_WRITING_VMDK` | `"stitch_writing_vmdk"` | VMDK image is being written |
 | `PullEventType.STITCH_COMPLETE` | `"stitch_complete"` | Image stitching completed |
 | `PullEventType.COMPLETE` | `"complete"` | Image pull completed |
+
+## Nested virtualization
+
+`nested_virt: bool | None` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```python
+sandbox = await Sandbox.create(name="nested", image="alpine", nested_virt=True)
+```

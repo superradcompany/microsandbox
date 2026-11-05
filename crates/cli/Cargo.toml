@@ -38,6 +38,7 @@ net = [
     "dep:thiserror",
     "dep:zeroize",
 ]
+oci-runtime = ["microsandbox/oci-runtime", "microsandbox-runtime/oci-runtime"]
 
 [dependencies]
 semver.workspace = true
@@ -53,7 +54,7 @@ futures.workspace = true
 indicatif.workspace = true
 ipnetwork = { workspace = true, optional = true }
 libc.workspace = true
-microsandbox = { workspace = true, features = ["local"] }
+microsandbox = { workspace = true, features = ["local", "cloud"] }
 microsandbox-db.workspace = true
 microsandbox-filesystem.workspace = true
 microsandbox-image.workspace = true

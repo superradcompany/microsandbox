@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::{
     bulk::{BULK_HEADER_SIZE, BulkFlow, BulkKind, BulkRecord, MAX_BULK_RECORD_PAYLOAD},
     error::{ProtocolError, ProtocolResult},
-    message::{FLAG_BULK, FRAME_HEADER_SIZE, Message},
+    message::{FLAG_BULK, FRAME_HEADER_SIZE, Message, MessageType},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -274,6 +274,19 @@ pub fn try_decode_from_bytes(buf: &mut BytesMut) -> ProtocolResult<Option<Messag
 //--------------------------------------------------------------------------------------------------
 // Functions: Typed message codec (CBOR-aware)
 //--------------------------------------------------------------------------------------------------
+
+/// Decode only the message kind from an encoded control body, without
+/// copying its payload. Returns `None` when the body is not a CBOR envelope.
+pub fn peek_message_type(body: &[u8]) -> Option<MessageType> {
+    #[derive(serde::Deserialize)]
+    struct Kind {
+        t: MessageType,
+    }
+
+    ciborium::from_reader::<Kind, _>(body)
+        .ok()
+        .map(|kind| kind.t)
+}
 
 /// Encodes a message to a byte buffer using the length-prefixed frame format.
 ///

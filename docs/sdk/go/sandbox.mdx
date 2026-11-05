@@ -1,76 +1,17 @@
 ---
 title: Sandbox
-description: Go SDK - Sandbox API reference
+"og:title": Go SDK Sandbox reference
+description: Create and manage microVM sandboxes with the Go SDK.
 keywords: ["Go SDK", "Go sandbox", "microsandbox sandbox"]
 ---
 
-Create and control a microVM sandbox: boot it from an image, run commands, stream logs and metrics, then shut it down. See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
+See [Overview](/sandboxes/overview) for configuration examples and [Lifecycle](/sandboxes/lifecycle) for state management.
 
-## Reuse and restart sandboxes
+<span id="forking" />
 
-```go
-ConnectOrCreateSandbox(ctx, name, opts...) (*Sandbox, error)
-handle.ConnectOrStart(ctx, opts...) (*Sandbox, error)
-handle.WaitForStatus(ctx, status) (*SandboxHandle, error)
-handle.Restart(ctx, opts...) (*Sandbox, error)
-handle.Destroy(ctx, opts...) error
-sandbox.ID() string
-handle.ID() string
-```
-
-Use `ConnectOrCreateSandbox` when a named sandbox might already exist. It connects to a running sandbox, starts a stopped or crashed sandbox, and creates one only when the name is unused. Options apply only to a new sandbox.
-
-Lifecycle methods on a `Sandbox` or `SandboxHandle` stay attached to its opaque `ID`. If the name is removed and reused, an old receiver returns `ErrSandboxReplaced` instead of acting on the replacement. See [Reuse or create a named sandbox](/sandboxes/lifecycle#reuse-or-create-a-named-sandbox) for examples.
-
-
-## Forking
-
-Forking duplicates a running or paused local sandbox without saving a reusable snapshot. It shares memory through copy-on-write, keeps child writes private, and returns the source to its previous state. These methods are available on both `Sandbox` and `SandboxHandle`. Each child requires an unused name. See [forking](/sandboxes/snapshots#forking) for examples, resource bindings, and backend limits.
-
-### Fork and ForkMany
-
-```go
-Fork(ctx context.Context, name string, opts ...ForkOption) (*Sandbox, error)
-ForkMany(ctx context.Context, names []string, opts ...ForkOption) ([]ForkOutcome, error)
-```
-
-`WithForkIntegrity()` records disk hashes. `WithForkGuestFlush(GuestFlushRequired)` requests guest writeback; `GuestFlushAuto` is the default, and `GuestFlushSkip` skips optional writeback. `ForkOption` configures `ForkOptions`.
-
-### ForkOutcome
-
-| Field | Meaning |
-| --- | --- |
-| `Name` | Requested child name |
-| `Sandbox` | Started `*Sandbox`, or `nil` on failure |
-| `Error` | Child startup error, or `nil` on success |
-
-Close each successful child’s handle with `Close()` after stopping it.
-
-`Branch`, `BranchMany`, `BranchOption`, `BranchOptions`, `BranchOutcome`, `WithBranchIntegrity`, and `WithBranchGuestFlush` remain deprecated aliases.
-
-Batch results follow input order. Validation or capture failures fail the whole call; an individual startup failure appears in that child's outcome, and successful siblings remain available. Stop successful children explicitly when finished.
+See [Snapshots](/sdk/go/snapshots#forking) for live fork methods.
 
 ## Functions
-
-### External mount restore
-
-Full restores use strict external-filesystem admission by default. Pass `WithExternalMountPolicy(ExternalMountRelaxed)` to accept supported mismatches, then inspect `sandbox.RestoreWarnings(ctx)`. Each `ExternalMountWarning` has `GuestPath`, `Reason`, and `StaleInodes []uint64`. `ExternalMountStrict` explicitly selects the default. Existing mount options select the destination paths. See [Snapshot external mounts](/sandboxes/snapshots#external-mounts).
-
-### Creation and restore progress
-
-`CreateSandboxWithProgress` and `RestoreSandboxWithProgress` return a bounded event channel and a single-result channel. Ignoring events does not delay the operation. Always receive the result and close the handle when finished; restored sandboxes are detached, so use `Stop` or `Destroy` to stop them. Cancel `ctx` to cancel the operation.
-
-```go
-events, result := m.RestoreSandboxWithProgress(ctx, "saved", "child", m.WithCowMemory())
-for event := range events {
-    fmt.Println(event.Kind, event.Progress.Phase, event.Progress.CompletedBytes)
-}
-created := <-result
-if created.Err != nil { return created.Err }
-defer created.Sandbox.Close()
-```
-
-`Kind` is `"pull"` or `"startup"`. Startup phases distinguish backing preparation, waits, reuse, syncing, and activation. `TotalBytes == nil` means indeterminate work. Preparation has no fixed deadline and does not consume the activation timeout; an optional context deadline still bounds the entire operation.
 
 #### <span className="msb-recv">m.</span><span className="msb-hn">CreateSandbox()</span>
 
@@ -386,7 +327,7 @@ Return a point-in-time [`Metrics`](#metrics) snapshot for every running sandbox,
 <span id="m-sdkversion"></span>
 <span id="m-runtimeversion"></span>
 
-Runtime installation and verification helpers are documented under [Runtime setup](/sdk/setup#install-and-verify). The Go-only version helpers are under [Inspect Go versions](/sdk/setup#inspect-go-versions).
+See [Runtime setup](/sdk/setup#resolve-check-install-and-ensure) for runtime installation and verification helpers. See [Inspect Go versions](/sdk/setup#inspect-go-versions) for the Go-only version helpers.
 
 ## Sandbox
 
@@ -677,9 +618,15 @@ _, err = sb.Modify(ctx, m.ModifyOptions{
 
 Plan or apply a configuration change. The returned plan labels each change `"live"`, `"next start"`, `"requires restart"`, or `"unsupported"`.
 
-`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart. `RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected. Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+`CPUs` and `MemoryMiB` resize live within the [`WithMaxCPUs`](#withmaxcpus) / [`WithMaxMemory`](#withmaxmemory) ceilings; raising a ceiling requires a restart.
 
-Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder` and `AllowedHosts`; omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
+`RootDiskSizeMiB` grows owned managed and flat ext4 roots live, including checkpoint-backed roots, tmpfs root disks can change in either direction on the next boot, and user-supplied disk images are rejected.
+
+Env and workdir changes affect future execs only. Stopped roots grow before the new size is saved. Explicit restart and next-start policies remain available.
+
+Secret specs are keyed by stable secret name. Each `SecretModifySpec` selects at most one source (`Env`, `Value`, or `Store`) and may also set `Placeholder`, `AllowedHosts`, and the settings listed under [`SecretModifySpec`](#secretmodifyspec); omitting a source updates only the other supplied fields. Plans expose only safe references and metadata; raw secret values never appear in a plan. Removal is explicit through `SecretsRemove`.
+
+Changing a secret's substitution rules, violation action, TLS identity requirement, or placeholder passthrough hosts requires a restart if the sandbox is running. Use `ModificationPolicyRestart` to apply now, or `ModificationPolicyNextStart` to save for the next start.
 
 A live CPU or memory resize can take a moment to settle. The new limits are enforced immediately, and the returned plan's `ResizeStatus` reports when the sandbox has finished adjusting. See [`SandboxModificationPlan`](#sandboxmodificationplan).
 
@@ -826,7 +773,7 @@ exitCode, err := sb.AttachWith(ctx, "bash", []string{"-l"},
 
 </Accordion>
 
-Same as [`Attach`](#sb-attach), but takes [`AttachOption`](#attachoption) values so the session can run as a different guest user, in a different working directory, with extra environment variables, or with custom detach keys.
+Same as [`Attach`](#sb-attach), but takes [`AttachOption`](#attachoption) values. Use them to run the session as a different guest user, in a different working directory, with extra environment variables, or with custom detach keys.
 
 <p className="msb-label">Parameters</p>
 
@@ -1082,6 +1029,34 @@ Convenience wrapper around [`OwnsLifecycle`](#sb-ownslifecycle) that swallows th
     <div className="msb-param-desc"><code>true</code> if attached, <code>false</code> on detach or error.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">RestoreWarnings()</span>
+
+```go
+func (s *Sandbox) RestoreWarnings(ctx context.Context) ([]ExternalMountWarning, error)
+```
+
+Return warnings for unavailable external filesystems and accepted restore mismatches. See [External mounts](/sandboxes/snapshots#external-mounts) for restore options.
+
+Each `ExternalMountWarning` contains:
+
+#### <span className="msb-hn">GuestPath</span>
+
+`string`
+
+Guest-visible mount path.
+
+#### <span className="msb-hn">Reason</span>
+
+`string`
+
+Why the resource could not be reconstructed.
+
+#### <span className="msb-hn">StaleInodes</span>
+
+`[]uint64`
+
+Permanently invalid captured node IDs; empty when the whole export is unavailable.
 
 ## Options
 
@@ -1672,7 +1647,7 @@ Stop the sandbox after this much wall-clock time without exec activity. Zero mea
 func WithRegistryAuth(auth RegistryAuth) SandboxOption
 ```
 
-Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth).
+Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#registryauth). Explicit auth replaces credentials microsandbox would otherwise look up in the OS keyring, registry configuration and Docker's credential store.
 
 <p className="msb-label">Parameters</p>
 
@@ -1682,6 +1657,14 @@ Set credentials for pulling from a private OCI registry. See [`RegistryAuth`](#r
     <div className="msb-param-desc">Registry credentials.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithRegistryAnonymous()</span>
+
+```go
+func WithRegistryAnonymous() SandboxOption
+```
+
+Pull a public image without credentials, even when stale credentials for its registry are stored on the host. Replaces an earlier `WithRegistryAuth` option.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithRegistryInsecure()</span>
 
@@ -1787,6 +1770,14 @@ Publish ports on explicit host bind addresses, such as `0.0.0.0`. See [`PortBind
     <div className="msb-param-desc">Explicit bind-address port mappings.</div>
   </div>
 </div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithInterceptTLS()</span>
+
+```go
+func WithInterceptTLS() SandboxOption
+```
+
+Enable [TLS interception](/networking/tls) for a local sandbox. Existing network and TLS settings are preserved. A later `WithNetwork()` option replaces the network configuration.
 
 #### <span className="msb-recv"></span><span className="msb-hn">WithNetwork()</span>
 
@@ -2255,7 +2246,7 @@ m.WithInit(m.Init.Auto())
 
 </Accordion>
 
-Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands; otherwise delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
+Use a known init at the start of the image ENTRYPOINT when present, preserving attached init-entrypoint commands. Otherwise, delegate to agentd to probe common init paths (`/sbin/init`, `/lib/systemd/systemd`, ...) inside the guest.
 
 <p className="msb-label">Returns</p>
 
@@ -2655,7 +2646,7 @@ Delete sandbox and persisted state
 
 #### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
 
-<Tooltip tip="Cloud disk snapshots require a stopped or crashed source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```go
 Snapshot(ctx, name)
@@ -2736,7 +2727,6 @@ The captured bytes
 
 Opaque resume token; pass to [`LogStreamOptions.FromCursor`](#logstreamoptions)
 
-
 #### <span className="msb-recv">entry.</span><span className="msb-hn">Text()</span>
 
 ```go
@@ -2811,36 +2801,148 @@ Explicit idle-refresh result.
 
 A requested sandbox modification. Zero-valued fields are left unchanged (`0` is not a valid CPU, memory, or disk size).
 
-| Field | Type | Description |
-|-------|------|-------------|
-| CPUs | `uint8` | Desired effective vCPU count. Live when within the booted `MaxCPUs` |
-| MaxCPUs | `uint8` | Boot-time maximum possible vCPUs (restart-backed) |
-| MemoryMiB | `uint32` | Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB` |
-| MaxMemoryMiB | `uint32` | Boot-time maximum hotpluggable memory in MiB (restart-backed) |
-| RootDiskSizeMiB | `uint32` | Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start |
-| Env | `map[string]string` | Environment variables to set for future execs |
-| EnvRemove | `[]string` | Environment variable keys to remove |
-| Labels | `map[string]string` | Labels to set |
-| LabelsRemove | `[]string` | Label keys to remove |
-| Workdir | `string` | Working directory for future execs |
-| Secrets | `map[string]SecretModifySpec` | Desired secret specs keyed by stable secret name |
-| SecretsRemove | `[]string` | Secret names to remove explicitly |
-| Policy | `ModificationPolicy` | `ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now |
-| DryRun | `bool` | Compute the plan without applying anything |
+#### <span className="msb-hn">CPUs</span>
+
+`uint8`
+
+Desired effective vCPU count. Live when within the booted `MaxCPUs`
+
+#### <span className="msb-hn">MaxCPUs</span>
+
+`uint8`
+
+Boot-time maximum possible vCPUs (restart-backed)
+
+#### <span className="msb-hn">MemoryMiB</span>
+
+`uint32`
+
+Desired effective guest memory in MiB. Live when within the booted `MaxMemoryMiB`
+
+#### <span className="msb-hn">MaxMemoryMiB</span>
+
+`uint32`
+
+Boot-time maximum hotpluggable memory in MiB (restart-backed)
+
+#### <span className="msb-hn">RootDiskSizeMiB</span>
+
+`uint32`
+
+Desired root disk size in MiB. Managed and flat OCI disks are grow-only; applies on restart or next start
+
+#### <span className="msb-hn">Env</span>
+
+`map[string]string`
+
+Environment variables to set for future execs
+
+#### <span className="msb-hn">EnvRemove</span>
+
+`[]string`
+
+Environment variable keys to remove
+
+#### <span className="msb-hn">Labels</span>
+
+`map[string]string`
+
+Labels to set
+
+#### <span className="msb-hn">LabelsRemove</span>
+
+`[]string`
+
+Label keys to remove
+
+#### <span className="msb-hn">Workdir</span>
+
+`string`
+
+Working directory for future execs
+
+#### <span className="msb-hn">Secrets</span>
+
+`map[string]SecretModifySpec`
+
+Desired secret specs keyed by stable secret name
+
+#### <span className="msb-hn">SecretsRemove</span>
+
+`[]string`
+
+Secret names to remove explicitly
+
+#### <span className="msb-hn">Ports</span>
+
+`[]PortBinding`
+
+Add/update published mappings; other endpoints stay unchanged
+
+#### <span className="msb-hn">PortsRemove</span>
+
+`[]PortEndpoint`
+
+Remove host endpoints (`Bind`, `HostPort`, `Protocol`); loopback TCP by default
+
+#### <span className="msb-hn">Policy</span>
+
+`ModificationPolicy`
+
+`ModificationPolicyNoRestart` (default) applies only changes that can complete without restarting; `ModificationPolicyNextStart` persists changes for the next start without mutating a running VM; `ModificationPolicyRestart` restarts if needed so restart-required changes become active now
+
+#### <span className="msb-hn">DryRun</span>
+
+`bool`
+
+Compute the plan without applying anything
 
 ### SecretModifySpec
 
 <p className="msb-backref">Used by <a href="#sb-modify">Modify()</a></p>
 
-Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the placeholder or allowed hosts.
+Desired state for one secret. `Env`, `Value`, and `Store` are mutually exclusive sources. Leave all three empty to update only the other supplied fields. Zero-valued fields keep the stored setting.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Env | `string` | Host environment variable to resolve when applying the modification |
-| Value | `string` | Raw secret value. Stored in the durable sandbox config until replaced by a source reference |
-| Store | `string` | Reserved for a host-side secret store reference; currently unsupported |
-| Placeholder | `string` | Explicit guest-visible placeholder. New secrets default to `$MSB_<NAME>` |
-| AllowedHosts | `[]string` | Desired allowed host patterns. A new secret requires at least one; an empty slice leaves existing hosts unchanged |
+<p className="msb-label">Fields</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Env</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Host environment variable to resolve when applying the modification.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Value</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Raw secret value. Stored in the durable sandbox config until replaced by a source reference.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Store</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Reserved for a host-side secret store reference; currently unsupported.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Placeholder</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Explicit guest-visible placeholder. New secrets default to <code>$MSB_&lt;NAME&gt;</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>AllowedHosts</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Desired allowed host patterns. A new secret requires at least one; an empty slice leaves existing hosts unchanged.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Substitution</code><a className="msb-type" href="/sdk/go/secrets#secretsubstitutionstruct">*SecretSubstitution</a></div>
+    <div className="msb-param-desc">Desired substitution locations. A non-<code>nil</code> value replaces the stored rule; <code>nil</code> keeps it. New secrets default to headers only.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>AllowPlaceholderFor</code><span className="msb-type">[]string</span></div>
+    <div className="msb-param-desc">Hosts permitted to receive the unchanged placeholder. A non-empty slice replaces the stored hosts; an empty slice leaves them unchanged.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ViolationAction</code><a className="msb-type" href="/sdk/go/secrets#violationactionstring-enum">ViolationAction</a></div>
+    <div className="msb-param-desc">Per-secret blocking action. <code>ViolationActionDefault</code> keeps the stored action.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>RequireTLSIdentity</code><span className="msb-type">*bool</span></div>
+    <div className="msb-param-desc">Whether substitution requires verified TLS identity. <code>nil</code> keeps the stored setting; new secrets default to <code>true</code>. <code>false</code> disables this requirement.</div>
+  </div>
+</div>
 
 ### SandboxModificationPlan
 
@@ -3195,14 +3297,17 @@ Sandbox-wide in-guest security profile.
 
 ### RegistryAuth
 
-<p className="msb-backref">Used by <a href="#withregistryauth">WithRegistryAuth()</a></p>
+#### <span className="msb-hn">Username</span>
 
-Credentials for a private OCI registry.
+`string`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| Username | `string` | Registry username |
-| Password | `string` | Registry password |
+Registry username.
+
+#### <span className="msb-hn">Password</span>
+
+`string`
+
+Registry password.
 
 ### InitConfig
 
@@ -3278,4 +3383,12 @@ Discriminator for [`PatchConfig`](#patchconfig). Prefer the [`Patch`](#patch) fa
 
 ### InstallOptions
 
-The setup-only `InstallOptions` type is documented under [Runtime setup](/sdk/setup#customize-installation).
+See [Runtime setup](/sdk/setup#customize-installation) for the setup-only `InstallOptions` type.
+
+## Nested virtualization
+
+`WithNestedVirt(enabled bool)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```go
+sandbox, err := microsandbox.CreateSandbox(ctx, "nested", microsandbox.WithImage("alpine"), microsandbox.WithNestedVirt(true))
+```

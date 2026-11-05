@@ -12,7 +12,7 @@ use microsandbox_cli::{
         sandbox::{self, SandboxCommands},
         self_cmd,
         snapshot::{self, SnapshotCommands},
-        uninstall, volume,
+        storage, uninstall, volume,
     },
     log_args::{self, LogArgs},
     machine_cmd::{self, MachineArgs},
@@ -37,7 +37,7 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     },
     CommandGroup {
         heading: "Storage",
-        commands: &["volume", "snapshot"],
+        commands: &["df", "prune", "volume", "snapshot"],
     },
     CommandGroup {
         heading: "Installation",
@@ -66,9 +66,8 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
-    /// Print the full command tree and exit.
-    #[arg(long, global = true)]
-    tree: bool,
+    #[command(flatten)]
+    tree: microsandbox_cli::tree::TreeArgs,
 
     #[command(flatten)]
     logs: LogArgs,
@@ -100,7 +99,7 @@ enum Commands {
     #[command(name = "__schema-baseline", hide = true)]
     SchemaBaseline(self_cmd::SchemaBaselineArgs),
 
-    /// Show the active backend and its selection source.
+    /// Inspect backend selection and manage saved profiles.
     #[command(visible_alias = "ctx")]
     Context(context::ContextArgs),
 
@@ -147,6 +146,12 @@ enum Commands {
     /// Remove a cached image (alias for `image rm`).
     #[command(hide = true)]
     Rmi(image::ImageRemoveArgs),
+
+    /// Show aggregate local storage usage.
+    Df(storage::DfArgs),
+
+    /// Remove unused runtime memory cache files.
+    Prune(storage::PruneArgs),
 
     /// Manage named volumes.
     #[command(visible_alias = "vol")]
@@ -293,12 +298,24 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
+                    oci_readonly_root: cfg!(all(target_os = "linux", feature = "oci-runtime")),
+                    oci_isolation: cfg!(all(target_os = "linux", feature = "oci-runtime")),
+                    oci_user_namespace: cfg!(all(target_os = "linux", feature = "oci-runtime")),
                     tcp_accept_queue_size: true,
+                    max_inbound_tcp_connections: cfg!(feature = "net"),
                     http_deny_message: cfg!(feature = "net"),
+                    http_deny_json: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
+                    http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
+                    fs_state_limit: true,
+                    nested_virt: Some(
+                        microsandbox_runtime::nested_virt_supported().unwrap_or(false)
+                    ),
+                    exec_limits: true,
                 })
                 .expect("serialize capabilities")
             );
@@ -655,11 +672,12 @@ fn run_async_command_anyhow(
     let runtime = builder.enable_all().build()?;
 
     runtime.block_on(async move {
+        let mut cleanup_backend = None;
         // Stale-sandbox reaping and ephemeral cleanup are owned by host
         // runtime processes (`msb machine`) now, not the CLI; see
         // `microsandbox_runtime::maintenance`. The CLI no longer spawns a
         // reaper here.
-        if !is_backend_independent_maintenance_command(&command) {
+        if !is_backend_independent_command(&command) {
             // Resolve once, fallibly, before backend-dependent dispatch. Unlike
             // the SDK's ambient convenience fallback, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
@@ -669,10 +687,11 @@ fn run_async_command_anyhow(
             {
                 local.prepare_cli_catalog().await?;
             }
+            cleanup_backend = Some(backend.clone());
             microsandbox::set_default_backend(backend);
         }
 
-        match command {
+        let result = match command {
             Commands::Machine(_) | Commands::LaunchProtocol => {
                 unreachable!("handled before Tokio starts")
             }
@@ -710,6 +729,8 @@ fn run_async_command_anyhow(
                 .await
             }
             Commands::Rmi(args) => image::run_remove(args).await,
+            Commands::Df(args) => storage::run_df(args).await,
+            Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
             Commands::Install(args) => install::run(args).await,
@@ -719,7 +740,16 @@ fn run_async_command_anyhow(
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
             Commands::Completion(args) => completion::run(args, Cli::command()),
+        };
+        // A CLI runtime would cancel the deferred worker when this function returns.
+        // Drain after dispatch so graceful-stop deadlines still cover only VM teardown.
+        if let Some(local) = cleanup_backend
+            .as_ref()
+            .and_then(|backend| backend.as_local())
+        {
+            local.finish_stopped_memory_cleanup().await;
         }
+        result
     })
 }
 
@@ -742,12 +772,13 @@ fn requires_current_catalog(command: &Commands) -> bool {
     }
 }
 
-/// Return whether a command manages the CLI installation rather than a backend.
+/// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
 /// invalid so users can diagnose, repair, downgrade, or uninstall that setup.
-fn is_backend_independent_maintenance_command(command: &Commands) -> bool {
+fn is_backend_independent_command(command: &Commands) -> bool {
     match command {
+        Commands::Context(args) => args.command.is_some(),
         Commands::SchemaBaseline(_)
         | Commands::Doctor(_)
         | Commands::Update(_)
@@ -813,6 +844,15 @@ mod command_tests {
 
     #[test]
     fn maintenance_commands_do_not_require_backend_resolution() {
+        for arguments in [
+            vec!["msb", "context", "list"],
+            vec!["msb", "context", "use", "work"],
+            vec!["msb", "context", "reset"],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            assert!(is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
         let maintenance_commands = [
             Cli::try_parse_from(["msb", "doctor"]).unwrap().command,
             Cli::try_parse_from(["msb", "update"]).unwrap().command,
@@ -828,15 +868,33 @@ mod command_tests {
         ];
 
         for command in &maintenance_commands {
-            assert!(is_backend_independent_maintenance_command(command));
+            assert!(is_backend_independent_command(command));
         }
 
         let context = Cli::try_parse_from(["msb", "context"]).unwrap();
         let create = Cli::try_parse_from(["msb", "create", "alpine:3.19"]).unwrap();
-        assert!(!is_backend_independent_maintenance_command(
-            &context.command
-        ));
-        assert!(!is_backend_independent_maintenance_command(&create.command));
+        assert!(!is_backend_independent_command(&context.command));
+        assert!(!is_backend_independent_command(&create.command));
+    }
+
+    #[test]
+    fn storage_commands_parse_and_use_backend_resolution() {
+        let df = Cli::try_parse_from(["msb", "df", "--verbose"]).unwrap();
+        assert!(matches!(df.command, Commands::Df(_)));
+        assert!(!is_backend_independent_command(&df.command));
+        assert!(!requires_current_catalog(&df.command));
+        assert!(Cli::try_parse_from(["msb", "df", "-q"]).is_err());
+        let prune =
+            Cli::try_parse_from(["msb", "prune", "--dry-run", "--older-than", "2h"]).unwrap();
+        assert!(matches!(prune.command, Commands::Prune(_)));
+        assert!(!is_backend_independent_command(&prune.command));
+        assert!(!requires_current_catalog(&prune.command));
+        let storage = TOP_LEVEL_COMMAND_GROUPS
+            .iter()
+            .find(|group| group.heading == "Storage")
+            .unwrap();
+        assert!(storage.commands.contains(&"df"));
+        assert!(storage.commands.contains(&"prune"));
     }
 
     #[test]
@@ -898,7 +956,7 @@ mod command_tests {
             );
             let command = cli.command.into_canonical();
             assert!(requires_current_catalog(&command));
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             let Commands::Sandbox(sandbox::SandboxArgs {
                 command: sandbox::SandboxCommands::Restore(args),
             }) = command
@@ -976,6 +1034,48 @@ mod command_tests {
 #[cfg(test)]
 mod sandbox_command_tests {
     use super::*;
+
+    #[test]
+    fn tree_controls_are_global_and_require_tree_mode() {
+        for args in [
+            vec!["msb", "--tree", "-L", "2", "--commands", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-L2", "--commands"],
+            vec!["msb", "--tree", "--brief", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "--brief"],
+            vec!["msb", "--tree", "-C", "-b", "image", "ls"],
+            vec!["msb", "image", "ls", "--tree", "-CbL2"],
+            vec![
+                "msb",
+                "image",
+                "ls",
+                "--tree",
+                "--commands",
+                "--brief",
+                "-L2",
+            ],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+        for flag in [
+            "-L2",
+            "--levels=2",
+            "--commands",
+            "--brief",
+            "-C",
+            "-b",
+            "-Cb",
+        ] {
+            let error = Cli::try_parse_from(["msb", "image", "ls", flag])
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            assert!(error.to_string().contains("--tree"));
+        }
+        Cli::try_parse_from(["msb", "modify", "demo", "--compact"]).unwrap();
+    }
 
     #[test]
     fn repeated_long_flags_have_consistent_short_forms() {
@@ -1131,7 +1231,7 @@ mod sandbox_command_tests {
                 };
                 assert_eq!(args.name, "worker");
                 assert_eq!(args.timeout.as_deref(), Some("30s"));
-                assert_eq!(args.format.as_deref(), Some("json"));
+                assert_eq!(args.format, Some(microsandbox_cli::ui::OutputFormat::Json));
             }
         }
     }
@@ -1267,7 +1367,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
         }
         for prefix in [&[][..], &["sandbox"][..], &["sbx"][..]] {
             for verb in ["pause", "resume"] {
@@ -1417,7 +1517,7 @@ mod sandbox_command_tests {
             assert!(cli.logs.debug);
             let command = cli.command.into_canonical();
             assert!(!command.is_resident_control());
-            assert!(!is_backend_independent_maintenance_command(&command));
+            assert!(!is_backend_independent_command(&command));
             assert!(matches!(
                 command,
                 Commands::Sandbox(sandbox::SandboxArgs {

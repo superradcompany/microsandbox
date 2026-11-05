@@ -8,7 +8,10 @@
 //! 3. Sets environment variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, etc.)
 //!    so that common runtimes trust the microsandbox CA.
 
-use std::os::unix::fs::PermissionsExt;
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, fchown};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -45,6 +48,10 @@ const HOST_CAS_FILENAMES: &[&str] = &["microsandbox-host-cas.pem", "microsandbox
 
 /// Directory mode for trust-store paths created by agentd.
 const CA_TRUST_DIR_MODE: u32 = 0o755;
+
+/// Suffix of the temporary file a CA bundle is written to before it is
+/// renamed over the bundle.
+const BUNDLE_TMP_SUFFIX: &str = ".msb-tmp";
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -172,28 +179,93 @@ fn missing_ancestors(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Appends the CA PEM to the first found CA bundle, or creates a fallback.
+/// A bundle that already holds the PEM is left unchanged.
 ///
 /// Returns the path to the bundle that was modified.
 fn append_to_bundle(ca_pem: &str) -> AgentdResult<String> {
-    for &path in CA_BUNDLE_PATHS {
+    append_to_bundle_at(ca_pem, CA_BUNDLE_PATHS, FALLBACK_BUNDLE_PATH)
+}
+
+fn append_to_bundle_at(
+    ca_pem: &str,
+    bundle_paths: &[&str],
+    fallback_path: &str,
+) -> AgentdResult<String> {
+    for &path in bundle_paths {
         if Path::new(path).exists() {
             let mut contents = fs::read_to_string(path)?;
+            if contents.contains(ca_pem) {
+                return Ok(path.to_string());
+            }
             // Ensure a newline before appending.
             if !contents.ends_with('\n') {
                 contents.push('\n');
             }
             contents.push_str(ca_pem);
-            fs::write(path, contents)?;
+            // Replace the symlink target, so a symlinked bundle stays a symlink.
+            replace_file(&fs::canonicalize(path)?, &contents)?;
             return Ok(path.to_string());
         }
     }
 
     // No existing bundle found — create the fallback.
-    if let Some(parent) = Path::new(FALLBACK_BUNDLE_PATH).parent() {
-        fs::create_dir_all(parent)?;
+    replace_file(Path::new(fallback_path), ca_pem)?;
+    Ok(fallback_path.to_string())
+}
+
+/// Replaces `path` with `contents` through a synced temporary file and a
+/// rename, so a crash leaves the old or the new file, never a partial one.
+fn replace_file(path: &Path, contents: &str) -> io::Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid CA bundle path {}", path.display()),
+        ));
+    };
+    fs::create_dir_all(dir)?;
+
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(BUNDLE_TMP_SUFFIX);
+    let tmp_path = dir.join(tmp_name);
+
+    let replaced = write_temp(&tmp_path, path, contents).and_then(|()| fs::rename(&tmp_path, path));
+    if replaced.is_err() {
+        let _ = fs::remove_file(&tmp_path);
     }
-    fs::write(FALLBACK_BUNDLE_PATH, ca_pem)?;
-    Ok(FALLBACK_BUNDLE_PATH.to_string())
+    replaced?;
+
+    if let Err(e) = File::open(dir).and_then(|dir| dir.sync_all()) {
+        eprintln!("agentd: failed to sync {}: {e}", dir.display());
+    }
+    Ok(())
+}
+
+/// Writes `contents` to a new file at `tmp_path` with `path`'s owner and mode,
+/// and syncs it.
+fn write_temp(tmp_path: &Path, path: &Path, contents: &str) -> io::Result<()> {
+    match fs::remove_file(tmp_path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp_path)?;
+    match fs::metadata(path) {
+        Ok(old) => {
+            // Some mounts refuse any chown, so change the owner only when it differs.
+            let new = file.metadata()?;
+            if (new.uid(), new.gid()) != (old.uid(), old.gid()) {
+                fchown(&file, Some(old.uid()), Some(old.gid()))?;
+            }
+            file.set_permissions(old.permissions())?;
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -225,6 +297,71 @@ mod tests {
             fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
             CA_TRUST_DIR_MODE
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn bundle_test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "microsandbox-agentd-bundle-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn append_to_bundle_replaces_the_bundle_instead_of_rewriting_it() {
+        let root = bundle_test_root("replace");
+        let bundle = root.join("ca-certificates.crt");
+        let old = root.join("old");
+        fs::write(&bundle, "OLD CERTS").unwrap();
+        // A second link to the old file shows it was never truncated.
+        fs::hard_link(&bundle, &old).unwrap();
+
+        let fallback = root.join("fallback.crt");
+        append_to_bundle_at(
+            "NEW CA\n",
+            &[bundle.to_str().unwrap()],
+            fallback.to_str().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&bundle).unwrap(), "OLD CERTS\nNEW CA\n");
+        assert_eq!(fs::read_to_string(&old).unwrap(), "OLD CERTS");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn append_to_bundle_skips_a_ca_already_in_the_bundle() {
+        let root = bundle_test_root("idempotent");
+        let bundle = root.join("ca-certificates.crt");
+        fs::write(&bundle, "OLD CERTS\n").unwrap();
+
+        let path = bundle.to_str().unwrap();
+        let fallback = root.join("fallback.crt");
+        append_to_bundle_at("NEW CA\n", &[path], fallback.to_str().unwrap()).unwrap();
+        append_to_bundle_at("NEW CA\n", &[path], fallback.to_str().unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(&bundle).unwrap(), "OLD CERTS\nNEW CA\n");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replace_file_does_not_write_through_a_link_at_the_temp_path() {
+        let root = bundle_test_root("stale-temp");
+        let bundle = root.join("bundle.crt");
+        let other = root.join("other");
+        let temp = root.join(".bundle.crt.msb-tmp");
+        fs::write(&bundle, "OLD CERTS\n").unwrap();
+        fs::write(&other, "UNTOUCHED").unwrap();
+        std::os::unix::fs::symlink(&other, &temp).unwrap();
+
+        replace_file(&bundle, "NEW CERTS\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&bundle).unwrap(), "NEW CERTS\n");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "UNTOUCHED");
+        assert!(fs::symlink_metadata(&temp).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 }

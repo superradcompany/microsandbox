@@ -1,9 +1,14 @@
 //! Opt-in SDK qualification against an installed full checkpoint containing /work/hash.
 //! Set MSB_PROGRESS_SNAPSHOT plus MSB_HOME/MSB_PATH/MSB_AGENTD_PATH/MSB_LIBKRUNFW_PATH.
+//! MSB_EXPECTED_EXEC_LIMITS accepts the captured policy JSON, or null for a legacy capture.
 
 #![cfg(feature = "local")]
 
 use microsandbox::{CreationProgress, Sandbox, StartupPhase};
+use microsandbox_protocol::{
+    exec::{ExecFailed, ExecFailureKind, ExecLimits, ExecRequest, ExecSignal},
+    message::MessageType,
+};
 
 #[tokio::test]
 #[ignore = "requires a matching runtime and prepared full snapshot fixture"]
@@ -38,14 +43,99 @@ async fn restored_creation_progress_and_ignored_observer() {
         } else {
             drop(progress);
         }
+
         let sandbox = task.await.unwrap().unwrap();
         println!(
             "created observed={observed} elapsed_ms={}",
             started.elapsed().as_millis()
         );
+
+        let connection = microsandbox::agent::AgentClient::connect_sandbox(&name)
+            .await
+            .unwrap();
+        let advertised = connection.ready().unwrap().exec_limits;
+        let expected: Option<Option<ExecLimits>> = std::env::var("MSB_EXPECTED_EXEC_LIMITS")
+            .ok()
+            .map(|value| serde_json::from_str(&value).expect("captured policy fixture"));
+
+        println!("restored execution policy: {advertised:?}; expected: {expected:?}");
+
+        if let Some(Some(captured)) = expected {
+            assert_eq!(advertised, Some(captured));
+
+            // A differing destination cap must not change actual admission after restore.
+            assert!(captured.max_executions <= 8, "fixture must use a small cap");
+            let request = ExecRequest {
+                cmd: "sleep".into(),
+                args: vec!["30".into()],
+                env: Vec::new(),
+                cwd: None,
+                user: None,
+                tty: false,
+                rows: 24,
+                cols: 80,
+                rlimits: Vec::new(),
+            };
+
+            let mut running = Vec::new();
+            for _ in 0..captured.max_executions {
+                let (id, mut stream) = connection
+                    .stream(MessageType::ExecRequest, &request)
+                    .await
+                    .unwrap();
+                let started =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(started.t, MessageType::ExecStarted);
+                running.push((id, stream));
+            }
+
+            let (_, mut denied) = connection
+                .stream(MessageType::ExecRequest, &request)
+                .await
+                .unwrap();
+            let rejected = tokio::time::timeout(std::time::Duration::from_secs(5), denied.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(rejected.t, MessageType::ExecFailed);
+            assert_eq!(
+                rejected.payload::<ExecFailed>().unwrap().kind,
+                ExecFailureKind::ResourceLimit
+            );
+
+            println!(
+                "captured admission cap enforced: {}",
+                captured.max_executions
+            );
+
+            for (id, mut stream) in running {
+                connection
+                    .send(id, MessageType::ExecSignal, &ExecSignal { signal: 9 })
+                    .await
+                    .unwrap();
+                let exited = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(exited.t, MessageType::ExecExited);
+            }
+        }
+
         let result = sandbox.exec("sha256sum", ["-c", "/work/hash"]).await;
         // Always stop our child before asserting workload results.
         sandbox.kill().await.unwrap();
+
+        if let Some(expected) = expected {
+            assert_eq!(
+                advertised, expected,
+                "restored guest must retain the captured policy"
+            );
+        }
+
         let result = result.unwrap();
         assert!(result.status().success);
     }

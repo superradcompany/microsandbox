@@ -6,6 +6,8 @@
 
 pub(crate) mod builder;
 mod create_ops;
+#[cfg(target_os = "linux")]
+mod dax;
 mod dir_ops;
 mod file_ops;
 mod host_mode;
@@ -114,6 +116,9 @@ pub enum HostPermissions {
 /// Configuration for the passthrough filesystem backend.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
+    /// Maximum serialized filesystem state per device, in bytes.
+    pub max_state_bytes: usize,
+
     /// Seal owned namespace/data and reconstruct private linked or detached objects.
     pub owned_checkpoint: Option<super::OwnedDirectoryCheckpoint>,
     /// Capture external-object identity and apply explicit destination reconciliation.
@@ -274,9 +279,21 @@ pub(crate) struct PassthroughDirEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl PassthroughFs {
+    pub(crate) fn max_state_bytes(&self) -> usize {
+        self.cfg.max_state_bytes
+    }
+
     /// Validate external checkpoint structure without resolving or creating host paths.
+    pub fn validate_external_state_with_limit(bytes: &[u8], limit: usize) -> io::Result<()> {
+        mobility::validate_unavailable(bytes, limit)
+    }
+
+    /// Validate external state with the default filesystem budget.
     pub fn validate_external_state(bytes: &[u8]) -> io::Result<()> {
-        mobility::validate_unavailable(bytes)
+        Self::validate_external_state_with_limit(
+            bytes,
+            msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
+        )
     }
 
     /// Validate the single-file facade's inner namespace before translating its selected name.
@@ -284,8 +301,9 @@ impl PassthroughFs {
         bytes: &[u8],
         source: &CStr,
         destination: &CStr,
+        limit: usize,
     ) -> io::Result<(Vec<u8>, super::ExternalSingleFileIndex)> {
-        mobility::prepare_single_file_state(bytes, source, destination)
+        mobility::prepare_single_file_state(bytes, source, destination, limit)
     }
     /// Create a builder for constructing a `PassthroughFs` instance.
     pub fn builder() -> builder::PassthroughFsBuilder {
@@ -344,8 +362,13 @@ impl PassthroughFs {
             .map_or_else(|| root_fd.as_raw_fd(), AsRawFd::as_raw_fd);
         probe_strict_xattr_support(&cfg, probe_fd)?;
 
-        // Create the init binary file.
-        let init_file = init_binary::create_init_file()?;
+        // Create the init binary file. Mounts that do not inject the virtual
+        // init binary use an empty file and never touch the Agentd payload.
+        let init_file = if cfg.inject_init {
+            init_binary::create_init_file()?
+        } else {
+            init_binary::create_empty_init_file()?
+        };
 
         // Probe openat2 / RESOLVE_BENEATH availability (Linux 5.6+).
         #[cfg(target_os = "linux")]
@@ -537,6 +560,7 @@ impl PassthroughConfig {
 impl Default for PassthroughConfig {
     fn default() -> Self {
         Self {
+            max_state_bytes: msb_krun::DEFAULT_MAX_FS_BACKEND_STATE_BYTES,
             owned_checkpoint: None,
             external_checkpoint: None,
             root_dir: PathBuf::new(),
@@ -971,6 +995,43 @@ impl DynFileSystem for PassthroughFs {
             self, ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len,
             flags,
         )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
+    fn setupmapping(
+        &self,
+        _ctx: Context,
+        inode: u64,
+        _handle: u64,
+        foffset: u64,
+        len: u64,
+        flags: u64,
+        moffset: u64,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_setupmapping(
+            self,
+            inode,
+            foffset,
+            len,
+            flags,
+            moffset,
+            host_shm_base,
+            shm_size,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn removemapping(
+        &self,
+        _ctx: Context,
+        requests: Vec<crate::RemovemappingOne>,
+        host_shm_base: u64,
+        shm_size: u64,
+    ) -> io::Result<()> {
+        dax::do_removemapping(&requests, host_shm_base, shm_size)
     }
 }
 

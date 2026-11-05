@@ -556,9 +556,7 @@ fn diagnose_host() -> microsandbox::setup::Diagnosis {
     diagnosis
 }
 
-/// Render the checks as a flat log: all `info <label>: <value>` facts first,
-/// then the `✓`/`✗ <label> <detail>` rows — matching the CLI's convention of
-/// leading with `info` metadata before the result rows.
+/// Render informational facts first, followed by results, using shared CLI styling.
 fn render_diagnosis(diagnosis: &microsandbox::setup::Diagnosis) {
     use microsandbox::setup::CheckState;
 
@@ -585,22 +583,14 @@ fn info_fact_rank(label: &str) -> u8 {
     }
 }
 
-/// Render one check. Pass/fail use the `✓`/`✗ <label> <detail>` completion
-/// format; informational facts render as an `info <label>: <value>` line.
+/// Render check results and facts with the shared action and diagnostic helpers.
 fn render_check(check: &microsandbox::setup::Check) {
     use microsandbox::setup::CheckState;
     match check.state {
         CheckState::Pass => ui::success(&check.label, &check.value),
         CheckState::Fail => ui::failure(&check.label, &check.value),
-        CheckState::Warn => {
-            eprintln!(
-                "   {} {:<12} {}",
-                style("!").yellow(),
-                check.label,
-                check.value
-            );
-        }
-        CheckState::Info => info(&format!("{}: {}", check.label, check.value)),
+        CheckState::Warn => ui::warn(&format!("{}: {}", check.label, check.value)),
+        CheckState::Info => ui::notice(&check.label, &check.value),
     }
 }
 
@@ -2307,8 +2297,9 @@ async fn prepare_downgrade_operation(
     target: &Version,
     _force: bool,
 ) -> anyhow::Result<(DowngradeOperation, SchemaBaseline)> {
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let operations_dir = db_dir.join("self-downgrade");
-    fs::create_dir_all(&operations_dir)?;
+    microsandbox_db::pool::ensure_private_database_directory(&operations_dir)?;
 
     if let Some(operation) = find_active_downgrade_operation(&operations_dir)? {
         if operation.journal.source_version != source.to_string()
@@ -2501,7 +2492,7 @@ async fn open_downgrade_db(
     db_path: &Path,
 ) -> anyhow::Result<microsandbox_db::connection::DbWriteConnection> {
     if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent)?;
+        microsandbox_db::pool::ensure_private_database_directory(parent)?;
     }
 
     let config = load_persisted_config_or_default()?;
@@ -2817,16 +2808,7 @@ async fn refuse_if_active_sandboxes(db: &DatabaseConnection) -> anyhow::Result<(
 }
 
 async fn vacuum_into(db: &DatabaseConnection, backup_path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = backup_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    db.execute_raw(Statement::from_sql_and_values(
-        DatabaseBackend::Sqlite,
-        "VACUUM INTO ?",
-        [backup_path.display().to_string().into()],
-    ))
-    .await?;
+    microsandbox_db::backup::create_private_backup(db, backup_path).await?;
     Ok(())
 }
 
@@ -2837,7 +2819,7 @@ async fn preflight_schema_rollback(
     target_version: &Version,
 ) -> anyhow::Result<()> {
     if let Some(parent) = preflight_path.parent() {
-        fs::create_dir_all(parent)?;
+        microsandbox_db::pool::ensure_private_database_directory(parent)?;
     }
     match fs::remove_file(preflight_path) {
         Ok(()) => {}
@@ -2865,18 +2847,7 @@ async fn preflight_schema_rollback(
 }
 
 async fn verify_sqlite_backup(path: &Path) -> anyhow::Result<()> {
-    let backup = open_downgrade_db(path).await?;
-    let row = backup
-        .query_one_raw(Statement::from_string(
-            DatabaseBackend::Sqlite,
-            "PRAGMA quick_check",
-        ))
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SQLite backup quick_check returned no row"))?;
-    let result = row.try_get_by_index::<String>(0)?;
-    if result != "ok" {
-        anyhow::bail!("SQLite backup failed quick_check: {result}");
-    }
+    microsandbox_db::backup::validate_backup(path).await?;
     Ok(())
 }
 
@@ -3189,8 +3160,9 @@ fn acquire_migration_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
 }
 
 fn acquire_downgrade_operation_lock(db_dir: &Path) -> anyhow::Result<MigrationLock> {
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let operations_dir = db_dir.join("self-downgrade");
-    fs::create_dir_all(&operations_dir)?;
+    microsandbox_db::pool::ensure_private_database_directory(&operations_dir)?;
     // Keep the existing filename and OS lock protocol so a holder using the
     // previous implementation is still excluded. File existence is not ownership.
     let path = operations_dir.join(format!(
@@ -3431,11 +3403,11 @@ fn remove_public_command_links(base_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn info(msg: &str) {
-    eprintln!("{} {msg}", style("info").cyan().bold());
+    ui::notice("", msg);
 }
 
 fn done(msg: &str) {
-    eprintln!("{} {msg}", style("done").green().bold());
+    ui::success(msg, "");
 }
 
 /// Remove a single uninstall category from the base directory.
@@ -3508,7 +3480,7 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     for rc in [".profile", ".bash_profile", ".bashrc", ".zshrc"] {
         let path = home.join(rc);
         if path.exists() && remove_marker_block(&path)? {
-            ui::success("Cleaned legacy shell config", &format!("~/{rc}"));
+            ui::success("Cleaned", &format!("legacy shell config ~/{rc}"));
         }
     }
 
@@ -3516,8 +3488,8 @@ fn clean_legacy_shell_config() -> anyhow::Result<()> {
     if fish_conf.exists() {
         fs::remove_file(&fish_conf)?;
         ui::success(
-            "Removed legacy shell config",
-            "~/.config/fish/conf.d/microsandbox.fish",
+            "Removed",
+            "legacy shell config ~/.config/fish/conf.d/microsandbox.fish",
         );
     }
 

@@ -28,8 +28,8 @@ use crate::error::AgentdResult;
 /// # Errors
 ///
 /// Returns [`AgentdError::Init`][crate::error::AgentdError::Init] when `/etc`
-/// cannot be created, `/etc/hosts` or `/etc/hostname` cannot be written, or
-/// `sethostname(2)` fails.
+/// cannot be created, a writable network file cannot be updated, or
+/// `sethostname(2)` fails. Existing files on read-only mounts are preserved.
 pub(crate) fn apply_hostname(
     hostname: Option<&str>,
     host_alias: Option<&str>,
@@ -127,8 +127,10 @@ fn hosts_file_contents(
 //--------------------------------------------------------------------------------------------------
 
 mod linux {
+    use std::io::Write;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::{fs, io, mem, ptr};
 
     use nix::unistd;
@@ -537,10 +539,7 @@ mod linux {
 
         fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        fs::write("/etc/hostname", format!("{name}\n"))
-            .map_err(|e| AgentdError::Init(format!("failed to write /etc/hostname: {e}")))?;
-
-        Ok(())
+        write_network_file(Path::new("/etc/hostname"), &format!("{name}\n"), None)
     }
 
     /// Writes `/etc/hosts` with localhost aliases and an optional hostname entry.
@@ -552,17 +551,11 @@ mod linux {
     ) -> AgentdResult<()> {
         fs::create_dir_all("/etc")
             .map_err(|e| AgentdError::Init(format!("failed to create /etc: {e}")))?;
-        fs::write(
-            "/etc/hosts",
-            super::hosts_file_contents(hostname, host_alias, gateway_ipv4, gateway_ipv6),
+        write_network_file(
+            Path::new("/etc/hosts"),
+            &super::hosts_file_contents(hostname, host_alias, gateway_ipv4, gateway_ipv6),
+            Some(ETC_NETWORK_FILE_MODE),
         )
-        .map_err(|e| AgentdError::Init(format!("failed to write /etc/hosts: {e}")))?;
-        fs::set_permissions(
-            "/etc/hosts",
-            fs::Permissions::from_mode(ETC_NETWORK_FILE_MODE),
-        )
-        .map_err(|e| AgentdError::Init(format!("failed to chmod /etc/hosts: {e}")))?;
-        Ok(())
     }
 
     /// Writes `/etc/resolv.conf` with the configured DNS servers.
@@ -579,15 +572,48 @@ mod linux {
             content.push_str(&format!("nameserver {dns}\n"));
         }
 
-        fs::write("/etc/resolv.conf", &content)
-            .map_err(|e| AgentdError::Init(format!("failed to write /etc/resolv.conf: {e}")))?;
-        fs::set_permissions(
-            "/etc/resolv.conf",
-            fs::Permissions::from_mode(ETC_NETWORK_FILE_MODE),
+        write_network_file(
+            Path::new("/etc/resolv.conf"),
+            &content,
+            Some(ETC_NETWORK_FILE_MODE),
         )
-        .map_err(|e| AgentdError::Init(format!("failed to chmod /etc/resolv.conf: {e}")))?;
+    }
 
+    /// Preserve caller-provided read-only files without remounting or replacing them.
+    pub(super) fn write_network_file(
+        path: &Path,
+        contents: &str,
+        mode: Option<u32>,
+    ) -> AgentdResult<()> {
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if preserve_readonly_file(path, &error) => return Ok(()),
+            Err(error) => {
+                return Err(AgentdError::Init(format!(
+                    "failed to open {} for writing: {error}",
+                    path.display()
+                )));
+            }
+        };
+        file.write_all(contents.as_bytes()).map_err(|error| {
+            AgentdError::Init(format!("failed to write {}: {error}", path.display()))
+        })?;
+        if let Some(mode) = mode {
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(|error| {
+                    AgentdError::Init(format!("failed to chmod {}: {error}", path.display()))
+                })?;
+        }
         Ok(())
+    }
+
+    pub(super) fn preserve_readonly_file(path: &Path, error: &io::Error) -> bool {
+        error.raw_os_error() == Some(libc::EROFS) && path.is_file()
     }
 
     // ── low-level helpers ──────────────────────────────────────────────
@@ -657,7 +683,78 @@ mod linux {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
     use super::*;
+
+    fn network_test_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "msb-network-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn network_file_updates_preserve_existing_writable_behavior() {
+        let dir = network_test_dir("write");
+        let path = dir.join("hostname");
+        fs::write(&path, "old-hostname\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        linux::write_network_file(&path, "new-hostname\n", None).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new-hostname\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        linux::write_network_file(&path, "nameserver 1.1.1.1\n", Some(0o644)).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "nameserver 1.1.1.1\n");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn readonly_network_preservation_requires_erofs_and_an_existing_file() {
+        let dir = network_test_dir("readonly");
+        let path = dir.join("hosts");
+        fs::write(&path, "127.0.0.1 supplied-host\n").unwrap();
+        let readonly = std::io::Error::from_raw_os_error(libc::EROFS);
+        assert!(linux::preserve_readonly_file(&path, &readonly));
+        assert!(!linux::preserve_readonly_file(&dir, &readonly));
+        assert!(!linux::preserve_readonly_file(
+            &dir.join("missing"),
+            &readonly
+        ));
+        for errno in [libc::EACCES, libc::EPERM, libc::EIO, libc::ENOSPC] {
+            assert!(!linux::preserve_readonly_file(
+                &path,
+                &std::io::Error::from_raw_os_error(errno)
+            ));
+        }
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "127.0.0.1 supplied-host\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn network_file_updates_do_not_hide_invalid_paths() {
+        let dir = network_test_dir("invalid");
+        assert!(linux::write_network_file(&dir, "contents", None).is_err());
+        assert!(linux::write_network_file(&dir.join("missing/hosts"), "contents", None).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn test_hosts_file_without_hostname() {

@@ -27,9 +27,6 @@ async fn main() -> anyhow::Result<()> {
         "\n== default sources (stdout+stderr+output): {} entries",
         entries.len()
     );
-    for e in &entries {
-        print_entry(e);
-    }
 
     // Adding `System` mixes in lifecycle markers and runtime/kernel diagnostics.
     let with_system = handle
@@ -55,32 +52,6 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     println!("\n== tail=1: {} entries", tail.len());
-    if let Some(e) = tail.first() {
-        print_entry(e);
-    }
 
     Ok(())
-}
-
-fn print_entry(e: &microsandbox::logs::LogEntry) {
-    let id = e
-        .session_id
-        .map(|i| format!("id={i:>3}"))
-        .unwrap_or_else(|| "id=---".into());
-    println!(
-        "  [{}] {} {}: {}",
-        e.timestamp.to_rfc3339(),
-        id,
-        source_label(e.source),
-        String::from_utf8_lossy(&e.data).trim_end()
-    );
-}
-
-fn source_label(s: LogSource) -> &'static str {
-    match s {
-        LogSource::Stdout => "stdout",
-        LogSource::Stderr => "stderr",
-        LogSource::Output => "output",
-        LogSource::System => "system",
-    }
 }

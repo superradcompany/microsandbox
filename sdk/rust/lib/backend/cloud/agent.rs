@@ -27,13 +27,13 @@ impl Backend for CloudBackend {
         BackendKind::Cloud
     }
 
-    fn info(&self) -> BackendInfo {
-        BackendInfo {
+    fn info(&self) -> crate::MicrosandboxResult<BackendInfo> {
+        Ok(BackendInfo {
             kind: BackendKind::Cloud,
             api_url: Some(self.url.clone()),
             source: self.selection_source,
             profile: self.profile.clone(),
-        }
+        })
     }
 
     fn as_cloud(&self) -> Option<&CloudBackend> {
