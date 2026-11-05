@@ -4,7 +4,7 @@ mod embedded_version;
 
 use std::io::{IsTerminal, Write};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Command, CommandFactory, Parser, Subcommand};
 use console::style;
 use microsandbox_cli::{
     commands::{
@@ -275,6 +275,9 @@ fn main() {
     {
         unsafe { std::env::set_var("MSB_PATH", &exe) };
     }
+
+    // CLI completion
+    clap_complete::CompleteEnv::with_factory(completion_cli).complete();
 
     // Handle --tree before Cli::parse() so it works even when
     // required arguments (e.g. `msb run --tree`) are missing.
@@ -786,6 +789,19 @@ fn is_backend_independent_command(command: &Commands) -> bool {
         Commands::WindowsSelfSwap(_) => true,
         _ => false,
     }
+}
+
+fn hide_all_args(cmd: Command) -> Command {
+    cmd
+        // `mut_args` does not touch built-in --help/--version, so disable them here
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .mut_args(|arg| arg.hide(true))
+        .mut_subcommands(hide_all_args)
+}
+
+fn completion_cli() -> Command {
+    hide_all_args(Cli::command())
 }
 
 #[cfg(test)]
