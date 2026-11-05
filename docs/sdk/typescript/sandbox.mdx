@@ -15,7 +15,7 @@ See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
@@ -614,7 +614,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics(): Promise<SandboxMetrics>
@@ -642,7 +642,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metricsStream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsStream(intervalMs: number): Promise<MetricsStream>
@@ -1047,7 +1047,7 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableMetricsSample()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disableMetricsSample(): this
@@ -1443,7 +1443,7 @@ Select the guest transparent huge-page policy applied through the kernel command
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsSampleIntervalMs(ms: number): this
@@ -2458,7 +2458,7 @@ Plan or apply a configuration change; same options as [`modify()`](#sandbox-modi
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics()

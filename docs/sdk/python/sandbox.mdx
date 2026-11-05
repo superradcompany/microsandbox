@@ -711,7 +711,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics(self) -> SandboxMetrics
@@ -739,7 +739,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -1593,7 +1593,7 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 metrics()
