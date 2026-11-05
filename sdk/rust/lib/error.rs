@@ -448,6 +448,8 @@ pub enum Operation {
     SandboxMetricsStream,
     /// `Sandbox::modify`.
     SandboxModify,
+    /// `Sandbox::set_network_policy`.
+    SandboxSetNetworkPolicy,
     /// `Sandbox::fs`.
     SandboxFs,
     /// The free function `all_sandbox_metrics`.
@@ -605,6 +607,7 @@ impl Operation {
             Operation::SandboxFollowLogs => "Sandbox::follow_logs",
             Operation::SandboxLogger => "Sandbox::logger",
             Operation::SandboxMetrics => "Sandbox::metrics",
+            Operation::SandboxSetNetworkPolicy => "Sandbox::set_network_policy",
             Operation::SandboxMetricsStream => "Sandbox::metrics_stream",
             Operation::SandboxModify => "Sandbox::modify",
             Operation::SandboxFs => "Sandbox::fs",

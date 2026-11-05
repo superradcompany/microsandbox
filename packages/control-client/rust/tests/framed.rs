@@ -542,3 +542,23 @@ fn partial_secret_progress_is_preserved_and_inconsistent_or_duplicate_records_re
         Err(ControlClientError::InvalidResponse { .. })
     ));
 }
+
+#[test]
+fn a_network_policy_update_is_sent_as_its_generation_two_message() {
+    let policy = microsandbox_types::NetworkPolicy {
+        default_egress: microsandbox_types::Action::Deny,
+        default_ingress: microsandbox_types::Action::Deny,
+        rules: vec![],
+    };
+    let update = UpdateNetworkPolicy(NetworkPolicyUpdate {
+        policy: policy.clone(),
+    });
+    let encoded = update.message().unwrap();
+    assert_eq!(encoded.message_type, "control.network.policy.update");
+    assert_eq!(
+        wire::decode_record::<NetworkPolicyUpdate>(&encoded.payload)
+            .unwrap()
+            .policy,
+        policy
+    );
+}

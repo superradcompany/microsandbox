@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     BranchCreate, CheckpointCreate, ControlRequest, CpuTarget, DiskCheckpointCreate, DiskCompact,
-    Empty, MemoryTarget, Pause, RootDiskGrow, SecretsResult, SecretsUpdate,
+    Empty, MemoryTarget, NetworkPolicyUpdate, Pause, RootDiskGrow, SecretsResult, SecretsUpdate,
 };
 use crate::wire::{Envelope, WireError, decode_value, validate_record};
 
@@ -31,6 +31,8 @@ pub const CONTROL_GENERATION_TWO_MESSAGES: &[&str] = &[
     "control.root-disk.state",
     "control.disk.compact",
     "control.disk.compact.result",
+    "control.network.policy.update",
+    "control.network.policy.result",
 ];
 
 //--------------------------------------------------------------------------------------------------
@@ -109,6 +111,8 @@ pub enum ControlOperation {
     RootDiskGrow(RootDiskGrow),
     /// Compact selected owned disk chains.
     DiskCompact(DiskCompact),
+    /// Replace the running sandbox's network policy.
+    NetworkPolicyUpdate(NetworkPolicyUpdate),
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -164,6 +168,9 @@ impl ControlOperation {
                 Self::PauseState
             }
             "control.root-disk.grow" if generation >= 2 => Self::RootDiskGrow(envelope.payload()?),
+            "control.network.policy.update" if generation >= 2 => {
+                Self::NetworkPolicyUpdate(envelope.payload()?)
+            }
             "control.disk.compact" if generation >= 2 => {
                 // The selector is itself a tagged record. Validate it before serde can collapse
                 // duplicate keys and choose a different mutation target than the wire expressed.

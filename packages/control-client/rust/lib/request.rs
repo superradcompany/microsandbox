@@ -4,8 +4,8 @@ use microsandbox_protocol::{
     control::{
         BranchCreate, BranchResult, Capabilities, CheckpointCreate, CheckpointResult, ControlError,
         CpuState, CpuTarget, DiskCheckpointCreate, DiskCheckpointState, DiskCompact, Empty,
-        MemoryState, MemoryTarget, Pause, PauseState, RootDiskGrow, RootDiskState,
-        RuntimeCapabilities, SecretChange, SecretsResult,
+        MemoryState, MemoryTarget, NetworkPolicyUpdate, Pause, PauseState, RootDiskGrow,
+        RootDiskState, RuntimeCapabilities, SecretChange, SecretsResult,
     },
     wire,
 };
@@ -73,6 +73,10 @@ pub struct GetPauseState;
 /// Grow the owned root disk and filesystem.
 #[derive(Debug, Clone, Copy)]
 pub struct GrowRootDisk(pub RootDiskGrow);
+
+/// Replace the running sandbox's network policy.
+#[derive(Debug, Clone)]
+pub struct UpdateNetworkPolicy(pub NetworkPolicyUpdate);
 /// Compact selected owned disk chains.
 #[derive(Debug, Clone)]
 pub struct CompactDisks(pub DiskCompact);
@@ -299,6 +303,12 @@ v2_request!(
     "control.root-disk.state"
 );
 v2_request!(
+    UpdateNetworkPolicy,
+    Empty,
+    "control.network.policy.update",
+    "control.network.policy.result"
+);
+v2_request!(
     CompactDisks,
     microsandbox_protocol::control::DiskCompactionResult,
     "control.disk.compact",
@@ -424,6 +434,13 @@ compatible_v2!(
     }),
     |reply| decode_json_field(reply, "compaction")
 );
+compatible_v2!(
+    UpdateNetworkPolicy,
+    |request: &UpdateNetworkPolicy| serde_json::json!({
+        "op": "network_policy_update", "policy": request.0.policy,
+    }),
+    decode_network_policy_json
+);
 
 impl CompatibleControlRequest for ResumeRuntime {
     fn min_generation(&self) -> u8 {
@@ -524,6 +541,13 @@ fn decode_branch_json(reply: JsonReply) -> ControlClientResult<BranchResult> {
         .and_then(|value| value.get("branch").cloned())
         .and_then(|value| serde_json::from_value(value).ok());
     reply.checked(|_| path.map(|path| BranchResult { path }))
+}
+
+fn decode_network_policy_json(reply: JsonReply) -> ControlClientResult<Empty> {
+    let updated = serde_json::from_slice::<serde_json::Value>(reply.raw())
+        .ok()
+        .and_then(|value| value.get("network_policy_updated")?.as_bool());
+    reply.checked(|_| (updated == Some(true)).then_some(Empty {}))
 }
 
 fn decode_checkpoint_json(reply: JsonReply) -> ControlClientResult<CheckpointResult> {

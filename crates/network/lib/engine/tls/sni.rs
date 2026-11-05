@@ -8,7 +8,7 @@
 //--------------------------------------------------------------------------------------------------
 
 /// A complete ClientHello, which may omit the server name.
-pub(super) struct ClientHello {
+pub(crate) struct ClientHello {
     /// The wire hostname, before DNS-name validation.
     pub server_name: Option<String>,
 }
@@ -20,9 +20,15 @@ pub(super) struct ClientHello {
 /// Extract the SNI hostname from a buffered TLS ClientHello.
 /// Returns `None` for incomplete or malformed messages, or an absent SNI.
 pub fn extract_sni(data: &[u8]) -> Option<String> {
+    peek_client_hello(data)?.server_name
+}
+
+/// Read a complete ClientHello the way policy peeking does, telling one that
+/// omits the server name apart from one that is still incomplete.
+pub(crate) fn peek_client_hello(data: &[u8]) -> Option<ClientHello> {
     // Policy peeking has always used the first SNI. A later malformed or
     // duplicate extension must not erase or replace that policy evidence.
-    parse_client_hello_inner(data, true)?.server_name
+    parse_client_hello_inner(data, true)
 }
 
 /// Peek at a complete ClientHello without requiring rustls-compatible ciphers
@@ -135,11 +141,11 @@ fn parse_sni_extension(data: &[u8], first_name_only: bool) -> Option<String> {
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// A minimal TLS 1.2 ClientHello with SNI "example.com".
-    fn build_client_hello(hostname: &str) -> Vec<u8> {
+    /// A minimal TLS 1.2 ClientHello with SNI `hostname`.
+    pub(crate) fn build_client_hello(hostname: &str) -> Vec<u8> {
         let hostname_bytes = hostname.as_bytes();
 
         // SNI extension.

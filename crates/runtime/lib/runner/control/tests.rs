@@ -1081,3 +1081,60 @@ async fn windows_cancelled_reply_drain_releases_its_flush_worker() {
         .unwrap();
     drop(client);
 }
+
+#[cfg(feature = "net")]
+#[test]
+fn a_network_policy_update_replaces_the_running_policy() {
+    use microsandbox_network::policy::{Action, NetworkPolicy, handle::PolicyHandle};
+
+    let running = PolicyHandle::new(NetworkPolicy::allow_all());
+    let closed = microsandbox_types::NetworkPolicy {
+        default_egress: microsandbox_types::Action::Deny,
+        default_ingress: microsandbox_types::Action::Deny,
+        rules: vec![],
+    };
+    let response = super::handler::apply_network_policy(Some(&running), closed);
+    assert!(response.json.ok);
+    assert!(matches!(response.framed, Reply::NetworkPolicy));
+    assert!(matches!(running.load().default_egress, Action::Deny));
+}
+
+#[cfg(feature = "net")]
+#[test]
+fn an_invalid_network_policy_is_refused_and_the_running_one_kept() {
+    use microsandbox_network::policy::{Action, NetworkPolicy, handle::PolicyHandle};
+
+    let running = PolicyHandle::new(NetworkPolicy::allow_all());
+    let invalid = microsandbox_types::NetworkPolicy {
+        default_egress: microsandbox_types::Action::Deny,
+        default_ingress: microsandbox_types::Action::Deny,
+        rules: vec![microsandbox_types::Rule {
+            direction: microsandbox_types::Direction::Egress,
+            destination: microsandbox_types::Destination::Domain("not a domain!".into()),
+            protocols: vec![],
+            ports: vec![],
+            action: microsandbox_types::Action::Allow,
+        }],
+    };
+    let response = super::handler::apply_network_policy(Some(&running), invalid);
+    assert!(!response.json.ok);
+    assert!(
+        matches!(&response.framed, Reply::Error(error) if error.code == "invalid_network_policy")
+    );
+    assert!(matches!(running.load().default_egress, Action::Allow));
+}
+
+#[cfg(feature = "net")]
+#[test]
+fn a_sandbox_without_a_network_refuses_a_policy_update() {
+    let closed = microsandbox_types::NetworkPolicy {
+        default_egress: microsandbox_types::Action::Deny,
+        default_ingress: microsandbox_types::Action::Deny,
+        rules: vec![],
+    };
+    let response = super::handler::apply_network_policy(None, closed);
+    assert!(!response.json.ok);
+    assert!(
+        matches!(&response.framed, Reply::Error(error) if error.code == "unsupported_operation")
+    );
+}

@@ -10,8 +10,9 @@ use crate::error::to_py_err;
 use crate::exec::{PyExecHandle, PyExecOutput};
 use crate::fs::PySandboxFs;
 use crate::helpers::{
-    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, parse_violation_action_obj,
-    prepare_fork_volumes, restore_builder_from_args, sandbox_builder_from_args, str_enum_member,
+    apply_fork_volumes, extract_str_enum, is_exact_sdk_type, network_policy_value,
+    parse_violation_action_obj, prepare_fork_volumes, restore_builder_from_args,
+    sandbox_builder_from_args, str_enum_member,
 };
 use crate::metrics::PyMetricsStream;
 use crate::metrics::convert_metrics;
@@ -895,6 +896,20 @@ impl PySandbox {
     //----------------------------------------------------------------------------------------------
 
     /// Get point-in-time resource metrics.
+    /// Replace this running sandbox's network policy; its next start uses the configured one.
+    fn set_network_policy<'py>(
+        &self,
+        py: Python<'py>,
+        policy: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let policy = network_policy_value(policy)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sandbox = Self::clone_sandbox(&inner).await?;
+            sandbox.set_network_policy(&policy).await.map_err(to_py_err)
+        })
+    }
+
     fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

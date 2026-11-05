@@ -241,6 +241,9 @@ impl TcpProxy {
         // refines over-allow when the cache matched a shared CDN IP;
         // CacheOnly is the non-TLS fallback path so Domain rules still
         // gate plain HTTP / SSH / etc.
+        if let Some(name) = sni.as_deref() {
+            proxy_connect.record_hostname(name);
+        }
         if hostname_policy_deferred {
             let source = match sni.as_deref() {
                 Some(name) => HostnameSource::Sni(name),
@@ -443,6 +446,11 @@ impl TcpProxy {
             None
         };
 
+        // The first flight is kept until it names a server, so a ClientHello split across
+        // segments still records the name a later policy change judges this connection by.
+        let mut first_flight = Some(Vec::new());
+        name_from_first_flight(&mut first_flight, &initial_buf, &proxy_connect);
+
         // Replay the buffered first flight — run through secrets handler first.
         if !initial_buf.is_empty() {
             let out: Cow<[u8]> = match secrets_handler.as_mut() {
@@ -491,6 +499,7 @@ impl TcpProxy {
                 data = from_smoltcp.recv(), if !guest_eof => {
                     match data {
                         Some(bytes) => {
+                            name_from_first_flight(&mut first_flight, &bytes, &proxy_connect);
                             if let Some(tls_state) = late_connect_state.take()
                                 && could_be_connect_request(&bytes)
                             {
@@ -1348,6 +1357,37 @@ pub(crate) async fn peek_for_sni(
     (buf, canonical)
 }
 
+/// Add `bytes` to the first flight kept to name a relayed connection, and record its server
+/// name once the ClientHello is complete. The flight is dropped once its ClientHello is
+/// complete, it can no longer be one, or it reaches the bound. As in `peek_for_sni`, a chunk
+/// is added whole before the bound is checked, so both name the same first flight alike.
+fn name_from_first_flight(
+    first_flight: &mut Option<Vec<u8>>,
+    bytes: &[u8],
+    proxy_connect: &ProxyConnectState,
+) {
+    let Some(flight) = first_flight.as_mut() else {
+        return;
+    };
+    flight.extend_from_slice(bytes);
+    if flight.is_empty() {
+        return;
+    }
+
+    match sni::peek_client_hello(flight) {
+        Some(hello) => {
+            if let Some(name) = hello.server_name {
+                proxy_connect.record_hostname(&name);
+            }
+            *first_flight = None;
+        }
+        None if flight.first() != Some(&0x16) || flight.len() >= PEEK_BUF_SIZE => {
+            *first_flight = None;
+        }
+        None => {}
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -1360,13 +1400,17 @@ mod tests {
     /// borrowed from `tls::sni` test fixtures so the parser sees a
     /// well-formed record.
     fn synthetic_client_hello(sni: &str) -> Vec<u8> {
-        // Minimal but valid TLS 1.2 ClientHello with one SNI entry.
+        client_hello(Some(sni), 0)
+    }
+
+    /// A ClientHello like `synthetic_client_hello`, optionally without SNI, and with a padding
+    /// extension of `padding` zero bytes ahead of the SNI extension when `padding` is non-zero.
+    fn client_hello(sni: Option<&str>, padding: usize) -> Vec<u8> {
+        // Minimal but valid TLS 1.2 ClientHello with at most one SNI entry.
         // Layout: record header (5) + handshake header (4) + body.
-        let host_bytes = sni.as_bytes();
-        let host_len = host_bytes.len() as u16;
-        let server_name_list_len = 3 + host_len; // type(1) + len(2) + host
-        let extension_data_len = 2 + server_name_list_len; // list-len(2) + list
-        let extensions_total = 4 + extension_data_len; // type(2) + len(2) + data
+        let padding_total = if padding > 0 { 4 + padding as u16 } else { 0 };
+        let sni_total = sni.map_or(0, |host| 9 + host.len() as u16);
+        let extensions_total = padding_total + sni_total;
 
         let mut body = Vec::new();
         // Client version
@@ -1381,13 +1425,25 @@ mod tests {
         body.extend_from_slice(&[0x01, 0x00]);
         // Extensions length
         body.extend_from_slice(&extensions_total.to_be_bytes());
+        // Padding extension: type 0x0015
+        if padding > 0 {
+            body.extend_from_slice(&[0x00, 0x15]);
+            body.extend_from_slice(&(padding as u16).to_be_bytes());
+            body.resize(body.len() + padding, 0);
+        }
         // SNI extension: type 0x0000
-        body.extend_from_slice(&[0x00, 0x00]);
-        body.extend_from_slice(&extension_data_len.to_be_bytes());
-        body.extend_from_slice(&server_name_list_len.to_be_bytes());
-        body.push(0x00); // host_name type
-        body.extend_from_slice(&host_len.to_be_bytes());
-        body.extend_from_slice(host_bytes);
+        if let Some(host) = sni {
+            let host_bytes = host.as_bytes();
+            let host_len = host_bytes.len() as u16;
+            let server_name_list_len = 3 + host_len; // type(1) + len(2) + host
+            let extension_data_len = 2 + server_name_list_len; // list-len(2) + list
+            body.extend_from_slice(&[0x00, 0x00]);
+            body.extend_from_slice(&extension_data_len.to_be_bytes());
+            body.extend_from_slice(&server_name_list_len.to_be_bytes());
+            body.push(0x00); // host_name type
+            body.extend_from_slice(&host_len.to_be_bytes());
+            body.extend_from_slice(host_bytes);
+        }
 
         let handshake_len = body.len() as u32;
         let mut hs = Vec::new();
@@ -1844,6 +1900,45 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "non-TLS bail must be fast: took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_relay_names_a_client_hello_that_crosses_the_peek_bound_as_peek_for_sni_does() {
+        let hello = client_hello(Some("Blocked.Test"), PEEK_BUF_SIZE);
+        let (first, rest) = hello.split_at(PEEK_BUF_SIZE - 100);
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Bytes::copy_from_slice(first)).await.unwrap();
+        tx.send(Bytes::copy_from_slice(rest)).await.unwrap();
+        drop(tx);
+        let proxy_connect = ProxyConnectState::new();
+        let mut first_flight = Some(Vec::new());
+
+        let (_, peeked) = peek_for_sni(&mut rx, PEEK_BUF_SIZE, PEEK_BUDGET).await;
+        for chunk in [first, rest] {
+            name_from_first_flight(&mut first_flight, chunk, &proxy_connect);
+        }
+
+        assert_eq!(peeked.as_deref(), Some("blocked.test"));
+        assert_eq!(
+            proxy_connect.hostname(),
+            peeked.as_deref(),
+            "the relay and the connect-time peek named the same first flight differently"
+        );
+    }
+
+    #[test]
+    fn the_relay_drops_its_first_flight_once_a_client_hello_without_a_name_is_complete() {
+        let hello = client_hello(None, 0);
+        let proxy_connect = ProxyConnectState::new();
+        let mut first_flight = Some(Vec::new());
+
+        name_from_first_flight(&mut first_flight, &hello, &proxy_connect);
+
+        assert!(
+            first_flight.is_none(),
+            "the relay kept a first flight whose ClientHello was already complete"
+        );
+        assert_eq!(proxy_connect.hostname(), None);
     }
 
     //----------------------------------------------------------------------------------------------

@@ -664,3 +664,33 @@ fn generation_two_rejects_duplicate_nested_compaction_selectors() {
         WireError::DuplicateKey
     );
 }
+
+#[test]
+fn a_network_policy_update_is_a_generation_two_request_carrying_the_policy() {
+    let policy = microsandbox_types::NetworkPolicy {
+        default_egress: microsandbox_types::Action::Deny,
+        default_ingress: microsandbox_types::Action::Deny,
+        rules: vec![],
+    };
+    let request = Envelope::new(
+        2,
+        "control.network.policy.update",
+        &NetworkPolicyUpdate {
+            policy: policy.clone(),
+        },
+    )
+    .unwrap();
+    match ControlOperation::from_envelope(&request, 2) {
+        Ok(ControlOperation::NetworkPolicyUpdate(update)) => assert_eq!(update.policy, policy),
+        other => panic!("decoded as {other:?}"),
+    }
+    let mut generation_one = request;
+    generation_one.v = 1;
+    assert!(ControlOperation::from_envelope(&generation_one, 1).is_err());
+    for name in [
+        "control.network.policy.update",
+        "control.network.policy.result",
+    ] {
+        assert_eq!(control_message_min_generation(name), Some(2), "{name}");
+    }
+}

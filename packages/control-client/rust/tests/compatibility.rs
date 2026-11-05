@@ -232,6 +232,79 @@ async fn generation_two_mutation_routes_to_json_before_sending_to_a_generation_o
     peer.await.unwrap();
 }
 
+#[tokio::test]
+async fn a_network_policy_update_reaches_a_generation_one_runtime_as_its_json_operation() {
+    let (connector, mut peers) = QueueConnector::new(4);
+    let operation = peers.pop().unwrap();
+    let rediscovery = peers.pop().unwrap();
+    let mut framed = peers.pop().unwrap();
+    let discovery = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        json_peer(discovery, "capabilities", FRAMED_CAPS).await;
+        generation_one_welcome(&mut framed).await;
+        json_peer(rediscovery, "capabilities", FRAMED_CAPS).await;
+        extended_json_peer(
+            operation,
+            serde_json::json!({
+                "op": "network_policy_update",
+                "policy": {"default_egress": "deny", "default_ingress": "deny", "rules": []},
+            }),
+            br#"{"ok":true,"network_policy_updated":true}"#,
+        )
+        .await;
+    });
+
+    let connection = ControlConnection::connect_connector(connector)
+        .await
+        .unwrap();
+    connection
+        .request_typed(&UpdateNetworkPolicy(NetworkPolicyUpdate {
+            policy: microsandbox_types::NetworkPolicy {
+                default_egress: microsandbox_types::Action::Deny,
+                default_ingress: microsandbox_types::Action::Deny,
+                rules: vec![],
+            },
+        }))
+        .await
+        .unwrap();
+    connection.close().await;
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_json_reply_that_does_not_confirm_the_policy_update_is_not_success() {
+    let (connector, mut peers) = QueueConnector::new(1);
+    let client = JsonControlClient::from_connector(connector);
+    let operation = peers.pop().unwrap();
+    let peer = tokio::spawn(async move {
+        let mut line = Vec::new();
+        let mut operation = operation;
+        BufReader::new(&mut operation)
+            .read_until(b'\n', &mut line)
+            .await
+            .unwrap();
+        operation.write_all(b"{\"ok\":true}\n").await.unwrap();
+    });
+
+    let result = client
+        .request_compatible(
+            &UpdateNetworkPolicy(NetworkPolicyUpdate {
+                policy: microsandbox_types::NetworkPolicy {
+                    default_egress: microsandbox_types::Action::Deny,
+                    default_ingress: microsandbox_types::Action::Deny,
+                    rules: vec![],
+                },
+            }),
+            RequestOptions::default(),
+        )
+        .await;
+    assert!(
+        matches!(result, Err(ControlClientError::InvalidJsonResponse { .. })),
+        "{result:?}"
+    );
+    peer.await.unwrap();
+}
+
 #[test]
 fn json_numbers_unknown_fields_and_original_bytes_are_lossless() {
     let historical = historical::ControlResponse {
