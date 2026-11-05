@@ -239,6 +239,8 @@ HTTP CONNECT and SOCKS4 support TCP; SOCKS5 also supports non-DNS UDP. HTTP CONN
 | `proto` | `tcp`, `udp`, `icmpv4`, `icmpv6`, `any` (default) |
 | `ports` | `<port>`, `<lo>-<hi>`, or `any` (default) |
 
+For `icmpv4` and `icmpv6`, omit `ports` or set it to `any`; ICMP has no ports.
+
 **Targets**
 
 | Form | Example | Notes |
