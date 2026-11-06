@@ -439,6 +439,7 @@ func buildFFINetwork(n *NetworkConfig) *ffi.NetworkOptions {
 		DNSRebindProtection:      n.DNSRebindProtection,
 		DenyDomains:              n.DenyDomains,
 		DenyDomainSuffixes:       n.DenyDomainSuffixes,
+		DenySubdomains:           n.DenySubdomains,
 		Ports:                    n.Ports,
 		PortBindings:             buildFFIPortBindings(n.PortBindings),
 		TCPAcceptQueueSize:       n.TCPAcceptQueueSize,

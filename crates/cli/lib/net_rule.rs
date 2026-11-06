@@ -10,7 +10,7 @@
 //! <action>    := allow | deny
 //! <direction> := egress | ingress | any                    (default: egress)
 //! <target>    := any | dns | <group> | <ipv4> | [<ipv6>] | <cidr> | [<ipv6-cidr>]
-//!              | <fqdn> | domain=<name> | suffix=<domain>
+//!              | <fqdn> | domain=<name> | suffix=<domain> | subdomain=<domain>
 //! <group>     := public | private | loopback | link-local | meta | multicast | host
 //! <proto>     := any | tcp | udp | icmpv4 | icmpv6
 //! <ports>     := any | <port> | <lo>-<hi>
@@ -75,7 +75,7 @@ pub enum RuleParseError {
     #[error(
         "`{raw}` is not a valid target. \
          Expected: any, dns, a group name (public, private, loopback, link-local, meta, multicast, host), \
-         an IP, a CIDR, a domain (with dot), domain=<name>, or suffix=<domain>{suggestion}"
+         an IP, a CIDR, a domain (with dot), domain=<name>, suffix=<domain>, or subdomain=<domain>{suggestion}"
     )]
     InvalidTarget {
         raw: String,
@@ -454,6 +454,12 @@ fn parse_target(raw: &str) -> Result<Destination, RuleParseError> {
         return Ok(Destination::DomainSuffix(name));
     }
 
+    // `subdomain=<name>`: like `suffix=`, but never the name itself.
+    if let Some(rest) = raw.strip_prefix("subdomain=") {
+        let name = parse_domain_suffix(rest)?;
+        return Ok(Destination::Subdomain(name));
+    }
+
     // 7. `domain=<name>` (escape hatch)
     if let Some(rest) = raw.strip_prefix("domain=") {
         let name = DomainName::from_str(rest).map_err(|source| RuleParseError::InvalidDomain {
@@ -501,8 +507,9 @@ fn parse_target(raw: &str) -> Result<Destination, RuleParseError> {
 }
 
 /// Parse a string as a [`DomainName`] and validate it for use as a
-/// [`Destination::DomainSuffix`] target. Shared by the `*.<name>` and
-/// `suffix=<name>` arms of [`parse_target`] so the TLD-broad guard
+/// [`Destination::DomainSuffix`] or [`Destination::Subdomain`] target.
+/// Shared by the `*.<name>`, `suffix=<name>` and `subdomain=<name>` arms
+/// of [`parse_target`] so the TLD-broad guard
 /// (single-label suffix rejection) is enforced uniformly.
 fn parse_domain_suffix(raw: &str) -> Result<DomainName, RuleParseError> {
     let name = DomainName::from_str(raw).map_err(|source| RuleParseError::InvalidDomain {
@@ -777,6 +784,27 @@ mod tests {
             Destination::DomainSuffix(name) => assert_eq!(name.as_str(), "corp.internal"),
             other => panic!("expected DomainSuffix, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn subdomain_prefix_parses_as_subdomain() {
+        let r = parse_rule_token("allow@subdomain=corp.internal").unwrap();
+        match r.destination {
+            Destination::Subdomain(name) => assert_eq!(name.as_str(), "corp.internal"),
+            other => panic!("expected Subdomain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subdomain_keyword_rejects_single_label_tld() {
+        let err = parse_rule_token("deny@subdomain=local").unwrap_err();
+        assert!(matches!(
+            err,
+            RuleParseError::InvalidDomain {
+                source: microsandbox_network::policy::DomainNameError::SuffixTooBroad { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

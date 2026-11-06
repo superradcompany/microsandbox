@@ -642,8 +642,8 @@ export declare class NetworkPolicyBuilder {
   /**
    * Materialize into a `NetworkPolicy` (camelCase JS object). Lazily
    * parses every recorded `.ip()` / `.cidr()` / `.domain()` /
-   * `.domainSuffix()` input, validates `direction`-set + ICMP-egress-
-   * only invariants, and surfaces the first failure.
+   * `.domainSuffix()` / `.subdomain()` input, validates `direction`-set +
+   * ICMP-egress-only invariants, and surfaces the first failure.
    */
   build(): NetworkPolicy
 }
@@ -997,10 +997,24 @@ export declare class RuleBuilder {
   /** Deny each suffix as a `Destination::DomainSuffix` rule. */
   denyDomainSuffixes(suffixes: Array<string>): this
   /**
+   * Allow `Destination::Subdomain(name)`. Matches any subdomain, never
+   * the name itself.
+   */
+  allowSubdomain(name: string): this
+  /**
+   * Deny `Destination::Subdomain(name)`. Matches any subdomain, never
+   * the name itself.
+   */
+  denySubdomain(name: string): this
+  /** Allow each name as a `Destination::Subdomain` rule. */
+  allowSubdomains(names: Array<string>): this
+  /** Deny each name as a `Destination::Subdomain` rule. */
+  denySubdomains(names: Array<string>): this
+  /**
    * Begin an explicit-destination rule with action `Allow`. The
    * closure receives a `RuleDestinationBuilder` and must call exactly
    * one of `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` /
-   * `.group()` / `.any()` to commit the rule.
+   * `.subdomain()` / `.group()` / `.any()` to commit the rule.
    */
   allow(configure: (arg: RuleDestinationBuilder) => RuleDestinationBuilder): this
   /** Begin an explicit-destination rule with action `Deny`. */
@@ -1011,7 +1025,7 @@ export type JsRuleBuilder = RuleBuilder
 /**
  * Terminal builder returned by `RuleBuilder.allow(d => ...)` /
  * `.deny(d => ...)`. Exactly one destination call (`.ip`, `.cidr`,
- * `.domain`, `.domainSuffix`, `.group`, `.any`) commits the rule;
+ * `.domain`, `.domainSuffix`, `.subdomain`, `.group`, `.any`) commits the rule;
  * dropping without a destination call silently does nothing.
  */
 export declare class RuleDestinationBuilder {
@@ -1032,6 +1046,11 @@ export declare class RuleDestinationBuilder {
    * the apex domain itself and any subdomain.
    */
   domainSuffix(suffix: string): this
+  /**
+   * Commit the rule with destination `Subdomain(<name>)`. Matches any
+   * subdomain, never the name itself.
+   */
+  subdomain(name: string): this
   /**
    * Commit the rule with destination `Group(<group>)`. `group` is
    * one of the `DestinationGroup` strings (`"public" | "private" |
@@ -2391,11 +2410,12 @@ export interface NetworkPolicy {
 }
 
 export interface NetworkPolicyDestination {
-  /** `"any" | "cidr" | "domain" | "domainSuffix" | "group"`. */
+  /** `"any" | "cidr" | "domain" | "domainSuffix" | "subdomain" | "group"`. */
   kind: string
   cidr?: string
   domain?: string
   suffix?: string
+  subdomain?: string
   group?: string
 }
 

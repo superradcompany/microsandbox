@@ -95,6 +95,11 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub http_connect_proxy_auth: bool,
 
+    /// `subdomain` network policy destinations are supported. Older runtimes omit
+    /// this capability and would fail to parse the policy.
+    #[serde(default)]
+    pub subdomain_destination: bool,
+
     /// The launch field `guest_clock` is honored by the runtime.
     /// Older runtimes omit this capability.
     #[serde(default)]

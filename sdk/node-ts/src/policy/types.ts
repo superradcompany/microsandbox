@@ -35,6 +35,7 @@ export type Destination =
   | { kind: "cidr"; cidr: string }
   | { kind: "domain"; domain: string }
   | { kind: "domainSuffix"; suffix: string }
+  | { kind: "subdomain"; subdomain: string }
   | { kind: "group"; group: DestinationGroup };
 
 /** Inclusive port range — see `PortRange.single` / `.range`. */

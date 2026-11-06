@@ -85,8 +85,9 @@ impl DomainName {
         &self.0
     }
 
-    /// Validate this name for use as a [`Destination::DomainSuffix`]
-    /// target and return it unchanged on success.
+    /// Validate this name for use as a [`Destination::DomainSuffix`] or
+    /// [`Destination::Subdomain`] target and return it unchanged on
+    /// success.
     ///
     /// Returns [`DomainNameError::SuffixTooBroad`] when the name is a
     /// single DNS label (e.g. `com`, `local`, `internal`). The
@@ -99,6 +100,7 @@ impl DomainName {
     /// `Destination::Domain` for those.
     ///
     /// [`Destination::DomainSuffix`]: super::Destination::DomainSuffix
+    /// [`Destination::Subdomain`]: super::Destination::Subdomain
     pub fn try_into_suffix(self) -> Result<Self, DomainNameError> {
         if self.0.contains('.') {
             Ok(self)

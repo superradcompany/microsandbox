@@ -1290,6 +1290,10 @@ export interface NapiRuleBuilder {
   denyDomainSuffix(suffix: string): this;
   allowDomainSuffixes(suffixes: string[]): this;
   denyDomainSuffixes(suffixes: string[]): this;
+  allowSubdomain(name: string): this;
+  denySubdomain(name: string): this;
+  allowSubdomains(names: string[]): this;
+  denySubdomains(names: string[]): this;
   allow(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
   deny(configure: (d: NapiRuleDestinationBuilder) => NapiRuleDestinationBuilder): this;
 }
@@ -1299,6 +1303,7 @@ export interface NapiRuleDestinationBuilder {
   cidr(cidr: string): this;
   domain(domain: string): this;
   domainSuffix(suffix: string): this;
+  subdomain(name: string): this;
   group(group: string): this;
   any(): this;
 }
@@ -1322,6 +1327,7 @@ export interface NapiBuiltNetworkPolicyDestination {
   readonly cidr?: string;
   readonly domain?: string;
   readonly suffix?: string;
+  readonly subdomain?: string;
   readonly group?: string;
 }
 

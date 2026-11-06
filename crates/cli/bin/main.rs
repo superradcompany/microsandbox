@@ -307,6 +307,7 @@ fn main() {
                     http_deny_json: cfg!(feature = "net"),
                     http_connect_proxy: cfg!(feature = "net"),
                     http_connect_proxy_auth: cfg!(feature = "net"),
+                    subdomain_destination: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
                     nested_virt: Some(

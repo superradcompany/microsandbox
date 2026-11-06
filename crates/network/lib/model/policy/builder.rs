@@ -14,8 +14,8 @@
 //! ## Lazy parse
 //!
 //! Methods that take string inputs (`.ip(&str)`, `.cidr(&str)`,
-//! `.domain(&str)`, `.domain_suffix(&str)`) **do not parse at the
-//! method call**. They store the raw input along with intent, returning
+//! `.domain(&str)`, `.domain_suffix(&str)`, `.subdomain(&str)`) **do not
+//! parse at the method call**. They store the raw input along with intent, returning
 //! a chain-friendly reference. At [`NetworkPolicyBuilder::build`] time,
 //! the builder walks the accumulated entries, parses each, validates
 //! invariants (direction set, ICMP-not-in-ingress, port range
@@ -66,7 +66,7 @@ pub enum BuildError {
     /// A rule was committed via `.allow()` / `.deny()` but no destination
     /// method was called on the resulting `RuleDestinationBuilder`.
     #[error(
-        "rule #{rule_index}: destination not set; call .ip(), .cidr(), .domain(), .domain_suffix(), .group(), or .any() on the rule-destination builder"
+        "rule #{rule_index}: destination not set; call .ip(), .cidr(), .domain(), .domain_suffix(), .subdomain(), .group(), or .any() on the rule-destination builder"
     )]
     MissingDestination { rule_index: usize },
 
@@ -113,8 +113,8 @@ pub enum BuildError {
     #[error("intercept CA config is incomplete; set both cert_path and key_path")]
     IncompleteInterceptCaConfig,
 
-    /// `.domain(&str)` or `.domain_suffix(&str)` received a value that
-    /// doesn't parse as a [`DomainName`].
+    /// `.domain(&str)`, `.domain_suffix(&str)` or `.subdomain(&str)`
+    /// received a value that doesn't parse as a [`DomainName`].
     #[error("rule #{rule_index}: invalid domain `{raw}`: {source}")]
     InvalidDomain {
         rule_index: usize,
@@ -297,8 +297,8 @@ impl NetworkPolicyBuilder {
     /// Consume the builder and produce a [`NetworkPolicy`].
     ///
     /// Lazy-parses every `.ip()` / `.cidr()` / `.domain()` /
-    /// `.domain_suffix()` input, validates direction-set and
-    /// ICMP-egress-only invariants, and emits a `tracing::warn!` for
+    /// `.domain_suffix()` / `.subdomain()` input, validates direction-set
+    /// and ICMP-egress-only invariants, and emits a `tracing::warn!` for
     /// each shadowed rule pair detected.
     ///
     /// Returns the first [`BuildError`] encountered.
@@ -640,12 +640,36 @@ impl RuleBuilder {
         self
     }
 
+    /// Allow each name as a `Destination::Subdomain` rule.
+    pub fn allow_subdomains<I, S>(&mut self, names: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commit_rule(Action::Allow, PendingDestination::Subdomain(name.into()));
+        }
+        self
+    }
+
+    /// Deny each name as a `Destination::Subdomain` rule.
+    pub fn deny_subdomains<I, S>(&mut self, names: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for name in names {
+            self.commit_rule(Action::Deny, PendingDestination::Subdomain(name.into()));
+        }
+        self
+    }
+
     // -- explicit-rule entry ----------------------------------------
 
     /// Begin an explicit-destination rule with action `Allow`. Returns
     /// an [`RuleDestinationBuilder`] that requires a destination call
-    /// (`.ip`, `.cidr`, `.domain`, `.domain_suffix`, `.group`, `.any`)
-    /// to commit the rule.
+    /// (`.ip`, `.cidr`, `.domain`, `.domain_suffix`, `.subdomain`, `.group`,
+    /// `.any`) to commit the rule.
     pub fn allow(&mut self) -> RuleDestinationBuilder<'_> {
         RuleDestinationBuilder {
             rule_builder: self,
@@ -691,7 +715,7 @@ impl RuleBuilder {
 ///
 /// Dropping without a destination call silently does nothing — no rule
 /// is added. The `#[must_use]` attribute warns at compile time.
-#[must_use = "RuleDestinationBuilder requires a destination method (.ip, .cidr, .domain, .domain_suffix, .group, .any) to commit the rule"]
+#[must_use = "RuleDestinationBuilder requires a destination method (.ip, .cidr, .domain, .domain_suffix, .subdomain, .group, .any) to commit the rule"]
 pub struct RuleDestinationBuilder<'a> {
     rule_builder: &'a mut RuleBuilder,
     action: Action,
@@ -728,6 +752,14 @@ impl<'a> RuleDestinationBuilder<'a> {
     pub fn domain_suffix(self, suffix: impl Into<String>) -> &'a mut RuleBuilder {
         self.rule_builder
             .commit_rule(self.action, PendingDestination::DomainSuffix(suffix.into()));
+        self.rule_builder
+    }
+
+    /// Commit the rule with destination `Subdomain(<name>)`. Matches
+    /// any subdomain, never the name itself.
+    pub fn subdomain(self, name: impl Into<String>) -> &'a mut RuleBuilder {
+        self.rule_builder
+            .commit_rule(self.action, PendingDestination::Subdomain(name.into()));
         self.rule_builder
     }
 
@@ -769,6 +801,7 @@ enum PendingDestination {
     Cidr(String),
     Domain(String),
     DomainSuffix(String),
+    Subdomain(String),
 }
 
 impl PendingDestination {
@@ -805,7 +838,7 @@ impl PendingDestination {
                     })?;
                 Ok(Destination::Domain(name))
             }
-            PendingDestination::DomainSuffix(raw) => {
+            PendingDestination::DomainSuffix(raw) | PendingDestination::Subdomain(raw) => {
                 let name =
                     DomainName::from_str(raw).map_err(|source| BuildError::InvalidDomain {
                         rule_index: idx,
@@ -819,7 +852,10 @@ impl PendingDestination {
                         raw: raw.clone(),
                         source,
                     })?;
-                Ok(Destination::DomainSuffix(name))
+                Ok(match self {
+                    PendingDestination::Subdomain(_) => Destination::Subdomain(name),
+                    _ => Destination::DomainSuffix(name),
+                })
             }
         }
     }
@@ -1240,6 +1276,27 @@ mod tests {
         assert!(matches!(
             &p.rules[1].destination,
             Destination::DomainSuffix(d) if d.as_str() == "doubleclick.net",
+        ));
+    }
+
+    /// `deny_subdomains` produces `Destination::Subdomain` rules and
+    /// applies the same name validation as the suffix form.
+    #[test]
+    fn deny_subdomains_produces_subdomain_rules() {
+        let p = NetworkPolicy::builder()
+            .default_allow()
+            .egress(|e| e.deny_subdomains(["ads.example"]))
+            .build()
+            .unwrap();
+        assert!(matches!(
+            &p.rules[0].destination,
+            Destination::Subdomain(d) if d.as_str() == "ads.example",
+        ));
+        assert!(matches!(
+            NetworkPolicy::builder()
+                .rule(|r| r.egress().deny().subdomain("com"))
+                .build(),
+            Err(BuildError::InvalidDomain { .. })
         ));
     }
 

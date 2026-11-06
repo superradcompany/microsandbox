@@ -1207,6 +1207,10 @@ type NetworkConfig struct {
 	// DenyDomainSuffixes is a list of domain suffixes (e.g. ".ads") to block.
 	DenyDomainSuffixes []string
 
+	// DenySubdomains is a list of domains (e.g. "ads.example") whose
+	// subdomains are blocked; the domain itself is not.
+	DenySubdomains []string
+
 	// DNS configures the in-VM DNS proxy.
 	DNS *DNSConfig
 
@@ -1343,8 +1347,9 @@ type PolicyRule struct {
 	Direction   PolicyDirection
 	Destination string // "*", "loopback", "private", "link-local", "metadata",
 	// "multicast", "public", "host", an IP ("1.1.1.1"), a CIDR
-	// ("10.0.0.0/8"), a domain suffix (".internal"), or a plain domain
-	// ("api.example.com").
+	// ("10.0.0.0/8"), a domain suffix (".internal", apex included), a
+	// strict subdomain ("subdomain=internal.example", apex excluded), or a
+	// plain domain ("api.example.com").
 
 	// Protocol is the legacy single-protocol field. Prefer Protocols when
 	// matching multiple. The empty string means any.
