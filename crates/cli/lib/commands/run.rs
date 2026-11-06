@@ -6,7 +6,7 @@ use std::time::Duration;
 use clap::Args;
 use futures::{FutureExt, StreamExt};
 use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
-use microsandbox::sandbox::{ExecOutput, RlimitResource, Sandbox};
+use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
 use crate::{sandbox_config, ui};
@@ -383,6 +383,17 @@ async fn exec_in_sandbox(
         let rlimits = opts.rlimits.clone();
         let timeout = opts.timeout;
         let tty = opts.tty;
+
+        // `--no-tty` from a terminal keeps ignoring terminal input.
+        if !opts.no_stdin && !io::stdin().is_terminal() {
+            let mut options = ExecOptionsBuilder::default().args(cmd_args).tty(tty);
+            for (resource, soft, hard) in rlimits {
+                options = options.rlimit_range(resource, soft, hard);
+            }
+            return super::exec::run_piped(sandbox, cmd.to_string(), options, timeout, false, tty)
+                .await;
+        }
+
         let has_opts = tty || opts.no_stdin || timeout.is_some() || !rlimits.is_empty();
         let output: ExecOutput = if has_opts {
             sandbox
