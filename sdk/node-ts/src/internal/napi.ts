@@ -44,6 +44,7 @@ export interface NativeBindings {
   readonly Sandbox: NapiSandboxStatic;
   readonly SandboxBuilder: NapiSandboxBuilderCtor;
   readonly RestoreBuilder: new (snapshot: string, referenceKind?: "auto" | "id" | "path") => NapiRestoreBuilder;
+  readonly RestoreNetworkBuilder: NapiBuilderCtor<NapiRestoreNetworkBuilder>;
   readonly Volume: NapiVolumeStatic;
   readonly VolumeBuilder: NapiVolumeBuilderCtor;
   readonly Snapshot: NapiSnapshotStatic;
@@ -283,6 +284,8 @@ export interface NapiRestoreBuilderSetters {
   maxTcpConnections(count: number): this;
   /** Zero selects unlimited; omission retains destination defaults. */
   maxUdpConnections(count: number): this;
+  /** Destination network overrides in one scope; the flat setters set the same values. */
+  network(configure: (n: NapiRestoreNetworkBuilderSetters) => NapiRestoreNetworkBuilderSetters): this;
   /** Full execution restore rejects removing a captured NIC. */
   disableNetwork(): this;
   /** Requires disk scope or diskOnly(); full execution rejects even explicit default. */
@@ -310,6 +313,23 @@ export interface NapiRestoreBuilderSetters {
   maxInboundTcpConnections(value: number): this;
   vsock(path: string, port: number): this;
   vsockDgram(path: string, port: number): this;
+}
+
+/** The destination network settings a restore can change. */
+export interface NapiRestoreNetworkBuilderSetters {
+  /** Host policy only: does not configure DNS, TLS, or guest bootstrap. */
+  policy(policy: NetworkPolicy | NapiNetworkPolicyBuilder): this;
+  /** Zero selects unlimited; omission retains destination defaults. */
+  maxTcpConnections(count: number): this;
+  /** Zero selects unlimited; omission retains destination defaults. */
+  maxUdpConnections(count: number): this;
+  /** Omission uses the default (enabled), not the source sandbox's setting. */
+  dnsRebindProtection(enabled: boolean): this;
+}
+
+export interface NapiRestoreNetworkBuilder extends NapiRestoreNetworkBuilderSetters {
+  policyJson(json: string): this;
+  policyFromBuilder(builder: NapiNetworkPolicyBuilder): this;
 }
 
 export interface NapiRestoreBuilder extends NapiRestoreBuilderSetters {

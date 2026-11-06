@@ -811,6 +811,11 @@ export declare class RestoreBuilder {
   maxTcpConnections(count: number): this
   /** Cap destination host-side UDP sessions; zero selects unlimited. */
   maxUdpConnections(count: number): this
+  /**
+   * Set destination network overrides in one scope. The callback receives a
+   * `RestoreNetworkBuilder` that exposes only the settings a restore can change.
+   */
+  network(configure: (arg: RestoreNetworkBuilder) => RestoreNetworkBuilder): this
   /** Disable networking; full restore rejects removal of a captured NIC. */
   disableNetwork(): this
   /** Set guest security for disk boot; explicit changes are rejected by full restore. */
@@ -877,6 +882,22 @@ export declare class RestoreBuilder {
   restoreWithProgress(): Promise<JsPullProgressCreate>
 }
 export type JsRestoreBuilder = RestoreBuilder
+
+/** Destination network settings that a restore can change. Unset settings are left unchanged. */
+export declare class RestoreNetworkBuilder {
+  constructor()
+  /** Set only host-side network policy, without DNS, TLS, or guest bootstrap changes. */
+  policyJson(json: string): this
+  /** Set host-side policy from the existing policy builder. */
+  policyFromBuilder(builder: NetworkPolicyBuilder): this
+  /** Cap destination host-side TCP connections; zero selects unlimited. */
+  maxTcpConnections(count: number): this
+  /** Cap destination host-side UDP sessions; zero selects unlimited. */
+  maxUdpConnections(count: number): this
+  /** Enable or disable DNS rebind protection on the destination host's resolver. */
+  dnsRebindProtection(enabled: boolean): this
+}
+export type JsRestoreNetworkBuilder = RestoreNetworkBuilder
 
 /**
  * Fluent builder for the root disk of an OCI image.

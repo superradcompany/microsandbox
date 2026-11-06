@@ -203,6 +203,7 @@ pub(crate) fn restore_builder_from_args(
             "cpus",
             "memory",
             "network_policy",
+            "network",
             "max_connections",
             "max_tcp_connections",
             "max_udp_connections",
@@ -239,6 +240,35 @@ pub(crate) fn restore_builder_from_args(
     if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
         builder = builder.memory(memory);
     }
+    let scope = match kwargs.get_item("network")?.filter(|v| !v.is_none()) {
+        Some(value) => config_dict(&value, "RestoreNetwork")?,
+        None => PyDict::new(kwargs.py()),
+    };
+    // Each setting has one home: the flat keyword or the network scope, never both.
+    for (flat, scoped, key) in [
+        ("network_policy", "network.policy", "custom_policy"),
+        (
+            "max_connections",
+            "network.max_tcp_connections",
+            "max_tcp_connections",
+        ),
+        (
+            "max_tcp_connections",
+            "network.max_tcp_connections",
+            "max_tcp_connections",
+        ),
+        (
+            "max_udp_connections",
+            "network.max_udp_connections",
+            "max_udp_connections",
+        ),
+    ] {
+        if scope.contains(key)? && kwargs.get_item(flat)?.is_some_and(|v| !v.is_none()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{flat} and {scoped} are mutually exclusive"
+            )));
+        }
+    }
     if let Some(value) = kwargs.get_item("network_policy")?.filter(|v| !v.is_none()) {
         // Accept only the existing policy value, not a Network config that could alter bootstrap.
         let policy = config_dict(&value, "NetworkPolicy")?;
@@ -273,6 +303,27 @@ pub(crate) fn restore_builder_from_args(
     }
     if let Some(count) = extract_opt::<usize>(kwargs, "max_udp_connections")? {
         builder = builder.max_udp_connections(count);
+    }
+    if !scope.is_empty() {
+        let policy = parse_network_policy(&scope)?;
+        let tcp = extract_opt::<usize>(&scope, "max_tcp_connections")?;
+        let udp = extract_opt::<usize>(&scope, "max_udp_connections")?;
+        let dns_rebind_protection = extract_opt::<bool>(&scope, "dns_rebind_protection")?;
+        builder = builder.network(|mut network| {
+            if let Some(policy) = policy {
+                network = network.policy(policy);
+            }
+            if let Some(count) = tcp {
+                network = network.max_tcp_connections(count);
+            }
+            if let Some(count) = udp {
+                network = network.max_udp_connections(count);
+            }
+            if let Some(enabled) = dns_rebind_protection {
+                network = network.dns_rebind_protection(enabled);
+            }
+            network
+        });
     }
     if extract_opt::<bool>(kwargs, "disable_network")?.unwrap_or(false) {
         builder = builder.disable_network();

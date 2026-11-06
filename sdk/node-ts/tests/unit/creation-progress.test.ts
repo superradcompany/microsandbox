@@ -49,6 +49,16 @@ vi.mock("../../dist/internal/napi.js", () => {
         maxConnections(value: number): this { native.controls("maxConnections", value); return this; }
         maxTcpConnections(value: number): this { native.controls("maxTcpConnections", value); return this; }
         maxUdpConnections(value: number): this { native.controls("maxUdpConnections", value); return this; }
+        network(configure: (scope: object) => unknown): this {
+          const scope = {
+            policy: (value: unknown) => { native.controls("networkPolicy", value); return scope; },
+            maxTcpConnections: (value: number) => { native.controls("maxTcpConnections", value); return scope; },
+            maxUdpConnections: (value: number) => { native.controls("maxUdpConnections", value); return scope; },
+            dnsRebindProtection: (value: boolean) => { native.controls("dnsRebindProtection", value); return scope; },
+          };
+          configure(scope);
+          return this;
+        }
         disableNetwork(): this { native.controls("disableNetwork"); return this; }
         security(value: string): this { native.controls("security", value); return this; }
         maxDuration(value: number): this { native.controls("maxDuration", value); return this; }
@@ -111,6 +121,17 @@ describe("creation result lifecycle ownership", () => {
         ["disableNetwork"], ["security", "default"], ["maxDuration", 0], ["idleTimeout", 0],
       ]);
       expect(native.create).not.toHaveBeenCalled();
+    });
+    it(`${method} applies the network scope as the flat setters do and forwards DNS rebind protection`, async () => {
+      const policy = { defaultEgress: "deny" as const, defaultIngress: "deny" as const, rules: [] };
+      const builder = Sandbox.restore("baseline").name("destination")
+        .network((n) => n.policy(policy).maxTcpConnections(0).maxUdpConnections(7).dnsRebindProtection(false));
+      if (method === "restore") await builder.restore();
+      else await (await builder.restoreWithProgress()).awaitSandbox();
+      expect(native.controls.mock.calls).toEqual([
+        ["networkPolicy", policy], ["maxTcpConnections", 0], ["maxUdpConnections", 7],
+        ["dnsRebindProtection", false],
+      ]);
     });
     for (const tcpMethod of ["maxTcpConnections", "maxConnections"] as const) {
       it(`${method} forwards ${tcpMethod} independently of an explicit unlimited UDP limit`, async () => {

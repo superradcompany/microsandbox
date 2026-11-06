@@ -5,6 +5,7 @@ import {
   NetworkPolicyBuilder,
   PortRange,
   Rule,
+  Sandbox,
 } from "../../dist/index.js";
 
 describe("NetworkPolicy profiles", () => {
@@ -262,5 +263,28 @@ describe("NetworkPolicyBuilder", () => {
   it("instanceof NetworkPolicyBuilder", () => {
     const npb = NetworkPolicy.builder();
     expect(npb).toBeInstanceOf(NetworkPolicyBuilder);
+  });
+});
+
+describe("RestoreBuilder.network()", () => {
+  it("scopes destination overrides to the settings a restore can change", () => {
+    const builder = Sandbox.restore("snapshot").name("destination");
+    let scope: object | undefined;
+    const names: string[] = [];
+
+    expect(builder.network((n) => {
+      scope = n;
+      return n.policy(NetworkPolicy.none()).maxTcpConnections(8).maxUdpConnections(0).dnsRebindProtection(false);
+    })).toBe(builder);
+    for (const name in scope) names.push(name);
+    expect(names.sort()).toEqual(["dnsRebindProtection", "maxTcpConnections", "maxUdpConnections", "policy"]);
+
+    // Policy validation matches the flat setter: only default actions and rules.
+    builder.network((n) => {
+      expect(() => n.policy(NetworkPolicy.builder().defaultDeny().build())).not.toThrow();
+      expect(() => n.policy({ tls: {} } as never))
+        .toThrow("restore network policy accepts only default actions and rules");
+      return n;
+    });
   });
 });

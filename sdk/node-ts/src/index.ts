@@ -26,7 +26,7 @@ export type { DeploymentProfile } from "./deployment-profile.js";
 
 // Sandbox lifecycle and execution
 export { PullProgressCreate, Sandbox, SandboxListBuilder } from "./sandbox.js";
-export type { RestoreBuilder } from "./sandbox.js";
+export type { RestoreBuilder, RestoreNetworkBuilder } from "./sandbox.js";
 import { Sandbox as _Sandbox, type SandboxBuilder as _SBT } from "./sandbox.js";
 /**
  * Native fluent builder for a sandbox. `new SandboxBuilder(name)` is
@@ -271,6 +271,8 @@ hideMethod(napi.NetworkBuilder, "policyJson");
 hideMethod(napi.NetworkBuilder, "policyFromBuilder");
 hideMethod(napi.RestoreBuilder, "networkPolicyJson");
 hideMethod(napi.RestoreBuilder, "networkPolicyFromBuilder");
+hideMethod(napi.RestoreNetworkBuilder, "policyJson");
+hideMethod(napi.RestoreNetworkBuilder, "policyFromBuilder");
 hideMethod(napi.SandboxBuilder, "execWithBuilder");
 hideMethod(napi.SandboxBuilder, "execStreamWithBuilder");
 hideMethod(napi.SandboxBuilder, "attachWithBuilder");
@@ -385,6 +387,17 @@ hideMethod(napi.SandboxBuilder, "attachWithBuilder");
         this.networkPolicyFromBuilder(p);
       } else {
         this.networkPolicyJson(JSON.stringify(remapKeys(p)));
+      }
+      return this;
+    };
+  }
+  const restoreNetworkProto = napi.RestoreNetworkBuilder.prototype;
+  if (!restoreNetworkProto.policy) {
+    restoreNetworkProto.policy = function (p: unknown) {
+      if (p instanceof napi.NetworkPolicyBuilder) {
+        this.policyFromBuilder(p);
+      } else {
+        this.policyJson(JSON.stringify(remapKeys(p)));
       }
       return this;
     };

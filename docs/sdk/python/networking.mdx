@@ -156,6 +156,8 @@ restored = await Sandbox.restore(
 
 Omitted restore limits use destination defaults. `restore_with_progress()` accepts the same options; `max_connections` remains a deprecated TCP-only alias, and supplying both TCP names is an error.
 
+`Sandbox.restore(..., network=RestoreNetwork(dns_rebind_protection=enabled))` sets DNS rebind protection for the restored sandbox. Omitted uses the default (enabled), not the source sandbox's setting, so pass `False` again when restoring a sandbox that was created without protection.
+
 #### <span className="msb-recv">network.</span><span className="msb-hn">rate_limiter</span>
 
 [`NetworkRateLimiter \| None`](#networkratelimiter)

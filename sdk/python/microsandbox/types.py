@@ -1974,6 +1974,39 @@ class Network:
         return d
 
 
+@dataclass(frozen=True, slots=True)
+class RestoreNetwork:
+    """Destination network settings that a restore can change.
+
+    ``None`` leaves a setting unset: the restored sandbox uses destination
+    defaults, not the source sandbox's settings."""
+
+    policy: NetworkPolicy | None = None
+    """Host-side policy. Restore accepts only rules and default actions."""
+    max_tcp_connections: int | None = None
+    """TCP connection limit; zero means unlimited."""
+    max_udp_connections: int | None = None
+    """UDP session limit; zero means unlimited."""
+    dns_rebind_protection: bool | None = None
+    """DNS rebind protection on the destination resolver. Defaults to enabled;
+    disable it to let hostnames resolve to private addresses, with the policy
+    deciding."""
+
+    def _to_dict(self) -> dict:
+        d: dict = {}
+        if self.policy is not None:
+            if not isinstance(self.policy, NetworkPolicy):
+                raise TypeError("RestoreNetwork.policy must be a NetworkPolicy")
+            d["custom_policy"] = self.policy._to_dict()
+        if self.max_tcp_connections is not None:
+            d["max_tcp_connections"] = self.max_tcp_connections
+        if self.max_udp_connections is not None:
+            d["max_udp_connections"] = self.max_udp_connections
+        if self.dns_rebind_protection is not None:
+            d["dns_rebind_protection"] = self.dns_rebind_protection
+        return d
+
+
 # --------------------------------------------------------------------------------------------------
 # Types: Registry Auth
 # --------------------------------------------------------------------------------------------------
