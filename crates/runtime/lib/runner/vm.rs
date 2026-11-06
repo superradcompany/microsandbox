@@ -1408,9 +1408,21 @@ fn run(
                 }
                 #[cfg(feature = "net")]
                 if let Some(network_activation) = network_activation_handle {
-                    // Published-port listeners and all packet processing start only after the
-                    // restored workload and local control surfaces are ready.
-                    network_activation.activate();
+                    // Reset startup socket queues before forwarding or sending SDK Ready.
+                    // Public endpoints are bound, but relay.run has not accepted clients yet.
+                    if let Err(error) = network_activation.activate() {
+                        let error = RuntimeError::Custom(format!(
+                            "activate published network endpoints: {error}"
+                        ));
+                        tracing::error!(%error, "activate restored network");
+                        super::progress::publish_failure(&relay_boot_log_dir, &error);
+                        relay_exit_reason.store(
+                            EXIT_REASON_AGENT_UNRESPONSIVE,
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        relay_exit_handle.trigger();
+                        return;
+                    }
                 }
                 #[cfg(not(feature = "net"))]
                 let _ = network_activation_handle;
@@ -2724,8 +2736,9 @@ fn build_vm(
         if vm.checkpoint_restore.is_some() {
             network_activation_handle = Some(network.defer_activation());
         }
-
-        network.start(tokio_handle.clone());
+        network
+            .start(tokio_handle.clone())
+            .map_err(|error| RuntimeError::Custom(format!("publish network endpoints: {error}")))?;
 
         let guest_mac = network.guest_mac();
         let net_backend = network.take_backend();

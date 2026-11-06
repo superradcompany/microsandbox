@@ -22,7 +22,9 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort, TcpAcceptQueueSize};
+#[cfg(test)]
+use crate::config::TcpAcceptQueueSize;
+use crate::config::{ConnectionLimit, DnsConfig};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -226,12 +228,10 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
-/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
-///   connections on the host-bind address and forwards into the guest.
+/// * `port_publisher` - Already reserved host sockets; listener tasks start in this loop.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
 /// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
-/// * `tcp_accept_queue_size` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -242,12 +242,10 @@ pub fn smoltcp_poll_loop(
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
-    published_ports: Vec<PublishedPort>,
+    mut port_publisher: PortPublisher,
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
-    tcp_accept_queue_size: TcpAcceptQueueSize,
-    max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
     outbound_proxy: Option<Arc<ResolvedOutboundProxy>>,
@@ -289,14 +287,7 @@ pub fn smoltcp_poll_loop(
         config.gateway_mac,
         config.guest_mac,
     );
-    let mut port_publisher = PortPublisher::new(
-        &published_ports,
-        tcp_accept_queue_size,
-        max_inbound_tcp_connections,
-        config.guest_ipv4,
-        config.guest_ipv6,
-        config.gateway.ipv4,
-        config.gateway.ipv6,
+    port_publisher.start(
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
@@ -2056,18 +2047,27 @@ mod tests {
         let loop_shared = shared.clone();
         let handle = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
+            let config = leak_poll_config();
+            let publisher = PortPublisher::new(
+                &[],
+                TcpAcceptQueueSize::DEFAULT,
+                None,
+                config.guest_ipv4,
+                config.guest_ipv6,
+                config.gateway.ipv4,
+                config.gateway.ipv6,
+            )
+            .unwrap();
             smoltcp_poll_loop(
                 loop_shared,
-                leak_poll_config(),
+                config,
                 NetworkPolicy::allow_all(),
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                publisher,
                 false,
                 None,
-                None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2205,18 +2205,27 @@ mod tests {
         let loop_shared = shared.clone();
         let handle = tokio::runtime::Handle::current();
         std::thread::spawn(move || {
+            let config = leak_poll_config();
+            let publisher = PortPublisher::new(
+                &[],
+                TcpAcceptQueueSize::DEFAULT,
+                None,
+                config.guest_ipv4,
+                config.guest_ipv6,
+                config.gateway.ipv4,
+                config.gateway.ipv6,
+            )
+            .unwrap();
             smoltcp_poll_loop(
                 loop_shared,
-                leak_poll_config(),
+                config,
                 NetworkPolicy::allow_all(),
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                publisher,
                 false,
                 None,
-                None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
