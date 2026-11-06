@@ -19,6 +19,8 @@ use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConf
 use microsandbox_types::GuestFlush;
 
 use crate::backend::Backend;
+#[cfg(feature = "local")]
+use crate::backend::local::creation::CreationStorage;
 use crate::backend::sandbox::SandboxIdentity;
 #[cfg(feature = "local")]
 use crate::backend::{ControlSession, LocalBackend};
@@ -475,8 +477,9 @@ pub(crate) async fn capture_child(
     local: &LocalBackend,
     config: &mut SandboxConfig,
     source: &super::identity::BranchSource,
-    child: &Path,
+    child: &CreationStorage,
 ) -> MicrosandboxResult<Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>> {
+    crate::runtime::protected_state::require_running(local, &source.name)?;
     if let Some(capture) = source.batch.as_ref().and_then(|batch| batch.get()) {
         let closure = child.join(".branch-restore");
         // Only local hardlinks and small directory metadata; no background copier may
@@ -504,7 +507,18 @@ pub(crate) async fn capture_child(
         &local.cache_dir().join("memory"),
         &id,
     )?;
-    tokio::fs::write(child.join(".branch-reservation"), &id).await?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let reservation_id = id.clone();
+    let worker_storage = child.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::write(reservation_path, reservation_id)
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Runtime(format!("branch reservation: {error}")))??;
+
     #[cfg(not(target_os = "linux"))]
     let request = microsandbox_protocol::control::BranchCreate {
         guest_flush: source.guest_flush,
@@ -530,7 +544,7 @@ pub(crate) async fn capture_child(
     let response = local
         .control_session_for_run(&source.name, source.run)
         .await?
-        .request(&CreateBranch(request))
+        .capture(&CreateBranch(request))
         .await
         .map_err(MicrosandboxError::ControlClient)?;
     #[cfg(target_os = "linux")]
@@ -581,14 +595,25 @@ pub(crate) async fn capture_child(
     // and readiness do not need to exclude later source lifecycle operations.
     drop(lineage);
     drop(_transition);
-    tokio::fs::remove_file(child.join(".branch-reservation")).await?;
+
+    let reservation_path = child.join(".branch-reservation");
+    let worker_storage = child.clone();
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        std::fs::remove_file(reservation_path)
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Runtime(format!("branch reservation cleanup: {error}"))
+    })??;
+
     adopt_capture(config, child, closure, &state, pin).await
 }
 
 #[cfg(feature = "local")]
 async fn adopt_capture(
     config: &mut SandboxConfig,
-    child: &Path,
+    child: &CreationStorage,
     closure: std::path::PathBuf,
     state: &LocalBranchState,
     pin: Arc<microsandbox_runtime::checkpoint::LocalMemoryPin>,
@@ -604,6 +629,10 @@ async fn adopt_capture(
     config.spec.resources.max_cpus = state.max_cpus;
     config.spec.resources.memory_mib = state.memory_mib;
     config.spec.resources.max_memory_mib = state.max_memory_mib;
+    let nested = microsandbox_runtime::checkpoint::captured_nested_virt(&state.resources)
+        .map_err(MicrosandboxError::SnapshotIntegrity)?;
+    // Forks retain captured execution state instead of the current host default.
+    config.spec.resources.nested_virt = Some(nested);
     // The captured effective address wins over launch-time pools/defaults. Each user-mode
     // network stack is isolated; host listeners were rejected before source mutation.
     config.spec.network.interface = None;
@@ -709,6 +738,7 @@ fn reclaim_abandoned_memory(root: &Path) {
     let root = root.to_owned();
     // Filesystem metadata and unlink may stall on cold or remote storage. Recovery is
     // best-effort and must not occupy the async worker that drives branch capture.
+    // This shared cache sweep must not retain the child's preparation lock.
     tokio::task::spawn_blocking(move || {
         let options = microsandbox_runtime::checkpoint::MemoryPruneOptions {
             branches_only: true,

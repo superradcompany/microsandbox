@@ -56,7 +56,7 @@ def phase_grow(label, name, mib):
 
 
 def journal(name):
-    return json.loads((home / "sandboxes" / name / "runtime" / "root-disk.json").read_text())
+    return json.loads((home / "sandboxes" / name / "root-disk.json").read_text())
 
 
 def file_hash(path):

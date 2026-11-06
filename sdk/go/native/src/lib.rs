@@ -485,6 +485,7 @@ mod error_kind {
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+    pub const MODIFICATION_NOT_CONFIRMED: &str = "modification_not_confirmed";
     pub const IO: &str = "io";
 }
 
@@ -582,6 +583,9 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
             MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
+            MicrosandboxError::ModificationNotConfirmed { .. } => {
+                error_kind::MODIFICATION_NOT_CONFIRMED
+            }
             MicrosandboxError::RuntimeNotInstalled(_) => "runtime_not_installed",
             MicrosandboxError::RuntimeIncomplete(_) => "runtime_incomplete",
             MicrosandboxError::Io(_) => error_kind::IO,
@@ -1107,6 +1111,7 @@ struct SandboxCreateOpts {
     cpu_placement: Option<String>,
     placement_profile: Option<String>,
     thp: Option<String>,
+    nested_virt: Option<bool>,
     workdir: Option<String>,
     shell: Option<String>,
     env: Option<HashMap<String, String>>,
@@ -2556,6 +2561,9 @@ pub unsafe extern "C" fn msb_sandbox_create(
             }
             if let Some(placement_profile) = opts.placement_profile {
                 builder = builder.placement_profile(placement_profile);
+            }
+            if let Some(enabled) = opts.nested_virt {
+                builder = builder.nested_virt(enabled);
             }
             if let Some(thp) = opts.thp {
                 let policy = thp
@@ -7874,6 +7882,21 @@ mod tests {
 
         assert_eq!(ffi.kind, super::error_kind::INVALID_CONFIG);
         assert_eq!(ffi.message, message);
+    }
+
+    #[test]
+    fn modification_not_confirmed_preserves_ffi_kind_and_message() {
+        let error = MicrosandboxError::ModificationNotConfirmed {
+            cause: "the running sandbox does not hold the secret".into(),
+        };
+
+        let ffi = FfiError::from(error);
+
+        assert_eq!(ffi.kind, super::error_kind::MODIFICATION_NOT_CONFIRMED);
+        assert_eq!(
+            ffi.message,
+            "the change did not complete as asked: the running sandbox does not hold the secret"
+        );
     }
 
     #[test]

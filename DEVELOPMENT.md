@@ -312,6 +312,12 @@ The release workflow (`.github/workflows/release.yml`) will:
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
 
+### Recovering an unpublished release
+
+If runner retirement or another workflow issue blocks a tagged release before publication, merge the workflow fix to `main`, cancel the blocked run, and dispatch **Release** on `main` with `release_tag` set to the existing tag (for example, `v0.7.12`). Leave this input empty for a build-only run. Do not move or recreate the tag.
+
+Recovery requires an unpublished tag whose commit is already in `main` and whose workspace version matches its name. The workflow resolves that commit once, records it in the run summary, and pins every build and publication checkout to it. All platform builds, artifact checks, and the production SDK smoke test still gate publication. A GitHub release that already exists is rejected; partial publication after that point needs a separate recovery assessment. Post-release lockfile maintenance continues to target current `main`.
+
 ### npm publishing and provenance
 
 The Node SDK, shared packages, and native platform packages publish with npm provenance from the GitHub-hosted `npm-publish` job. The job retains `NPM_TOKEN` authentication and requests `id-token: write` only for signing the provenance statement. Each package's repository metadata points to this public repository. MCP remains a separate token-based publication because its source lives in the `microsandbox-mcp` submodule repository.

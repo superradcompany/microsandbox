@@ -33,6 +33,7 @@ export type MicrosandboxErrorCode =
   | "metricsUnavailable"
   | "unsupportedOperation"
   | "unsupported"
+  | "modificationNotConfirmed"
   | "custom";
 
 export class MicrosandboxError extends Error {
@@ -274,6 +275,12 @@ export class UnsupportedOperationError extends MicrosandboxError {
 export class UnsupportedError extends MicrosandboxError {
   constructor(message: string, options?: ErrorOptions) {
     super("unsupported", message, options);
+  }
+}
+
+export class ModificationNotConfirmedError extends MicrosandboxError {
+  constructor(message: string, options?: ErrorOptions) {
+    super("modificationNotConfirmed", message, options);
   }
 }
 

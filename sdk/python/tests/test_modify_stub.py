@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from microsandbox import ModificationNotConfirmedError
+
 STUB_PATH = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
 TYPES_PATH = Path(__file__).parent.parent / "microsandbox" / "types.py"
 
@@ -71,3 +73,14 @@ def test_sandbox_modify_stub_signature() -> None:
         assert all(default is not None for default in method.args.kw_defaults)
         assert isinstance(method.returns, ast.Name)
         assert method.returns.id == "SandboxModificationPlan"
+
+
+def test_modification_not_confirmed_error_preserves_message() -> None:
+    message = (
+        "the change did not complete as asked: "
+        "the running sandbox does not hold the secret"
+    )
+    error = ModificationNotConfirmedError(message)
+
+    assert str(error) == message
+    assert error.code == "modification-not-confirmed"

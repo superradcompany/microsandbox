@@ -38,4 +38,7 @@ pub(crate) use runner::bootstrap_fs;
 #[cfg(feature = "runner")]
 pub(crate) use runner::{clock, startup, writeback};
 
+#[cfg(feature = "runner")]
+pub use msb_krun::{default_nested_virt, nested_virt_supported};
+
 pub use error::*;

@@ -12,18 +12,13 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd};
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::HashMap,
     ffi::{OsStr, OsString},
     fs::File,
-    future::Future,
     io::{Seek, SeekFrom, Write as IoWrite},
     path::{Path, PathBuf},
     process::Stdio,
@@ -31,7 +26,6 @@ use std::{
 
 #[cfg(windows)]
 use rand::Rng;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 #[cfg(windows)]
@@ -49,8 +43,6 @@ use windows_sys::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 #[cfg(windows)]
-use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
-#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
 };
@@ -67,36 +59,37 @@ use microsandbox_protocol::{
     },
     exec::ExecRlimit,
 };
-use microsandbox_runtime::ipc::SandboxSocketPaths;
+use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_runtime::launch::{FileMountConfig, LaunchConfig, Lifecycle};
 use microsandbox_runtime::vm::{MetricsSlotHandoff, StartupCommand};
 use microsandbox_types::{CommandResolutionError, SandboxLogLevel, resolve_default_command};
 use microsandbox_utils::{DB_FILENAME, DB_SUBDIR};
 
+use super::lifecycle::acquire_sandbox_lifecycle_guard;
 #[cfg(feature = "net")]
 use super::network_slot::NetworkSlot;
+#[cfg(windows)]
+use super::sockets::ensure_agent_pipe_unclaimed;
+use super::sockets::remove_socket_artifacts_at;
+use crate::backend::local::creation::CreationStorage;
+use crate::backend::local::volume::ResolvedNamedVolume;
 #[cfg(not(target_os = "linux"))]
 use crate::error::{Operation, UnsupportedReason};
 #[cfg(windows)]
 use crate::runtime::handle::WindowsJob;
 use crate::runtime::handle::{ProcessHandle, StartupProcess};
-use crate::runtime::launch_contract::{self, LaunchContract};
+use crate::runtime::launch_contract;
 use crate::sandbox::SecurityProfile;
-use crate::timing;
 use crate::{
     MicrosandboxError, MicrosandboxResult,
     backend::LocalBackend,
     config::{BlockWritebackConfig, RuntimeConfig},
-    db::entity::volume as volume_entity,
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
-        DiskImageFormat, HostPermissions, MountOptions, NamedVolumeMode, RootfsSource,
-        SandboxConfig, StatVirtualization, VolumeMount, validate_named_disk_mount_options,
+        DiskImageFormat, HostPermissions, MountOptions, RootfsSource, SandboxConfig,
+        StatVirtualization, VolumeMount,
     },
-    volume::{
-        VolumeConfig, VolumeKind, lock_volume_name, materialize_volume_path,
-        validate_volume_config, validate_volume_name,
-    },
+    volume::VolumeKind,
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -165,36 +158,12 @@ struct StdioInheritGuard {
     states: Vec<HandleInheritState>,
 }
 
-/// Local storage metadata for a named volume mounted by a sandbox.
-#[derive(Clone, Debug)]
-struct ResolvedNamedVolume {
-    kind: VolumeKind,
-    path: PathBuf,
-    format: Option<DiskImageFormat>,
-    fstype: Option<String>,
-    quota_mib: Option<u32>,
-}
-
 #[derive(Clone, Debug)]
 struct DiskLockRequest {
     path: PathBuf,
     readonly: bool,
     label: String,
     volume_name: Option<String>,
-}
-
-/// Named volume row and path created for one sandbox create attempt.
-#[derive(Debug)]
-pub(crate) struct CreatedNamedVolume {
-    pub(crate) id: i32,
-    pub(crate) path: PathBuf,
-}
-
-/// Sandbox-create named volume preflight state.
-#[derive(Debug)]
-pub(crate) struct EnsuredNamedVolumes {
-    created: Vec<CreatedNamedVolume>,
-    _locks: Vec<File>,
 }
 
 /// How the sandbox process should behave relative to the creating process.
@@ -211,9 +180,729 @@ pub enum SpawnMode {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
-impl EnsuredNamedVolumes {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.created.is_empty()
+impl LocalBackend {
+    /// Complete filesystem preparation while its storage owner is still held.
+    pub(crate) async fn prepare_sandbox_launch(
+        &self,
+        config: &SandboxConfig,
+        storage: &CreationStorage,
+    ) -> MicrosandboxResult<()> {
+        if storage.path() != self.sandboxes_dir().join(&config.spec.name) {
+            return Err(MicrosandboxError::Runtime(
+                "launch preparation has the wrong storage owner".into(),
+            ));
+        }
+
+        // Unlike offline configuration validation, a start must select a real runtime before
+        // layout admission. Preserve first-use installation for bundled SDKs.
+        #[cfg(feature = "embed-binaries")]
+        crate::setup::ensure_runtime(
+            self.config(),
+            crate::setup::InstallOptions {
+                source: crate::setup::InstallSource::EmbeddedArchive,
+                ..Default::default()
+            },
+        )
+        .await?;
+        #[cfg(not(feature = "embed-binaries"))]
+        crate::setup::resolve_runtime(self.config())?;
+        launch_contract::validate_runtime_config(config, self.config()).await?;
+        super::protected_state::prepare(self, config, storage).await?;
+        let runtime_storage = storage.clone();
+        let scripts = config.spec.runtime.scripts.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let runtime_dir = runtime_storage.join("runtime");
+            let guest_dir =
+                microsandbox_runtime::checkpoint::layout::reset_guest_files(&runtime_dir)
+                    .map_err(MicrosandboxError::Runtime)?;
+            let scripts_dir = guest_dir.join("scripts");
+
+            std::fs::create_dir_all(runtime_storage.join("logs"))?;
+            std::fs::create_dir_all(&scripts_dir)?;
+            for (name, content) in &scripts {
+                // Prevent path traversal: only use the filename component.
+                let safe_name = Path::new(name).file_name().ok_or_else(|| {
+                    crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
+                })?;
+                let script_path = scripts_dir.join(safe_name);
+                std::fs::write(&script_path, content)?;
+                #[cfg(unix)]
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+                #[cfg(windows)]
+                microsandbox_filesystem::PassthroughFs::set_path_virtual_permissions(
+                    &guest_dir,
+                    &script_path,
+                    0,
+                    0,
+                    0o755,
+                )?;
+            }
+
+            Ok::<_, MicrosandboxError>(())
+        })
+        .await
+        .map_err(|error| {
+            MicrosandboxError::Runtime(format!("runtime file preparation: {error}"))
+        })??;
+
+        prepare_oci_upper(config, storage).await?;
+        Ok(())
+    }
+
+    /// Spawn the sandbox process for a sandbox.
+    ///
+    /// Returns a [`ProcessHandle`] and the path to the agent relay socket.
+    ///
+    /// The function:
+    /// 1. Resolves the `msb` binary path
+    /// 2. Creates sandbox directories (logs, runtime, scripts)
+    /// 3. Builds CLI arguments from the config
+    /// 4. Spawns the hidden `msb machine` process with `--agent-sock` for the relay
+    /// 5. Reads startup JSON from stdout to get child PIDs
+    pub async fn spawn_sandbox(
+        &self,
+        config: &SandboxConfig,
+        sandbox_id: i32,
+        mode: SpawnMode,
+        lifecycle_guard: Option<SandboxLifecycleGuard>,
+    ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+        let lifecycle_guard = match lifecycle_guard {
+            Some(guard) => Some(guard),
+            None => Some(
+                acquire_sandbox_lifecycle_guard(
+                    &self.config().run_dir(),
+                    &config.spec.name,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?,
+            ),
+        };
+        let storage = CreationStorage::acquire(self, &config.spec.name)?;
+        self.prepare_sandbox_launch(config, &storage).await?;
+        self.launch_sandbox(config, sandbox_id, mode, lifecycle_guard)
+            .await
+    }
+
+    /// Launch after the caller has completed storage preparation.
+    pub(crate) async fn launch_sandbox(
+        &self,
+        config: &SandboxConfig,
+        sandbox_id: i32,
+        mode: SpawnMode,
+        lifecycle_guard: Option<SandboxLifecycleGuard>,
+    ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
+        // Durable configuration stores only host-side source references. Resolve
+        // them into the private runtime configuration before the sandbox process
+        // is spawned.
+        #[cfg(feature = "net")]
+        let resolved_network = config
+            .local_network_config()?
+            .resolve(&EnvNetworkSecretResolver)
+            .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
+
+        // Resolve the already-layered runtime paths as one compatible pair before launch.
+        let global = self.config();
+        #[cfg(feature = "embed-binaries")]
+        let resolved_runtime = crate::setup::ensure_runtime(
+            global,
+            crate::setup::InstallOptions {
+                source: crate::setup::InstallSource::EmbeddedArchive,
+                ..Default::default()
+            },
+        )
+        .await?;
+        #[cfg(not(feature = "embed-binaries"))]
+        let resolved_runtime = crate::setup::resolve_runtime(global)?;
+        ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
+        launch_contract::require_protected_guest_state(&resolved_runtime.msb_path).await?;
+        let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
+        // A stopped sandbox may have been edited without a runtime installed, or
+        // the selected executable may have changed since creation. Validate its
+        // effective configuration here for both initial launch and later starts.
+        launch_contract.validate_launch_intent(config)?;
+        #[cfg(feature = "net")]
+        launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
+        launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
+        launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
+        launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
+        launch_contract::validate_nested_virt(&resolved_runtime.msb_path, config, launch_contract)
+            .await?;
+        if config.checkpoint_restore.as_ref().is_some_and(|restore| {
+            restore
+                .external_mounts
+                .iter()
+                .any(|binding| binding.require_backing)
+        }) {
+            launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
+        }
+        // Create already probed before replacing; a later start may use a different runtime.
+        #[cfg(feature = "net")]
+        launch_contract
+            .require_network_capabilities(&resolved_runtime.msb_path, resolved_network.config())
+            .await?;
+        if launch_contract.patch < 9
+            && !matches!(
+                global.runtime.block_writeback,
+                BlockWritebackConfig::Auto { pool_mib: None } | BlockWritebackConfig::Off {}
+            )
+        {
+            return Err(MicrosandboxError::Runtime(
+                "explicit block-writeback policy requires a newer runtime launch contract".into(),
+            ));
+        }
+        let catalog_has_writeback =
+            microsandbox_db::catalog::has_table(self.db().await?.read(), "writeback_allocation")
+                .await?;
+        if !catalog_has_writeback
+            && !matches!(
+                global.runtime.block_writeback,
+                BlockWritebackConfig::Auto { pool_mib: None } | BlockWritebackConfig::Off {}
+            )
+        {
+            return Err(MicrosandboxError::Runtime("explicit block-writeback policy requires a catalog with writeback allocation support; the historical catalog was left unchanged".into()));
+        }
+        let msb_path = resolved_runtime.msb_path;
+        let libkrunfw_path = resolved_runtime.libkrunfw_path;
+        // Historical selection uses the cached version contract, never a second process probe.
+        if !launch_contract.machine
+            && (config.checkpoint_restore.is_some()
+                || !config.snapshot_upper_layers.is_empty()
+                || !config.snapshot_root_layer_sources.is_empty())
+        {
+            return Err(MicrosandboxError::Runtime(
+                "checkpoint restore, branch, or disk chains require a newer runtime launch contract"
+                    .into(),
+            ));
+        }
+        #[cfg(windows)]
+        crate::setup::verify_windows_host_prerequisites()?;
+        tracing::debug!(
+            msb = %msb_path.display(),
+            libkrunfw = %libkrunfw_path.display(),
+            sandbox = %config.spec.name,
+            cpus = config.spec.resources.cpus,
+            memory_mib = config.spec.resources.memory_mib,
+            mode = ?mode,
+            "spawn_sandbox: resolved paths"
+        );
+
+        let sandbox_dir = global.sandboxes_dir().join(&config.spec.name);
+        let log_dir = sandbox_dir.join("logs");
+        let runtime_dir = sandbox_dir.join("runtime");
+        let db_dir = global.home().join(DB_SUBDIR);
+        let db_path = db_dir.join(DB_FILENAME);
+
+        // Own the sandbox's runtime namespace before touching any deterministic
+        // endpoint. The descriptor is duplicated into the child below and remains
+        // locked there for the runtime's entire lifetime.
+        #[cfg(unix)]
+        let lifecycle_guard = match lifecycle_guard {
+            Some(guard) => guard,
+            None => {
+                acquire_sandbox_lifecycle_guard(
+                    &global.run_dir(),
+                    &config.spec.name,
+                    std::time::Duration::from_secs(5),
+                )
+                .await?
+            }
+        };
+
+        // Lifecycle callers prove any previous owner dead before reaching spawn.
+        // With ownership now serialized, remove exact leftovers from that prior
+        // generation so compatibility-link publication cannot be masked by them.
+        remove_socket_artifacts_at(
+            &global.run_dir(),
+            &global.sandboxes_dir(),
+            &config.spec.name,
+        )?;
+
+        // Compute the agent relay socket path from the backend being used for
+        // this spawn, not from the ambient default backend.
+        let agent_sock_path = self.launch_agent_socket_path(&config.spec.name, launch_contract)?;
+
+        // The pipe name is derived from the sandbox NAME, so a leaked VM process
+        // from an earlier run would keep serving it and silently receive the new
+        // sandbox's agent traffic. Refuse to boot on top of a live server.
+        #[cfg(windows)]
+        ensure_agent_pipe_unclaimed(&agent_sock_path, &config.spec.name).await?;
+
+        // Resolve file mounts separately so the runtime can attach a synthetic
+        // one-entry filesystem instead of exporting the source's parent directory.
+        let file_mounts = resolve_file_mounts(config)?;
+        let named_volumes = self.resolve_named_volumes(config).await?;
+        let owned_root = self.sandboxes_dir().join(&config.spec.name);
+        super::owned_volumes::validate(&owned_root, &config.spec.mounts)?;
+        let disk_locks = lock_disk_mounts(config, &named_volumes, &owned_root)?;
+        let metrics_reservation = if config.effective_metrics_interval().is_some() {
+            reserve_metrics_slot(self, config, sandbox_id)
+        } else {
+            None
+        };
+        #[cfg(unix)]
+        let parent_watchdog = match mode {
+            SpawnMode::Attached => match create_parent_watchdog_pipe() {
+                Ok(pipe) => Some(pipe),
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(err);
+                }
+            },
+            SpawnMode::Detached => None,
+        };
+
+        #[cfg(windows)]
+        let parent_watchdog: Option<()> = None;
+
+        #[cfg(unix)]
+        let startup_pipe = match mode {
+            SpawnMode::Attached => None,
+            SpawnMode::Detached => match create_startup_pipe() {
+                Ok(pipe) => Some(pipe),
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(err);
+                }
+            },
+        };
+
+        #[cfg(windows)]
+        let startup_pipe = match mode {
+            SpawnMode::Attached => None,
+            SpawnMode::Detached => match create_startup_pipe(&config.spec.name, sandbox_id) {
+                Ok(pipe) => Some(pipe),
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(err);
+                }
+            },
+        };
+
+        #[cfg(windows)]
+        let child_job = match mode {
+            SpawnMode::Attached => match WindowsJob::new_kill_on_close() {
+                Ok(job) => Some(job),
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(crate::MicrosandboxError::Runtime(format!(
+                        "failed to create Windows sandbox job: {err}"
+                    )));
+                }
+            },
+            SpawnMode::Detached => None,
+        };
+
+        #[cfg(windows)]
+        let startup_pipe_name = startup_pipe.as_ref().map(|pipe| pipe.name.as_os_str());
+
+        let (writeback_limit_bytes, writeback_pool_bytes) =
+            match block_writeback_policy(&global.runtime) {
+                Ok(policy) => policy,
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(err);
+                }
+            };
+
+        // #1390: lease from active sandboxes instead of deriving the slot from the
+        // ever-increasing sandbox ID.
+        #[cfg(feature = "net")]
+        let lease = if !launch_contract.machine && launch_contract.patch < 16 {
+            NetworkSlot::lease_legacy(self, sandbox_id).await
+        } else {
+            NetworkSlot::lease(self, sandbox_id).await
+        };
+        #[cfg(feature = "net")]
+        let network_slot = match lease {
+            Ok(slot) => slot,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
+
+        // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
+        // delivered over the config fd (keeps the network-config blob and
+        // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
+        let (mut visible, mut launch) = machine_cli_args(
+            self,
+            config,
+            sandbox_id,
+            #[cfg(feature = "net")]
+            network_slot,
+            #[cfg(feature = "net")]
+            resolved_network,
+            &db_path,
+            global.database.connect_timeout_secs,
+            &log_dir,
+            &runtime_dir,
+            &agent_sock_path,
+            &libkrunfw_path,
+            &file_mounts,
+            &named_volumes,
+            metrics_reservation.as_ref(),
+            parent_watchdog
+                .as_ref()
+                .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
+            #[cfg(unix)]
+            startup_pipe
+                .as_ref()
+                .map(|_| microsandbox_runtime::vm::STARTUP_FD),
+            #[cfg(unix)]
+            None,
+            #[cfg(windows)]
+            None,
+            #[cfg(windows)]
+            startup_pipe_name,
+        );
+        tracing::debug!(
+            per_disk_limit_bytes = ?writeback_limit_bytes,
+            pool_bytes = ?writeback_pool_bytes,
+            "resolved buffered writeback policy"
+        );
+        launch.block_writeback_limit_bytes = if catalog_has_writeback {
+            writeback_limit_bytes
+        } else {
+            None
+        };
+        launch.block_writeback_pool_bytes = if catalog_has_writeback {
+            writeback_pool_bytes
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let branch_memory_fd = config
+            .branch_memory
+            .as_ref()
+            .map(|pin| pin.file().as_raw_fd());
+        #[cfg(target_os = "linux")]
+        if launch
+            .checkpoint_restore
+            .as_ref()
+            .is_some_and(|r| r.memory_descriptor)
+            != branch_memory_fd.is_some()
+        {
+            release_metrics_reservation(config, metrics_reservation.as_ref());
+            return Err(MicrosandboxError::Runtime(
+                "branch restore is missing its owned memory descriptor".into(),
+            ));
+        }
+        if !launch_contract.machine {
+            visible[0] = OsString::from("sandbox");
+        }
+        let launch_value = match launch_contract.encode_for_runtime(&msb_path, &launch).await {
+            Ok(launch) => launch,
+            Err(error) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(error);
+            }
+        };
+        let launch_bytes = serde_json::to_vec(&launch_value)?;
+        #[cfg(unix)]
+        let config_file = match write_launch_config_fd(&launch_bytes) {
+            Ok(file) => file,
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
+        #[cfg(unix)]
+        let config_raw_fd = config_file.as_raw_fd();
+        #[cfg(unix)]
+        {
+            visible.push(OsString::from("--config-fd"));
+            visible.push(OsString::from(
+                microsandbox_runtime::vm::CONFIG_FD.to_string(),
+            ));
+            // Older runtimes retain the inherited descriptor without naming it.
+            // Newer runtimes need the argument to adopt it instead of relocking.
+            if launch_contract.lifecycle_lock_argument() {
+                visible.push(OsString::from("--lifecycle-lock-fd"));
+                visible.push(OsString::from(
+                    microsandbox_runtime::vm::LIFECYCLE_LOCK_FD.to_string(),
+                ));
+            }
+        }
+
+        #[cfg(windows)]
+        let _config_file = match write_launch_config_file(&launch_bytes, &runtime_dir) {
+            Ok(file) => {
+                visible.push(OsString::from("--config-file"));
+                visible.push(file.path().as_os_str().to_os_string());
+                file
+            }
+            Err(err) => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(err);
+            }
+        };
+
+        // Build the command.
+        let mut cmd = Command::new(&msb_path);
+        #[cfg(windows)]
+        if matches!(mode, SpawnMode::Detached) {
+            let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+            cmd.creation_flags(flags);
+        }
+        cmd.args(visible);
+
+        // Agentd selection is process-wide for the VMM. Forward the explicit
+        // path from the resolved backend config into the child environment.
+        // Managed clears also remove inherited overrides. The child validates and eagerly
+        // reads the selected payload before constructing any filesystem.
+        cmd.env_remove("MSB_AGENTD_PATH");
+        if let Some(path) = &global.paths.agentd {
+            cmd.env("MSB_AGENTD_PATH", path);
+        }
+
+        // Prevent the sandbox process from inheriting the parent's terminal on
+        // stdin — the VMM's implicit console auto-detects terminals and sets raw
+        // mode, which corrupts the parent's terminal output (\n without \r).
+        cmd.stdin(Stdio::null());
+        #[cfg(windows)]
+        if launch_contract.machine && !disk_locks.is_empty() {
+            // A private startup pipe is not a terminal. Only modern runtimes adopt these
+            // handles; historical runtimes retain the existing launcher-owned locks.
+            cmd.arg("--disk-locks-stdin");
+            cmd.stdin(Stdio::piped());
+        }
+
+        #[cfg(unix)]
+        {
+            let parent_watch_fd = parent_watchdog
+                .as_ref()
+                .map(|pipe| pipe.read_fd.as_raw_fd());
+            let startup_write_fd = startup_pipe.as_ref().map(|pipe| pipe.write_fd.as_raw_fd());
+            let lifecycle_lock_fd = lifecycle_guard.as_raw_fd();
+            // Parent descriptors remain CLOEXEC; only this child admits its own locks.
+            let mut disk_lock_fds: Vec<i32> = disk_locks.iter().map(AsRawFd::as_raw_fd).collect();
+            unsafe {
+                cmd.pre_exec(move || {
+                    if startup_write_fd.is_some() {
+                        detach_from_launcher_session()?;
+                    }
+
+                    let mut config_mapping =
+                        InheritedFdMapping::new(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD);
+                    let mut parent_watch_mapping = parent_watch_fd.map(|fd| {
+                        InheritedFdMapping::new(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)
+                    });
+                    let mut startup_mapping = startup_write_fd.map(|fd| {
+                        InheritedFdMapping::new(fd, microsandbox_runtime::vm::STARTUP_FD)
+                    });
+                    let mut lifecycle_mapping = InheritedFdMapping::new(
+                        lifecycle_lock_fd,
+                        microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
+                    );
+                    #[cfg(target_os = "linux")]
+                    let mut memory_mapping = branch_memory_fd.map(|fd| {
+                        InheritedFdMapping::new(fd, microsandbox_runtime::vm::BRANCH_MEMORY_FD)
+                    });
+
+                    // Parent runtimes such as Vitest or Go tests can have enough
+                    // open files that pipe/tempfile allocation lands on one of the
+                    // fixed inherited fd numbers. Move those sources away before
+                    // any dup2 call can overwrite a later source fd.
+                    let mut next_spare_fd = microsandbox_runtime::vm::LIFECYCLE_LOCK_FD + 1;
+                    move_reserved_source_fd(&mut config_mapping, &mut next_spare_fd)?;
+                    if let Some(mapping) = parent_watch_mapping.as_mut() {
+                        move_reserved_source_fd(mapping, &mut next_spare_fd)?;
+                    }
+                    if let Some(mapping) = startup_mapping.as_mut() {
+                        move_reserved_source_fd(mapping, &mut next_spare_fd)?;
+                    }
+                    move_reserved_source_fd(&mut lifecycle_mapping, &mut next_spare_fd)?;
+                    #[cfg(target_os = "linux")]
+                    if let Some(mapping) = memory_mapping.as_mut() {
+                        move_reserved_source_fd(mapping, &mut next_spare_fd)?;
+                    }
+                    // Disk locks stay CLOEXEC in the parent. Only this child inherits its own
+                    // locks, and their original numbers may be destinations of the mappings below.
+                    inherit_disk_lock_fds(&mut disk_lock_fds, &mut next_spare_fd)?;
+
+                    dup_inherited_fd(config_mapping.src, config_mapping.dst)?;
+                    if let Some(mapping) = parent_watch_mapping {
+                        dup_inherited_fd(mapping.src, mapping.dst)?;
+                    }
+                    if let Some(mapping) = startup_mapping {
+                        dup_inherited_fd(mapping.src, mapping.dst)?;
+                    }
+                    dup_inherited_fd(lifecycle_mapping.src, lifecycle_mapping.dst)?;
+                    #[cfg(target_os = "linux")]
+                    if let Some(mapping) = memory_mapping {
+                        dup_inherited_fd(mapping.src, mapping.dst)?;
+                    }
+
+                    Ok(())
+                });
+            }
+        }
+
+        // Capture stdout for attached startup JSON. Detached mode uses a
+        // dedicated startup fd so stdio can be severed from the launcher.
+        #[cfg(unix)]
+        if startup_pipe.is_some() {
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+        } else {
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::inherit());
+        }
+        #[cfg(windows)]
+        {
+            let runtime_log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("runtime.log"))?;
+
+            if startup_pipe.is_some() {
+                cmd.stdout(Stdio::null());
+            } else {
+                cmd.stdout(Stdio::piped());
+            }
+            cmd.stderr(Stdio::from(runtime_log));
+        }
+
+        ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
+
+        // Spawn and Windows lock release form one handoff, before waiting for startup JSON.
+        let child = {
+            match spawn_runtime_command(
+                &mut cmd,
+                mode,
+                #[cfg(not(unix))]
+                lifecycle_guard,
+            ) {
+                Ok(child) => child,
+                Err(err) => {
+                    release_metrics_reservation(config, metrics_reservation.as_ref());
+                    return Err(err.into());
+                }
+            }
+        };
+
+        let _pid = match child.id() {
+            Some(pid) => pid,
+            None => {
+                release_metrics_reservation(config, metrics_reservation.as_ref());
+                return Err(crate::MicrosandboxError::Runtime(
+                    "sandbox process exited immediately".into(),
+                ));
+            }
+        };
+        tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
+
+        #[cfg(windows)]
+        let job_assignment = child_job
+            .as_ref()
+            .map(|job| job.assign_pid(_pid))
+            .transpose();
+
+        // Install cancellation ownership before the first post-spawn await, including failures
+        // during Windows job assignment and the initial startup reply.
+        let mut startup_process = StartupProcess::new(ProcessHandle::new(
+            _pid,
+            config.spec.name.clone(),
+            child,
+            disk_locks,
+            #[cfg(unix)]
+            parent_watchdog.map(|pipe| pipe.write_fd),
+            #[cfg(windows)]
+            child_job,
+            metrics_reservation.as_ref().map(|reservation| {
+                MetricsReservationCleanup::new(
+                    reservation.shm_name.clone(),
+                    reservation.slot,
+                    reservation.generation,
+                    Some(reservation.registry.clone()),
+                )
+            }),
+        ));
+
+        #[cfg(windows)]
+        {
+            let process =
+                super::ownership::RuntimeProcess::capture(_pid as i32)?.ok_or_else(|| {
+                    MicrosandboxError::Runtime("runtime exited during ownership capture".into())
+                })?;
+            // Released Windows runtimes started owning the lifecycle lock in v0.6.16.
+            startup_process.handle_mut().ownership = Some((
+                process,
+                launch_contract.machine || launch_contract.patch >= 16,
+            ));
+        }
+
+        #[cfg(windows)]
+        if let Err(err) = job_assignment {
+            let error = crate::MicrosandboxError::Runtime(format!(
+                "failed to assign sandbox process to Windows job: {err}"
+            ));
+            let cleanup = startup_process
+                .handle_mut()
+                .terminate_failed_startup()
+                .await;
+            return Err(startup_error_with_cleanup(error, cleanup));
+        }
+
+        #[cfg(windows)]
+        if launch_contract.machine {
+            let handoff = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                startup_process.handle_mut().handoff_disk_locks(),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(MicrosandboxError::Runtime(
+                    "sandbox startup timeout during disk ownership handoff".into(),
+                ))
+            });
+            if let Err(error) = handoff {
+                let cleanup = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await;
+                return Err(startup_error_with_cleanup(error, cleanup));
+            }
+        }
+
+        let startup_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            read_startup_line(startup_process.child_mut(), startup_pipe),
+        )
+        .await
+        {
+            Ok(reply) => reply.and_then(|(line, reader)| {
+                parse_startup_info(&line, _pid).map(|info| (info, reader))
+            }),
+            Err(_) => Err(crate::MicrosandboxError::Runtime(
+                "sandbox startup timeout: no JSON received within 30 seconds".into(),
+            )),
+        };
+        let (startup, reader) = match startup_result {
+            Ok(startup) => startup,
+            Err(error) => {
+                // Decide why launch failed before cleanup. Reaping can fail independently and
+                // must never replace the timeout, read error, bad JSON or mismatched identity.
+                let cleanup = startup_process
+                    .handle_mut()
+                    .terminate_failed_startup()
+                    .await;
+                return Err(startup_error_with_cleanup(error, cleanup));
+            }
+        };
+
+        if startup.startup_events {
+            startup_process.handle_mut().startup_reader = Some(reader);
+        }
+
+        tracing::debug!(
+            vm_pid = startup.pid,
+            agent_sock = %agent_sock_path.display(),
+            "spawn_sandbox: startup JSON received"
+        );
+
+        Ok((startup_process.into_handle(), agent_sock_path))
     }
 }
 
@@ -289,665 +978,19 @@ impl Drop for StdioInheritGuard {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Spawn the sandbox process for a sandbox.
+/// Spawn a sandbox through the supplied local backend.
 ///
-/// Returns a [`ProcessHandle`] and the path to the agent relay socket.
-///
-/// The function:
-/// 1. Resolves the `msb` binary path
-/// 2. Creates sandbox directories (logs, runtime, scripts)
-/// 3. Builds CLI arguments from the config
-/// 4. Spawns the hidden `msb machine` process with `--agent-sock` for the relay
-/// 5. Reads startup JSON from stdout to get child PIDs
+/// Delegates to [`LocalBackend::spawn_sandbox`].
 pub async fn spawn_sandbox(
     local: &LocalBackend,
     config: &SandboxConfig,
     sandbox_id: i32,
     mode: SpawnMode,
-    lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
+    lifecycle_guard: Option<SandboxLifecycleGuard>,
 ) -> MicrosandboxResult<(ProcessHandle, PathBuf)> {
-    // Durable configuration stores only host-side source references. Resolve
-    // them into the private runtime configuration before the sandbox process
-    // is spawned.
-    #[cfg(feature = "net")]
-    let resolved_network = config
-        .local_network_config()?
-        .resolve(&EnvNetworkSecretResolver)
-        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
-
-    // Resolve the already-layered runtime paths as one compatible pair before launch.
-    let global = local.config();
-    #[cfg(feature = "embed-binaries")]
-    let resolved_runtime = crate::setup::ensure_runtime(
-        global,
-        crate::setup::InstallOptions {
-            source: crate::setup::InstallSource::EmbeddedArchive,
-            ..Default::default()
-        },
-    )
-    .await?;
-    #[cfg(not(feature = "embed-binaries"))]
-    let resolved_runtime = crate::setup::resolve_runtime(global)?;
-    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
-    let launch_contract = launch_contract::resolve(&resolved_runtime.msb_path).await?;
-    // A stopped sandbox may have been edited without a runtime installed, or
-    // the selected executable may have changed since creation. Validate its
-    // effective configuration here for both initial launch and later starts.
-    launch_contract.validate_launch_intent(config)?;
-    #[cfg(feature = "net")]
-    launch_contract::validate_http_deny_response(&resolved_runtime.msb_path, config).await?;
-    launch_contract::validate_exec_limits(&resolved_runtime.msb_path, config).await?;
-    launch_contract::validate_guest_clock(&resolved_runtime.msb_path, config).await?;
-    launch_contract::validate_fs_state_limit(&resolved_runtime.msb_path, global).await?;
-    if config.checkpoint_restore.as_ref().is_some_and(|restore| {
-        restore
-            .external_mounts
-            .iter()
-            .any(|binding| binding.require_backing)
-    }) {
-        launch_contract::require_restore_backing(&resolved_runtime.msb_path).await?;
-    }
-    // Create already probed before replacing; a later start may use a different runtime.
-    #[cfg(feature = "net")]
-    launch_contract
-        .require_network_capabilities(&resolved_runtime.msb_path, resolved_network.config())
-        .await?;
-    if launch_contract.patch < 9
-        && !matches!(
-            global.runtime.block_writeback,
-            BlockWritebackConfig::Auto { pool_mib: None } | BlockWritebackConfig::Off {}
-        )
-    {
-        return Err(MicrosandboxError::Runtime(
-            "explicit block-writeback policy requires a newer runtime launch contract".into(),
-        ));
-    }
-    let catalog_has_writeback =
-        microsandbox_db::catalog::has_table(local.db().await?.read(), "writeback_allocation")
-            .await?;
-    if !catalog_has_writeback
-        && !matches!(
-            global.runtime.block_writeback,
-            BlockWritebackConfig::Auto { pool_mib: None } | BlockWritebackConfig::Off {}
-        )
-    {
-        return Err(MicrosandboxError::Runtime("explicit block-writeback policy requires a catalog with writeback allocation support; the historical catalog was left unchanged".into()));
-    }
-    let msb_path = resolved_runtime.msb_path;
-    let libkrunfw_path = resolved_runtime.libkrunfw_path;
-    // Historical selection uses the cached version contract, never a second process probe.
-    if !launch_contract.machine
-        && (config.checkpoint_restore.is_some()
-            || !config.snapshot_upper_layers.is_empty()
-            || !config.snapshot_root_layer_sources.is_empty())
-    {
-        return Err(MicrosandboxError::Runtime(
-            "checkpoint restore, branch, or disk chains require a newer runtime launch contract"
-                .into(),
-        ));
-    }
-    #[cfg(windows)]
-    crate::setup::verify_windows_host_prerequisites()?;
-    tracing::debug!(
-        msb = %msb_path.display(),
-        libkrunfw = %libkrunfw_path.display(),
-        sandbox = %config.spec.name,
-        cpus = config.spec.resources.cpus,
-        memory_mib = config.spec.resources.memory_mib,
-        mode = ?mode,
-        "spawn_sandbox: resolved paths"
-    );
-
-    let sandbox_dir = global.sandboxes_dir().join(&config.spec.name);
-    let log_dir = sandbox_dir.join("logs");
-    let runtime_dir = sandbox_dir.join("runtime");
-    let scripts_dir = runtime_dir.join("scripts");
-    let db_dir = global.home().join(DB_SUBDIR);
-    let db_path = db_dir.join(DB_FILENAME);
-
-    // Own the sandbox's runtime namespace before touching any deterministic
-    // endpoint. The descriptor is duplicated into the child below and remains
-    // locked there for the runtime's entire lifetime.
-    #[cfg(unix)]
-    let lifecycle_guard = match lifecycle_guard {
-        Some(guard) => guard,
-        None => {
-            acquire_sandbox_lifecycle_guard(
-                &global.run_dir(),
-                &config.spec.name,
-                std::time::Duration::from_secs(5),
-            )
-            .await?
-        }
-    };
-
-    // Lifecycle callers prove any previous owner dead before reaching spawn.
-    // With ownership now serialized, remove exact leftovers from that prior
-    // generation so compatibility-link publication cannot be masked by them.
-    remove_sandbox_socket_artifacts_at(
-        &global.run_dir(),
-        &global.sandboxes_dir(),
-        &config.spec.name,
-    )?;
-
-    // Create directories concurrently.
-    tokio::try_join!(
-        tokio::fs::create_dir_all(&log_dir),
-        tokio::fs::create_dir_all(&scripts_dir),
-    )?;
-
-    // Stopped-safe preparation: a `--next-start` upper grow persists only the
-    // desired size, so the file itself grows here, before any virtio device
-    // attaches the image.
-    timing::measure(
-        &config.spec.name,
-        "writable_disk_grow",
-        prepare_oci_upper(config, &sandbox_dir),
-    )
-    .await?;
-
-    // Write scripts to the runtime scripts directory.
-    for (name, content) in &config.spec.runtime.scripts {
-        // Prevent path traversal: only use the filename component.
-        let safe_name = Path::new(name).file_name().ok_or_else(|| {
-            crate::MicrosandboxError::InvalidConfig(format!("invalid script name: {name}"))
-        })?;
-        let script_path = scripts_dir.join(safe_name);
-        tokio::fs::write(&script_path, content).await?;
-        #[cfg(unix)]
-        tokio::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).await?;
-        #[cfg(windows)]
-        microsandbox_filesystem::PassthroughFs::set_path_virtual_permissions(
-            &runtime_dir,
-            &script_path,
-            0,
-            0,
-            0o755,
-        )?;
-    }
-
-    // Compute the agent relay socket path from the backend being used for
-    // this spawn, not from the ambient default backend.
-    let agent_sock_path = launch_agent_socket_path(local, &config.spec.name, launch_contract)?;
-
-    // The pipe name is derived from the sandbox NAME, so a leaked VM process
-    // from an earlier run would keep serving it and silently receive the new
-    // sandbox's agent traffic. Refuse to boot on top of a live server.
-    #[cfg(windows)]
-    ensure_agent_pipe_unclaimed(&agent_sock_path, &config.spec.name).await?;
-
-    // Resolve file mounts separately so the runtime can attach a synthetic
-    // one-entry filesystem instead of exporting the source's parent directory.
-    let file_mounts = resolve_file_mounts(config)?;
-    let named_volumes = resolve_named_volumes(local, config).await?;
-    let owned_root = local.sandboxes_dir().join(&config.spec.name);
-    super::owned_volumes::validate(&owned_root, &config.spec.mounts)?;
-    let disk_locks = lock_disk_mounts(config, &named_volumes, &owned_root)?;
-    let metrics_reservation = if config.effective_metrics_interval().is_some() {
-        reserve_metrics_slot(local, config, sandbox_id)
-    } else {
-        None
-    };
-    #[cfg(unix)]
-    let parent_watchdog = match mode {
-        SpawnMode::Attached => match create_parent_watchdog_pipe() {
-            Ok(pipe) => Some(pipe),
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(err);
-            }
-        },
-        SpawnMode::Detached => None,
-    };
-
-    #[cfg(windows)]
-    let parent_watchdog: Option<()> = None;
-
-    #[cfg(unix)]
-    let startup_pipe = match mode {
-        SpawnMode::Attached => None,
-        SpawnMode::Detached => match create_startup_pipe() {
-            Ok(pipe) => Some(pipe),
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(err);
-            }
-        },
-    };
-
-    #[cfg(windows)]
-    let startup_pipe = match mode {
-        SpawnMode::Attached => None,
-        SpawnMode::Detached => match create_startup_pipe(&config.spec.name, sandbox_id) {
-            Ok(pipe) => Some(pipe),
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(err);
-            }
-        },
-    };
-
-    #[cfg(windows)]
-    let child_job = match mode {
-        SpawnMode::Attached => match WindowsJob::new_kill_on_close() {
-            Ok(job) => Some(job),
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(crate::MicrosandboxError::Runtime(format!(
-                    "failed to create Windows sandbox job: {err}"
-                )));
-            }
-        },
-        SpawnMode::Detached => None,
-    };
-
-    #[cfg(windows)]
-    let startup_pipe_name = startup_pipe.as_ref().map(|pipe| pipe.name.as_os_str());
-
-    let (writeback_limit_bytes, writeback_pool_bytes) =
-        match block_writeback_policy(&global.runtime) {
-            Ok(policy) => policy,
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(err);
-            }
-        };
-
-    // #1390: lease from active sandboxes instead of deriving the slot from the
-    // ever-increasing sandbox ID.
-    #[cfg(feature = "net")]
-    let lease = if !launch_contract.machine && launch_contract.patch < 16 {
-        NetworkSlot::lease_legacy(local, sandbox_id).await
-    } else {
-        NetworkSlot::lease(local, sandbox_id).await
-    };
-    #[cfg(feature = "net")]
-    let network_slot = match lease {
-        Ok(slot) => slot,
-        Err(err) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err);
-        }
-    };
-
-    // Split the config: `visible` stays on argv, the typed `LaunchConfig` is
-    // delivered over the config fd (keeps the network-config blob and
-    // secret-bearing env off `ps` / `/proc/<pid>/cmdline` — see issue #997).
-    let (mut visible, mut launch) = machine_cli_args(
-        local,
-        config,
-        sandbox_id,
-        #[cfg(feature = "net")]
-        network_slot,
-        #[cfg(feature = "net")]
-        resolved_network,
-        &db_path,
-        global.database.connect_timeout_secs,
-        &log_dir,
-        &runtime_dir,
-        &agent_sock_path,
-        &libkrunfw_path,
-        &file_mounts,
-        &named_volumes,
-        metrics_reservation.as_ref(),
-        parent_watchdog
-            .as_ref()
-            .map(|_| microsandbox_runtime::vm::PARENT_WATCH_FD),
-        #[cfg(unix)]
-        startup_pipe
-            .as_ref()
-            .map(|_| microsandbox_runtime::vm::STARTUP_FD),
-        #[cfg(unix)]
-        None,
-        #[cfg(windows)]
-        None,
-        #[cfg(windows)]
-        startup_pipe_name,
-    );
-    tracing::debug!(
-        per_disk_limit_bytes = ?writeback_limit_bytes,
-        pool_bytes = ?writeback_pool_bytes,
-        "resolved buffered writeback policy"
-    );
-    launch.block_writeback_limit_bytes = if catalog_has_writeback {
-        writeback_limit_bytes
-    } else {
-        None
-    };
-    launch.block_writeback_pool_bytes = if catalog_has_writeback {
-        writeback_pool_bytes
-    } else {
-        None
-    };
-    #[cfg(target_os = "linux")]
-    let branch_memory_fd = config
-        .branch_memory
-        .as_ref()
-        .map(|pin| pin.file().as_raw_fd());
-    #[cfg(target_os = "linux")]
-    if launch
-        .checkpoint_restore
-        .as_ref()
-        .is_some_and(|r| r.memory_descriptor)
-        != branch_memory_fd.is_some()
-    {
-        release_metrics_reservation(config, metrics_reservation.as_ref());
-        return Err(MicrosandboxError::Runtime(
-            "branch restore is missing its owned memory descriptor".into(),
-        ));
-    }
-    if !launch_contract.machine {
-        visible[0] = OsString::from("sandbox");
-    }
-    let launch_value = match launch_contract.encode(&launch) {
-        Ok(launch) => launch,
-        Err(error) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(error);
-        }
-    };
-    let launch_bytes = serde_json::to_vec(&launch_value)?;
-    #[cfg(unix)]
-    let config_file = match write_launch_config_fd(&launch_bytes) {
-        Ok(file) => file,
-        Err(err) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err);
-        }
-    };
-    #[cfg(unix)]
-    let config_raw_fd = config_file.as_raw_fd();
-    #[cfg(unix)]
-    {
-        visible.push(OsString::from("--config-fd"));
-        visible.push(OsString::from(
-            microsandbox_runtime::vm::CONFIG_FD.to_string(),
-        ));
-        // Older runtimes retain the inherited descriptor without naming it.
-        // Newer runtimes need the argument to adopt it instead of relocking.
-        if launch_contract.lifecycle_lock_argument() {
-            visible.push(OsString::from("--lifecycle-lock-fd"));
-            visible.push(OsString::from(
-                microsandbox_runtime::vm::LIFECYCLE_LOCK_FD.to_string(),
-            ));
-        }
-    }
-
-    #[cfg(windows)]
-    let _config_file = match write_launch_config_file(&launch_bytes, &runtime_dir) {
-        Ok(file) => {
-            visible.push(OsString::from("--config-file"));
-            visible.push(file.path().as_os_str().to_os_string());
-            file
-        }
-        Err(err) => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(err);
-        }
-    };
-
-    // Build the command.
-    let mut cmd = Command::new(&msb_path);
-    #[cfg(windows)]
-    if matches!(mode, SpawnMode::Detached) {
-        let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
-        cmd.creation_flags(flags);
-    }
-    cmd.args(visible);
-
-    // Agentd selection is process-wide for the VMM. Forward the explicit
-    // path from the resolved backend config into the child environment.
-    // Managed clears also remove inherited overrides. The child validates and eagerly
-    // reads the selected payload before constructing any filesystem.
-    cmd.env_remove("MSB_AGENTD_PATH");
-    if let Some(path) = &global.paths.agentd {
-        cmd.env("MSB_AGENTD_PATH", path);
-    }
-
-    // Prevent the sandbox process from inheriting the parent's terminal on
-    // stdin — the VMM's implicit console auto-detects terminals and sets raw
-    // mode, which corrupts the parent's terminal output (\n without \r).
-    cmd.stdin(Stdio::null());
-    #[cfg(windows)]
-    if launch_contract.machine && !disk_locks.is_empty() {
-        // A private startup pipe is not a terminal. Only modern runtimes adopt these
-        // handles; historical runtimes retain the existing launcher-owned locks.
-        cmd.arg("--disk-locks-stdin");
-        cmd.stdin(Stdio::piped());
-    }
-
-    #[cfg(unix)]
-    {
-        let parent_watch_fd = parent_watchdog
-            .as_ref()
-            .map(|pipe| pipe.read_fd.as_raw_fd());
-        let startup_write_fd = startup_pipe.as_ref().map(|pipe| pipe.write_fd.as_raw_fd());
-        let lifecycle_lock_fd = lifecycle_guard.as_raw_fd();
-        // Parent descriptors remain CLOEXEC; only this child admits its own locks.
-        let mut disk_lock_fds: Vec<i32> = disk_locks.iter().map(AsRawFd::as_raw_fd).collect();
-        unsafe {
-            cmd.pre_exec(move || {
-                if startup_write_fd.is_some() {
-                    detach_from_launcher_session()?;
-                }
-
-                let mut config_mapping =
-                    InheritedFdMapping::new(config_raw_fd, microsandbox_runtime::vm::CONFIG_FD);
-                let mut parent_watch_mapping = parent_watch_fd.map(|fd| {
-                    InheritedFdMapping::new(fd, microsandbox_runtime::vm::PARENT_WATCH_FD)
-                });
-                let mut startup_mapping = startup_write_fd
-                    .map(|fd| InheritedFdMapping::new(fd, microsandbox_runtime::vm::STARTUP_FD));
-                let mut lifecycle_mapping = InheritedFdMapping::new(
-                    lifecycle_lock_fd,
-                    microsandbox_runtime::vm::LIFECYCLE_LOCK_FD,
-                );
-                #[cfg(target_os = "linux")]
-                let mut memory_mapping = branch_memory_fd.map(|fd| {
-                    InheritedFdMapping::new(fd, microsandbox_runtime::vm::BRANCH_MEMORY_FD)
-                });
-
-                // Parent runtimes such as Vitest or Go tests can have enough
-                // open files that pipe/tempfile allocation lands on one of the
-                // fixed inherited fd numbers. Move those sources away before
-                // any dup2 call can overwrite a later source fd.
-                let mut next_spare_fd = microsandbox_runtime::vm::LIFECYCLE_LOCK_FD + 1;
-                move_reserved_source_fd(&mut config_mapping, &mut next_spare_fd)?;
-                if let Some(mapping) = parent_watch_mapping.as_mut() {
-                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
-                }
-                if let Some(mapping) = startup_mapping.as_mut() {
-                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
-                }
-                move_reserved_source_fd(&mut lifecycle_mapping, &mut next_spare_fd)?;
-                #[cfg(target_os = "linux")]
-                if let Some(mapping) = memory_mapping.as_mut() {
-                    move_reserved_source_fd(mapping, &mut next_spare_fd)?;
-                }
-                // Disk locks stay CLOEXEC in the parent. Only this child inherits its own
-                // locks, and their original numbers may be destinations of the mappings below.
-                inherit_disk_lock_fds(&mut disk_lock_fds, &mut next_spare_fd)?;
-
-                dup_inherited_fd(config_mapping.src, config_mapping.dst)?;
-                if let Some(mapping) = parent_watch_mapping {
-                    dup_inherited_fd(mapping.src, mapping.dst)?;
-                }
-                if let Some(mapping) = startup_mapping {
-                    dup_inherited_fd(mapping.src, mapping.dst)?;
-                }
-                dup_inherited_fd(lifecycle_mapping.src, lifecycle_mapping.dst)?;
-                #[cfg(target_os = "linux")]
-                if let Some(mapping) = memory_mapping {
-                    dup_inherited_fd(mapping.src, mapping.dst)?;
-                }
-
-                Ok(())
-            });
-        }
-    }
-
-    // Capture stdout for attached startup JSON. Detached mode uses a
-    // dedicated startup fd so stdio can be severed from the launcher.
-    #[cfg(unix)]
-    if startup_pipe.is_some() {
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::null());
-    } else {
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::inherit());
-    }
-    #[cfg(windows)]
-    {
-        let runtime_log = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_dir.join("runtime.log"))?;
-
-        if startup_pipe.is_some() {
-            cmd.stdout(Stdio::null());
-        } else {
-            cmd.stdout(Stdio::piped());
-        }
-        cmd.stderr(Stdio::from(runtime_log));
-    }
-
-    ensure_sigchld_handler_uses_alt_stack_before_spawn().await?;
-
-    // Spawn and Windows lock release form one handoff, before waiting for startup JSON.
-    let child = {
-        match spawn_runtime_command(
-            &mut cmd,
-            mode,
-            #[cfg(not(unix))]
-            lifecycle_guard,
-        ) {
-            Ok(child) => child,
-            Err(err) => {
-                release_metrics_reservation(config, metrics_reservation.as_ref());
-                return Err(err.into());
-            }
-        }
-    };
-
-    let _pid = match child.id() {
-        Some(pid) => pid,
-        None => {
-            release_metrics_reservation(config, metrics_reservation.as_ref());
-            return Err(crate::MicrosandboxError::Runtime(
-                "sandbox process exited immediately".into(),
-            ));
-        }
-    };
-    tracing::debug!(pid = _pid, sandbox = %config.spec.name, "spawn_sandbox: process started");
-
-    #[cfg(windows)]
-    let job_assignment = child_job
-        .as_ref()
-        .map(|job| job.assign_pid(_pid))
-        .transpose();
-
-    // Install cancellation ownership before the first post-spawn await, including failures
-    // during Windows job assignment and the initial startup reply.
-    let mut startup_process = StartupProcess::new(ProcessHandle::new(
-        _pid,
-        config.spec.name.clone(),
-        child,
-        disk_locks,
-        #[cfg(unix)]
-        parent_watchdog.map(|pipe| pipe.write_fd),
-        #[cfg(windows)]
-        child_job,
-        metrics_reservation.as_ref().map(|reservation| {
-            MetricsReservationCleanup::new(
-                reservation.shm_name.clone(),
-                reservation.slot,
-                reservation.generation,
-                Some(reservation.registry.clone()),
-            )
-        }),
-    ));
-
-    #[cfg(windows)]
-    {
-        let process = super::ownership::RuntimeProcess::capture(_pid as i32)?.ok_or_else(|| {
-            MicrosandboxError::Runtime("runtime exited during ownership capture".into())
-        })?;
-        // Released Windows runtimes started owning the lifecycle lock in v0.6.16.
-        startup_process.handle_mut().ownership = Some((
-            process,
-            launch_contract.machine || launch_contract.patch >= 16,
-        ));
-    }
-
-    #[cfg(windows)]
-    if let Err(err) = job_assignment {
-        let error = crate::MicrosandboxError::Runtime(format!(
-            "failed to assign sandbox process to Windows job: {err}"
-        ));
-        let cleanup = startup_process
-            .handle_mut()
-            .terminate_failed_startup()
-            .await;
-        return Err(startup_error_with_cleanup(error, cleanup));
-    }
-
-    #[cfg(windows)]
-    if launch_contract.machine {
-        let handoff = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            startup_process.handle_mut().handoff_disk_locks(),
-        )
+    local
+        .spawn_sandbox(config, sandbox_id, mode, lifecycle_guard)
         .await
-        .unwrap_or_else(|_| {
-            Err(MicrosandboxError::Runtime(
-                "sandbox startup timeout during disk ownership handoff".into(),
-            ))
-        });
-        if let Err(error) = handoff {
-            let cleanup = startup_process
-                .handle_mut()
-                .terminate_failed_startup()
-                .await;
-            return Err(startup_error_with_cleanup(error, cleanup));
-        }
-    }
-
-    let startup_result = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        read_startup_line(startup_process.child_mut(), startup_pipe),
-    )
-    .await
-    {
-        Ok(reply) => reply
-            .and_then(|(line, reader)| parse_startup_info(&line, _pid).map(|info| (info, reader))),
-        Err(_) => Err(crate::MicrosandboxError::Runtime(
-            "sandbox startup timeout: no JSON received within 30 seconds".into(),
-        )),
-    };
-    let (startup, reader) = match startup_result {
-        Ok(startup) => startup,
-        Err(error) => {
-            // Decide why launch failed before cleanup. Reaping can fail independently and
-            // must never replace the timeout, read error, bad JSON or mismatched identity.
-            let cleanup = startup_process
-                .handle_mut()
-                .terminate_failed_startup()
-                .await;
-            return Err(startup_error_with_cleanup(error, cleanup));
-        }
-    };
-
-    if startup.startup_events {
-        startup_process.handle_mut().startup_reader = Some(reader);
-    }
-
-    tracing::debug!(
-        vm_pid = startup.pid,
-        agent_sock = %agent_sock_path.display(),
-        "spawn_sandbox: startup JSON received"
-    );
-
-    Ok((startup_process.into_handle(), agent_sock_path))
 }
 
 /// Validate the reply before cleanup so a teardown failure cannot hide its diagnosis.
@@ -984,7 +1027,7 @@ fn startup_error_with_cleanup(
 fn spawn_runtime_command(
     cmd: &mut Command,
     _mode: SpawnMode,
-    #[cfg(not(unix))] lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
+    #[cfg(not(unix))] lifecycle_guard: Option<SandboxLifecycleGuard>,
 ) -> std::io::Result<tokio::process::Child> {
     // The caller retains its transition guard through readiness; only the runtime ownership
     // moves to the child. Keeping this handle during startup creates a parent/child deadlock.
@@ -1194,7 +1237,10 @@ fn linux_u64_file(path: &str) -> MicrosandboxResult<u64> {
 //--------------------------------------------------------------------------------------------------
 
 /// Grow the sandbox-owned OCI root disk before boot when its persisted target increased.
-async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> MicrosandboxResult<()> {
+async fn prepare_oci_upper(
+    config: &SandboxConfig,
+    sandbox_dir: &CreationStorage,
+) -> MicrosandboxResult<()> {
     // A restored checkpoint chain already ends in a fresh writable qcow2 head. Its earlier layers
     // are sealed capture state and must never pass through ordinary root-disk growth.
     if !config.snapshot_upper_layers.is_empty() {
@@ -1210,16 +1256,25 @@ async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> Micros
         _ => None,
     };
     let runtime_dir = sandbox_dir.join("runtime");
-    let handled = tokio::task::spawn_blocking(move || {
-        microsandbox_runtime::checkpoint::recover_stopped_root_growth(&runtime_dir)?;
-        match desired_mib {
-            Some(desired) => microsandbox_runtime::checkpoint::grow_stopped_root(
-                &runtime_dir,
-                u64::from(desired) * 1024 * 1024,
-            ),
-            None => Ok(runtime_dir.join("root-disk.json").exists()),
-        }
-    })
+    let handled = {
+        let worker_storage = sandbox_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let _storage = worker_storage;
+
+            microsandbox_runtime::checkpoint::recover_stopped_root_growth(&runtime_dir)?;
+            match desired_mib {
+                Some(desired) => microsandbox_runtime::checkpoint::grow_stopped_root(
+                    &runtime_dir,
+                    u64::from(desired) * 1024 * 1024,
+                ),
+                None => Ok(
+                    microsandbox_runtime::checkpoint::layout::host_root(&runtime_dir)?
+                        .join("root-disk.json")
+                        .exists(),
+                ),
+            }
+        })
+    }
     .await
     .map_err(|e| MicrosandboxError::Runtime(e.to_string()))?
     .map_err(MicrosandboxError::Runtime)?;
@@ -1235,7 +1290,11 @@ async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> Micros
             if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 return Ok(());
             }
-            crate::sandbox::flat_rootfs::grow_private_flat_rootfs(path, *desired_mib).await
+            crate::sandbox::flat_rootfs::grow_private_flat_rootfs(
+                &sandbox_dir.at(path),
+                *desired_mib,
+            )
+            .await
         }
         Some(microsandbox_types::RootDisk::Managed {
             size_mib: Some(desired_mib),
@@ -1244,7 +1303,8 @@ async fn prepare_oci_upper(config: &SandboxConfig, sandbox_dir: &Path) -> Micros
             if !tokio::fs::try_exists(&upper_path).await.unwrap_or(false) {
                 return Ok(());
             }
-            crate::sandbox::upper::grow_upper_to_mib(upper_path, *desired_mib).await
+            crate::sandbox::upper::grow_upper_to_mib(&sandbox_dir.at(upper_path), *desired_mib)
+                .await
         }
         _ => Ok(()),
     }
@@ -1616,338 +1676,6 @@ fn patch_sigchld_handler_uses_alt_stack() {
     }
 }
 
-pub(crate) async fn ensure_named_volumes(
-    local: &LocalBackend,
-    config: &SandboxConfig,
-) -> MicrosandboxResult<EnsuredNamedVolumes> {
-    let locks = lock_named_volume_mounts(config, |name| async move {
-        lock_volume_name(local, &name).await
-    })
-    .await?;
-
-    let mut created = Vec::new();
-
-    if let Err(err) = ensure_named_volumes_inner(local, config, &mut created).await {
-        rollback_created_named_volume_records(local, &created).await;
-        return Err(err);
-    }
-
-    // Resolve every named mount while the volume locks are still held and
-    // before the caller inserts the sandbox row. Existing disk-backed volumes
-    // are only distinguishable through the catalog, so this is the earliest
-    // point where virtiofs-only ownership can be rejected without leaving
-    // durable sandbox state behind.
-    if let Err(err) = resolve_named_volumes(local, config).await {
-        rollback_created_named_volume_records(local, &created).await;
-        return Err(err);
-    }
-
-    Ok(EnsuredNamedVolumes {
-        created,
-        _locks: locks,
-    })
-}
-
-async fn ensure_named_volumes_inner(
-    local: &LocalBackend,
-    config: &SandboxConfig,
-    created: &mut Vec<CreatedNamedVolume>,
-) -> MicrosandboxResult<()> {
-    for mount in &config.spec.mounts {
-        let Some(create) = mount.named_create() else {
-            continue;
-        };
-
-        validate_volume_name(create.name())?;
-        let pools = local.db().await?;
-        let existing = volume_entity::Entity::find()
-            .filter(volume_entity::Column::Name.eq(create.name()))
-            .one(pools.read())
-            .await?;
-
-        if let Some(existing) = existing {
-            match create.mode() {
-                NamedVolumeMode::Create => {
-                    return Err(MicrosandboxError::VolumeAlreadyExists(
-                        create.name().to_string(),
-                    ));
-                }
-                NamedVolumeMode::EnsureExists => {
-                    validate_existing_named_volume(create, &existing)?;
-                    continue;
-                }
-                NamedVolumeMode::Existing => continue,
-            }
-        }
-
-        if create.mode() == NamedVolumeMode::Existing {
-            return Err(MicrosandboxError::VolumeNotFound(create.name().to_string()));
-        }
-
-        let volume_config = VolumeConfig {
-            name: create.name().to_string(),
-            kind: create.kind(),
-            quota_mib: create.quota_mib(),
-            capacity_mib: create.capacity_mib(),
-            labels: create.labels().to_vec(),
-        };
-        validate_volume_config(&volume_config)?;
-
-        let labels_json = if create.labels().is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(create.labels())?)
-        };
-        let now = chrono::Utc::now().naive_utc();
-        let capacity_bytes = volume_config
-            .capacity_mib
-            .map(|mib| i64::from(mib) * 1024 * 1024);
-        let model = volume_entity::ActiveModel {
-            name: Set(volume_config.name.clone()),
-            kind: Set(volume_config.kind.as_str().to_string()),
-            quota_mib: Set(volume_config.quota_mib.map(|value| value as i32)),
-            size_bytes: Set(None),
-            capacity_bytes: Set(capacity_bytes),
-            disk_format: Set((volume_config.kind == VolumeKind::Disk).then(|| "raw".to_string())),
-            disk_fstype: Set((volume_config.kind == VolumeKind::Disk).then(|| "ext4".to_string())),
-            labels: Set(labels_json),
-            created_at: Set(Some(now)),
-            updated_at: Set(Some(now)),
-            ..Default::default()
-        };
-        let inserted = volume_entity::Entity::insert(model)
-            .exec(pools.write())
-            .await?;
-        let volume_id = inserted.last_insert_id;
-
-        let path = local.volume_path(&volume_config.name);
-        if let Err(err) = materialize_volume_path(&volume_config, &path).await {
-            let _ = volume_entity::Entity::delete_by_id(volume_id)
-                .exec(pools.write())
-                .await;
-            let _ = tokio::fs::remove_dir_all(&path).await;
-            return Err(err);
-        }
-        created.push(CreatedNamedVolume {
-            id: volume_id,
-            path,
-        });
-    }
-
-    Ok(())
-}
-
-pub(crate) async fn rollback_created_named_volumes(
-    local: &LocalBackend,
-    volumes: &EnsuredNamedVolumes,
-) {
-    rollback_created_named_volume_records(local, &volumes.created).await;
-}
-
-async fn rollback_created_named_volume_records(
-    local: &LocalBackend,
-    volumes: &[CreatedNamedVolume],
-) {
-    if volumes.is_empty() {
-        return;
-    }
-
-    for volume in volumes {
-        let _ = tokio::fs::remove_dir_all(&volume.path).await;
-    }
-
-    let ids = volumes.iter().map(|volume| volume.id).collect::<Vec<_>>();
-    if let Ok(pools) = local.db().await {
-        let _ = volume_entity::Entity::delete_many()
-            .filter(volume_entity::Column::Id.is_in(ids))
-            .exec(pools.write())
-            .await;
-    }
-}
-
-async fn lock_named_volume_mounts<Guard, Acquire>(
-    config: &SandboxConfig,
-    mut acquire: impl FnMut(String) -> Acquire,
-) -> MicrosandboxResult<Vec<Guard>>
-where
-    Acquire: Future<Output = MicrosandboxResult<Guard>>,
-{
-    let mut names = BTreeSet::new();
-    for mount in &config.spec.mounts {
-        if let VolumeMount::Named { name, .. } = mount {
-            validate_volume_name(name)?;
-            names.insert(name.clone());
-        }
-    }
-
-    let mut locks = Vec::with_capacity(names.len());
-    for name in names {
-        locks.push(acquire(name).await?);
-    }
-    Ok(locks)
-}
-
-async fn resolve_named_volumes(
-    local: &LocalBackend,
-    config: &SandboxConfig,
-) -> MicrosandboxResult<HashMap<String, ResolvedNamedVolume>> {
-    let mut resolved: HashMap<String, ResolvedNamedVolume> = HashMap::new();
-
-    for mount in &config.spec.mounts {
-        let VolumeMount::Named {
-            name,
-            options,
-            stat_virtualization,
-            host_permissions,
-            ..
-        } = mount
-        else {
-            continue;
-        };
-
-        if let Some(volume) = resolved.get(name) {
-            if volume.kind == VolumeKind::Disk {
-                validate_named_disk_mount_options(
-                    name,
-                    *stat_virtualization,
-                    *host_permissions,
-                    options,
-                )?;
-            }
-            continue;
-        }
-
-        let pools = local.db().await?;
-        let model = volume_entity::Entity::find()
-            .filter(volume_entity::Column::Name.eq(name))
-            .one(pools.read())
-            .await?
-            .ok_or_else(|| MicrosandboxError::VolumeNotFound(name.clone()))?;
-
-        let kind = VolumeKind::from_db_value(&model.kind);
-        let path = local.volume_path(name);
-        let volume = match kind {
-            VolumeKind::Directory => ResolvedNamedVolume {
-                kind,
-                path,
-                format: None,
-                fstype: None,
-                quota_mib: model.quota_mib.map(|value| value.max(0) as u32),
-            },
-            VolumeKind::Disk => {
-                validate_named_disk_mount_options(
-                    name,
-                    *stat_virtualization,
-                    *host_permissions,
-                    options,
-                )?;
-                let format = model
-                    .disk_format
-                    .as_deref()
-                    .unwrap_or("raw")
-                    .parse::<DiskImageFormat>()
-                    .map_err(|err| {
-                        MicrosandboxError::InvalidConfig(format!(
-                            "disk named volume {name:?} has invalid disk format: {err}"
-                        ))
-                    })?;
-
-                ResolvedNamedVolume {
-                    kind,
-                    path: path.join("disk.raw"),
-                    format: Some(format),
-                    fstype: model.disk_fstype,
-                    quota_mib: None,
-                }
-            }
-        };
-
-        resolved.insert(name.clone(), volume);
-    }
-
-    Ok(resolved)
-}
-
-fn validate_existing_named_volume(
-    requested: &microsandbox_types::NamedVolumeCreate,
-    existing: &volume_entity::Model,
-) -> MicrosandboxResult<()> {
-    let actual_kind = VolumeKind::from_db_value(&existing.kind);
-    if requested.kind() != actual_kind {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "named volume {:?} already exists as {}, but this sandbox requested {}",
-            requested.name(),
-            actual_kind.as_str(),
-            requested.kind().as_str()
-        )));
-    }
-
-    if let Some(requested_quota_mib) = requested.quota_mib()
-        && existing.quota_mib != Some(requested_quota_mib as i32)
-    {
-        return Err(MicrosandboxError::InvalidConfig(format!(
-            "named volume {:?} already exists with quota {:?} MiB, but this sandbox requested {} MiB",
-            requested.name(),
-            existing.quota_mib,
-            requested_quota_mib
-        )));
-    }
-
-    if let Some(requested_capacity_mib) = requested.capacity_mib() {
-        let requested_capacity_bytes = i64::from(requested_capacity_mib) * 1024 * 1024;
-        if existing.capacity_bytes != Some(requested_capacity_bytes) {
-            return Err(MicrosandboxError::InvalidConfig(format!(
-                "named volume {:?} already exists with capacity {:?} bytes, but this sandbox requested {} bytes",
-                requested.name(),
-                existing.capacity_bytes,
-                requested_capacity_bytes
-            )));
-        }
-    }
-
-    validate_requested_named_volume_labels(requested, existing)?;
-
-    Ok(())
-}
-
-fn validate_requested_named_volume_labels(
-    requested: &microsandbox_types::NamedVolumeCreate,
-    existing: &volume_entity::Model,
-) -> MicrosandboxResult<()> {
-    if requested.labels().is_empty() {
-        return Ok(());
-    }
-
-    let existing_labels = existing
-        .labels
-        .as_deref()
-        .map(serde_json::from_str::<Vec<(String, String)>>)
-        .transpose()?
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-
-    for (key, requested_value) in requested.labels() {
-        match existing_labels.get(key) {
-            Some(existing_value) if existing_value == requested_value => {}
-            Some(existing_value) => {
-                return Err(MicrosandboxError::InvalidConfig(format!(
-                    "named volume {:?} already exists with label {key:?}={existing_value:?}, but this sandbox requested {requested_value:?}",
-                    requested.name()
-                )));
-            }
-            None => {
-                return Err(MicrosandboxError::InvalidConfig(format!(
-                    "named volume {:?} already exists without requested label {key:?}",
-                    requested.name()
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn lock_disk_mounts(
     config: &SandboxConfig,
     named_volumes: &HashMap<String, ResolvedNamedVolume>,
@@ -2181,294 +1909,6 @@ fn clear_cloexec(fd: i32) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
-}
-
-/// Return agent relay socket paths in preferred connection order.
-pub(crate) fn sandbox_agent_socket_path_candidates(name: &str) -> Vec<PathBuf> {
-    let (run_dir, sandboxes_dir) = crate::backend::default_backend()
-        .as_local()
-        .map(|local| (local.config().run_dir(), local.config().sandboxes_dir()))
-        .unwrap_or_else(|| {
-            let home = microsandbox_utils::resolve_home();
-            (
-                home.join(microsandbox_utils::RUN_SUBDIR),
-                home.join(microsandbox_utils::SANDBOXES_SUBDIR),
-            )
-        });
-    sandbox_agent_socket_path_candidates_with_roots(&run_dir, &sandboxes_dir, name)
-}
-
-pub(crate) fn sandbox_agent_socket_path_candidates_for(
-    local: &LocalBackend,
-    name: &str,
-) -> Vec<PathBuf> {
-    sandbox_agent_socket_path_candidates_with_roots(
-        &local.config().run_dir(),
-        &local.config().sandboxes_dir(),
-        name,
-    )
-}
-
-fn sandbox_agent_socket_path_candidates_with_roots(
-    run_dir: &Path,
-    sandboxes_dir: &Path,
-    name: &str,
-) -> Vec<PathBuf> {
-    // New clients prefer the canonical per-sandbox endpoint, then the flat
-    // legacy path used by older runtimes, and finally the pre-hash in-sandbox
-    // fallback retained for unusually deep homes. Windows named pipes did not
-    // change layout, so the canonical endpoint is the only candidate there.
-    #[cfg(unix)]
-    let candidates = {
-        let paths = SandboxSocketPaths::in_sandboxes_dir(run_dir, sandboxes_dir, name);
-        vec![
-            paths.runtime.agent,
-            paths.runtime.legacy_agent,
-            paths.fallback_agent,
-        ]
-    };
-    #[cfg(not(unix))]
-    let candidates = {
-        let _ = sandboxes_dir;
-        vec![microsandbox_runtime::ipc::canonical_agent_endpoint(
-            run_dir, name,
-        )]
-    };
-
-    candidates
-}
-
-/// Pre-v0.6.9 runtimes derive control paths by replacing the agent extension.
-/// Give them the flat endpoint whose control name discovery already recognizes.
-fn launch_agent_socket_path(
-    local: &LocalBackend,
-    name: &str,
-    contract: LaunchContract,
-) -> MicrosandboxResult<PathBuf> {
-    #[cfg(unix)]
-    if contract.patch < 9 {
-        let paths = SandboxSocketPaths::in_sandboxes_dir(
-            &local.config().run_dir(),
-            &local.sandboxes_dir(),
-            name,
-        );
-        return resolve_sandbox_agent_socket_path_from_candidates(vec![
-            paths.runtime.legacy_agent,
-            paths.fallback_agent,
-        ]);
-    }
-    #[cfg(not(unix))]
-    let _ = contract;
-    resolve_sandbox_agent_socket_path_for(local, name)
-}
-
-/// Pick the first explicit-backend socket path usable on this platform.
-pub(crate) fn resolve_sandbox_agent_socket_path_for(
-    local: &LocalBackend,
-    name: &str,
-) -> MicrosandboxResult<PathBuf> {
-    #[cfg(unix)]
-    let candidates = vec![microsandbox_runtime::ipc::canonical_agent_endpoint(
-        &local.config().run_dir(),
-        name,
-    )];
-    #[cfg(not(unix))]
-    let candidates = sandbox_agent_socket_path_candidates_for(local, name);
-    resolve_sandbox_agent_socket_path_from_candidates(candidates)
-}
-
-/// Pick the first socket path usable on this platform.
-pub(crate) fn resolve_sandbox_agent_socket_path(name: &str) -> MicrosandboxResult<PathBuf> {
-    let candidates = sandbox_agent_socket_path_candidates(name);
-
-    #[cfg(unix)]
-    if let Some(existing) = first_existing_socket_candidate(&candidates) {
-        return Ok(existing);
-    }
-
-    resolve_sandbox_agent_socket_path_from_candidates(candidates)
-}
-
-#[cfg(unix)]
-fn first_existing_socket_candidate(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates.iter().find(|path| path.exists()).cloned()
-}
-
-#[cfg(unix)]
-fn resolve_sandbox_agent_socket_path_from_candidates(
-    candidates: Vec<PathBuf>,
-) -> MicrosandboxResult<PathBuf> {
-    for path in &candidates {
-        if microsandbox_runtime::ipc::validate_socket_pair(path).is_ok() {
-            return Ok(path.clone());
-        }
-    }
-
-    let shortest = candidates
-        .iter()
-        .flat_map(|path| {
-            [
-                path.as_os_str().as_bytes().len(),
-                microsandbox_runtime::ipc::control_socket_path_for(path)
-                    .as_os_str()
-                    .as_bytes()
-                    .len(),
-            ]
-        })
-        .min()
-        .unwrap_or(0);
-    Err(crate::MicrosandboxError::InvalidConfig(format!(
-        "sandbox runtime socket path is too long: shortest derived path is {shortest} bytes, \
-         but Unix socket paths on this platform must be shorter than {} bytes; set \
-         MSB_HOME to a shorter directory",
-        unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
-            .sun_path
-            .len()
-    )))
-}
-
-#[cfg(not(unix))]
-fn resolve_sandbox_agent_socket_path_from_candidates(
-    candidates: Vec<PathBuf>,
-) -> MicrosandboxResult<PathBuf> {
-    // Named pipes have no `sun_path`-style length limit, so the primary
-    // candidate is always usable.
-    candidates.into_iter().next().ok_or_else(|| {
-        crate::MicrosandboxError::InvalidConfig(
-            "no agent relay socket candidates were derived".to_string(),
-        )
-    })
-}
-
-/// What a client-side open of the agent pipe name revealed.
-#[cfg(windows)]
-enum AgentPipeProbe {
-    /// No server instance exists — the name is free to bind.
-    Free,
-
-    /// A live server holds the name. The serving PID is best-effort.
-    Served { server_pid: Option<u32> },
-}
-
-/// Fail the spawn when another process already serves this sandbox's agent
-/// pipe, naming the stale PID so the operator can terminate it.
-///
-/// Unix sockets are files the new runtime simply unlinks and rebinds; Windows
-/// named pipes have no such steal path — the child's `first_pipe_instance`
-/// bind would fail deep in boot, and agent clients would keep silently
-/// reaching the stale server in the meantime.
-#[cfg(windows)]
-async fn ensure_agent_pipe_unclaimed(
-    pipe_path: &Path,
-    sandbox_name: &str,
-) -> MicrosandboxResult<()> {
-    // A just-stopped runtime closes its pipe within moments of its DB row
-    // going terminal; retry briefly so stop→start (restart) flows don't trip
-    // on ordinary teardown.
-    const PROBE_ATTEMPTS: u32 = 10;
-    const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
-
-    let mut last_seen_pid = None;
-    for attempt in 0..PROBE_ATTEMPTS {
-        match probe_agent_pipe_server(pipe_path) {
-            Ok(AgentPipeProbe::Free) => return Ok(()),
-            Ok(AgentPipeProbe::Served { server_pid }) => last_seen_pid = server_pid,
-            Err(err) => {
-                // Unexpected probe failure must not block the spawn — if the
-                // name really is taken, the child's first-instance bind fails
-                // loudly on its own.
-                tracing::debug!(
-                    error = %err,
-                    pipe = %pipe_path.display(),
-                    "agent pipe probe failed; proceeding with spawn"
-                );
-                return Ok(());
-            }
-        }
-        if attempt + 1 < PROBE_ATTEMPTS {
-            tokio::time::sleep(PROBE_INTERVAL).await;
-        }
-    }
-
-    let pid_note = match last_seen_pid {
-        Some(pid) => format!(" (pid {pid})"),
-        None => String::new(),
-    };
-    Err(crate::MicrosandboxError::Runtime(format!(
-        "agent pipe {} for sandbox '{sandbox_name}' is already being served by a stale sandbox \
-         process{pid_note}; terminate that process and retry",
-        pipe_path.display()
-    )))
-}
-
-#[cfg(windows)]
-fn probe_agent_pipe_server(pipe_path: &Path) -> std::io::Result<AgentPipeProbe> {
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(pipe_path)
-    {
-        Ok(client) => {
-            let mut pid = 0u32;
-            let ok =
-                unsafe { GetNamedPipeServerProcessId(client.as_raw_handle() as HANDLE, &mut pid) };
-            Ok(AgentPipeProbe::Served {
-                server_pid: (ok != 0).then_some(pid),
-            })
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AgentPipeProbe::Free),
-        // Every instance being busy still proves a live server.
-        Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
-            Ok(AgentPipeProbe::Served { server_pid: None })
-        }
-        Err(err) => Err(err),
-    }
-}
-
-/// Remove every Unix runtime socket artifact deterministically owned by a sandbox.
-pub(crate) fn remove_sandbox_socket_artifacts_for(
-    local: &LocalBackend,
-    name: &str,
-) -> MicrosandboxResult<()> {
-    remove_sandbox_socket_artifacts_at(
-        &local.config().run_dir(),
-        &local.config().sandboxes_dir(),
-        name,
-    )
-}
-
-/// Remove runtime socket artifacts using explicit storage roots.
-pub(crate) fn remove_sandbox_socket_artifacts_at(
-    run_dir: &Path,
-    sandboxes_dir: &Path,
-    name: &str,
-) -> MicrosandboxResult<()> {
-    SandboxSocketPaths::in_sandboxes_dir(run_dir, sandboxes_dir, name).remove_artifacts()?;
-
-    Ok(())
-}
-
-/// Wait until no runtime generation owns a sandbox's deterministic namespace.
-pub(crate) async fn acquire_sandbox_lifecycle_guard(
-    run_dir: &Path,
-    name: &str,
-    timeout: std::time::Duration,
-) -> MicrosandboxResult<microsandbox_runtime::ipc::SandboxLifecycleGuard> {
-    let started = std::time::Instant::now();
-    loop {
-        if let Some(guard) = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(run_dir, name)?
-        {
-            return Ok(guard);
-        }
-        if started.elapsed() >= timeout {
-            return Err(crate::MicrosandboxError::SandboxStillRunning(format!(
-                "sandbox {name:?} runtime still owns its lifecycle lock"
-            )));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
 }
 
 /// Resolve bind mounts whose host source is a regular file.
@@ -2824,6 +2264,7 @@ fn machine_cli_args(
     }
 
     let mut launch = LaunchConfig {
+        protected_guest_state: true,
         owned_volumes: config
             .spec
             .mounts
@@ -2851,6 +2292,7 @@ fn machine_cli_args(
         agent_sock: agent_sock_path.to_path_buf(),
         libkrunfw_path: libkrunfw_path.to_path_buf(),
         thp: config.spec.resources.thp,
+        nested_virt: config.spec.resources.nested_virt,
         guest_clock: config.spec.runtime.guest_clock.unwrap_or_default(),
         fs_state_limit_bytes: local.config().fs_state_limit_override(),
         memory_cache_dir: Some(local.cache_dir().join("memory")),
@@ -3326,11 +2768,9 @@ mod tests {
         exec::ExecRlimit,
     };
     use microsandbox_types::HandoffInit;
-    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+    use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
 
-    #[cfg(unix)]
-    use microsandbox_runtime::ipc::RuntimeSocketPaths;
     use microsandbox_runtime::launch::{
         CheckpointRestoreConfig, LaunchConfig, RootfsUpperLayerConfig,
     };
@@ -3343,6 +2783,7 @@ mod tests {
         auto_block_writeback_pool_bytes, resolve_linux_block_writeback_policy,
     };
     use super::{block_writeback_policy, is_owned_restored_disk, machine_cli_args};
+    use crate::db::entity::volume as volume_entity;
     use crate::{
         LogLevel,
         backend::LocalBackend,
@@ -4372,45 +3813,6 @@ mod tests {
         }
     }
 
-    fn named_volume_create(
-        name: &str,
-        kind: VolumeKind,
-        quota_mib: Option<u32>,
-        capacity_mib: Option<u32>,
-        labels: Vec<(String, String)>,
-    ) -> microsandbox_types::NamedVolumeCreate {
-        microsandbox_types::NamedVolumeCreate {
-            mode: crate::sandbox::NamedVolumeMode::EnsureExists,
-            name: name.to_string(),
-            kind,
-            quota_mib,
-            capacity_mib,
-            labels,
-        }
-    }
-
-    fn existing_volume_model(
-        name: &str,
-        kind: VolumeKind,
-        quota_mib: Option<i32>,
-        capacity_bytes: Option<i64>,
-        labels: Option<Vec<(String, String)>>,
-    ) -> super::volume_entity::Model {
-        super::volume_entity::Model {
-            id: 1,
-            name: name.to_string(),
-            kind: kind.as_str().to_string(),
-            quota_mib,
-            size_bytes: None,
-            capacity_bytes,
-            disk_format: (kind == VolumeKind::Disk).then(|| "raw".to_string()),
-            disk_fstype: (kind == VolumeKind::Disk).then(|| "ext4".to_string()),
-            labels: labels.map(|labels| serde_json::to_string(&labels).unwrap()),
-            created_at: Some(chrono::Utc::now().naive_utc()),
-            updated_at: Some(chrono::Utc::now().naive_utc()),
-        }
-    }
-
     #[cfg(feature = "net")]
     #[tokio::test]
     async fn machine_cli_args_uses_the_supplied_network_slot() {
@@ -4688,109 +4090,6 @@ mod tests {
         );
         assert_eq!(handoff.cwd.as_deref(), Some("/opt/hermes"));
         assert!(launch.startup.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_agent_socket_candidates_follow_explicit_local_backend_paths() {
-        let temp = tempdir().unwrap();
-        let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder()
-            .config_path(home.join("config.json"))
-            .managed_config_path(home.join("managed.json"))
-            .home(&home)
-            .build()
-            .await
-            .unwrap();
-
-        let candidates =
-            super::sandbox_agent_socket_path_candidates_for(&backend, "sdk-socket-test");
-
-        #[cfg(unix)]
-        {
-            assert_eq!(candidates.len(), 3);
-            assert!(candidates[0].starts_with(backend.config().run_dir().join("sandboxes")));
-            assert_eq!(candidates[0].file_name().unwrap(), "agent.sock");
-            assert!(candidates[1].starts_with(backend.config().run_dir().join("agent")));
-            assert_eq!(
-                candidates[2],
-                backend
-                    .config()
-                    .sandboxes_dir()
-                    .join("sdk-socket-test")
-                    .join("runtime")
-                    .join("agent.sock")
-            );
-        }
-        #[cfg(windows)]
-        {
-            assert_eq!(candidates.len(), 1);
-            assert!(
-                candidates[0]
-                    .to_string_lossy()
-                    .starts_with(r"\\.\pipe\msb-agent-")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_agent_socket_resolution_uses_explicit_local_backend_paths() {
-        // Root the backend home under a short directory so the derived AF_UNIX
-        // socket path stays within the platform `sun_path` limit (104 bytes on
-        // macOS). The default system temp dir on macOS lives under
-        // `/var/folders/...`, long enough to overflow that limit and make
-        // resolution fail spuriously. Windows uses named pipes (no length
-        // limit), so the default temp dir is fine there.
-        #[cfg(unix)]
-        let temp = tempfile::Builder::new()
-            .prefix("msb")
-            .tempdir_in("/tmp")
-            .unwrap();
-        #[cfg(not(unix))]
-        let temp = tempfile::Builder::new().prefix("msb").tempdir().unwrap();
-        let home = temp.path().join("msb-home");
-        let backend = LocalBackend::builder()
-            .config_path(home.join("config.json"))
-            .managed_config_path(home.join("managed.json"))
-            .home(&home)
-            .build()
-            .await
-            .unwrap();
-
-        let resolved =
-            super::resolve_sandbox_agent_socket_path_for(&backend, "sdk-socket-test").unwrap();
-
-        #[cfg(unix)]
-        assert!(resolved.starts_with(backend.config().run_dir().join("sandboxes")));
-        #[cfg(windows)]
-        assert!(
-            resolved
-                .to_string_lossy()
-                .starts_with(r"\\.\pipe\msb-agent-")
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_new_client_selects_old_runtime_socket_when_canonical_is_absent() {
-        let temp = tempfile::Builder::new()
-            .prefix("msb-compat")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let run_dir = temp.path().join("run");
-        let sandboxes_dir = temp.path().join("sandboxes");
-        let paths = RuntimeSocketPaths::new(&run_dir, "old-runtime");
-        std::fs::create_dir_all(paths.legacy_agent.parent().unwrap()).unwrap();
-        let _listener = std::os::unix::net::UnixListener::bind(&paths.legacy_agent).unwrap();
-
-        let candidates = super::sandbox_agent_socket_path_candidates_with_roots(
-            &run_dir,
-            &sandboxes_dir,
-            "old-runtime",
-        );
-        let selected = super::first_existing_socket_candidate(&candidates).unwrap();
-
-        assert_eq!(selected, paths.legacy_agent);
-        std::os::unix::net::UnixStream::connect(selected).unwrap();
     }
 
     #[tokio::test]
@@ -5146,9 +4445,12 @@ mod tests {
             },
         ];
 
-        super::prepare_oci_upper(&config, temp.path())
-            .await
-            .unwrap();
+        super::prepare_oci_upper(
+            &config,
+            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(std::fs::metadata(upper).unwrap().len(), 512 * 1024);
     }
@@ -5186,7 +4488,7 @@ mod tests {
             ]
         });
         std::fs::write(
-            runtime.join("root-disk.json"),
+            runtime.parent().unwrap().join("root-disk.json"),
             serde_json::to_vec(&state).unwrap(),
         )
         .unwrap();
@@ -5201,9 +4503,12 @@ mod tests {
             }),
         });
 
-        let error = super::prepare_oci_upper(&config, temp.path())
-            .await
-            .unwrap_err();
+        let error = super::prepare_oci_upper(
+            &config,
+            &crate::backend::local::creation::CreationStorage::for_test(temp.path()),
+        )
+        .await
+        .unwrap_err();
         let expected = microsandbox_image::checkpoint::layer_capacities(vec![
             microsandbox_image::checkpoint::CompactLayer {
                 path: head.clone(),
@@ -5215,7 +4520,7 @@ mod tests {
         assert_eq!(std::fs::read(&base).unwrap(), vec![0; 4096]);
         assert_eq!(std::fs::read(&head).unwrap(), head_before);
         assert_eq!(
-            std::fs::read(runtime.join("root-disk.json")).unwrap(),
+            std::fs::read(runtime.parent().unwrap().join("root-disk.json")).unwrap(),
             serde_json::to_vec(&state).unwrap()
         );
     }
@@ -5707,221 +5012,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_validate_existing_named_volume_rejects_quota_mismatch() {
-        let requested =
-            named_volume_create("mydir", VolumeKind::Directory, Some(1024), None, Vec::new());
-        let existing = existing_volume_model("mydir", VolumeKind::Directory, Some(512), None, None);
-
-        let err = super::validate_existing_named_volume(&requested, &existing).unwrap_err();
-
-        assert!(err.to_string().contains("quota"), "got: {err}");
-    }
-
-    #[test]
-    fn test_validate_existing_named_volume_rejects_capacity_mismatch() {
-        let requested =
-            named_volume_create("mydisk", VolumeKind::Disk, None, Some(2048), Vec::new());
-        let existing_capacity_bytes = 1024_i64 * 1024 * 1024;
-        let existing = existing_volume_model(
-            "mydisk",
-            VolumeKind::Disk,
-            None,
-            Some(existing_capacity_bytes),
-            None,
-        );
-
-        let err = super::validate_existing_named_volume(&requested, &existing).unwrap_err();
-
-        assert!(err.to_string().contains("capacity"), "got: {err}");
-    }
-
-    #[test]
-    fn test_validate_existing_named_volume_rejects_requested_label_mismatch() {
-        let requested = named_volume_create(
-            "mydir",
-            VolumeKind::Directory,
-            None,
-            None,
-            vec![("env".to_string(), "prod".to_string())],
-        );
-        let existing = existing_volume_model(
-            "mydir",
-            VolumeKind::Directory,
-            None,
-            None,
-            Some(vec![("env".to_string(), "dev".to_string())]),
-        );
-
-        let err = super::validate_existing_named_volume(&requested, &existing).unwrap_err();
-
-        assert!(err.to_string().contains("label"), "got: {err}");
-    }
-
-    #[test]
-    fn test_validate_existing_named_volume_allows_extra_existing_labels() {
-        let requested = named_volume_create(
-            "mydir",
-            VolumeKind::Directory,
-            None,
-            None,
-            vec![("env".to_string(), "prod".to_string())],
-        );
-        let existing = existing_volume_model(
-            "mydir",
-            VolumeKind::Directory,
-            None,
-            None,
-            Some(vec![
-                ("env".to_string(), "prod".to_string()),
-                ("team".to_string(), "runtime".to_string()),
-            ]),
-        );
-
-        super::validate_existing_named_volume(&requested, &existing).unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_ensure_named_volumes_rolls_back_db_row_on_provision_failure() {
-        let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
-        let volumes_dir = temp.path().join("volumes");
-        std::fs::create_dir_all(&volumes_dir).unwrap();
-        std::fs::write(volumes_dir.join("broken"), b"not a directory").unwrap();
-        let local = LocalBackend::builder()
-            .config_path(home.join("config.json"))
-            .managed_config_path(home.join("managed.json"))
-            .home(&home)
-            .volumes_dir(&volumes_dir)
-            .build()
-            .await
-            .unwrap();
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/data", |m| m.named_with("broken", |v| v.ensure_exists()))
-            .build()
-            .await
-            .unwrap();
-
-        let err = super::ensure_named_volumes(&local, &config)
-            .await
-            .unwrap_err();
-
-        assert!(err.to_string().contains("already exists"), "got: {err}");
-        let pools = local.db().await.unwrap();
-        let existing = super::volume_entity::Entity::find()
-            .filter(super::volume_entity::Column::Name.eq("broken"))
-            .one(pools.read())
-            .await
-            .unwrap();
-        assert!(
-            existing.is_none(),
-            "failed sandbox-time provisioning must not leave a phantom volume row"
-        );
-    }
-
-    #[tokio::test]
-    async fn named_volume_waiter_yields_and_cancellation_releases_partial_locks() {
-        use std::cell::RefCell;
-
-        use tokio::sync::oneshot;
-
-        let config = SandboxBuilder::new("waiter")
-            .image("/tmp/rootfs")
-            // Deliberately reverse the mount order: acquisition must still take a-first
-            // before waiting for z-shared, and cancellation must release that partial set.
-            .volume("/shared", |mount| mount.named("z-shared"))
-            .volume("/first", |mount| mount.named("a-first"))
-            .volume("/first-again", |mount| mount.named("a-first"))
-            .build()
-            .await
-            .unwrap();
-        // Dropping the sender reports guard release without OS locks that unrelated
-        // parallel tests can inherit between fork and exec.
-        let (first_guard, mut first_released) = oneshot::channel::<()>();
-        let mut first_guard = Some(first_guard);
-        let attempts = RefCell::new(Vec::new());
-        let mut waiter = Box::pin(super::lock_named_volume_mounts(&config, |name| {
-            attempts.borrow_mut().push(name.clone());
-            let guard = match name.as_str() {
-                "a-first" => Some(first_guard.take().expect("lock acquired only once")),
-                "z-shared" => None,
-                _ => panic!("unexpected volume: {name}"),
-            };
-            async move {
-                match guard {
-                    Some(guard) => Ok(guard),
-                    None => std::future::pending().await,
-                }
-            }
-        }));
-
-        // One poll must yield at the contended second lock while retaining the first.
-        assert!(futures::poll!(waiter.as_mut()).is_pending());
-        assert_eq!(*attempts.borrow(), ["a-first", "z-shared"]);
-        assert_eq!(
-            first_released.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        );
-
-        drop(waiter);
-        assert_eq!(
-            first_released.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
-        );
-
-        let locks = super::lock_named_volume_mounts(&config, |name| std::future::ready(Ok(name)))
-            .await
-            .unwrap();
-        assert_eq!(locks, ["a-first", "z-shared"]);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_named_volumes_rolls_back_earlier_created_volumes_on_later_failure() {
-        let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
-        let volumes_dir = temp.path().join("volumes");
-        let local = LocalBackend::builder()
-            .config_path(home.join("config.json"))
-            .managed_config_path(home.join("managed.json"))
-            .home(&home)
-            .volumes_dir(&volumes_dir)
-            .build()
-            .await
-            .unwrap();
-        let config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/ok", |m| {
-                m.named_with("first-created", |v| v.ensure_exists())
-            })
-            .volume("/bad", |m| {
-                m.named_with("bad-disk", |v| v.ensure_exists().disk())
-            })
-            .build()
-            .await
-            .unwrap();
-
-        let err = super::ensure_named_volumes(&local, &config)
-            .await
-            .unwrap_err();
-
-        assert!(
-            err.to_string().contains("disk named volumes require"),
-            "got: {err}"
-        );
-        assert!(!local.volume_path("first-created").exists());
-        let pools = local.db().await.unwrap();
-        let existing = super::volume_entity::Entity::find()
-            .filter(super::volume_entity::Column::Name.eq("first-created"))
-            .one(pools.read())
-            .await
-            .unwrap();
-        assert!(
-            existing.is_none(),
-            "later sandbox-time provisioning failure must roll back earlier created volumes"
-        );
-    }
-
     #[tokio::test]
     async fn test_resolve_named_volumes_recovers_disk_metadata_from_store() {
         let temp = tempdir().unwrap();
@@ -5933,7 +5023,7 @@ mod tests {
             .await
             .unwrap();
         let pools = local.db().await.unwrap();
-        super::volume_entity::ActiveModel {
+        volume_entity::ActiveModel {
             name: Set("mydata".to_string()),
             kind: Set(VolumeKind::Disk.as_str().to_string()),
             disk_format: Set(Some("raw".to_string())),
@@ -5953,7 +5043,7 @@ mod tests {
             .await
             .unwrap();
 
-        let resolved = super::resolve_named_volumes(&local, &config).await.unwrap();
+        let resolved = local.resolve_named_volumes(&config).await.unwrap();
         let volume = resolved.get("mydata").expect("volume should resolve");
         assert_eq!(volume.kind, VolumeKind::Disk);
         assert_eq!(volume.format, Some(DiskImageFormat::Raw));
@@ -5972,62 +5062,14 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let err = super::resolve_named_volumes(&local, &owned_config)
+        let err = local
+            .resolve_named_volumes(&owned_config)
             .await
             .unwrap_err();
         assert!(
             err.to_string().contains("directory named volumes"),
             "got: {err}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_existing_named_volume_mode_does_not_validate_default_metadata() {
-        let temp = tempdir().unwrap();
-        let local = LocalBackend::builder()
-            .config_path(temp.path().join("config.json"))
-            .managed_config_path(temp.path().join("managed.json"))
-            .home(temp.path())
-            .build()
-            .await
-            .unwrap();
-        let pools = local.db().await.unwrap();
-        super::volume_entity::ActiveModel {
-            name: Set("docker-data".to_string()),
-            kind: Set(VolumeKind::Disk.as_str().to_string()),
-            capacity_bytes: Set(Some(2048_i64 * 1024 * 1024)),
-            disk_format: Set(Some("raw".to_string())),
-            disk_fstype: Set(Some("ext4".to_string())),
-            created_at: Set(Some(chrono::Utc::now().naive_utc())),
-            updated_at: Set(Some(chrono::Utc::now().naive_utc())),
-            ..Default::default()
-        }
-        .insert(pools.write())
-        .await
-        .unwrap();
-
-        let mut config = SandboxBuilder::new("test")
-            .image("/tmp/rootfs")
-            .volume("/var/lib/docker", |m| m.named("docker-data"))
-            .build()
-            .await
-            .unwrap();
-        if let VolumeMount::Named { create, .. } = &mut config.spec.mounts[0] {
-            // Directly deserialized configs can still carry an explicit
-            // Existing create object even though the builder normalizes this
-            // path to a plain named mount.
-            *create = Some(microsandbox_types::NamedVolumeCreate {
-                mode: crate::sandbox::NamedVolumeMode::Existing,
-                name: "docker-data".to_string(),
-                kind: VolumeKind::Directory,
-                quota_mib: None,
-                capacity_mib: None,
-                labels: Vec::new(),
-            });
-        }
-
-        let ensured = super::ensure_named_volumes(&local, &config).await.unwrap();
-        assert!(ensured.is_empty());
     }
 
     #[tokio::test]

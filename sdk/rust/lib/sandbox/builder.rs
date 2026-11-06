@@ -389,6 +389,17 @@ impl SandboxBuilder {
         self
     }
 
+    /// Enable or disable nested virtualization for a local sandbox.
+    ///
+    /// Disabled by default unless enabled by configuration. Runtimes that cannot
+    /// enforce the effective policy require an upgrade.
+    /// The host hypervisor must support nesting, and the guest
+    /// kernel must support KVM. Enabling it on an unsupported host fails at startup.
+    pub fn nested_virt(mut self, enabled: bool) -> Self {
+        self.config.spec.resources.nested_virt = Some(Some(enabled));
+        self
+    }
+
     /// Select the guest transparent huge-page policy applied at boot.
     ///
     /// `Madvise` is the default and uses huge pages only for mappings that
@@ -2373,6 +2384,10 @@ pub(crate) fn apply_checkpoint_restore_constraints(
             )));
         }
     }
+    config.restore_resources.nested_virt = Some(
+        microsandbox_runtime::checkpoint::captured_nested_virt(&checkpoint.resources)
+            .map_err(MicrosandboxError::SnapshotIntegrity)?,
+    );
     config.restore_resources.geometry = Some(checkpoint.geometry);
     config
         .restore_resources
@@ -4417,6 +4432,101 @@ mod tests {
     }
 
     #[test]
+    fn restored_nesting_cannot_be_changed_by_managed_layers() {
+        for nested in [None, Some(false), Some(true)] {
+            let mut captured = SandboxBuilder::new("restore")
+                .image("alpine")
+                .config
+                .into_config();
+            captured.spec.resources.nested_virt = nested;
+            captured.suppress_launch_for_full_restore();
+
+            for managed in [None, Some(false), Some(true)] {
+                let policy = managed.map_or_else(
+                    || serde_json::json!({}),
+                    |enabled| serde_json::json!({"sandbox_defaults":{"nested_virt":enabled}}),
+                );
+                let sources = BackendConfig::new(
+                    serde_json::from_value(serde_json::json!({
+                        "sandbox_defaults":{"nested_virt": !nested.unwrap_or(false)}
+                    }))
+                    .unwrap(),
+                    serde_json::from_value(policy).unwrap(),
+                );
+                let result = SandboxBuilder::from(captured.clone()).finish(Some(&sources), None);
+
+                if managed.is_some_and(|enabled| enabled != nested.unwrap_or(false)) {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("captured nested virtualization")
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap().spec.resources.nested_virt,
+                        Some(nested.unwrap_or(false))
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn fork_nesting_policy_waits_for_capture() {
+        for managed in [false, true] {
+            let sources = BackendConfig::new(
+                Default::default(),
+                serde_json::from_value(serde_json::json!({
+                    "sandbox_defaults": {"nested_virt": managed}
+                }))
+                .unwrap(),
+            );
+            let mut source = SandboxBuilder::new("child")
+                .image("alpine")
+                .config
+                .into_config();
+            source.suppress_launch_for_full_restore();
+            source.branch_source = Some(super::super::identity::BranchSource {
+                guest_flush: None,
+                batch: None,
+                record_integrity: false,
+                name: "source".into(),
+                run: super::super::identity::SandboxRunIdentity {
+                    sandbox_id: 1,
+                    run_id: 1,
+                    pid: 1,
+                },
+            });
+
+            // Automatic source configuration does not reveal its running nesting mode.
+            let pending = SandboxBuilder::from(source)
+                .finish(Some(&sources), None)
+                .unwrap();
+
+            for nested in [false, true] {
+                let mut captured = pending.clone();
+                captured.branch_source = None;
+                captured.spec.resources.nested_virt = Some(nested);
+
+                let result = SandboxBuilder::from(captured).finish(Some(&sources), None);
+
+                if nested == managed {
+                    assert_eq!(result.unwrap().spec.resources.nested_virt, Some(nested));
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("captured nested virtualization")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn restored_root_layout_cannot_be_changed_by_managed_layers() {
         let mut captured = SandboxBuilder::new("restore")
             .image("alpine")
@@ -4635,6 +4745,120 @@ mod tests {
         let plain = manifest_with_guest_clock(GuestClockPolicy::Sync);
 
         require_recorded_mounts(&config(SandboxBuilder::new("restore"), true), &plain).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_restore_preserves_captured_nesting_over_defaults() {
+        use microsandbox_image::checkpoint::{
+            CaptureIntent, CheckpointGeometry, CheckpointManifest, ObjectId, ResourceDescriptor,
+            ResourceTreatment,
+        };
+
+        use crate::MicrosandboxError;
+
+        let state = crate::snapshot::CheckpointSnapshotState {
+            checkpoint_id: "checkpoint_test".into(),
+            checkpoint_root:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            restore_intents: vec!["clone".into()],
+            requirements_summary: BTreeMap::from([
+                ("vcpus".into(), serde_json::json!(4)),
+                ("max_vcpus".into(), serde_json::json!(8)),
+                ("memory_mib".into(), serde_json::json!(2048)),
+                ("max_memory_mib".into(), serde_json::json!(4096)),
+            ]),
+        };
+        let mut checkpoint = CheckpointManifest {
+            schema: "microsandbox.checkpoint/1".into(),
+            checkpoint_id: "checkpoint_test".into(),
+            capture_intent: CaptureIntent::FullSnapshot,
+            architecture: std::env::consts::ARCH.into(),
+            geometry: CheckpointGeometry {
+                vcpus: 4,
+                max_vcpus: 8,
+                memory_mib: 2048,
+                max_memory_mib: 4096,
+            },
+            pause_generation: 1,
+            execution_state: ObjectId::from_bytes(b"execution").unwrap(),
+            memory: ObjectId::from_bytes(b"memory").unwrap(),
+            disks: Vec::new(),
+            owned_volumes: Vec::new(),
+            devices: Vec::new(),
+            resources: Vec::new(),
+            requires: Vec::new(),
+        };
+
+        for captured in [false, true] {
+            checkpoint.resources = if captured {
+                vec![ResourceDescriptor {
+                    id: "vm:nested-virt".into(),
+                    kind: "nested-virt".into(),
+                    treatment: ResourceTreatment::Serialize,
+                    binding: [("enabled".into(), "true".into())].into(),
+                }]
+            } else {
+                Vec::new()
+            };
+            checkpoint.resources.push(ResourceDescriptor {
+                id: "agent".into(),
+                kind: "agent".into(),
+                treatment: ResourceTreatment::Serialize,
+                binding: [(
+                    "ready".into(),
+                    serde_json::to_string(&microsandbox_protocol::core::Ready::default()).unwrap(),
+                )]
+                .into(),
+            });
+            for configured in [None, Some(false), Some(true)] {
+                for explicit in [false, true] {
+                    let mut config = SandboxBuilder::new("restore")
+                        .image("alpine")
+                        .config
+                        .into_config();
+                    config.spec.resources.nested_virt = configured;
+                    let result = super::apply_checkpoint_restore_constraints(
+                        &mut config,
+                        &state,
+                        &checkpoint,
+                    )
+                    .and_then(|_| {
+                        let sources = BackendConfig::new(
+                            serde_json::from_value(
+                                serde_json::json!({"sandbox_defaults":{"nested_virt":configured}}),
+                            )
+                            .unwrap(),
+                            Default::default(),
+                        );
+                        let mut caller = SandboxConfigPatch::default();
+                        if explicit {
+                            caller.spec.resources.nested_virt = Some(configured);
+                        }
+                        finish_prepared_restore(config, caller, &sources)
+                    });
+
+                    if explicit && configured.unwrap_or(false) != captured {
+                        assert!(matches!(result, Err(MicrosandboxError::InvalidConfig(_))));
+                    } else {
+                        let restored = result.unwrap();
+                        assert_eq!(restored.spec.resources.nested_virt, Some(captured));
+                    }
+                }
+            }
+        }
+
+        // A malformed captured requirement must fail before a restore can proceed.
+        checkpoint.resources[0]
+            .binding
+            .insert("enabled".into(), "false".into());
+        let mut config = SandboxBuilder::new("restore")
+            .image("alpine")
+            .config
+            .into_config();
+        assert!(matches!(
+            super::apply_checkpoint_restore_constraints(&mut config, &state, &checkpoint,),
+            Err(MicrosandboxError::SnapshotIntegrity(_))
+        ));
     }
 
     #[test]

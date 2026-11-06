@@ -34,6 +34,14 @@ runs:
             # https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
             kernel_sha256=413f7d9fcbbd85c980987b8ccb6fb247e9cabd9b5fdcc292e2dc1d55f428b63d
             ;;
+          linux-6.12.112:'tarballs/$(KERNEL_VERSION).tar.gz')
+            # https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+            kernel_sha256=313023bd092cad85677dbf8006057735857d49acd1e256bba1bae6427dc58eca
+            ;;
+          linux-6.12.113:'tarballs/$(KERNEL_VERSION).tar.gz')
+            # https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+            kernel_sha256=413f7d9fcbbd85c980987b8ccb6fb247e9cabd9b5fdcc292e2dc1d55f428b63d
+            ;;
           *)
             echo "::error::Add the checksum for ${kernel_version} (${kernel_tarball}) to ${GITHUB_ACTION_PATH}/action.yml"
             exit 1

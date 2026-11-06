@@ -377,7 +377,7 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed.</div>
+    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed. Must be an integer from 0 to 4294967295, inclusive; other values reject with <code>RangeError</code> before calling native.</div>
   </div>
 </div>
 
@@ -540,7 +540,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
@@ -2444,7 +2444,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?)
@@ -2538,7 +2538,7 @@ Connect to a running sandbox without taking ownership. Returns an error if it do
 connectWithTimeout(timeoutMs)
 ```
 
-Same as `connect()` with an explicit timeout in milliseconds
+Same as `connect()` with an explicit timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2638,7 +2638,7 @@ Force terminate and wait until stopped state is observed
 killWithTimeout(timeoutMs)
 ```
 
-Same as `kill()` with an explicit observation timeout
+Same as `kill()` with an explicit observation timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -3245,3 +3245,11 @@ Current lifecycle state of a sandbox. String literal type.
 | `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nestedVirt(enabled: boolean)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```typescript
+const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
+```

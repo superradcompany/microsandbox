@@ -373,6 +373,16 @@ pub enum MicrosandboxError {
         reason: UnsupportedReason,
     },
 
+    /// A modification did not complete as asked: it may be saved without being in effect on the
+    /// running sandbox, or its result is unknown. Only Cloud returns it; `cause` never holds a
+    /// secret value.
+    #[error("the change did not complete as asked: {cause}")]
+    ModificationNotConfirmed {
+        /// What is known about the change: what failed, whether it was saved, and whether
+        /// sending the same change again retries it.
+        cause: String,
+    },
+
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
@@ -875,6 +885,21 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "timed out after 360s waiting for sandbox \"cloud-sandbox\" to stop; the accepted stop may still complete"
+        );
+    }
+
+    #[test]
+    fn modification_not_confirmed_shows_the_cause_as_given() {
+        let error = MicrosandboxError::ModificationNotConfirmed {
+            cause: "the change was saved, but the running sandbox does not hold the secret; it \
+                    applies at the next start"
+                .into(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the change did not complete as asked: the change was saved, but the running sandbox \
+             does not hold the secret; it applies at the next start"
         );
     }
 }
