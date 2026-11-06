@@ -236,14 +236,15 @@ path = "bin/main.rs"
 //--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
-// Tests
+// Re-Exports
 //--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
-// Re-Exports
+// Tests
 //--------------------------------------------------------------------------------------------------
 ```
 
+- Re-Exports comes before Tests: `clippy::items_after_test_module` (warn by default) rejects any item after the test module, so a file that both re-exports and has tests cannot put the re-exports last.
 - Aggregator files that only expose modules and public items may use `Exports` instead of `Re-Exports` when matching existing files.
 - Use qualified section labels only to split large sections into obvious groups, for example `Types: Identifiers`, `Functions: Handlers`, or `Functions: Helpers`.
 - Do not create a qualified section for one or two items unless the surrounding file already uses that pattern.
@@ -291,7 +292,7 @@ Common Rust checks:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p microsandbox-cli
 ```
