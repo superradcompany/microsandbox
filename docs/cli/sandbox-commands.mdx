@@ -786,7 +786,7 @@ msb logs devbox --source all                # everything, chronologically merged
 | `--tail` | Show only the last N entries |
 | `--since` | Show entries at or after this time (RFC 3339 or relative `5m`/`2h`/`1d`) |
 | `--until` | Show entries strictly before this time (same formats) |
-| `-f`, `--follow` | Follow new entries |
+| `-f`, `--follow` | Follow new entries until the sandbox stops |
 | `--timestamps` | Prefix each line with the entry timestamp |
 | `--source` | Sources to include: `stdout`, `stderr`, `output`, `system`, `all`. Repeat or comma-separate. Default: `stdout,stderr,output` |
 | `--grep` | Client-side regex filter on the entry body |
