@@ -13,6 +13,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
+// Each test creates a fresh sandbox name. Avoid replacement: its conservative
+// stale-runtime probe can time out on a busy CI host before this test boots a VM.
+
 // Constants
 
 const CURL_IMAGE: &str = "mirror.gcr.io/curlimages/curl";
@@ -343,7 +346,6 @@ async fn https_connect_proxy_substitutes_secret_in_authorization_header() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -419,7 +421,6 @@ async fn https_connect_proxy_blocks_secret_for_wrong_host() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -502,7 +503,6 @@ async fn https_connect_proxy_leaves_non_intercepted_target_port_opaque() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -577,7 +577,6 @@ async fn https_connect_proxy_blocks_secret_in_outer_connect_headers() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| {
             s.env("API_KEY")
                 .value(REAL_SECRET)
@@ -642,7 +641,6 @@ async fn https_connect_proxy_substitutes_secret_when_target_not_in_dns_cache() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
@@ -721,7 +719,6 @@ async fn https_connect_proxy_substitutes_secret_after_prior_dns_lookup() {
         .cpus(1)
         .memory(256)
         .user("0")
-        .replace()
         .secret(|s| s.env("API_KEY").value(REAL_SECRET).allow(FAKE_TARGET_HOST))
         .network(|n| {
             n.policy(NetworkPolicy::allow_all()).tls(|t| {
