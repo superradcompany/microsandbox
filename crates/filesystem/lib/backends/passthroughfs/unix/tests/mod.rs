@@ -52,6 +52,7 @@ const LINUX_EEXIST: i32 = 17;
 const LINUX_ENOTDIR: i32 = 20;
 const LINUX_EINVAL: i32 = 22;
 const LINUX_EROFS: i32 = 30;
+const LINUX_ERANGE: i32 = 34;
 const LINUX_ELOOP: i32 = 40;
 const LINUX_ENOSYS: i32 = 38;
 const LINUX_ENOTEMPTY: i32 = 39;
