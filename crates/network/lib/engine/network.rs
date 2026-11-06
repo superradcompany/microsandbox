@@ -619,7 +619,7 @@ impl MetricsHandle {
         self.shared.rx_bytes()
     }
 
-    /// Published TCP connections rejected because this sandbox reached its active cap.
+    /// Published TCP connections rejected by the bounded admission queue.
     pub fn inbound_tcp_rejected(&self) -> u64 {
         self.shared.inbound_tcp_rejected()
     }

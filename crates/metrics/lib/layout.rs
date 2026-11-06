@@ -167,7 +167,7 @@ pub const SAMPLE_FLAG_UPPER_FREE: u32 = 1 << 5;
 pub const SAMPLE_FLAG_UPPER_HOST_ALLOCATED: u32 = 1 << 6;
 /// Sample flag: `memory_limit_bytes` was refreshed from live VM memory state.
 pub const SAMPLE_FLAG_MEMORY_LIMIT_LIVE: u32 = 1 << 7;
-/// Sample flag: the tail extension reports published TCP active-cap rejections.
+/// Sample flag: the tail extension reports published TCP admission rejections.
 pub const SAMPLE_FLAG_INBOUND_TCP_REJECTED: u32 = 1 << 8;
 /// Sample flag: outbound TCP active-cap rejections are available.
 pub const SAMPLE_FLAG_OUTBOUND_TCP_REJECTED: u32 = 1 << 9;

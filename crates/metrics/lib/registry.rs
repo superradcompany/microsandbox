@@ -112,7 +112,7 @@ pub struct SampleWrite {
     pub net_rx_bytes: u64,
     /// Cumulative network bytes transmitted.
     pub net_tx_bytes: u64,
-    /// Published TCP connections rejected by the active cap; absent on older runtimes.
+    /// Published TCP admission rejections; absent on older runtimes.
     pub net_inbound_tcp_rejected: Option<u64>,
     /// Outbound TCP cap rejections; absent on older runtimes.
     pub net_outbound_tcp_rejected: Option<u64>,

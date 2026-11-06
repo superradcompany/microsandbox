@@ -48,7 +48,7 @@ pub trait NetworkMetrics: Send + Sync {
     /// Bytes received by the guest from the runtime.
     fn rx_bytes(&self) -> u64;
 
-    /// Published TCP cap rejections, when this backend reports them.
+    /// Published TCP admission rejections, when this backend reports them.
     fn inbound_tcp_rejected(&self) -> Option<u64> {
         None
     }

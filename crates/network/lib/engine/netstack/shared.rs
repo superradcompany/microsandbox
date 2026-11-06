@@ -353,14 +353,14 @@ impl SharedState {
         true
     }
 
-    /// Count a published TCP connection rejected by the active connection cap.
+    /// Count a published TCP connection rejected by the admission queue.
     pub(crate) fn record_inbound_tcp_rejection(&self) {
         self.metrics
             .inbound_tcp_rejected
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Cumulative published TCP connections rejected by the active connection cap.
+    /// Cumulative published TCP connections rejected by the admission queue.
     pub fn inbound_tcp_rejected(&self) -> u64 {
         self.metrics.inbound_tcp_rejected.load(Ordering::Relaxed)
     }

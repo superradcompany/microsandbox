@@ -732,7 +732,7 @@ pub fn smoltcp_poll_loop(
         let timeout_ms = poll_timeout_ms(
             stack_delay,
             conn_tracker.deferred_close_delay(),
-            port_publisher.deferred_close_delay(),
+            port_publisher.next_deadline_delay(),
             CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
         );
 

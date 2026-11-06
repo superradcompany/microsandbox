@@ -742,9 +742,7 @@ fn register_sandbox_instruments(meter: &Meter) -> SandboxMetricObservations {
 
     meter
         .u64_observable_gauge("microsandbox.network.inbound_tcp.rejected")
-        .with_description(
-            "Cumulative published TCP connections rejected by the active connection cap",
-        )
+        .with_description("Cumulative published TCP connections rejected by the admission queue")
         .with_unit("{connection}")
         .with_callback(move |observer| {
             inbound_rejected_observations.with_observations(|observations| {
