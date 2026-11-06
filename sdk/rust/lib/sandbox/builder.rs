@@ -2978,6 +2978,57 @@ mod tests {
 
     #[cfg(feature = "net")]
     #[test]
+    fn restore_dns_rebind_protection_survives_restore_preparation() {
+        let backend = BackendConfig::new(Default::default(), Default::default());
+        for (restore, expected) in [
+            (crate::Sandbox::restore("saved").name("child"), true),
+            (
+                crate::Sandbox::restore("saved")
+                    .name("child")
+                    .network(|network| network.dns_rebind_protection(false)),
+                false,
+            ),
+        ] {
+            // Preparation starts from the caller's options, as `resolve_restore` does.
+            let mut prepared = SandboxBuilder::new("child")
+                .image("alpine")
+                .config
+                .into_config();
+            prepared.spec.network = restore.inner.config.clone().into_config().spec.network;
+            let restored =
+                finish_prepared_restore(prepared, restore.inner.config, &backend).unwrap();
+            let dns = restored.local_network_config().unwrap().dns;
+            assert_eq!(dns.rebind_protection, expected);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn restore_strict_survives_restore_preparation() {
+        let backend = BackendConfig::new(Default::default(), Default::default());
+        for (restore, expected) in [
+            (crate::Sandbox::restore("saved").name("child"), true),
+            (
+                crate::Sandbox::restore("saved")
+                    .name("child")
+                    .network(|network| network.strict(false)),
+                false,
+            ),
+        ] {
+            // Preparation starts from the caller's options, as `resolve_restore` does.
+            let mut prepared = SandboxBuilder::new("child")
+                .image("alpine")
+                .config
+                .into_config();
+            prepared.spec.network = restore.inner.config.clone().into_config().spec.network;
+            let restored =
+                finish_prepared_restore(prepared, restore.inner.config, &backend).unwrap();
+            assert_eq!(restored.local_network_config().unwrap().strict, expected);
+        }
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
     fn changing_violation_action_preserves_global_passthrough() {
         let mut builder = SandboxBuilder::new("secrets");
         let mut network = builder.local_network_config().unwrap();

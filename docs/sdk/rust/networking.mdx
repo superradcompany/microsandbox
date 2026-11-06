@@ -919,6 +919,10 @@ Limit the maximum number of concurrent TCP connections from the sandbox. When om
 
 For dedicated snapshot restore, `RestoreBuilder::max_tcp_connections` and `RestoreBuilder::max_udp_connections` set the destination limits. `RestoreBuilder::max_connections` remains a deprecated TCP alias; the last TCP setter call wins.
 
+`RestoreBuilder::network(|n| n.dns_rebind_protection(enabled))` sets DNS rebind protection for the restored sandbox. Omitted uses the default (enabled), not the source sandbox's setting, so pass `false` again when restoring a sandbox that was created without protection.
+
+`RestoreBuilder::network(|n| n.strict(enabled))` sets strict hostname enforcement for the restored sandbox. Omitted uses the default (enabled), not the source sandbox's setting, so pass `false` again when restoring a sandbox that was created with strict mode off.
+
 <p className="msb-label">Parameters</p>
 
 <div className="msb-params">

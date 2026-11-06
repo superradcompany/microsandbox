@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +95,81 @@ func TestRestoreConnectionLimitsPreserveExplicitZero(t *testing.T) {
 				t.Fatalf("connection limits lost or unexpected aliases emitted: %s", encoded)
 			}
 		})
+	}
+}
+
+func TestRestoreNetworkMatchesFlatOptions(t *testing.T) {
+	tcp, udp := uint(8), uint(0)
+	var flat, scoped RestoreConfig
+	for _, option := range []RestoreOption{
+		WithRestoreNetworkPolicy(NetworkPolicy.None()), WithRestoreMaxTCPConnections(tcp),
+		WithRestoreMaxUDPConnections(udp), WithRestoreNetwork(RestoreNetworkOptions{}),
+	} {
+		option(&flat)
+	}
+	WithRestoreNetwork(RestoreNetworkOptions{
+		Policy: NetworkPolicy.None(), MaxTCPConnections: &tcp, MaxUDPConnections: &udp,
+	})(&scoped)
+	if !reflect.DeepEqual(flat, scoped) {
+		t.Fatalf("scoped network = %#v, want %#v", scoped, flat)
+	}
+}
+
+func TestRestoreDNSRebindProtectionReachesFFI(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		var config RestoreConfig
+		WithRestoreNetwork(RestoreNetworkOptions{DNSRebindProtection: &enabled})(&config)
+		if err := validateRestoreConfig(config); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(encoded, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["dns_rebind_protection"] != enabled {
+			t.Fatalf("dns_rebind_protection lost: %s", encoded)
+		}
+	}
+
+	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "dns_rebind_protection") {
+		t.Fatalf("unset DNS rebind protection reached the wire: %s", encoded)
+	}
+}
+
+func TestRestoreStrictReachesFFI(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		var config RestoreConfig
+		WithRestoreNetwork(RestoreNetworkOptions{Strict: &enabled})(&config)
+		if err := validateRestoreConfig(config); err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(encoded, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["strict"] != enabled {
+			t.Fatalf("strict lost: %s", encoded)
+		}
+	}
+
+	encoded, err := json.Marshal(buildFFIRestoreOptions("baseline", RestoreConfig{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "strict") {
+		t.Fatalf("unset strict reached the wire: %s", encoded)
 	}
 }
 

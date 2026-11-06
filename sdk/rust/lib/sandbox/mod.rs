@@ -198,6 +198,8 @@ pub use microsandbox_types::{
 pub use microsandbox_types::{ExternalMountRestorePolicy, ExternalMountWarning};
 #[cfg(feature = "local")]
 pub use restore_builder::RestoreBuilder;
+#[cfg(all(feature = "local", feature = "net"))]
+pub use restore_builder::RestoreNetworkBuilder;
 
 #[cfg(feature = "local")]
 mod external_mounts;

@@ -25,6 +25,7 @@ import {
   type NapiSandbox,
   type NapiSandboxBuilderSetters,
   type NapiRestoreBuilderSetters,
+  type NapiRestoreNetworkBuilderSetters,
   type NapiSandboxConfig,
   type NapiSandboxListOptions,
   type NapiSandboxPage,
@@ -88,6 +89,9 @@ export interface SandboxBuilder extends NapiSandboxBuilderSetters {
   /** Image preparation, snapshot backing and activation progress. Await the result for success. */
   createWithProgress(): Promise<CreationProgressCreate>;
 }
+
+/** The destination network settings a restore can change, passed to `RestoreBuilder.network()`. */
+export type RestoreNetworkBuilder = NapiRestoreNetworkBuilderSetters;
 
 /** Restore a snapshot or archive as a detached sandbox with explicit host bindings. */
 export interface RestoreBuilder extends NapiRestoreBuilderSetters {
