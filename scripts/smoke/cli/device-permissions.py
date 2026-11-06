@@ -83,20 +83,31 @@ def main():
                 check(result.returncode == 0,
                       profile + ": UID 1000 cannot open " + device)
     finally:
-        removed = [run("rm", "--force", name).returncode == 0 for name in names]
-        report["cleanup_ok"] = all(removed)
-        if report["cleanup_ok"]:
-            # Match metrics_registry_shm_name (ABI 3); the registry outlives the VM.
-            home_hash = 0xcbf29ce484222325
-            for byte in os.fsencode(home):
-                home_hash = ((home_hash ^ byte) * 0x100000001b3) & 0xffffffffffffffff
-            registry = f"/msb-met-{home_hash:016x}-v3"
-            libc = ctypes.CDLL(None, use_errno=True)
-            result = libc.shm_unlink(ctypes.c_char_p(registry.encode()))
-            check(result == 0 or ctypes.get_errno() == errno.ENOENT,
-                  "cannot remove metrics registry " + registry)
-            shutil.rmtree(home)
-        (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        report["cleanup_ok"] = False
+        try:
+            removed = []
+            for name in names:
+                try:
+                    result = run("rm", "--force", name)
+                    removed.append(result.returncode == 0)
+                    check(result.returncode == 0, "cannot remove sandbox " + name)
+                except (subprocess.TimeoutExpired, OSError) as error:
+                    removed.append(False)
+                    report["failures"].append(f"cannot remove sandbox {name}: {error}")
+            report["cleanup_ok"] = all(removed)
+            if report["cleanup_ok"]:
+                # Match metrics_registry_shm_name (ABI 3); the registry outlives the VM.
+                home_hash = 0xcbf29ce484222325
+                for byte in os.fsencode(home):
+                    home_hash = ((home_hash ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+                registry = f"/msb-met-{home_hash:016x}-v3"
+                libc = ctypes.CDLL(None, use_errno=True)
+                result = libc.shm_unlink(ctypes.c_char_p(registry.encode()))
+                check(result == 0 or ctypes.get_errno() == errno.ENOENT,
+                      "cannot remove metrics registry " + registry)
+                shutil.rmtree(home)
+        finally:
+            (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     if report["failures"] or not report["cleanup_ok"]:
         raise SystemExit("\n".join(report["failures"]) or "sandbox cleanup failed")
     print("Both profiles passed device access and security checks.")
