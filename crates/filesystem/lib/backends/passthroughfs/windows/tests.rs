@@ -3,6 +3,7 @@
 use super::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::FileExt;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct TempDir {
@@ -283,6 +284,72 @@ fn lists_and_reads_host_file() {
     )
     .unwrap();
     assert_eq!(writer.bytes, b"from ");
+}
+
+#[test]
+fn directory_listing_skips_host_junctions() {
+    let temp = TempDir::new();
+    let root = temp.path.join("root");
+    let outside = temp.path.join("outside");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(root.join("hello.txt"), b"hello from windows").unwrap();
+    std::fs::write(outside.join("secret.txt"), b"outside the mount").unwrap();
+
+    // Junctions exercise the reparse-point guard without needing the symlink
+    // privilege or Developer Mode, so this regression always runs in CI.
+    let junction = root.join("junction");
+    let output = Command::new("cmd.exe")
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mklink failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let fs = fs_for(&root);
+    let (handle, _) = fs
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let handle = handle.unwrap();
+    let entries = fs
+        .readdirplus(context(), ROOT_INODE, handle, 4096, 0)
+        .unwrap();
+    let names: Vec<_> = entries.iter().map(|(entry, _)| entry.name).collect();
+    assert_eq!(names, [b".".as_slice(), b"..", b"hello.txt"]);
+
+    // Filtering must leave usable continuation cookies and ordinary siblings.
+    let file = &entries[2];
+    assert_eq!(file.0.offset, 3);
+    assert!(
+        fs.readdirplus(context(), ROOT_INODE, handle, 4096, file.0.offset)
+            .unwrap()
+            .is_empty()
+    );
+    let entry = fs.lookup(context(), ROOT_INODE, c"hello.txt").unwrap();
+    let (file_handle, _) = fs.open(context(), entry.inode, false, 0).unwrap();
+    assert_eq!(
+        owned_read(&fs, entry.inode, file_handle.unwrap()),
+        b"hello from windows"
+    );
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"junction"), LINUX_ELOOP);
+
+    // A dangling junction must also be omitted without following its target.
+    std::fs::remove_file(outside.join("secret.txt")).unwrap();
+    std::fs::remove_dir(&outside).unwrap();
+    let (handle, _) = fs
+        .opendir(context(), ROOT_INODE, LINUX_O_DIRECTORY as u32)
+        .unwrap();
+    let entries = fs
+        .readdir(context(), ROOT_INODE, handle.unwrap(), 4096, 0)
+        .unwrap();
+    let names: Vec<_> = entries.iter().map(|entry| entry.name).collect();
+    assert_eq!(names, [b".".as_slice(), b"..", b"hello.txt"]);
+    expect_errno(fs.lookup(context(), ROOT_INODE, c"junction"), LINUX_ELOOP);
 }
 
 #[test]

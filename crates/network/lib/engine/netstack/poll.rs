@@ -456,6 +456,7 @@ pub fn smoltcp_poll_loop(
                     conn_tracker.cleanup_closed(&mut sockets);
                     if !conn_tracker.has_socket_for(&src, &dst) {
                         conn_tracker.create_tcp_socket(src, dst, &mut sockets, accept_mode);
+                        shared.set_outbound_tcp_rejected(conn_tracker.rejected_connections());
                     }
 
                     // smoltcp validates the packet before any host-side dial.
@@ -731,7 +732,7 @@ pub fn smoltcp_poll_loop(
         let timeout_ms = poll_timeout_ms(
             stack_delay,
             conn_tracker.deferred_close_delay(),
-            port_publisher.deferred_close_delay(),
+            port_publisher.next_deadline_delay(),
             CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
         );
 
@@ -2728,10 +2729,17 @@ mod tests {
         );
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::Reject));
+        assert_eq!(
+            tracker.rejected_connections(),
+            0,
+            "policy denials are not cap rejections"
+        );
         assert!(
             !tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::AcceptImmediately),
             "the pending reset still owns its socket budget"
         );
+        assert_eq!(tracker.rejected_connections(), 1);
         loop {
             if matches!(
                 iface.poll_egress(now, &mut device, &mut sockets),
@@ -2749,6 +2757,11 @@ mod tests {
             &mut sockets,
             TcpAcceptMode::AcceptImmediately
         ));
+        assert_eq!(
+            tracker.rejected_connections(),
+            1,
+            "admitted retries do not increment it"
+        );
         assert!(!tracker.has_socket_for(
             &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000),
             &dst

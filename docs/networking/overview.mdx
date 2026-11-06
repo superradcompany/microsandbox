@@ -126,6 +126,8 @@ Legacy v0.6.x launch contracts keep their historical default of 256 TCP connecti
 
 `maxInboundTcpConnections` limits active inbound TCP connections across published ports; `0` means unlimited. Omission uses the runtime default: unlimited in **0.7.9+**, or **256** in older versions. Explicit overrides require runtime support or fail with an upgrade-required error. This local-only limit is separate from the listener queue (`tcpAcceptQueueSize`).
 
+When the active inbound limit is full, new connections wait in a shared FIFO queue across published TCP ports. Up to 1,024 connections can wait, for at most 30 seconds each. A full queue or expired wait resets the connection; existing connections continue. Waiting connections use host sockets and file descriptors, but guest-side TCP buffers are allocated only on admission. `tcpAcceptQueueSize` controls the separate kernel listen backlog for each port. With unlimited inbound connections, the listener pauses when its handoff channel fills; no active-slot waiting deadline applies.
+
 On 0.7.9+, finished connections leave the active budget after response delivery. The runtime retains up to 256 finished sockets in TIME-WAIT, evicting the oldest under pressure and shortening protection against delayed packets. Host writes stalled for 30 seconds are closed; successful writes restart the timer.
 
 Each TCP socket allocates 128 KiB of buffers. An outbound cap of 1,024 allows up to 128 MiB; an inbound cap of 256 plus 256 retained sockets allows up to 64 MiB. The retention pool can use 32 MiB even with a small active cap. These figures exclude relay channels, host socket buffers, and other allocations. Unlimited connections still face memory, file-descriptor, and source-port limits.

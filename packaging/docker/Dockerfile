@@ -11,6 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY build/${TARGETARCH}/msb /usr/local/bin/msb
+COPY build/${TARGETARCH}/msb-metrics /usr/local/bin/msb-metrics
 COPY build/${TARGETARCH}/libkrunfw.so.* /usr/local/lib/
 
 ENTRYPOINT ["msb"]

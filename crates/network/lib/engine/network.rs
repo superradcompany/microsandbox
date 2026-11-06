@@ -140,7 +140,7 @@ pub struct TerminationHandle {
     shared: Arc<SharedState>,
 }
 
-/// Read-only view of aggregate network byte counters.
+/// Read-only view of aggregate network counters.
 #[derive(Clone)]
 pub struct MetricsHandle {
     shared: Arc<SharedState>,
@@ -566,7 +566,7 @@ impl SmoltcpNetwork {
         }
     }
 
-    /// Create a handle for reading aggregate network byte counters.
+    /// Create a handle for reading aggregate network counters.
     pub fn metrics_handle(&self) -> MetricsHandle {
         MetricsHandle {
             shared: self.shared.clone(),
@@ -617,6 +617,21 @@ impl MetricsHandle {
     /// Total runtime -> guest bytes observed at the virtio-net boundary.
     pub fn rx_bytes(&self) -> u64 {
         self.shared.rx_bytes()
+    }
+
+    /// Published TCP connections rejected by the bounded admission queue.
+    pub fn inbound_tcp_rejected(&self) -> u64 {
+        self.shared.inbound_tcp_rejected()
+    }
+
+    /// Outbound TCP connections rejected because this sandbox reached its active cap.
+    pub fn outbound_tcp_rejected(&self) -> u64 {
+        self.shared.outbound_tcp_rejected()
+    }
+
+    /// Outbound UDP sessions evicted because this sandbox reached its session cap.
+    pub fn outbound_udp_evicted(&self) -> u64 {
+        self.shared.outbound_udp_evicted()
     }
 }
 
