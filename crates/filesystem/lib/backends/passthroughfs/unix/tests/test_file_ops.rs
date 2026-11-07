@@ -195,9 +195,11 @@ fn test_create_write_close_budget() {
 
     if let Ok(policy) = std::env::var(CHILD_POLICY) {
         let sb = TestSandbox::with_config(|mut cfg| {
-            if policy == "dup_close" {
-                cfg.flush_policy = FlushPolicy::DupClose;
-            }
+            cfg.flush_policy = match policy.as_str() {
+                "none" => FlushPolicy::None,
+                "dup_close" => FlushPolicy::DupClose,
+                _ => panic!("unknown close policy"),
+            };
             cfg
         });
         let (entry, handle) = sb.fuse_create_root("close-budget.txt").unwrap();
@@ -236,14 +238,13 @@ fn test_create_write_close_budget() {
         return;
     }
 
-    if std::process::Command::new("strace")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("close budget requires strace; expected one real file close at RELEASE");
-        return;
-    }
+    assert!(
+        std::process::Command::new("strace")
+            .arg("--version")
+            .status()
+            .expect("Linux close-budget tests require strace (apt-get install strace)")
+            .success()
+    );
     for (policy, expected_closes) in [("none", 1), ("dup_close", 5)] {
         let trace = tempfile::NamedTempFile::new().unwrap();
         let output = std::process::Command::new("strace")
@@ -276,6 +277,64 @@ fn test_create_write_close_budget() {
         assert!(
             file_calls.iter().any(|line| line.contains("fdatasync(")),
             "{calls}"
+        );
+    }
+}
+
+/// Inject a backing close error at the syscall boundary, without mocking the
+/// filesystem handler. strace path filtering leaves unrelated closes alone.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_flush_reports_backing_close_errors_by_default() {
+    const CHILD_ROOT: &str = "MSB_TEST_FLUSH_ERROR_ROOT";
+    const CHILD_POLICY: &str = "MSB_TEST_FLUSH_ERROR_POLICY";
+    const TEST_NAME: &str = "backends::passthroughfs::unix::tests::test_file_ops::test_flush_reports_backing_close_errors_by_default";
+
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let policy = std::env::var(CHILD_POLICY).unwrap();
+        let sb = TestSandbox::with_config(|mut cfg| {
+            cfg.root_dir = root.into();
+            if policy == "none" {
+                cfg.flush_policy = FlushPolicy::None;
+            }
+            cfg
+        });
+        let (entry, handle) = sb.fuse_create_root("flush-error.txt").unwrap();
+        sb.fuse_write(entry.inode, handle, b"pending write", 0)
+            .unwrap();
+        let result = sb.fs.flush(sb.ctx(), entry.inode, handle, 0);
+        if policy == "none" {
+            result.unwrap();
+        } else {
+            TestSandbox::assert_errno(result, policy.parse().unwrap());
+        }
+        return;
+    }
+
+    for (policy, errno) in [("28", "ENOSPC"), ("5", "EIO"), ("none", "ENOSPC")] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("flush-error.txt");
+        std::fs::write(&path, b"").unwrap();
+        let output = std::process::Command::new("strace")
+            .args(["-f", "-yy", "-P"])
+            .arg(&path)
+            .args(["-e", "trace=close", "-e"])
+            .arg(format!("inject=close:error={errno}:when=1"))
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ROOT, root.path())
+            .env(CHILD_POLICY, policy)
+            .output()
+            .expect("Linux flush error tests require strace (apt-get install strace)");
+        let trace = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{policy}: {trace}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            trace.contains("INJECTED"),
+            "fault did not reach the backing close: {trace}"
         );
     }
 }

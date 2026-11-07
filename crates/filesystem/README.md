@@ -24,19 +24,28 @@ Metadata like uid, gid, and mode are stored in an extended attribute on the host
 #### Guest close policy (Unix)
 
 `PassthroughConfig::flush_policy` and the builder's `.flush_policy(...)` control
-host work for guest FUSE FLUSH requests. `FlushPolicy::None` is the default:
-validate the handle and return success without duplicating or closing its fd.
-The real fd closes at RELEASE. On host FUSE filesystems such as JuiceFS this
-avoids a metadata/object round trip for every synthetic close.
+host work for guest FUSE FLUSH requests. The default, `FlushPolicy::DupClose`,
+duplicates and closes the host descriptor so backing filesystem close-time
+write errors (such as ENOSPC or EIO from host FUSE FLUSH) reach guest `close()`.
+Neither policy guarantees durability; explicit fsync/fdatasync is unchanged.
 
-Use `FlushPolicy::DupClose` to retain the previous dup-and-close behavior and
-its close-time error check. Neither policy guarantees durability. With `None`,
-close-time write errors are no longer detected on each guest close; RELEASE
-still closes the host fd, but its errors cannot be reported to the guest's
-`close()` (and the current File drop discards host close errors). Applications
-that require write error reporting or durability must explicitly fsync or
-fdatasync; those operations are unchanged. This policy is backend configuration,
-not persisted filesystem metadata or a guest protocol change.
+The runtime's Unix `--mount` option accepts `flush=dup-close|none`, defaulting to
+`flush=dup-close`, alongside `stat-virt=` and `host-perms=`. For example:
+
+```sh
+--mount named-volume:/srv/juicefs/volume:flush=none
+```
+
+`flush=none` (`FlushPolicy::None`) validates the handle and returns success
+without duplicating or closing its fd. On backing filesystems such as JuiceFS,
+this avoids a metadata/object round trip for each synthetic close. Opt in only
+where that cost warrants losing close-time write error reporting: applications
+must fsync/fdatasync to detect write errors and request durability. The real fd
+closes at RELEASE, whose errors cannot be reported to guest `close()`; the
+current File drop discards those host close errors. This is per-mount runtime
+configuration, not persisted filesystem metadata or a guest protocol change.
+Older runtimes reject the new option; mount specifications omitting it retain
+the original dup-close behavior.
 
 Descriptor audit for a successful regular-file create/write sequence:
 
@@ -49,21 +58,33 @@ Descriptor audit for a successful regular-file create/write sequence:
   is no supplied handle.
 - Linux namespace resolution uses O_PATH descriptors; ordinary path-based
   metadata reopens use read-only descriptors. These do not add writable closes.
-- Default FLUSH adds no closes. RELEASE closes the real handle once.
+- Default FLUSH adds one synthetic close per request. With `flush=none` it adds
+  none. RELEASE closes the real handle once.
 
 The Linux `test_create_write_close_budget` traces CREATE → WRITE → handle-based
 truncate → four xattr operations → four FLUSH requests → fsync/fdatasync →
-RELEASE with `strace -f -yy`. It asserts **one close of the created file**, and
-five with `DupClose` (one RELEASE plus four synthetic closes). Run with:
+RELEASE with `strace -f -yy`. It asserts **one close of the created file** with
+explicit `None`, and five with the default `DupClose` (one RELEASE plus four
+synthetic closes). Run with:
 
 ```sh
 cargo test -p microsandbox-filesystem test_create_write_close_budget -- --nocapture
 ```
 
-Install strace on Linux to enforce the syscall count; without it the test reports
-that the count check was skipped. The count covers this direct handler sequence,
+Install strace on Linux (`apt-get install strace`); the test **fails** if it is
+missing, including in CI and Docker. The count covers this direct handler sequence,
 not arbitrary guest path walks, extra opens, handleless truncates, error cleanup,
 or checkpoint/unlink retention. No live JuiceFS latency improvement is claimed.
+
+`test_flush_reports_backing_close_errors_by_default` uses strace's path-filtered
+close fault injection to emulate backing FUSE FLUSH failures. It verifies that
+the default reports ENOSPC/EIO and explicit `none` acknowledges the guest close.
+Both Linux tests run in the ordinary crate suite:
+
+```sh
+cargo test -p microsandbox-filesystem
+cargo clippy -p microsandbox-filesystem --all-targets -- -D warnings
+```
 
 ### MemFs
 

@@ -205,8 +205,8 @@ fn open_flags_mutate(flags: i32) -> bool {
 
 /// Acknowledge a guest close, optionally requesting host close-time errors.
 ///
-/// The default avoids synthetic host FUSE FLUSH requests. Explicit fsync and
-/// fdatasync remain the durability and error-reporting boundary.
+/// The default duplicates and closes the host fd to report close-time errors.
+/// Explicit fsync and fdatasync remain necessary for durability.
 pub(crate) fn do_flush(
     fs: &PassthroughFs,
     _ctx: Context,

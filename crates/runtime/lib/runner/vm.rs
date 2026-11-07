@@ -19,7 +19,7 @@ use std::time::Duration;
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::entity::run as run_entity;
 #[cfg(unix)]
-use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle};
+use microsandbox_filesystem::{BindIdentityMap, BindIdentityMapHandle, FlushPolicy};
 use microsandbox_filesystem::{
     DynFileSystem, HostPermissions, PassthroughConfig, PassthroughFs, SingleFileFs,
     StatVirtualization,
@@ -2284,6 +2284,8 @@ fn build_vm(
             external_checkpoint: Some(external_options),
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
+            #[cfg(unix)]
+            flush_policy: parsed.flush_policy,
             readonly: parsed.readonly,
             quota_bytes: parsed.quota_bytes,
             #[cfg(unix)]
@@ -2455,6 +2457,8 @@ fn build_vm(
             inject_init: false,
             stat_virtualization: parsed.stat_virtualization,
             host_permissions: parsed.host_permissions,
+            #[cfg(unix)]
+            flush_policy: parsed.flush_policy,
             readonly: parsed.readonly,
             // Default-on protection: resolve the mount root following no symlink
             // unless the mount opted out via `follow-root-symlinks`.
@@ -3618,7 +3622,7 @@ fn spawn_log_thread(
 /// Parsed `--mount` spec: tag, host path, plus optional policies.
 ///
 /// Wire format: `tag:host_path[:opts]`.
-/// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`. The `ro` flag is
+/// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`, `flush=dup-close`. The `ro` flag is
 /// enforced by the host filesystem server; execution and suid flags are applied
 /// by agentd when the guest mount is installed.
 #[derive(Debug)]
@@ -3627,6 +3631,8 @@ struct ParsedMountSpec {
     host_path: String,
     stat_virtualization: StatVirtualization,
     host_permissions: HostPermissions,
+    #[cfg(unix)]
+    flush_policy: FlushPolicy,
     readonly: bool,
     follow_root_symlinks: bool,
     quota_bytes: Option<u64>,
@@ -3645,7 +3651,11 @@ struct ParsedMountSpec {
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
 /// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
 /// `follow-root-symlinks`) and keyed policies (`stat-virt=...`, `host-perms=...`,
-/// `uid=...`, `gid=...`). The `follow-root-symlinks` flag opts the mount out of the
+/// `flush=none|dup-close` (Unix), `uid=...`, `gid=...`). `flush=none` avoids
+/// synthetic host closes, but drops close-time write errors; use only on backing
+/// filesystems where this trade-off is acceptable (e.g. JuiceFS named volumes).
+/// Applications must fsync/fdatasync for error reporting and durability in that mode.
+/// The `follow-root-symlinks` flag opts the mount out of the
 /// default no-follow root resolution; its absence keeps the protective default on.
 /// `uid=`/`gid=` set the guest owner presented for host files that have no per-file
 /// override (see [`ParsedMountSpec::override_uid`]); they must be given together.
@@ -3670,6 +3680,10 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
 
     let mut stat_virtualization = StatVirtualization::Strict;
     let mut host_permissions = HostPermissions::Private;
+    #[cfg(unix)]
+    let mut flush_policy = FlushPolicy::DupClose;
+    #[cfg(unix)]
+    let mut seen_flush = false;
     let mut readonly = false;
     let mut follow_root_symlinks = false;
     let mut quota_bytes = None;
@@ -3770,6 +3784,30 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
                                 }
                             }
                         }
+                        "flush" => {
+                            #[cfg(unix)]
+                            {
+                                if seen_flush {
+                                    return Err(
+                                        "mount option `flush` specified more than once".to_string()
+                                    );
+                                }
+                                seen_flush = true;
+                                flush_policy = match value {
+                                    "none" => FlushPolicy::None,
+                                    "dup-close" => FlushPolicy::DupClose,
+                                    other => {
+                                        return Err(format!(
+                                            "invalid flush {other:?} (expected none|dup-close)"
+                                        ));
+                                    }
+                                };
+                            }
+                            #[cfg(windows)]
+                            return Err(
+                                "mount option `flush` is only supported on Unix".to_string()
+                            );
+                        }
                         "quota" => {
                             if seen_quota {
                                 return Err(
@@ -3830,6 +3868,8 @@ fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
         host_path: host_path.to_string(),
         stat_virtualization,
         host_permissions,
+        #[cfg(unix)]
+        flush_policy,
         readonly,
         follow_root_symlinks,
         quota_bytes,
@@ -3958,7 +3998,7 @@ mod tests {
     };
     #[cfg(unix)]
     use super::{
-        BOOTSTRAP_ROOTFS_DIR, BindIdentityMapRegistration, PARENT_WATCH_DETACH,
+        BOOTSTRAP_ROOTFS_DIR, BindIdentityMapRegistration, FlushPolicy, PARENT_WATCH_DETACH,
         ParentWatchdogSignal, TrampolineRootfsGuard, bind_identity_map_for_mount,
         bootstrap_trampoline_backend, read_parent_watchdog_signal, remove_trampoline_rootfs_dirs,
         trampoline_rootfs_cleanup_on_exit,
@@ -4637,9 +4677,33 @@ mod tests {
         assert_eq!(p.host_path, "/host/data");
         assert!(matches!(p.stat_virtualization, StatVirtualization::Strict));
         assert!(matches!(p.host_permissions, HostPermissions::Private));
+        #[cfg(unix)]
+        assert_eq!(p.flush_policy, FlushPolicy::DupClose);
         assert!(!p.readonly);
         assert_eq!(p.override_uid, None);
         assert_eq!(p.override_gid, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_parse_mount_spec_flush() {
+        for (value, expected) in [
+            ("none", FlushPolicy::None),
+            ("dup-close", FlushPolicy::DupClose),
+        ] {
+            let p = parse_mount_spec(&format!("data:/host/data:flush={value}")).unwrap();
+            assert_eq!(p.flush_policy, expected);
+        }
+        assert!(
+            parse_mount_spec("data:/host/data:flush=invalid")
+                .unwrap_err()
+                .contains("invalid flush")
+        );
+        assert!(
+            parse_mount_spec("data:/host/data:flush=none,flush=dup-close")
+                .unwrap_err()
+                .contains("more than once")
+        );
     }
 
     #[test]

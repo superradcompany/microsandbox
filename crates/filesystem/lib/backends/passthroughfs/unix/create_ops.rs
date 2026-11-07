@@ -152,6 +152,13 @@ pub(crate) fn do_create(
         }
     }
 
+    #[cfg(test)]
+    super::tests::BEFORE_CREATE_REGISTRATION.with(|hook| {
+        let callback = hook.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
     let entry = inode::register_created_fd(fs, parent, name, open_fd)?;
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);

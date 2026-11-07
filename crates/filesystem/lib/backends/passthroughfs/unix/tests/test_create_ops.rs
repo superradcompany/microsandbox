@@ -377,14 +377,20 @@ fn test_create_exclusive_truncate_and_handle_identity() {
         b"original"
     );
 
+    // Replace the name after openat, before CREATE registers or returns. A
+    // path-based registration/reopen would now select the replacement inode.
+    let root = sb.root.clone();
+    BEFORE_CREATE_REGISTRATION.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(root.join("existing"), root.join("detached")).unwrap();
+            std::fs::write(root.join("existing"), b"replacement").unwrap();
+        }))
+    });
     let (truncated, handle, _) = create(LINUX_O_RDWR | LINUX_O_TRUNC).unwrap();
     let handle = handle.unwrap();
     assert_eq!(truncated.inode, entry.inode);
     assert_eq!(truncated.attr.st_size, 0);
-    // Replace the name on the host; the CREATE handle must still target the
-    // exact inode whose stat was returned, rather than resolving the name again.
-    std::fs::rename(sb.root.join("existing"), sb.root.join("detached")).unwrap();
-    std::fs::write(sb.root.join("existing"), b"replacement").unwrap();
+    // The returned stat and retained handle must both belong to the old inode.
     sb.fuse_write(entry.inode, handle, b"retained", 0).unwrap();
     assert_eq!(
         std::fs::read(sb.root.join("detached")).unwrap(),

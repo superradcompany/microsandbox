@@ -70,7 +70,7 @@ impl PassthroughFsBuilder {
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
-            flush_policy: FlushPolicy::None,
+            flush_policy: FlushPolicy::DupClose,
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
@@ -138,7 +138,7 @@ impl PassthroughFsBuilder {
         self
     }
 
-    /// Set the host action for guest close. Default: [`FlushPolicy::None`].
+    /// Set the host action for guest close. Default: [`FlushPolicy::DupClose`].
     ///
     /// See [`FlushPolicy`] for close-time error reporting and durability limits.
     pub fn flush_policy(mut self, policy: FlushPolicy) -> Self {

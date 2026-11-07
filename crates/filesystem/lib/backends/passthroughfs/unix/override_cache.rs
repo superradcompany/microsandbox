@@ -2,7 +2,7 @@
 //! single-writer contract here. Entries expire after five seconds (the default
 //! guest attribute TTL), and a changed host ctime forces an earlier reread.
 //! Guest SETXATTR/REMOVEXATTR reject the reserved override key; all internal
-//! override writers publish through this cache. Namespace mutations clear it.
+//! override writers invalidate through this cache. Namespace mutations clear it.
 //! Errors are never cached. The cap also bounds mounts with long-lived inodes.
 
 use std::{
@@ -11,7 +11,7 @@ use std::{
     fs::File,
     io,
     os::fd::{AsRawFd, FromRawFd, RawFd},
-    sync::Mutex,
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -22,6 +22,13 @@ use crate::{
     },
     stat64,
 };
+
+// Deterministic syscall-boundary ordering for concurrent-writer regressions.
+#[cfg(test)]
+thread_local! {
+    static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+    static AFTER_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+}
 
 const CAPACITY: usize = 16_384;
 const TTL: Duration = Duration::from_secs(5);
@@ -45,10 +52,13 @@ struct CacheEntries {
     values: HashMap<Identity, CachedOverride>,
     recency: BTreeMap<u64, Identity>,
     clock: u64,
+    generation: u64,
+    in_flight: HashMap<Identity, Weak<Mutex<()>>>,
 }
 
 impl CacheEntries {
     fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
         self.values.clear();
         self.recency.clear();
     }
@@ -78,16 +88,38 @@ fn ctime(st: &stat64) -> (i64, i64) {
 
 impl OverrideCache {
     pub(crate) fn invalidate(&self, dev: u64, ino: u64) {
-        self.entries.lock().unwrap().remove(&(dev, ino));
+        let key = (dev, ino);
+        let guard = self.inode_guard(key);
+        let _guard = guard.lock().unwrap();
+        self.entries.lock().unwrap().remove(&key);
     }
 
     pub(crate) fn clear(&self) {
         self.entries.lock().unwrap().clear();
     }
 
-    fn read(&self, fd: RawFd, st: &stat64, strict: bool) -> io::Result<Option<OverrideStat>> {
+    fn inode_guard(&self, key: Identity) -> Arc<Mutex<()>> {
         let mut entries = self.entries.lock().unwrap();
+        if let Some(guard) = entries.in_flight.get(&key).and_then(Weak::upgrade) {
+            return guard;
+        }
+        // Bound idle guard bookkeeping without discarding a guard that still
+        // has a reader, writer, or waiter. Never wait while holding the table.
+        if entries.in_flight.len() >= CAPACITY {
+            entries
+                .in_flight
+                .retain(|_, guard| guard.strong_count() > 0);
+        }
+        let guard = Arc::new(Mutex::new(()));
+        entries.in_flight.insert(key, Arc::downgrade(&guard));
+        guard
+    }
+
+    fn read(&self, fd: RawFd, st: &stat64, strict: bool) -> io::Result<Option<OverrideStat>> {
         let key = identity(st);
+        let guard = self.inode_guard(key);
+        let _guard = guard.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap();
         if let Some(entry) = entries.values.get(&key)
             && entry.ctime == ctime(st)
             && entry.read_at.elapsed() < TTL
@@ -97,8 +129,23 @@ impl OverrideCache {
             return Ok(value);
         }
         entries.remove(&key);
+        let generation = entries.generation;
+        drop(entries);
+
         let value = stat_override::get_override(fd, true, strict)?;
-        Self::insert(&mut entries, st, value);
+        #[cfg(test)]
+        AFTER_READ.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
+        let mut entries = self.entries.lock().unwrap();
+        // clear() cannot wait for host I/O, but must invalidate reads already
+        // in flight. Per-inode guards serialize reads with writes/invalidate.
+        if generation == entries.generation {
+            Self::insert(&mut entries, st, value);
+        }
         Ok(value)
     }
 
@@ -161,25 +208,23 @@ impl OverrideCache {
         mode: u32,
         rdev: u32,
     ) -> io::Result<()> {
-        // Serialize publication with reads so an in-flight miss cannot publish
-        // an old value after a successful mutation.
-        let mut entries = self.entries.lock().unwrap();
+        let st = platform::fstat(fd)?;
+        let key = identity(&st);
+        let guard = self.inode_guard(key);
+        let _guard = guard.lock().unwrap();
+        self.entries.lock().unwrap().remove(&key);
+
+        // Do not publish the supplied value under a later ctime: another mount
+        // or host writer may have replaced the xattr before that stat. The next
+        // read must obtain the actual backing value. Invalidate even on error.
         stat_override::set_override(fd, uid, gid, mode, rdev)?;
-        match platform::fstat(fd) {
-            Ok(st) => Self::insert(
-                &mut entries,
-                &st,
-                Some(OverrideStat {
-                    version: 1,
-                    _pad: [0; 3],
-                    uid,
-                    gid,
-                    mode,
-                    rdev,
-                }),
-            ),
-            Err(_) => entries.clear(),
-        }
+        #[cfg(test)]
+        AFTER_WRITE.with(|hook| {
+            let callback = hook.borrow_mut().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        });
         Ok(())
     }
 
@@ -212,7 +257,133 @@ impl OverrideCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use super::super::{PassthroughConfig, PassthroughFs};
     use super::*;
+    use crate::{Context, DynFileSystem, Extensions, FsOptions, SetattrValid};
+
+    #[test]
+    fn concurrent_backend_write_is_not_cached_as_our_value() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = || {
+            let fs = PassthroughFs::new(PassthroughConfig {
+                root_dir: root.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap();
+            fs.init(FsOptions::empty()).unwrap();
+            fs
+        };
+        let a = backend();
+        let b = Arc::new(backend());
+        let ctx = Context {
+            uid: 0,
+            gid: 0,
+            pid: 1,
+        };
+        let (entry, handle, _) = a
+            .create(ctx, 1, c"data", 0o600, false, 2, 0, Extensions::default())
+            .unwrap();
+        let other = b.lookup(ctx, 1, c"data").unwrap();
+
+        // B writes after A's setxattr, before A can read the resulting ctime.
+        AFTER_WRITE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut attr: stat64 = unsafe { std::mem::zeroed() };
+                attr.st_uid = 3000;
+                attr.st_gid = 4000;
+                b.setattr(
+                    ctx,
+                    other.inode,
+                    attr,
+                    None,
+                    SetattrValid::UID | SetattrValid::GID,
+                )
+                .unwrap();
+            }))
+        });
+        let handles = a.handles.read().unwrap();
+        let file = handles[&handle.unwrap()].file.read().unwrap();
+        a.override_cache
+            .set_override(file.as_raw_fd(), 1000, 2000, platform::MODE_REG | 0o600, 0)
+            .unwrap();
+        drop(file);
+        drop(handles);
+
+        // A's partial chmod must preserve B's owner, including in the host xattr.
+        let mut attr: stat64 = unsafe { std::mem::zeroed() };
+        attr.st_mode = 0o640;
+        a.setattr(ctx, entry.inode, attr, handle, SetattrValid::MODE)
+            .unwrap();
+        let file = File::open(root.path().join("data")).unwrap();
+        let value = stat_override::get_override(file.as_raw_fd(), true, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (value.uid, value.gid, value.mode),
+            (3000, 4000, platform::MODE_REG | 0o640)
+        );
+    }
+
+    #[test]
+    fn slow_inode_does_not_block_other_inodes_or_repopulate_after_clear() {
+        let cache = OverrideCache::default();
+        let slow = tempfile::tempfile().unwrap();
+        let other = tempfile::tempfile().unwrap();
+        let slow_st = platform::fstat(slow.as_raw_fd()).unwrap();
+        let other_st = platform::fstat(other.as_raw_fd()).unwrap();
+        cache.read(other.as_raw_fd(), &other_st, true).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let cache = &cache;
+            scope.spawn(move || {
+                AFTER_READ.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        entered_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }))
+                });
+                cache.read(slow.as_raw_fd(), &slow_st, true).unwrap();
+            });
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            scope.spawn(move || {
+                assert!(cache.read(-1, &other_st, true).unwrap().is_none());
+                cache
+                    .set_override(other.as_raw_fd(), 123, 456, platform::MODE_REG | 0o600, 0)
+                    .unwrap();
+                assert_eq!(
+                    {
+                        cache
+                            .get_override(other.as_raw_fd(), true, true)
+                            .unwrap()
+                            .unwrap()
+                            .uid
+                    },
+                    123
+                );
+                done_tx.send(()).unwrap();
+            });
+
+            let completed = done_rx.recv_timeout(Duration::from_secs(2));
+            if completed.is_ok() {
+                // A namespace clear must not be undone by the paused read.
+                cache.clear();
+            }
+            resume_tx.send(()).unwrap();
+            assert!(
+                completed.is_ok(),
+                "unrelated inode blocked behind a slow xattr read"
+            );
+        });
+        assert!(
+            cache.read(-1, &slow_st, true).is_err(),
+            "in-flight read repopulated after clear"
+        );
+    }
 
     #[test]
     fn caches_absence_mutations_and_invalidates_without_hiding_errors() {
@@ -234,7 +405,7 @@ mod tests {
             .set_override(fd, 1000, 2000, platform::MODE_REG | 0o640, 0)
             .unwrap();
         let st = platform::fstat(fd).unwrap();
-        let value = cache.read(-1, &st, true).unwrap().unwrap();
+        let value = cache.read(fd, &st, true).unwrap().unwrap();
         assert_eq!(
             (value.uid, value.gid, value.mode),
             (1000, 2000, platform::MODE_REG | 0o640)
@@ -244,7 +415,8 @@ mod tests {
             .set_override(fd, 3000, 4000, platform::MODE_REG | 0o600, 0)
             .unwrap();
         let st = platform::fstat(fd).unwrap();
-        assert_eq!({ cache.read(-1, &st, true).unwrap().unwrap().uid }, 3000);
+        assert!(cache.read(-1, &st, true).is_err());
+        assert_eq!({ cache.read(fd, &st, true).unwrap().unwrap().uid }, 3000);
         cache
             .entries
             .lock()
