@@ -1227,6 +1227,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -5519,6 +5520,11 @@ func CreateService(ctx context.Context, request ServiceCreateRequest) (*ServiceI
 
 // GetService returns a Service by slug.
 func GetService(ctx context.Context, slug string) (*ServiceInfo, error) {
+	// The slug is passed as a C string, which ends at the first NUL, so a slug with one
+	// would fetch a different Service.
+	if strings.IndexByte(slug, 0) >= 0 {
+		return nil, &Error{Kind: KindInvalidConfig, Message: fmt.Sprintf("invalid config: service slug %q is not valid", slug)}
+	}
 	cSlug := C.CString(slug)
 	defer C.free(unsafe.Pointer(cSlug))
 	return callService(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {

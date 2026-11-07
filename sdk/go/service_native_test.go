@@ -122,6 +122,9 @@ func TestServiceNativePassesResultsAndOutcomesThrough(t *testing.T) {
 	if _, err := GetService(ctx, "gone"); !IsKind(err, ErrServiceNotFound) {
 		t.Fatalf("missing service: %v", err)
 	}
+	if got, err := GetService(ctx, "shop\x00suffix"); !IsKind(err, ErrInvalidConfig) {
+		t.Fatalf("slug with NUL = %v, %v; want ErrInvalidConfig", got, err)
+	}
 	_, err = svc.Update(ctx, ServiceTarget{Sandbox: "web-2", Port: 0})
 	if !IsKind(err, ErrInvalidConfig) {
 		t.Fatalf("port zero update: %v", err)
