@@ -29,12 +29,33 @@ duplicates and closes the host descriptor so backing filesystem close-time
 write errors (such as ENOSPC or EIO from host FUSE FLUSH) reach guest `close()`.
 Neither policy guarantees durability; explicit fsync/fdatasync is unchanged.
 
-The runtime's Unix `--mount` option accepts `flush=dup-close|none`, defaulting to
-`flush=dup-close`, alongside `stat-virt=` and `host-perms=`. For example:
+The Unix runtime accepts `flush=dup-close|none` in launch JSON mount strings,
+alongside `stat-virt=` and `host-perms=`. The launcher's `msb machine` command
+reads this JSON through `--config-fd` or `--config-file`; it has no `--mount` flag.
+For example, the `mounts` member of a complete launch configuration can contain:
 
-```sh
---mount named-volume:/srv/juicefs/volume:flush=none
+```json
+{"mounts": ["named-volume:/srv/juicefs/volume:flush=none"]}
 ```
+
+Shared sandbox specs use the typed per-mount `options.flush_policy` field:
+
+```json
+{
+  "mounts": [{
+    "type": "Bind",
+    "host": "/srv/juicefs/volume",
+    "guest": "/data",
+    "options": {"flush_policy": "none"}
+  }]
+}
+```
+
+The wire values are `"dup_close"` and `"none"`. The default is `"dup_close"`,
+which is omitted when serialized and emits no launch option. The Rust SDK
+builder exposes `.flush_policy(MountFlushPolicy::None)`; explicit `"none"`
+renders as `flush=none` for Unix virtiofs mounts. It is rejected for tmpfs,
+disk-backed mounts, and Windows runtimes.
 
 `flush=none` (`FlushPolicy::None`) validates the handle and returns success
 without duplicating or closing its fd. On backing filesystems such as JuiceFS,
@@ -42,8 +63,8 @@ this avoids a metadata/object round trip for each synthetic close. Opt in only
 where that cost warrants losing close-time write error reporting: applications
 must fsync/fdatasync to detect write errors and request durability. The real fd
 closes at RELEASE, whose errors cannot be reported to guest `close()`; the
-current File drop discards those host close errors. This is per-mount runtime
-configuration, not persisted filesystem metadata or a guest protocol change.
+current File drop discards those host close errors. This policy is persisted in
+the sandbox spec; it does not change filesystem metadata or the guest protocol.
 Older runtimes reject the new option; mount specifications omitting it retain
 the original dup-close behavior.
 

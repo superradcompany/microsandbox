@@ -27,6 +27,7 @@ use crate::{
 #[cfg(test)]
 thread_local! {
     static AFTER_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+    static BEFORE_INVALIDATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
     static AFTER_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
 }
 
@@ -89,8 +90,17 @@ fn ctime(st: &stat64) -> (i64, i64) {
 impl OverrideCache {
     pub(crate) fn invalidate(&self, dev: u64, ino: u64) {
         let key = (dev, ino);
+        #[cfg(test)]
+        BEFORE_INVALIDATE.with(|hook| {
+            if let Some(callback) = hook.borrow_mut().take() {
+                callback();
+            }
+        });
         let guard = self.inode_guard(key);
         let _guard = guard.lock().unwrap();
+        // Remove after all earlier readers finish, including readers that
+        // started between FORGET's table mutation and this invalidation. Reads
+        // crossing clear() still use its generation check before publishing.
         self.entries.lock().unwrap().remove(&key);
     }
 
@@ -383,6 +393,81 @@ mod tests {
             cache.read(-1, &slow_st, true).is_err(),
             "in-flight read repopulated after clear"
         );
+    }
+
+    #[test]
+    fn forget_during_xattr_does_not_block_unrelated_inode() {
+        for batch in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let fs = PassthroughFs::new(PassthroughConfig {
+                root_dir: root.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap();
+            fs.init(FsOptions::empty()).unwrap();
+            let ctx = Context {
+                uid: 0,
+                gid: 0,
+                pid: 1,
+            };
+            let (slow, handle, _) = fs
+                .create(ctx, 1, c"slow", 0o600, false, 2, 0, Extensions::default())
+                .unwrap();
+            let (other, _, _) = fs
+                .create(ctx, 1, c"other", 0o600, false, 2, 0, Extensions::default())
+                .unwrap();
+            fs.override_cache.clear();
+            let file = File::open(root.path().join("slow")).unwrap();
+            let st = platform::fstat(file.as_raw_fd()).unwrap();
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let (forget_tx, forget_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+
+            std::thread::scope(|scope| {
+                let fs = &fs;
+                scope.spawn(move || {
+                    AFTER_READ.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || {
+                            entered_tx.send(()).unwrap();
+                            resume_rx.recv().unwrap();
+                        }));
+                    });
+                    fs.getattr(ctx, slow.inode, handle).unwrap();
+                });
+                entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                scope.spawn(move || {
+                    BEFORE_INVALIDATE.with(|hook| {
+                        *hook.borrow_mut() = Some(Box::new(move || {
+                            forget_tx.send(()).unwrap();
+                        }));
+                    });
+                    if batch {
+                        fs.batch_forget(ctx, vec![(slow.inode, 1)]);
+                    } else {
+                        fs.forget(ctx, slow.inode, 1);
+                    }
+                });
+                forget_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                scope.spawn(move || {
+                    // Handleless GETATTR must consult the mount-wide inode table.
+                    fs.getattr(ctx, other.inode, None).unwrap();
+                    done_tx.send(()).unwrap();
+                });
+                let completed = done_rx.recv_timeout(Duration::from_secs(2));
+                // Always unblock the worker, including when testing the broken code.
+                resume_tx.send(()).unwrap();
+                assert!(
+                    completed.is_ok(),
+                    "batch={batch}: FORGET blocked unrelated GETATTR"
+                );
+            });
+
+            assert!(
+                fs.override_cache.read(-1, &st, true).is_err(),
+                "in-flight read repopulated the forgotten identity"
+            );
+        }
     }
 
     #[test]

@@ -2255,6 +2255,7 @@ fn build_vm(
         };
         let parsed = parse_mount_spec(&file_mount.mount)
             .map_err(|e| RuntimeError::Custom(format!("file mount {:?}: {e}", file_mount.mount)))?;
+        let mount_config = parsed.passthrough_config();
         let tag = parsed.tag;
         let host_path = PathBuf::from(&parsed.host_path);
         let override_owner = match (parsed.override_uid, parsed.override_gid) {
@@ -2282,17 +2283,11 @@ fn build_vm(
         let cfg = PassthroughConfig {
             max_state_bytes: vm.fs_state_limit(),
             external_checkpoint: Some(external_options),
-            stat_virtualization: parsed.stat_virtualization,
-            host_permissions: parsed.host_permissions,
-            #[cfg(unix)]
-            flush_policy: parsed.flush_policy,
-            readonly: parsed.readonly,
-            quota_bytes: parsed.quota_bytes,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             #[cfg(windows)]
             default_owner: override_owner,
-            ..Default::default()
+            ..mount_config
         };
         let backend =
             match SingleFileFs::new(host_path.clone(), file_mount.filename.clone(), cfg) {
@@ -2397,6 +2392,7 @@ fn build_vm(
         let parsed = parse_mount_spec(mount_spec)
             .map_err(|e| RuntimeError::Custom(format!("--mount {mount_spec:?}: {e}")))?;
 
+        let mount_config = parsed.passthrough_config();
         let tag = parsed.tag;
         // Keep the host path as a PathBuf so mount failures can format it
         // without relying on the string-only mount spec field.
@@ -2454,21 +2450,11 @@ fn build_vm(
             root_dir: host_path.clone(),
             external_checkpoint: owned_checkpoint.is_none().then_some(external_options),
             owned_checkpoint,
-            inject_init: false,
-            stat_virtualization: parsed.stat_virtualization,
-            host_permissions: parsed.host_permissions,
-            #[cfg(unix)]
-            flush_policy: parsed.flush_policy,
-            readonly: parsed.readonly,
-            // Default-on protection: resolve the mount root following no symlink
-            // unless the mount opted out via `follow-root-symlinks`.
-            no_symlink_root: !parsed.follow_root_symlinks,
             #[cfg(unix)]
             bind_identity_map: mount_bind_identity_map,
             #[cfg(windows)]
             default_owner: override_owner,
-            quota_bytes: parsed.quota_bytes,
-            ..Default::default()
+            ..mount_config
         };
         let backend = match PassthroughFs::new(cfg) {
             Err(error) if owned_mount.is_none() && relaxed && restore_binding.is_some_and(|binding| !binding.require_backing)
@@ -3619,14 +3605,14 @@ fn spawn_log_thread(
     Ok(())
 }
 
-/// Parsed `--mount` spec: tag, host path, plus optional policies.
+/// Parsed launch-JSON mount string: tag, host path, plus optional policies.
 ///
 /// Wire format: `tag:host_path[:opts]`.
 /// Defaults: `rw`, `stat-virt=strict`, `host-perms=private`, `flush=dup-close`. The `ro` flag is
 /// enforced by the host filesystem server; execution and suid flags are applied
 /// by agentd when the guest mount is installed.
 #[derive(Debug)]
-struct ParsedMountSpec {
+pub struct ParsedMountSpec {
     tag: String,
     host_path: String,
     stat_virtualization: StatVirtualization,
@@ -3646,7 +3632,30 @@ struct ParsedMountSpec {
     override_gid: Option<u32>,
 }
 
-/// Parse a `--mount` spec into [`ParsedMountSpec`].
+impl ParsedMountSpec {
+    /// Build the backing filesystem configuration from the parsed launch policy.
+    ///
+    /// Callers add lifecycle state and resolved identity mappings before opening
+    /// the backend. This applies to directory and single-file virtiofs mounts.
+    pub fn passthrough_config(&self) -> PassthroughConfig {
+        PassthroughConfig {
+            root_dir: PathBuf::from(&self.host_path),
+            inject_init: false,
+            stat_virtualization: self.stat_virtualization,
+            host_permissions: self.host_permissions,
+            #[cfg(unix)]
+            flush_policy: self.flush_policy,
+            readonly: self.readonly,
+            no_symlink_root: !self.follow_root_symlinks,
+            quota_bytes: self.quota_bytes,
+            #[cfg(windows)]
+            default_owner: self.override_uid.zip(self.override_gid),
+            ..Default::default()
+        }
+    }
+}
+
+/// Parse a launch-JSON mount string into [`ParsedMountSpec`].
 ///
 /// Wire grammar: `tag:host_path[:opts]`, where `opts` is a comma-separated
 /// option block of flags (`ro`, `rw`, `noexec`, `nosuid`, `nodev`,
@@ -3658,8 +3667,8 @@ struct ParsedMountSpec {
 /// The `follow-root-symlinks` flag opts the mount out of the
 /// default no-follow root resolution; its absence keeps the protective default on.
 /// `uid=`/`gid=` set the guest owner presented for host files that have no per-file
-/// override (see [`ParsedMountSpec::override_uid`]); they must be given together.
-fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
+/// override; they must be given together.
+pub fn parse_mount_spec(spec: &str) -> Result<ParsedMountSpec, String> {
     let (tag, rest) = spec
         .split_once(':')
         .ok_or_else(|| format!("expected tag:host_path[:opts] shape, got {spec:?}"))?;

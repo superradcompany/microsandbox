@@ -28,8 +28,8 @@ use crate::{
     CloudSecretsConfig, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,
     CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
     CloudViolationAction, CloudVolumeMount, Destination, DestinationGroup, Direction, EnvVar,
-    HandoffInit, HostPermissions, ModificationPolicy, MountOptions, NetworkPolicy,
-    OwnedVolumeStorage, PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy,
+    HandoffInit, HostPermissions, ModificationPolicy, MountFlushPolicy, MountOptions,
+    NetworkPolicy, OwnedVolumeStorage, PortRange, Protocol, Rule, SandboxLogLevel, SandboxPolicy,
     SecretSubstitution, SecurityProfile, StatVirtualization,
 };
 
@@ -51,6 +51,7 @@ const DOMAIN_TYPE_NAMES: &[&str] = &[
     "HandoffInit",
     "HostPermissions",
     "MountOptions",
+    "MountFlushPolicy",
     "OwnedVolumeStorage",
     "NetworkPolicy",
     "PortRange",
@@ -155,6 +156,7 @@ pub fn domain_declarations() -> Vec<String> {
         SandboxPolicy::decl(&cfg),
         SandboxLogLevel::decl(&cfg),
         MountOptions::decl(&cfg),
+        MountFlushPolicy::decl(&cfg),
         OwnedVolumeStorage::decl(&cfg),
         StatVirtualization::decl(&cfg),
         HostPermissions::decl(&cfg),

@@ -86,8 +86,8 @@ use crate::{
     config::{BlockWritebackConfig, RuntimeConfig},
     runtime::handle::MetricsReservationCleanup,
     sandbox::{
-        DiskImageFormat, HostPermissions, MountOptions, RootfsSource, SandboxConfig,
-        StatVirtualization, VolumeMount,
+        DiskImageFormat, HostPermissions, MountFlushPolicy, MountOptions, RootfsSource,
+        SandboxConfig, StatVirtualization, VolumeMount,
     },
     volume::VolumeKind,
 };
@@ -2088,6 +2088,9 @@ fn is_owned_restored_disk(host: &Path, sandbox: &Path, id: &str, format: DiskIma
 
 fn mount_option_tokens(options: MountOptions) -> Vec<String> {
     let mut tokens = Vec::new();
+    if options.flush_policy == MountFlushPolicy::None {
+        tokens.push("flush=none".to_string());
+    }
     if options.readonly {
         tokens.push("ro".to_string());
     }
@@ -2763,11 +2766,17 @@ mod tests {
     use std::num::NonZero;
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
+    use microsandbox_filesystem::FlushPolicy;
     use microsandbox_protocol::{
         bootstrap::{BootstrapBlockRoot, BootstrapEnvVar, BootstrapMountFlags},
         exec::ExecRlimit,
     };
+    #[cfg(unix)]
+    use microsandbox_runtime::vm::parse_mount_spec;
     use microsandbox_types::HandoffInit;
+    #[cfg(unix)]
+    use microsandbox_types::SandboxSpec;
     use sea_orm::{ActiveModelTrait, Set};
     use tempfile::tempdir;
 
@@ -4673,6 +4682,74 @@ mod tests {
         // Should not contain bind or overlay args.
         assert!(!rendered.contains(&"--rootfs-path".to_string()));
         assert!(!rendered.contains(&"--rootfs-lower".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spec_flush_policy_reaches_launch_and_backend_config() {
+        for (policy, expected) in [
+            (None, FlushPolicy::DupClose),
+            (Some("dup_close"), FlushPolicy::DupClose),
+            (Some("none"), FlushPolicy::None),
+        ] {
+            let mut options = serde_json::json!({"readonly": true});
+            if let Some(policy) = policy {
+                options["flush_policy"] = policy.into();
+            }
+            let spec: SandboxSpec = serde_json::from_value(serde_json::json!({
+                "name": "flush-policy",
+                "image": {"Bind": {"path": "/tmp/rootfs"}},
+                "mounts": [
+                    {"type": "Bind", "host": "/host/data", "guest": "/data", "options": options},
+                    {"type": "Bind", "host": "/host/file", "guest": "/file", "options": options},
+                    {"type": "Named", "name": "cache", "guest": "/cache", "options": options},
+                    {"type": "Owned", "guest": "/owned", "storage": {"kind": "directory", "quota_mib": null}, "options": options}
+                ]
+            })).unwrap();
+            let mut config = SandboxConfig {
+                spec,
+                ..Default::default()
+            };
+            crate::sandbox::validate_volume_mounts(&mut config.spec.mounts).unwrap();
+            let local = test_local_backend();
+            let files = HashMap::from([("/file".into(), ("file".into(), "file_tag".into()))]);
+            let named = HashMap::from([("cache".into(), named_directory("/host/cache", None))]);
+            let (_, launch) = machine_cli_args(
+                &local,
+                &config,
+                42,
+                #[cfg(feature = "net")]
+                test_network_slot(),
+                #[cfg(feature = "net")]
+                test_resolved_network(&config),
+                Path::new("/tmp/msb.db"),
+                30,
+                Path::new("/tmp/logs"),
+                Path::new("/tmp/runtime"),
+                Path::new("/tmp/agent.sock"),
+                Path::new("/tmp/libkrunfw.dylib"),
+                &files,
+                &named,
+                None,
+                None,
+                None,
+                None,
+            );
+            let launch: LaunchConfig =
+                serde_json::from_slice(&serde_json::to_vec(&launch).unwrap()).unwrap();
+            assert_eq!(launch.mounts.len(), 3);
+            assert_eq!(launch.file_mounts.len(), 1);
+            for mount in launch
+                .mounts
+                .iter()
+                .chain(launch.file_mounts.iter().map(|file| &file.mount))
+            {
+                assert_eq!(mount.contains("flush="), policy == Some("none"), "{mount}");
+                let backend = parse_mount_spec(mount).unwrap().passthrough_config();
+                assert_eq!(backend.flush_policy, expected, "{mount}");
+                assert!(backend.readonly);
+            }
+        }
     }
 
     #[tokio::test]

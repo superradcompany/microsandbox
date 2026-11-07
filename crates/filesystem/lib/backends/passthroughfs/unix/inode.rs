@@ -539,11 +539,17 @@ fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
 /// Decrement the reference count for an inode. Remove it from the table
 /// when the count reaches zero.
 pub(crate) fn forget_one(fs: &PassthroughFs, inode: u64, count: u64) {
-    let mut inodes = fs.inodes.write().unwrap();
-    if let Some(data) = inodes.get(&inode) {
-        fs.override_cache.invalidate(data.dev, data.ino);
+    let identity = {
+        let mut inodes = fs.inodes.write().unwrap();
+        let identity = inodes.get(&inode).map(|data| (data.dev, data.ino));
+        forget_one_locked(&mut inodes, inode, count);
+        identity
+    };
+    // Invalidation may wait for an in-flight xattr syscall on this identity.
+    // Never hold the mount-wide inode table while waiting for host I/O.
+    if let Some((dev, ino)) = identity {
+        fs.override_cache.invalidate(dev, ino);
     }
-    forget_one_locked(&mut inodes, inode, count);
 }
 
 /// Decrement the reference count under an already-held write lock.
