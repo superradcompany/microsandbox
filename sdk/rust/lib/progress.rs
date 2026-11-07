@@ -63,21 +63,21 @@ mod tests {
     #[tokio::test]
     async fn ignored_full_or_dropped_progress_never_blocks_the_producer() {
         let (mut events, sender) = channel();
-        let weak = Some(sender.downgrade());
+        let weak = sender.downgrade();
         for _ in 0..10000 {
             report(
-                &weak,
+                &Some(weak.clone()),
                 CreationProgress::Startup(StartupProgress::phase(StartupPhase::Activating)),
             );
         }
         assert!(events.recv().await.is_some());
         drop(events);
         report(
-            &weak,
+            &Some(weak.clone()),
             CreationProgress::Startup(StartupProgress::phase(StartupPhase::Activating)),
         );
         drop(sender);
-        assert!(weak.unwrap().upgrade().is_none());
+        assert!(weak.upgrade().is_none());
     }
 
     #[test]

@@ -309,11 +309,11 @@ fn second_account_cannot_read_legacy_fresh_or_acl_inherited_storage() {
     read_as_other(&files, true);
     let fresh = prepare_database_file(&dir.join("fresh.db"), true).unwrap();
     fs::write(&fresh, "fresh secret").unwrap();
-    read_as_other(&[fresh.clone()], true);
+    read_as_other(std::slice::from_ref(&fresh), true);
     // Isolate the inherited file ACL from the directory barrier: search-only access
     // must still leave the fresh file unreadable. Restore the boundary immediately.
     chmod(&dir, 0o711);
-    read_as_other(&[fresh.clone()], true);
+    read_as_other(std::slice::from_ref(&fresh), true);
     chmod(&dir, 0o700);
     let output = Command::new("sudo").args(["-n", "-u", "nobody", "python3", "-c",
         "import os,sys,errno\ntry: os.symlink(sys.argv[1],sys.argv[2])\nexcept PermissionError as e: assert e.errno==errno.EACCES\nelse: raise AssertionError('other account could substitute catalog path')"])

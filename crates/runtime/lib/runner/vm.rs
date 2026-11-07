@@ -2725,7 +2725,9 @@ fn build_vm(
             network_activation_handle = Some(network.defer_activation());
         }
 
-        network.start(tokio_handle.clone());
+        network
+            .start(tokio_handle.clone())
+            .map_err(|err| RuntimeError::Custom(err.to_string()))?;
 
         let guest_mac = network.guest_mac();
         let net_backend = network.take_backend();
