@@ -21,7 +21,7 @@
 use std::{
     ffi::CStr,
     io,
-    os::fd::FromRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
@@ -29,7 +29,7 @@ use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchm
 use super::{PassthroughFs, inode};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
-    backends::shared::{handle_table::HandleData, name_validation, platform, stat_override},
+    backends::shared::{handle_table::HandleData, name_validation, platform},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -76,6 +76,14 @@ pub(crate) fn do_create(
     let mut open_flags = inode::translate_open_flags(flags as i32);
     open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
+    // Match OPEN's writeback descriptor policy before the first open.
+    if fs.writeback.load(Ordering::Relaxed) {
+        if open_flags & libc::O_ACCMODE == libc::O_WRONLY {
+            open_flags = (open_flags & !libc::O_ACCMODE) | libc::O_RDWR;
+        }
+        open_flags &= !libc::O_APPEND;
+    }
+
     // With overlay, default to conservative 0o600 and let `Mirror` widen via
     // `fchmod` after creation. Without overlay (`Off`), use the guest's request
     // OR'd with the owner-access floor so the host process can keep accessing
@@ -110,31 +118,32 @@ pub(crate) fn do_create(
         }
 
         let full_mode = platform::MODE_REG | file_mode;
-        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
+        if let Err(e) = fs
+            .override_cache
+            .set_override(fd, ctx.uid, ctx.gid, full_mode, 0)
+        {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
         }
     }
 
-    // Close the fd we used for xattr, then do a proper lookup.
-    unsafe { libc::close(fd) };
-
-    let entry = inode::do_lookup(fs, parent, name)?;
-
-    // Reopen for the handle — strip O_CREAT since the file already exists.
-    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
-    let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+    // Retain the original descriptor through registration and handle publication.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let open_fd = file.as_raw_fd();
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) = stat_override::get_override(open_fd, true, fs.cfg.strict_enabled())?
+            if let Some(ovr) =
+                fs.override_cache
+                    .get_override(open_fd, true, fs.cfg.strict_enabled())?
             {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ =
-                        stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ = fs
+                        .override_cache
+                        .set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {
@@ -143,7 +152,7 @@ pub(crate) fn do_create(
         }
     }
 
-    let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
+    let entry = inode::register_created_fd(fs, parent, name, open_fd)?;
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {
@@ -202,7 +211,8 @@ pub(crate) fn do_mkdir(
 
         let full_mode = platform::MODE_DIR | dir_mode;
         if let Err(e) =
-            stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
+            fs.override_cache
+                .set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
         {
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
             return Err(e);
@@ -280,7 +290,10 @@ pub(crate) fn do_mknod(
 
         // Store the requested type and permissions in xattr.
         let full_mode = file_type | perm_mode;
-        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, rdev) {
+        if let Err(e) = fs
+            .override_cache
+            .set_override(fd, ctx.uid, ctx.gid, full_mode, rdev)
+        {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
@@ -368,7 +381,10 @@ pub(crate) fn do_symlink(
 
             // Set override xattr with S_IFLNK.
             let mode = platform::MODE_LNK | 0o777;
-            if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
+            if let Err(e) = fs
+                .override_cache
+                .set_override(fd, ctx.uid, ctx.gid, mode, 0)
+            {
                 unsafe { libc::close(fd) };
                 unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
                 return Err(e);
@@ -411,7 +427,9 @@ pub(crate) fn do_symlink(
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
 
-            let xattr_result = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0);
+            let xattr_result = fs
+                .override_cache
+                .set_override(fd, ctx.uid, ctx.gid, mode, 0);
             unsafe { libc::close(fd) };
 
             if let Err(err) = xattr_result {
@@ -518,7 +536,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match stat_override::get_override(
+        match fs.override_cache.get_override(
             inode_fd.raw(),
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),

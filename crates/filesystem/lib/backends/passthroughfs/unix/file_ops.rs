@@ -23,7 +23,7 @@ use super::host_mode::host_strip_priv_bits;
 use super::{PassthroughFs, inode};
 use crate::{
     Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
-    backends::shared::{handle_table::HandleData, init_binary, platform, stat_override},
+    backends::shared::{handle_table::HandleData, init_binary, platform},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -78,10 +78,15 @@ pub(crate) fn do_open(
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
+            if let Some(ovr) = fs
+                .override_cache
+                .get_override(fd, true, fs.cfg.strict_enabled())?
+            {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ = fs
+                        .override_cache
+                        .set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {
@@ -174,10 +179,15 @@ pub(crate) fn do_write(
 
     if kill_priv {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
+            if let Some(ovr) = fs
+                .override_cache
+                .get_override(fd, true, fs.cfg.strict_enabled())?
+            {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ = fs
+                        .override_cache
+                        .set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {

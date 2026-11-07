@@ -93,11 +93,24 @@ pub(crate) fn do_setattr(
         libc::O_RDONLY
     };
 
+    let handle_data = handle
+        .map(|handle| {
+            let handles = fs.handles.read().unwrap();
+            let data = handles.get(&handle).cloned().ok_or_else(platform::ebadf)?;
+            if valid.contains(SetattrValid::SIZE)
+                && data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY
+            {
+                return Err(platform::einval());
+            }
+            Ok(data)
+        })
+        .transpose()?;
+    let borrowed_file = handle_data.as_ref().map(|data| data.file.read().unwrap());
     let file = match handle {
         // A supplied FUSE handle is the authoritative object. In particular,
         // it remains valid after an atomic host replacement detaches the inode
         // from the namespace, when reopening by inode can no longer succeed.
-        Some(handle) => clone_handle_file(fs, handle, valid.contains(SetattrValid::SIZE))?,
+        Some(_) => None,
         None => {
             #[cfg(target_os = "linux")]
             let fd = inode::open_inode_fd(fs, ino, open_flags)?;
@@ -110,10 +123,14 @@ pub(crate) fn do_setattr(
             };
 
             // SAFETY: each open helper returns a newly owned descriptor.
-            unsafe { File::from_raw_fd(fd) }
+            Some(unsafe { File::from_raw_fd(fd) })
         }
     };
-    let fd = file.as_raw_fd();
+    let fd = borrowed_file
+        .as_deref()
+        .or(file.as_ref())
+        .unwrap()
+        .as_raw_fd();
 
     // FUSE expects setattr-triggered truncate/chown to clear suid/sgid when
     // requested. UID/GID changes always clear them; SIZE changes only do so
@@ -127,8 +144,11 @@ pub(crate) fn do_setattr(
     //   - kill_priv            : kernel asked us to clear setuid/setgid
     if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
         if fs.cfg.xattr_enabled() {
-            let current =
-                stat_override::get_override(fd, fs.cfg.xattr_enabled(), fs.cfg.strict_enabled())?;
+            let current = fs.override_cache.get_override(
+                fd,
+                fs.cfg.xattr_enabled(),
+                fs.cfg.strict_enabled(),
+            )?;
             let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
                 Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
                 None => {
@@ -173,7 +193,8 @@ pub(crate) fn do_setattr(
                 fchmod_mirror(fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
             }
 
-            stat_override::set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
+            fs.override_cache
+                .set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
         } else if valid.contains(SetattrValid::MODE) {
             // xattr off: guest sees real host stat. Apply chmod directly.
             // For REG/DIR we keep the owner-access floor so the host process
@@ -240,6 +261,7 @@ pub(crate) fn do_setattr(
         }
     }
 
+    drop(borrowed_file);
     drop(file);
 
     // Return updated attributes.
@@ -320,23 +342,13 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     let fd = file.as_raw_fd();
     let st = platform::fstat(fd)?;
 
-    stat_override::patched_stat(
+    fs.override_cache.patched_stat(
         fd,
         st,
         fs.cfg.xattr_enabled(),
         fs.cfg.strict_enabled(),
         fs.cfg.bind_identity_map.as_ref(),
     )
-}
-
-fn clone_handle_file(fs: &PassthroughFs, handle: u64, writable: bool) -> io::Result<File> {
-    let handles = fs.handles.read().unwrap();
-    let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
-    if writable && data.flags as i32 & libc::O_ACCMODE == libc::O_RDONLY {
-        return Err(platform::einval());
-    }
-    let file = data.file.read().unwrap();
-    file.try_clone().map_err(platform::linux_error)
 }
 
 #[cfg(target_os = "macos")]

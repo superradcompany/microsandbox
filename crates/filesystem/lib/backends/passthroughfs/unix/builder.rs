@@ -232,6 +232,7 @@ impl PassthroughFsBuilder {
         });
 
         Ok(PassthroughFs {
+            override_cache: super::override_cache::OverrideCache::default(),
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,

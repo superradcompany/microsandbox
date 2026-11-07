@@ -14,6 +14,7 @@ mod host_mode;
 pub(crate) mod inode;
 mod metadata;
 mod mobility;
+mod override_cache;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -194,6 +195,7 @@ pub struct PassthroughConfig {
 /// Implements [`DynFileSystem`] by mapping guest filesystem operations to
 /// the host filesystem, with stat virtualization via xattr.
 pub struct PassthroughFs {
+    pub(crate) override_cache: override_cache::OverrideCache,
     /// Invalid restored node identities are never reused when a path later reappears.
     pub(crate) invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
     /// Configuration.
@@ -398,6 +400,7 @@ impl PassthroughFs {
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,
+            override_cache: override_cache::OverrideCache::default(),
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
             handles: RwLock::new(BTreeMap::new()),
@@ -684,6 +687,9 @@ impl DynFileSystem for PassthroughFs {
         for (ino, count) in requests {
             if self.is_virtual_init_inode(ino) {
                 continue;
+            }
+            if let Some(data) = inodes.get(&ino) {
+                self.override_cache.invalidate(data.dev, data.ino);
             }
             inode::forget_one_locked(&mut inodes, ino, count);
         }
