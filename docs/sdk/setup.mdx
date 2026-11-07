@@ -151,7 +151,7 @@ Storage diagnostics require an explicit list of sandbox names or an explicit who
 - **Go:** `DiagnoseStorage(ctx, config, selection)`; `RecoverStorage(ctx, name, options)`.
 - **Ruby:** `Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)`; `Microsandbox::Sandbox.recover_storage(name, ...)`.
 
-Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the migration guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [protected-state migration](/migrations/v0.7#protected-sandbox-state) for the CLI workflow and recovery limits.
+Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the migration guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage migration](/migrations/sandbox-storage) for the CLI workflow and recovery limits.
 
 ### Bring your own runtime
 

@@ -1,0 +1,18 @@
+---
+title: "Migrations"
+sidebarTitle: "Overview"
+description: "Understand saved sandbox storage and choose the migration guide for your upgrade."
+---
+
+A local sandbox's saved state includes its root filesystem, additional disks, snapshots, configuration, and the metadata that connects them. Upgrades can change these formats or their directory layout, so existing sandboxes may need migration.
+
+Some changes migrate automatically; others need diagnosis or repair before the sandbox can start. Choose the guide for the upgrade affecting your sandboxes.
+
+<CardGroup cols={2}>
+  <Card title="v0.6 to v0.7" icon="arrow-right-arrow-left" href="/migrations/v0.7">
+    Upgrade saved configurations and update secret, snapshot, and SDK usage.
+  </Card>
+  <Card title="Storage changes in v0.7.12" icon="hard-drive" href="/migrations/sandbox-storage">
+    Migrate existing sandbox storage and repair sandboxes refused after upgrading.
+  </Card>
+</CardGroup>

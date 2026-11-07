@@ -23,8 +23,6 @@ Use **v0.7.3 or a later compatible patch release**. Earlier v0.7 releases have c
 | Older SDK applications and CLI jobs sharing `MSB_HOME` | Stop and upgrade them together. Older processes can write incompatible records or fail to read the upgraded database. |
 | Running sandbox VMs | Can remain running during migration. They keep their runtime and guest code until restarted. |
 
-Local starts now require a runtime supporting protected sandbox state, including restarts and restores. Selecting an older runtime does not restore older SDK access to an upgraded database. Restart already-running older VMs with the patched runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available.
-
 Cloud users do not run this local migration. Cloud compatibility is handled by the service and requires server support, not just an updated SDK.
 
 ## Upgrade your installation
@@ -44,28 +42,7 @@ Use your package manager for other SDKs. For an installed runtime, [`msb self up
 
 ## Protected sandbox state
 
-Update both the SDK/CLI and runtime, then retry the operation. An upgrade-required error identifies the selected runtime; update an explicitly pinned runtime too. `msb self update` updates binaries; storage migration is a separate step described below. Existing VMs must restart to gain the protection.
-
-The strict migration introduced in v0.7.12 can refuse existing snapshots, forks, owned disks, and completed disk growth or compaction. A refusal does not itself delete the disk data. Preserve the original sandbox; restoring an earlier snapshot omits writes made after that snapshot.
-
-On Linux and Windows, eligible storage migrates automatically on the next start or stopped storage operation. If the operation asks for repair, inspect the affected sandbox and follow the guided repair in a terminal.
-
-```bash
-msb doctor --sandbox app
-msb self repair --sandbox app
-```
-
-Repair identifies known VMs that must stop and asks before stopping one. On macOS, stop legacy VMs across all microsandbox homes and prevent new legacy writers until repair finishes. Confirm this in the prompt. New and already migrated sandboxes can keep running.
-
-Repair validates and imports the existing selected disk state for supported, intact layouts, including writes made after a snapshot. It retains the original disk files. External disks continue to use their configured paths after repair. Omit `--sandbox` to select several sandboxes; a blocked sandbox does not prevent independent repairs from completing.
-
-If repair cannot safely establish the active state or its dependencies, it reports "needs investigation" and offers a diagnostic report to review and copy for the [maintainers](https://github.com/superradcompany/microsandbox/issues). The report excludes guest file contents, secrets, and host paths; nothing is submitted automatically. Preserve the sandbox and recovery records. Cancelling waits for an in-progress stop or import to finish; it does not undo completed repairs, accepted stops, or catalog updates.
-
-Use `--format json` for structured diagnosis or repair results. Noninteractive repair refuses when a VM must stop, macOS maintenance needs confirmation, or storage needs investigation; run repair in a terminal to follow the prompts.
-
-An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. Pending memory or device restores still require their execution state.
-
-Do not delete journals, guards, or migration records to bypass an error, and do not downgrade in place to obtain a backup. Downgrade remains unavailable while protected or migrating sandboxes exist. Saved-configuration errors described below are a separate problem.
+For the storage change introduced in v0.7.12, including automatic migration and guided repair, see [sandbox storage migration](/migrations/sandbox-storage).
 
 ## Later v0.7 releases
 
