@@ -1,0 +1,50 @@
+name: Release selection
+
+on:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - scripts/ci/*release*
+      - scripts/ci/test_install.py
+      - scripts/ci/test_installer_selection.py
+      - scripts/ci/test-install-selection.ps1
+      - .github/workflows/release*.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - scripts/ci/*release*
+      - scripts/ci/test_install.py
+      - scripts/ci/test_installer_selection.py
+      - scripts/ci/test-install-selection.ps1
+      - .github/workflows/release*.yml
+
+permissions:
+  contents: read
+
+jobs:
+  selection:
+    name: Installer selection (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test PowerShell release selection
+        shell: pwsh
+        run: ./scripts/ci/test-install-selection.ps1
+      - name: Test Windows PowerShell 5.1 compatibility
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/ci/test-install-selection.ps1
+      - name: Test Unix installer and release selection
+        if: runner.os != 'Windows'
+        run: |
+          sh -n scripts/install.sh
+          python3 -m unittest discover -s scripts/ci -p 'test_install*.py'
+      - name: Test npm publication routing
+        run: node --test scripts/ci/test-release-channel.mjs
