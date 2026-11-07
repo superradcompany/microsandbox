@@ -77,6 +77,47 @@ const UDP_EPHEMERAL_PORT_COUNT: usize =
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Host sockets claimed for published ports.
+///
+/// Claiming them before the VM boots lets a taken port fail startup, rather than leaving a
+/// running sandbox whose port never opens.
+#[derive(Debug, Default)]
+pub struct BoundPublishedPorts {
+    ports: Vec<BoundPublishedPort>,
+}
+
+/// One published port and its host socket.
+#[derive(Debug)]
+struct BoundPublishedPort {
+    bind_addr: SocketAddr,
+    guest_port: u16,
+    socket: BoundPortSocket,
+}
+
+/// Host socket for one published port.
+#[derive(Debug)]
+enum BoundPortSocket {
+    Tcp(TcpListener),
+    Udp {
+        socket: UdpSocket,
+        guest_ip: IpAddr,
+        gateway_ip: IpAddr,
+    },
+}
+
+/// A published host port could not be claimed.
+#[derive(Debug, thiserror::Error)]
+#[error("failed to publish {protocol} port {bind_addr}: {source}")]
+pub struct PublishedPortBindError {
+    /// Host address and port that could not be claimed.
+    pub bind_addr: SocketAddr,
+    /// Protocol of the published port.
+    pub protocol: &'static str,
+    /// Underlying socket error.
+    #[source]
+    pub source: std::io::Error,
+}
+
 /// Manages published port listeners and inbound connections.
 ///
 /// Spawns tokio listeners for each published port. When connections arrive,
@@ -198,6 +239,89 @@ enum BindExposure {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl BoundPublishedPorts {
+    /// Claim the host socket for each published port.
+    ///
+    /// Ports that cannot reach the guest are skipped with a warning. Any other failure is
+    /// returned, and every socket claimed so far is released.
+    pub fn bind(
+        ports: &[PublishedPort],
+        tcp_accept_queue_size: TcpAcceptQueueSize,
+        guest_ipv4: Option<Ipv4Addr>,
+        guest_ipv6: Option<Ipv6Addr>,
+        gateway_ipv4: Option<Ipv4Addr>,
+        gateway_ipv6: Option<Ipv6Addr>,
+        tokio_handle: &tokio::runtime::Handle,
+    ) -> Result<Self, PublishedPortBindError> {
+        if guest_ipv4.is_none() && guest_ipv6.is_none() {
+            if !ports.is_empty() {
+                tracing::warn!(
+                    count = ports.len(),
+                    "skipping published port listeners: guest has no IPv4 or IPv6 address",
+                );
+            }
+            return Ok(Self::default());
+        }
+
+        // Tokio sockets register with the runtime that is current when they are created.
+        let _runtime = tokio_handle.enter();
+        let mut bound = Vec::with_capacity(ports.len());
+
+        for port in ports {
+            let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
+            let socket = match port.protocol {
+                PortProtocol::Tcp => {
+                    let listener =
+                        bind_listener(bind_addr, tcp_accept_queue_size).map_err(|source| {
+                            PublishedPortBindError {
+                                bind_addr,
+                                protocol: "TCP",
+                                source,
+                            }
+                        })?;
+                    BoundPortSocket::Tcp(listener)
+                }
+                PortProtocol::Udp => {
+                    let Some((guest_ip, gateway_ip)) = udp_ips_for_bind(
+                        port.host_bind,
+                        guest_ipv4,
+                        guest_ipv6,
+                        gateway_ipv4,
+                        gateway_ipv6,
+                    ) else {
+                        tracing::warn!(
+                            bind = %bind_addr,
+                            guest_port = port.guest_port,
+                            "skipping UDP published port: guest has no matching gateway/guest IP family",
+                        );
+                        continue;
+                    };
+
+                    let socket =
+                        bind_udp_socket(bind_addr).map_err(|source| PublishedPortBindError {
+                            bind_addr,
+                            protocol: "UDP",
+                            source,
+                        })?;
+                    BoundPortSocket::Udp {
+                        socket,
+                        guest_ip,
+                        gateway_ip,
+                    }
+                }
+            };
+
+            bound.push(BoundPublishedPort {
+                bind_addr,
+                guest_port: port.guest_port,
+                socket,
+            });
+        }
+
+        Ok(Self { ports: bound })
+    }
+}
+
 impl PortPublisher {
     /// Create a new publisher and spawn listeners for all published ports.
     ///
@@ -209,13 +333,10 @@ impl PortPublisher {
     /// the peer observes `ECONNRESET`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        ports: &[PublishedPort],
-        tcp_accept_queue_size: TcpAcceptQueueSize,
+        published_ports: BoundPublishedPorts,
         max_inbound_tcp_connections: Option<ConnectionLimit>,
         guest_ipv4: Option<Ipv4Addr>,
         guest_ipv6: Option<Ipv6Addr>,
-        gateway_ipv4: Option<Ipv4Addr>,
-        gateway_ipv6: Option<Ipv6Addr>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
         policy: Arc<NetworkPolicy>,
@@ -244,30 +365,18 @@ impl PortPublisher {
             .map(IpAddr::V4)
             .or_else(|| guest_ipv6.map(IpAddr::V6));
 
-        if guest_ip.is_some() {
-            Self::spawn_listeners(
-                ports,
-                tcp_accept_queue_size,
-                inbound_limit,
-                &inbound_tx,
-                udp_routes.clone(),
-                guest_ipv4,
-                guest_ipv6,
-                gateway_ipv4,
-                gateway_ipv6,
-                ephemeral_port.clone(),
-                gateway_mac,
-                guest_mac,
-                policy,
-                shared,
-                tokio_handle,
-            );
-        } else if !ports.is_empty() {
-            tracing::warn!(
-                count = ports.len(),
-                "skipping published port listeners: guest has no IPv4 or IPv6 address",
-            );
-        }
+        Self::spawn_listeners(
+            published_ports,
+            inbound_limit,
+            &inbound_tx,
+            udp_routes.clone(),
+            ephemeral_port.clone(),
+            gateway_mac,
+            guest_mac,
+            policy,
+            shared,
+            tokio_handle,
+        );
 
         Self {
             inbound_rx,
@@ -622,18 +731,13 @@ impl PortPublisher {
         self.cleanup_udp_peers();
     }
 
-    /// Spawn one tokio listener task per TCP published port.
+    /// Spawn one tokio task per bound host socket.
     #[allow(clippy::too_many_arguments)]
     fn spawn_listeners(
-        ports: &[PublishedPort],
-        tcp_accept_queue_size: TcpAcceptQueueSize,
+        published_ports: BoundPublishedPorts,
         inbound_limit: ConnectionLimit,
         inbound_tx: &InboundSender,
         udp_routes: PublishedUdpRoutes,
-        guest_ipv4: Option<Ipv4Addr>,
-        guest_ipv6: Option<Ipv6Addr>,
-        gateway_ipv4: Option<Ipv4Addr>,
-        gateway_ipv6: Option<Ipv6Addr>,
         ephemeral_port: Arc<AtomicU16>,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
@@ -641,19 +745,22 @@ impl PortPublisher {
         shared: Arc<SharedState>,
         tokio_handle: &tokio::runtime::Handle,
     ) {
-        for port in ports {
-            let bind_addr = SocketAddr::new(port.host_bind, port.host_port);
-            let guest_port = port.guest_port;
+        for port in published_ports.ports {
+            let BoundPublishedPort {
+                bind_addr,
+                guest_port,
+                socket,
+            } = port;
 
-            match port.protocol {
-                PortProtocol::Tcp => {
+            match socket {
+                BoundPortSocket::Tcp(listener) => {
                     let tx = inbound_tx.clone();
                     let policy = policy.clone();
                     let shared = shared.clone();
                     tokio_handle.spawn(async move {
                         if let Err(e) = tcp_listener_task(
+                            listener,
                             bind_addr,
-                            tcp_accept_queue_size,
                             guest_port,
                             inbound_limit,
                             tx,
@@ -670,22 +777,11 @@ impl PortPublisher {
                         }
                     });
                 }
-                PortProtocol::Udp => {
-                    let Some((guest_ip, gateway_ip)) = udp_ips_for_bind(
-                        port.host_bind,
-                        guest_ipv4,
-                        guest_ipv6,
-                        gateway_ipv4,
-                        gateway_ipv6,
-                    ) else {
-                        tracing::warn!(
-                            bind = %bind_addr,
-                            guest_port,
-                            "skipping UDP published port: guest has no matching gateway/guest IP family",
-                        );
-                        continue;
-                    };
-
+                BoundPortSocket::Udp {
+                    socket,
+                    guest_ip,
+                    gateway_ip,
+                } => {
                     let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);
                     let peers = Arc::new(Mutex::new(PublishedUdpPeers::default()));
                     udp_routes
@@ -703,6 +799,7 @@ impl PortPublisher {
                     let ephemeral_port = ephemeral_port.clone();
                     tokio_handle.spawn(async move {
                         if let Err(e) = udp_listener_task(
+                            socket,
                             bind_addr,
                             guest_ip,
                             gateway_ip,
@@ -810,21 +907,27 @@ fn bind_listener(
     socket.listen(backlog.get())
 }
 
+/// Bind a published UDP port. Must run inside the tokio runtime that will own the socket.
+fn bind_udp_socket(bind_addr: SocketAddr) -> std::io::Result<UdpSocket> {
+    let socket = std::net::UdpSocket::bind(bind_addr)?;
+    socket.set_nonblocking(true)?;
+    UdpSocket::from_std(socket)
+}
+
 /// Listener task: accepts TCP connections on the host, runs each
 /// through the network policy's ingress evaluator, and queues
 /// allowed connections for the publisher's accept loop. Denied
 /// connections are dropped with TCP RST (zero-linger) so the peer
 /// sees `ECONNRESET` rather than a graceful close.
 async fn tcp_listener_task(
+    listener: TcpListener,
     bind_addr: SocketAddr,
-    backlog: TcpAcceptQueueSize,
     guest_port: u16,
     inbound_limit: ConnectionLimit,
     inbound_tx: InboundSender,
     policy: Arc<NetworkPolicy>,
     shared: Arc<SharedState>,
 ) -> std::io::Result<()> {
-    let listener = bind_listener(bind_addr, backlog)?;
     log_published_port_listener("TCP", bind_addr, guest_port);
 
     loop {
@@ -866,6 +969,7 @@ async fn tcp_listener_task(
 /// and sends guest replies back to active peers through the same socket.
 #[allow(clippy::too_many_arguments)]
 async fn udp_listener_task(
+    socket: UdpSocket,
     bind_addr: SocketAddr,
     guest_ip: IpAddr,
     gateway_ip: IpAddr,
@@ -878,7 +982,6 @@ async fn udp_listener_task(
     gateway_mac: EthernetAddress,
     guest_mac: EthernetAddress,
 ) -> std::io::Result<()> {
-    let socket = UdpSocket::bind(bind_addr).await?;
     log_published_port_listener("UDP", bind_addr, guest_port);
 
     let mut buf = vec![0u8; UDP_RELAY_BUF_SIZE];
@@ -1498,12 +1601,9 @@ mod tests {
         for stalled in [false, true] {
             let mut network = TestNetwork::new(false);
             let mut publisher = PortPublisher::new(
-                &[],
-                TcpAcceptQueueSize::DEFAULT,
+                BoundPublishedPorts::default(),
                 None,
                 Some(Ipv4Addr::new(10, 0, 0, 1)),
-                None,
-                Some(Ipv4Addr::new(10, 0, 0, 2)),
                 None,
                 [2, 0, 0, 0, 0, 1],
                 [2, 0, 0, 0, 0, 2],
@@ -1941,12 +2041,9 @@ mod tests {
     async fn cold_burst_uses_active_slots_before_exhausting_the_waiting_budget() {
         let mut h = Harness::new();
         h.publisher = PortPublisher::new(
-            &[],
-            TcpAcceptQueueSize::DEFAULT,
+            BoundPublishedPorts::default(),
             Some(ConnectionLimit::from(1)),
             Some(Ipv4Addr::LOCALHOST),
-            None,
-            None,
             None,
             [2, 0, 0, 0, 0, 1],
             [2, 0, 0, 0, 0, 2],
@@ -2080,11 +2177,13 @@ mod tests {
     async fn dropping_the_publisher_stops_an_idle_tcp_listener() {
         let (sender, receiver) = mpsc::channel(1);
         drop(receiver);
+        let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let listener = bind_listener(bind_addr, TcpAcceptQueueSize::DEFAULT).unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             tcp_listener_task(
-                SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
-                TcpAcceptQueueSize::DEFAULT,
+                listener,
+                bind_addr,
                 TEST_GUEST_PORT,
                 ConnectionLimit::Unlimited,
                 InboundSender {
@@ -2100,18 +2199,117 @@ mod tests {
         .unwrap();
     }
 
+    fn published_port(addr: SocketAddr, protocol: PortProtocol) -> PublishedPort {
+        PublishedPort {
+            host_port: addr.port(),
+            guest_port: TEST_GUEST_PORT,
+            protocol,
+            host_bind: addr.ip(),
+        }
+    }
+
+    fn bind_published_ports(ports: &[PublishedPort]) -> Result<usize, PublishedPortBindError> {
+        BoundPublishedPorts::bind(
+            ports,
+            TcpAcceptQueueSize::DEFAULT,
+            Some(Ipv4Addr::new(10, 0, 0, 1)),
+            None,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            None,
+            &tokio::runtime::Handle::current(),
+        )
+        .map(|bound| bound.ports.len())
+    }
+
+    #[tokio::test]
+    async fn binding_a_taken_tcp_port_reports_the_conflict() {
+        let holder = bind_listener(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            TcpAcceptQueueSize::DEFAULT,
+        )
+        .unwrap();
+        let addr = holder.local_addr().unwrap();
+
+        let error = bind_published_ports(&[published_port(addr, PortProtocol::Tcp)]).unwrap_err();
+
+        assert_eq!(error.bind_addr, addr);
+        assert_eq!(error.protocol, "TCP");
+        assert_eq!(error.source.kind(), ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn binding_a_taken_udp_port_reports_the_conflict() {
+        let holder = bind_udp_socket(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let addr = holder.local_addr().unwrap();
+
+        let error = bind_published_ports(&[published_port(addr, PortProtocol::Udp)]).unwrap_err();
+
+        assert_eq!(error.bind_addr, addr);
+        assert_eq!(error.protocol, "UDP");
+        assert_eq!(error.source.kind(), ErrorKind::AddrInUse);
+    }
+
+    #[tokio::test]
+    async fn bound_ports_stay_claimed_until_released() {
+        let free = bind_listener(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            TcpAcceptQueueSize::DEFAULT,
+        )
+        .unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+        let port = published_port(addr, PortProtocol::Tcp);
+
+        let bound = BoundPublishedPorts::bind(
+            std::slice::from_ref(&port),
+            TcpAcceptQueueSize::DEFAULT,
+            Some(Ipv4Addr::new(10, 0, 0, 1)),
+            None,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            None,
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        let error = bind_published_ports(std::slice::from_ref(&port)).unwrap_err();
+        assert_eq!(error.source.kind(), ErrorKind::AddrInUse);
+
+        drop(bound);
+        assert_eq!(bind_published_ports(&[port]).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn binding_without_a_guest_address_claims_nothing() {
+        let holder = bind_listener(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            TcpAcceptQueueSize::DEFAULT,
+        )
+        .unwrap();
+        let addr = holder.local_addr().unwrap();
+
+        let bound = BoundPublishedPorts::bind(
+            &[published_port(addr, PortProtocol::Tcp)],
+            TcpAcceptQueueSize::DEFAULT,
+            None,
+            None,
+            None,
+            None,
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+
+        assert!(bound.ports.is_empty());
+    }
+
     /// Configuration controls admission, including unlimited, without resetting live flows.
     #[tokio::test]
     async fn inbound_limit_controls_live_connections_and_unlimited() {
         for (configured, attempts) in [(Some(1), 3), (Some(3), 4), (Some(0), 3), (None, 257)] {
             let mut h = Harness::new();
             h.publisher = PortPublisher::new(
-                &[],
-                TcpAcceptQueueSize::DEFAULT,
+                BoundPublishedPorts::default(),
                 configured.map(ConnectionLimit::from),
                 Some(Ipv4Addr::LOCALHOST),
-                None,
-                None,
                 None,
                 [2, 0, 0, 0, 0, 1],
                 [2, 0, 0, 0, 0, 2],
