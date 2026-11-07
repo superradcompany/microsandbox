@@ -144,3 +144,20 @@ fn boot_error_reason_is_preserved_in_every_backend_build() {
         }
     }
 }
+
+#[test]
+#[cfg(feature = "cloud")]
+fn rust_modify_surface_is_available_on_cloud_builds() {
+    let _ = microsandbox::Sandbox::modify;
+    let _ = microsandbox::sandbox::SandboxHandle::modify;
+    let _ = microsandbox::SandboxModificationBuilder::dry_run;
+    let _ = microsandbox::SandboxModificationBuilder::apply;
+    let _: Option<microsandbox::SandboxModificationPlan> = None;
+    let not_confirmed = microsandbox::MicrosandboxError::ModificationNotConfirmed {
+        cause: "the running sandbox does not hold the secret".into(),
+    };
+    assert_eq!(
+        not_confirmed.to_string(),
+        "the change did not complete as asked: the running sandbox does not hold the secret"
+    );
+}

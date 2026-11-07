@@ -160,9 +160,7 @@ pub(super) async fn requires_initialization<C: ConnectionTrait>(
     {
         return Ok(prefix.len() < schema_metadata::BASELINE_0_6_0_MIGRATIONS.len());
     }
-    Err(MicrosandboxError::Runtime(
-        "database schema is newer than this msb binary or has an unknown migration prefix; refusing to change an unrecognized catalog".into(),
-    ))
+    Err(newer_schema_error("unrecognized migration history"))
 }
 
 pub(super) async fn upgrade(pools: &microsandbox_db::pool::DbPools) -> MicrosandboxResult<()> {
@@ -252,6 +250,17 @@ pub(super) async fn recover_abandoned_lease(
         .exec(pools.write())
         .await?;
     Ok(())
+}
+
+/// Recovery guidance shared by every SDK/CLI schema admission path.
+pub(super) fn newer_schema_error(detail: &str) -> MicrosandboxError {
+    MicrosandboxError::Runtime(format!(
+        "This MSB_HOME has a newer or unrecognized database schema.\n\n\
+         Update your SDK and msb to a version that supports this database,\n\
+         or set MSB_HOME to a different directory to use a separate environment.\n\n\
+         Your existing sandboxes remain in the original MSB_HOME.\n\n\
+         Details: {detail}"
+    ))
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -345,7 +354,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(requires_initialization(&db).await.is_err());
+        let error = requires_initialization(&db).await.unwrap_err().to_string();
+        assert!(error.contains("schema.\n\nUpdate your SDK and msb"));
+        assert!(error.contains("set MSB_HOME to a different directory"));
+        assert!(error.contains("\n\nYour existing sandboxes remain in the original MSB_HOME."));
     }
 
     #[tokio::test]
@@ -607,8 +619,8 @@ mod tests {
             assert_eq!(current_pid, pid, "upgrade must not restart the old VM");
             active.stop().await.unwrap();
             crate::Sandbox::remove("catalog-running").await.unwrap();
-            // Existing VMs remain usable after catalog migration, but old Linux
-            // x86 runtimes cannot enforce the new SDK's default nesting policy.
+            // Existing VMs remain usable after catalog migration. New launches
+            // fail the protected-state prerequisite before the nesting-policy check.
             if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
                 let rejected = crate::Sandbox::builder("catalog-unsupported")
                     .image("alpine:3.21").cpus(1).memory(256u32).max_duration(120)
@@ -617,11 +629,15 @@ mod tests {
                     Ok(unexpected) => {
                         unexpected.stop().await.unwrap();
                         crate::Sandbox::remove("catalog-unsupported").await.unwrap();
-                        panic!("previous runtime accepted an unenforceable nesting policy");
+                        panic!("previous runtime accepted a launch without protected sandbox state");
                     }
                     Err(error) => error.to_string(),
                 };
-                assert!(error.contains("does not support nested virtualization policy"), "{error}");
+                assert!(
+                    error.contains("upgrade required")
+                        && error.contains("does not advertise protected sandbox state"),
+                    "{error}"
+                );
                 assert!(matches!(crate::Sandbox::get("catalog-unsupported").await,
                     Err(MicrosandboxError::SandboxNotFound(_))));
                 assert!(!local.config().sandboxes_dir().join("catalog-unsupported").exists());

@@ -4,6 +4,7 @@ import type {
   EnvVar,
   HandoffInit,
   HostPermissions,
+  ModificationPolicy,
   MountOptions,
   NetworkPolicy,
   OwnedVolumeStorage,
@@ -992,6 +993,282 @@ export type CloudSnapshotOperationStatus =
   | "failed";
 
 export type CloudSnapshotKind = "disk";
+
+export type CloudSandboxModificationPlanRequest = {
+  /**
+   * Policy the plan is classified under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Secret changes, in patch order.
+   */
+  secrets?: Array<CloudSecretPlanEntry>;
+  /**
+   * Names of secrets to remove.
+   */
+  secrets_remove?: Array<string>;
+};
+
+export type CloudSecretPlanEntry = {
+  /**
+   * Name of the secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * New secret material: provided when the secret is added or rotated, absent for a
+   * metadata-only change.
+   */
+  material: CloudSecretMaterial;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretMaterial = { "type": "provided" } | { "type": "absent" };
+
+export type CloudSandboxModificationApplyRequest = {
+  /**
+   * Policy the change is applied under.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Secret changes, in patch order.
+   */
+  secrets?: Array<CloudSecretApplyEntry>;
+  /**
+   * Names of secrets to remove.
+   */
+  secrets_remove?: Array<string>;
+};
+
+export type CloudSecretApplyEntry = {
+  /**
+   * Name of the secret, the env var it is exposed as.
+   */
+  name: string;
+  /**
+   * New secret value. Present when the secret is added or rotated.
+   */
+  value?: CloudSecretValue | null;
+  /**
+   * New guest-visible placeholder.
+   */
+  placeholder?: string | null;
+  /**
+   * New hosts allowed to receive the secret.
+   */
+  allowed_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New substitution locations.
+   */
+  substitution?: SecretSubstitution | null;
+  /**
+   * New hosts allowed to receive the placeholder unchanged.
+   */
+  passthrough_hosts?: Array<CloudHostPattern> | null;
+  /**
+   * New per-secret violation action.
+   */
+  violation_action?: CloudViolationAction | null;
+  /**
+   * New verified-TLS-identity requirement.
+   */
+  require_tls_identity?: boolean | null;
+};
+
+export type CloudSecretValue = string;
+
+export type CloudSandboxModificationPlan = {
+  /**
+   * Sandbox being modified.
+   */
+  sandbox: string;
+  /**
+   * Sandbox status used for classification.
+   */
+  status: string;
+  /**
+   * Whether the changes were applied.
+   */
+  applied: boolean;
+  /**
+   * Modification policy used to produce the plan.
+   */
+  policy: ModificationPolicy;
+  /**
+   * Planned changes.
+   */
+  changes: Array<CloudPlannedChange>;
+  /**
+   * Conflicts that must be resolved before the patch can apply.
+   */
+  conflicts: Array<CloudModificationConflict>;
+  /**
+   * Non-fatal warnings about the patch or current runtime capabilities.
+   */
+  warnings: Array<CloudModificationWarning>;
+  /**
+   * Live resource resize outcomes, populated by apply when a live change ran.
+   */
+  resize_status?: Array<CloudResourceResizeStatus>;
+};
+
+export type CloudPlannedChange =
+  | { "kind": "config" } & CloudConfigPlannedChange
+  | { "kind": "secret" } & CloudSecretPlannedChange;
+
+export type CloudConfigPlannedChange = {
+  /**
+   * Config field being changed.
+   */
+  field: string;
+  /**
+   * Natural change type for table rendering.
+   */
+  change: CloudChangeKind;
+  /**
+   * Previous safe visible state.
+   */
+  before?: string | null;
+  /**
+   * New safe visible state.
+   */
+  after?: string | null;
+  /**
+   * When or whether the change can take effect.
+   */
+  disposition: CloudModificationDisposition;
+  /**
+   * Human-readable reason for this classification, when useful.
+   */
+  reason?: string | null;
+};
+
+export type CloudSecretPlannedChange = {
+  /**
+   * Table field name. This is always `secret`.
+   */
+  field: string;
+  /**
+   * Stable secret identity, usually the environment variable name.
+   */
+  name: string;
+  /**
+   * Natural change type for table rendering.
+   */
+  change: CloudSecretChangeKind;
+  /**
+   * Previous guest-visible reference or placeholder.
+   */
+  before_ref?: string | null;
+  /**
+   * New guest-visible reference or placeholder.
+   */
+  after_ref?: string | null;
+  /**
+   * When or whether the change can take effect.
+   */
+  disposition: CloudModificationDisposition;
+  /**
+   * Allowed hosts after the requested change.
+   */
+  allow_hosts?: Array<string>;
+  /**
+   * Human-readable reason for this classification, when useful.
+   */
+  reason?: string | null;
+};
+
+export type CloudChangeKind = "added" | "updated" | "removed";
+
+export type CloudSecretChangeKind =
+  | "added"
+  | "rotated"
+  | "removed"
+  | "renamed"
+  | "hosts_updated"
+  | "placeholder_updated";
+
+export type CloudModificationDisposition =
+  | "live"
+  | "next_start"
+  | "requires_restart"
+  | "unsupported";
+
+export type CloudModificationConflict = {
+  /**
+   * Field with the conflict.
+   */
+  field: string;
+  /**
+   * Human-readable conflict description.
+   */
+  message: string;
+};
+
+export type CloudModificationWarning = {
+  /**
+   * Field associated with the warning.
+   */
+  field: string;
+  /**
+   * Human-readable warning description.
+   */
+  message: string;
+};
+
+export type CloudResourceResizeStatus = {
+  /**
+   * Resource being resized.
+   */
+  resource: CloudResourceKind;
+  /**
+   * Requested value.
+   */
+  requested: string;
+  /**
+   * Actual value observed in the sandbox.
+   */
+  actual: string;
+  /**
+   * Enforced value.
+   */
+  enforced: string;
+  /**
+   * Convergence state.
+   */
+  state: CloudResourceConvergenceState;
+};
+
+export type CloudResourceKind = "cpus" | "memory";
+
+export type CloudResourceConvergenceState =
+  | "accepted"
+  | "converging"
+  | "applied"
+  | "guest_refused"
+  | "failed";
 
 export type CloudPaginated<T> = {
   /**

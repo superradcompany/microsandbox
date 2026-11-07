@@ -479,6 +479,7 @@ export {
   MetricsDisabledError,
   MetricsUnavailableError,
   MicrosandboxError,
+  ModificationNotConfirmedError,
   NixError,
   PatchFailedError,
   ProtocolError,
@@ -635,3 +636,8 @@ export type Rule = _Types.Rule;
 
 export { Job, JobAttachment, JobError, JobLogStream, JobListBuilder, JobAttachOptionsBuilder } from "./jobs.js";
 export type { JobInfo, JobPage, JobExit, JobLogEntry, JobLogOptions, JobEvent, JobState } from "./jobs.js";
+
+export { diagnoseStorage } from "./storage-diagnosis.js";
+export type { StorageSelection, StorageDiagnosticStatus, StorageCandidate, StorageInspection, StorageSandboxDiagnosis, StorageDiagnosis } from "./storage-diagnosis.js";
+
+export type { StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection } from "./storage-recovery.js";

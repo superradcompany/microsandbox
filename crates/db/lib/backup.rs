@@ -1,5 +1,6 @@
 //! Private, verified SQLite copies published only after successful completion.
 
+#[cfg(unix)]
 use std::fs::File;
 use std::path::Path;
 

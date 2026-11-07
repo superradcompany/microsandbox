@@ -1,7 +1,8 @@
+import { recoverStorage, type StorageRecovery, type StorageRecoveryOptions } from "./storage-recovery.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
-import { validateStopTimeout } from "./internal/stop.js";
+import { validateTimeoutMs } from "./internal/stop.js";
 import { forkMountBuilders, type ForkVolumes } from "./internal/fork-volumes.js";
 import {
   compactionResultFromJson,
@@ -239,6 +240,11 @@ export class CreationProgressCreate {
 
 export class Sandbox implements AsyncDisposable {
   private detachedFromScope = false;
+
+  /** Recover stopped storage after diagnosis. Never boots or stops a VM; originals are retained. */
+  static async recoverStorage(name: string, options: StorageRecoveryOptions = {}): Promise<StorageRecovery> {
+    return recoverStorage(name, options);
+  }
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {
@@ -678,7 +684,7 @@ export class Sandbox implements AsyncDisposable {
 
   /** One total budget; StopTimeoutError on expiry without killing. Zero never dispatches shutdown. */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
-    validateStopTimeout(timeoutMs);
+    validateTimeoutMs(timeoutMs, "stop");
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 
@@ -690,7 +696,9 @@ export class Sandbox implements AsyncDisposable {
     await withMappedErrors(() => this.inner.requestKill());
   }
 
+  /** Force-kill with an integer observation timeout from 0 to 4294967295 milliseconds. */
   async killWithTimeout(timeoutMs: number): Promise<void> {
+    validateTimeoutMs(timeoutMs, "kill");
     await withMappedErrors(() => this.inner.killWithTimeout(timeoutMs));
   }
 

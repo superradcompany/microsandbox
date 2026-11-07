@@ -247,6 +247,47 @@ Get a handle to an existing sandbox (running or stopped). The handle provides st
   </div>
 </div>
 
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recover_storage()</span>
+
+```python
+@staticmethod
+async def recover_storage(
+    name: str,
+    *,
+    selections: Mapping[str, str] | None = None,
+    accept_selected_view: bool = False,
+    legacy_writers_stopped: bool = False,
+) -> StorageRecovery
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">Mapping[str, str] | None</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with disk ID keys and candidate ID values. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>accept_selected_view</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>False</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacy_writers_stopped</code><span className="msb-type">bool</span></div>
+    <div className="msb-param-desc">Default <code>False</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
 
 ```python
@@ -539,7 +580,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def modify(
@@ -712,7 +753,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics(self) -> SandboxMetrics
@@ -740,7 +781,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">metrics_stream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 async def metrics_stream(self, interval: float = 1.0) -> MetricsStream
@@ -1426,7 +1467,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 modify(...)
@@ -1594,7 +1635,7 @@ Delete sandbox and state
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```python
 metrics()

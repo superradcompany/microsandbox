@@ -7,6 +7,17 @@ use microsandbox::setup::{binding_install_options, binding_runtime_config};
 use crate::{FfiError, cstr, run_c};
 
 //--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StorageRecoveryRequest {
+    name: String,
+    options: microsandbox::sandbox::StorageRecoveryOptions,
+}
+
+//--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
 
@@ -25,9 +36,24 @@ pub unsafe extern "C" fn msb_runtime_setup(
 ) -> *mut c_char {
     run_c(cancel_id, buf, buf_len, || {
         let operation = unsafe { cstr(operation) }?;
-        let config = binding_runtime_config(&unsafe { cstr(config_json) }?)?;
+        let config_json = unsafe { cstr(config_json) }?;
         let options_json = unsafe { cstr(options_json) }?;
         Ok(Box::pin(async move {
+            if operation == "diagnose_storage" {
+                return microsandbox::setup::binding_diagnose_storage(&config_json, &options_json)
+                    .await
+                    .map_err(FfiError::from);
+            }
+            if operation == "recover_storage" {
+                // Existing optional ABI, new explicit operation; use the active SDK backend.
+                let request: StorageRecoveryRequest = serde_json::from_str(&options_json)
+                    .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
+                let result =
+                    microsandbox::Sandbox::recover_storage(&request.name, request.options).await?;
+                return serde_json::to_string(&result)
+                    .map_err(|error| FfiError::internal(error.to_string()));
+            }
+            let config = binding_runtime_config(&config_json)?;
             let runtime = match operation.as_str() {
                 "resolve" => microsandbox::setup::resolve_runtime(&config)?,
                 "install" => {

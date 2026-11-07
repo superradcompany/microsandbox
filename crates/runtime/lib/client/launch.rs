@@ -56,6 +56,13 @@ pub const BOOTSTRAP_ROOTFS_DIR: &str = ".bootstrap-rootfs";
 /// Capability response to `msb __launch-protocol`, including host nesting support.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LaunchCapabilities {
+    /// The runtime can validate its selected agent before opening recovery preview disks.
+    #[serde(default)]
+    pub storage_reader: bool,
+    /// Host journals and checkpoint storage are excluded from the guest runtime share.
+    /// Absence is unsafe for every launch, including restarts of legacy sandboxes.
+    #[serde(default)]
+    pub protected_guest_state: bool,
     /// Supported wire generations: 1 is the v0.6.17 boot contract; 2 adds explicit intent.
     pub protocols: Vec<u32>,
 
@@ -144,6 +151,9 @@ pub struct StartupCommand {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LaunchConfig {
+    /// The launcher has admitted the protected storage layout before preparing disks.
+    #[serde(default)]
+    pub protected_guest_state: bool,
     /// Required execution intent. Restore intent must never be inferred from optional hints.
     pub execution: ExecutionIntent,
 

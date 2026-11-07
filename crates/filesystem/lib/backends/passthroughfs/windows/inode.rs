@@ -189,8 +189,12 @@ impl PassthroughFs {
     pub(super) fn intern_path(&self, path: PathBuf) -> io::Result<Arc<InodeData>> {
         let identity = self.path_identity(&path)?;
         let mut inodes = self.inodes.write().unwrap();
-        if let Some(data) = inodes.by_path.get(&path) {
-            return Ok(data.clone());
+        if let Some(data) = inodes.by_path.get(&path).cloned() {
+            // A cached alias (hard link) can outlive the canonical name.
+            if identity.is_some() && data.identity == identity {
+                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
+            }
+            return Ok(data);
         }
         if let Some(identity) = identity
             && let Some(data) = inodes.by_identity.get(&identity).cloned()
@@ -202,6 +206,8 @@ impl PassthroughFs {
                 *data.path.write().unwrap() = path;
                 *data.retained.lock().unwrap() = None;
                 *data.retained_stat.lock().unwrap() = None;
+            } else {
+                Self::follow_host_rename(&mut inodes, &data, &path, |p| self.path_identity(p));
             }
             return Ok(data);
         }
@@ -222,6 +228,93 @@ impl PassthroughFs {
             inodes.by_identity.insert(identity, data.clone());
         }
         Ok(data)
+    }
+
+    /// Renamed or moved on the host (same file identity, new name): if the
+    /// canonical path no longer resolves to this object, re-point it to
+    /// `path` (a live name of the same object) and drop the stale alias.
+    /// Otherwise every operation through the inode (stat, open, and the
+    /// readdir of its directory) fails until the sandbox restarts. A live
+    /// hard link keeps its canonical path.
+    fn follow_host_rename(
+        inodes: &mut InodeTable,
+        data: &Arc<InodeData>,
+        path: &Path,
+        identity_of: impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
+    ) {
+        if data.retained.lock().unwrap().is_some() {
+            return;
+        }
+        let canonical = data.path();
+        if canonical == path || identity_of(&canonical).ok().flatten() == data.identity {
+            return;
+        }
+        if inodes
+            .by_path
+            .get(&canonical)
+            .is_some_and(|alias| Arc::ptr_eq(alias, data))
+        {
+            inodes.by_path.remove(&canonical);
+        }
+        *data.path.write().unwrap() = path.to_path_buf();
+        Self::follow_host_rename_descendants(inodes, data, &canonical, path, &identity_of);
+    }
+
+    /// A directory renamed on the host takes its cached descendants along:
+    /// each alias and canonical path under `old` is rewritten under `new`, as
+    /// `rename_inode_path` does for guest-side renames, but only when the host
+    /// confirms the same object now lives at the rewritten path. Entries that
+    /// fail the check stay put: they belong to whatever now occupies `old`
+    /// (cached through the stale directory inode before this repair), or the
+    /// object is gone. The repaired directory and its new alias are skipped.
+    /// Identity checks run only for entries under `old`, on this rare path.
+    fn follow_host_rename_descendants(
+        inodes: &mut InodeTable,
+        repaired: &Arc<InodeData>,
+        old: &Path,
+        new: &Path,
+        identity_of: &impl Fn(&Path) -> io::Result<Option<(u32, u64)>>,
+    ) {
+        let rewritten = |p: &Path| -> Option<PathBuf> {
+            if p == old {
+                return None;
+            }
+            p.strip_prefix(old).ok().map(|rest| new.join(rest))
+        };
+        // Without a file identity there is nothing to check: follow the move.
+        let live_at = |data: &InodeData, target: &Path| match data.identity {
+            Some(id) => identity_of(target).ok().flatten() == Some(id),
+            None => true,
+        };
+        let moved = inodes
+            .by_path
+            .range(old.to_path_buf()..)
+            .take_while(|(p, _)| p.starts_with(old))
+            .filter(|(_, d)| !Arc::ptr_eq(d, repaired))
+            .filter_map(|(p, d)| {
+                let target = rewritten(p)?;
+                live_at(d, &target).then(|| (p.clone(), target, d.clone()))
+            })
+            .collect::<Vec<_>>();
+        // All sources out before any insert: on an upward move a target can be
+        // another source's key (`p/c/c/f` -> `p/c/f`). A target held by a
+        // non-source entry is stale, since the host now has this object there.
+        for (source, _, _) in &moved {
+            inodes.by_path.remove(source);
+        }
+        for (_, target, data) in moved {
+            inodes.by_path.insert(target, data);
+        }
+        for data in inodes.by_inode.values() {
+            if Arc::ptr_eq(data, repaired) {
+                continue;
+            }
+            if let Some(target) = rewritten(&data.path())
+                && live_at(data, &target)
+            {
+                *data.path.write().unwrap() = target;
+            }
+        }
     }
 
     pub(super) fn child_path(&self, parent: u64, name: &CStr) -> io::Result<PathBuf> {

@@ -29,6 +29,7 @@ use tokio::io::AsyncReadExt;
 
 use super::types::{Patch, RootfsSource};
 use crate::MicrosandboxResult;
+use crate::backend::local::creation::CreationStorage;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -776,9 +777,17 @@ pub(crate) async fn build_upper_tree(
 pub(crate) async fn build_flat_tree(
     patches: &[Patch],
     lower_erofs: &[PathBuf],
-    spool_path: &Path,
+    spool_path: &CreationStorage,
 ) -> MicrosandboxResult<FileTree> {
-    let mut tree = microsandbox_image::merge_erofs_layers(lower_erofs, spool_path)?;
+    let lower_erofs = lower_erofs.to_vec();
+    let spool_path = spool_path.clone();
+    let mut tree = tokio::task::spawn_blocking(move || {
+        microsandbox_image::merge_erofs_layers(&lower_erofs, &spool_path)
+    })
+    .await
+    .map_err(|error| {
+        crate::MicrosandboxError::PatchFailed(format!("flat patch tree task: {error}"))
+    })??;
     let mut no_lowers = LowerLayers {
         readers: Vec::new(),
         removed: Vec::new(),
@@ -2364,9 +2373,12 @@ mod tests {
         symlink(&actual_root, &linked_root).unwrap();
         let patch = text_patch("/allowed.txt", "hello");
 
-        let error = apply_patches(&bind_root(linked_root.clone(), false), &[patch.clone()])
-            .await
-            .unwrap_err();
+        let error = apply_patches(
+            &bind_root(linked_root.clone(), false),
+            std::slice::from_ref(&patch),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("follow_root_symlinks"));
         assert!(!actual_root.join("allowed.txt").exists());
 
@@ -3714,7 +3726,7 @@ mod tests {
             content: "more".into(),
         });
         assert!(
-            build_upper_tree(&patches, &[lower_path.clone()])
+            build_upper_tree(&patches, std::slice::from_ref(&lower_path))
                 .await
                 .is_err()
         );
@@ -3779,7 +3791,7 @@ mod tests {
             },
             text_patch("/data/sub/new.txt", "new"),
         ];
-        let tree = build_upper_tree(&patches, &[lower_path.clone()])
+        let tree = build_upper_tree(&patches, std::slice::from_ref(&lower_path))
             .await
             .unwrap();
         assert_eq!(
@@ -3947,7 +3959,7 @@ mod tests {
                 },
             ],
             &[base_path, top_path],
-            &spool_path,
+            &crate::backend::local::creation::CreationStorage::for_test(&spool_path),
         )
         .await
         .unwrap();

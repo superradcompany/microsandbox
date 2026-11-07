@@ -61,12 +61,17 @@ msb run debian
 ```typescript TypeScript
 import { Sandbox } from "microsandbox";
 
-await using sb = await Sandbox.builder("hello")
+const sb = await Sandbox.builder("hello")
     .image("python")
     .create();
 
-const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
-console.log(output.stdout());
+try {
+    const output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"]);
+    console.log(output.stdout());
+} finally {
+    await sb.stop();
+    await Sandbox.remove("hello");
+}
 ```
 
 ```rust Rust
@@ -81,6 +86,7 @@ let output = sb.exec("python", ["-c", "print('Hello from a microVM!')"]).await?;
 println!("{}", output.stdout()?);
 
 sb.stop().await?;
+Sandbox::remove("hello").await?;
 ```
 
 ```python Python
@@ -92,6 +98,7 @@ output = await sb.exec("python", ["-c", "print('Hello from a microVM!')"])
 print(output.stdout_text)
 
 await sb.stop()
+await Sandbox.remove("hello")
 ```
 
 ```go Go
@@ -99,7 +106,10 @@ sb, err := m.CreateSandbox(ctx, "hello", m.WithImage("python"))
 if err != nil {
     return err
 }
-defer sb.Stop(ctx)
+defer func() {
+    _ = sb.Stop(ctx)
+    _ = m.RemoveSandbox(ctx, "hello")
+}()
 
 out, err := sb.Exec(ctx, "python", []string{"-c", "print('Hello from a microVM!')"})
 if err != nil {
@@ -115,6 +125,7 @@ Microsandbox::Sandbox.with("hello", image: "python") do |sb|
   output = sb.exec("python", ["-c", "print('Hello from a microVM!')"])
   puts output.stdout
 end
+Microsandbox::Sandbox.remove("hello")
 ```
 </CodeGroup>
 

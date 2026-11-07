@@ -19,11 +19,13 @@
 mod config_paths;
 pub(crate) mod control;
 mod control_lookup;
+pub(crate) mod creation;
 mod database;
 pub(crate) mod host_paths;
 mod metrics_lookup;
 mod sandbox;
 pub(crate) mod snapshot;
+pub(crate) mod volume;
 
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -554,7 +556,7 @@ impl Backend for LocalBackend {
         Box::pin(async move {
             let mut last_error = None;
 
-            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+            for sock_path in self.agent_socket_paths(name) {
                 if !agent_endpoint_may_exist(&sock_path) {
                     continue;
                 }
@@ -754,8 +756,8 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
             .or_else(|| applied.first())
             .map(String::as_str)
             .unwrap_or("<missing migration>");
-        return Err(MicrosandboxError::Runtime(format!(
-            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        return Err(database::newer_schema_error(&format!(
+            "applied migration {version:?} is not recognized by this version"
         )));
     }
 
@@ -1099,6 +1101,7 @@ mod tests {
             "manifest",
             "manifest_layer",
             "memory_allocation_node",
+            "protected_sandbox_state",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -1250,7 +1253,10 @@ mod tests {
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("database schema is newer"));
+        assert!(
+            err.to_string()
+                .contains("newer or unrecognized database schema")
+        );
     }
 
     #[tokio::test]

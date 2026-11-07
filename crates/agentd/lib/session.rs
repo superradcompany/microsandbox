@@ -1699,13 +1699,13 @@ fn lookup_passwd_by_name(name: &str) -> AgentdResult<Option<PasswdEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest user {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
@@ -1737,13 +1737,13 @@ fn lookup_passwd_by_uid(uid: libc::uid_t) -> AgentdResult<ResolvedUserLookup> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest uid {uid}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(ResolvedUserLookup::Numeric(uid));
     }
 
@@ -1777,18 +1777,26 @@ fn lookup_group_by_name(name: &str) -> AgentdResult<Option<GroupEntry>> {
             &mut result,
         )
     };
-    if rc != 0 {
+    if rc != 0 && !is_missing_entry_error(rc) {
         return Err(AgentdError::ExecSession(format!(
             "failed to resolve guest group {name:?}: {}",
             std::io::Error::from_raw_os_error(rc)
         )));
     }
-    if result.is_null() {
+    if rc != 0 || result.is_null() {
         return Ok(None);
     }
 
     let grp = unsafe { grp.assume_init() };
     Ok(Some(GroupEntry { gid: grp.gr_gid }))
+}
+
+/// Whether a `getpw*_r` or `getgr*_r` result means the entry does not exist.
+///
+/// POSIX allows these errors for a missing entry. musl returns `ENOENT` when the image has no
+/// `/etc/passwd` or `/etc/group`, which is normal for images built from scratch.
+fn is_missing_entry_error(rc: libc::c_int) -> bool {
+    matches!(rc, libc::ENOENT | libc::ESRCH | libc::EBADF | libc::EPERM)
 }
 
 fn lookup_buffer_len() -> usize {
@@ -2212,6 +2220,17 @@ mod tests {
     }
     const PIPE_OWNER_TEST_NAME: &str =
         "session::tests::test_piped_process_exit_outlives_spawning_runtime";
+
+    #[test]
+    fn test_missing_account_database_is_not_a_lookup_failure() {
+        for rc in [libc::ENOENT, libc::ESRCH, libc::EBADF, libc::EPERM] {
+            assert!(is_missing_entry_error(rc));
+        }
+
+        for rc in [libc::EIO, libc::ENOMEM, libc::ERANGE, libc::EMFILE] {
+            assert!(!is_missing_entry_error(rc));
+        }
+    }
 
     #[test]
     fn test_spawn_reaps_adopted_descendant() {

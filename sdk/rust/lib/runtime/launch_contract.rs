@@ -330,6 +330,7 @@ impl LaunchContract {
         let mut value = serde_json::to_value(launch)?;
         let fields = value.as_object_mut().expect("launch config object");
         for key in [
+            "protected_guest_state",
             "execution",
             "checkpoint_restore",
             "memory_cache_dir",
@@ -657,6 +658,7 @@ pub(crate) async fn validate_runtime_config(
         }
         Err(error) => return Err(error),
     };
+    require_protected_guest_state(&runtime.msb_path).await?;
     let contract = resolve(&runtime.msb_path).await?;
     validate_nested_virt(&runtime.msb_path, config, contract).await?;
     contract.validate_launch_intent(config)?;
@@ -927,6 +929,30 @@ async fn require_tcp_accept_queue_size(path: &Path) -> MicrosandboxResult<()> {
     .await
 }
 
+/// This is a security prerequisite for every start, rather than an optional feature.
+/// Probe failures are refusals too: older executables may not recognize the probe command.
+pub(crate) async fn require_protected_guest_state(path: &Path) -> MicrosandboxResult<()> {
+    let result = bounded_probe(path, "__launch-protocol").await;
+    let supported = result.as_ref().ok().is_some_and(|output| {
+        serde_json::from_slice::<LaunchCapabilities>(output).is_ok_and(|capabilities| {
+            capabilities.protocols.contains(&2) && capabilities.protected_guest_state
+        })
+    });
+    if supported {
+        return Ok(());
+    }
+    let detail = result
+        .err()
+        .map(|error| format!(" Probe failed: {error}."))
+        .unwrap_or_default();
+    Err(MicrosandboxError::Runtime(format!(
+        "upgrade required: selected runtime {} does not advertise protected sandbox state. \
+         Update the runtime in the configured home, or select a patched runtime explicitly, \
+         then retry. Updating the SDK alone may leave an older installed runtime selected.{detail}",
+        path.display()
+    )))
+}
+
 async fn require_capability(
     path: &Path,
     advertised: impl FnOnce(&LaunchCapabilities) -> bool,
@@ -938,6 +964,15 @@ async fn require_capability(
         return Err(MicrosandboxError::Runtime(upgrade_required(feature)));
     }
     Ok(())
+}
+
+pub(crate) async fn require_storage_reader(path: &Path) -> MicrosandboxResult<()> {
+    require_capability(
+        path,
+        |capabilities| capabilities.storage_reader && capabilities.protected_guest_state,
+        "the embedded storage recovery reader",
+    )
+    .await
 }
 
 // Cache successful discovery for unchanged native executables. Wrappers can
@@ -1108,6 +1143,36 @@ mod tests {
                 .to_string()
                 .contains("UDP connection limits")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_state_probe_fails_closed_and_identifies_the_selected_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, response) in [
+            ("old", "printf '%s' '{\"protocols\":[2,1]}'"),
+            (
+                "disabled",
+                "printf '%s' '{\"protocols\":[2],\"protected_guest_state\":false}'",
+            ),
+            ("malformed", "printf '%s' 'invalid response'"),
+            ("unknown-command", "exit 2"),
+        ] {
+            let executable = script(directory.path(), name, response);
+            let error = require_protected_guest_state(&executable)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("upgrade required"), "{error}");
+            assert!(error.contains(&executable.display().to_string()), "{error}");
+            assert!(error.contains("Updating the SDK alone"), "{error}");
+        }
+        let patched = script(
+            directory.path(),
+            "patched",
+            "printf '%s' '{\"protocols\":[2],\"protected_guest_state\":true}'",
+        );
+        require_protected_guest_state(&patched).await.unwrap();
     }
 
     #[cfg(unix)]
@@ -2372,33 +2437,35 @@ mod encoding {
 
     #[test]
     fn legacy_input_retains_guest_root_mounts_environment_and_cwd() {
-        let mut launch = LaunchConfig::default();
-        launch.bootstrap = GuestBootstrap {
-            block_root: Some(BootstrapBlockRoot::OciErofs {
-                lower: "/dev/vda".into(),
-                upper: BootstrapBlockRootUpper::Device {
-                    device: "/dev/vdb".into(),
-                    fstype: "ext4".into(),
-                },
-            }),
-            dir_mounts: vec![BootstrapDirMount {
-                tag: "work".into(),
-                guest_path: "/work".into(),
-                flags: BootstrapMountFlags {
-                    readonly: true,
-                    noexec: true,
-                    ..Default::default()
-                },
-            }],
-            default_env: vec![BootstrapEnvVar {
-                key: "APP".into(),
-                value: "value=with spaces".into(),
-            }],
-            default_cwd: Some("/work".into()),
-            security_profile: BootstrapSecurityProfile::Restricted,
-            // Real launches always carry the built-in limits; the legacy
-            // grammar must encode such a bootstrap by omitting them.
-            exec_limits: Some(microsandbox_types::ExecLimits::default()),
+        let launch = LaunchConfig {
+            bootstrap: GuestBootstrap {
+                block_root: Some(BootstrapBlockRoot::OciErofs {
+                    lower: "/dev/vda".into(),
+                    upper: BootstrapBlockRootUpper::Device {
+                        device: "/dev/vdb".into(),
+                        fstype: "ext4".into(),
+                    },
+                }),
+                dir_mounts: vec![BootstrapDirMount {
+                    tag: "work".into(),
+                    guest_path: "/work".into(),
+                    flags: BootstrapMountFlags {
+                        readonly: true,
+                        noexec: true,
+                        ..Default::default()
+                    },
+                }],
+                default_env: vec![BootstrapEnvVar {
+                    key: "APP".into(),
+                    value: "value=with spaces".into(),
+                }],
+                default_cwd: Some("/work".into()),
+                security_profile: BootstrapSecurityProfile::Restricted,
+                // Real launches always carry the built-in limits; the legacy
+                // grammar must encode such a bootstrap by omitting them.
+                exec_limits: Some(microsandbox_types::ExecLimits::default()),
+                ..Default::default()
+            },
             ..Default::default()
         };
         for patch in [0, 4, 8, 9] {
@@ -2487,10 +2554,9 @@ mod encoding {
             if let Some(secrets) = expected["config"]
                 .get_mut("secrets")
                 .and_then(Value::as_object_mut)
+                && let Some(action) = secrets.remove("violation_action")
             {
-                if let Some(action) = secrets.remove("violation_action") {
-                    secrets.insert("on_violation".into(), action);
-                }
+                secrets.insert("on_violation".into(), action);
             }
             assert_eq!(value["network"], expected);
             assert!(value["network"]["outbound_proxy"].is_null());

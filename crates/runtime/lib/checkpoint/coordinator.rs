@@ -373,9 +373,10 @@ impl CheckpointCoordinator {
         workload_control: Arc<WorkloadControl>,
         owned_directories: BTreeMap<String, microsandbox_filesystem::OwnedDirectoryCheckpoint>,
     ) -> Result<Self, String> {
-        let root = runtime_dir.join("checkpoints");
+        let host = super::layout::host_root(runtime_dir)?;
+        let root = host.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-        let store = LocalObjectStore::open(runtime_dir.join("checkpoint-store"))
+        let store = LocalObjectStore::open(host.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
         let additional_disks =
@@ -721,7 +722,7 @@ impl CheckpointCoordinator {
             .map_err(CheckpointFailure::before_pause)?;
         // The SDK reserves a fresh child directory under this same backend. Never accept
         // caller-selected host paths, symlinked children, or an existing handoff destination.
-        let source = self.root.parent().and_then(Path::parent).ok_or_else(|| {
+        let source = self.root.parent().ok_or_else(|| {
             CheckpointFailure::before_pause("source storage has no sandbox parent")
         })?;
         let parent = source

@@ -601,7 +601,7 @@ fn journal_path(runtime_dir: &Path, mount_id: &str) -> Result<PathBuf, String> {
     {
         return Err("invalid owned disk mount identity".into());
     }
-    Ok(runtime_dir
+    Ok(super::layout::host_root(runtime_dir)?
         .join("owned-disks")
         .join(mount_id)
         .join("disk.json"))
@@ -644,10 +644,11 @@ fn validate_fresh_storage(runtime_dir: &Path, mount_id: &str) -> Result<(), Stri
 }
 
 fn validate_journal_parents(runtime_dir: &Path, mount_id: &str) -> Result<(), String> {
+    let sandbox = super::layout::host_root(runtime_dir)?;
     for path in [
-        runtime_dir.to_path_buf(),
-        runtime_dir.join("owned-disks"),
-        runtime_dir.join("owned-disks").join(mount_id),
+        sandbox.to_path_buf(),
+        sandbox.join("owned-disks"),
+        sandbox.join("owned-disks").join(mount_id),
     ] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -769,7 +770,7 @@ fn write_state_with_sync(
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| RootDiskRolloverError::pre_rebind("owned journal root missing"))?;
-    validate_journal_parents(runtime, &state.device_id)
+    validate_journal_parents(&runtime.join("runtime"), &state.device_id)
         .map_err(RootDiskRolloverError::pre_rebind)?;
     std::fs::create_dir_all(parent).map_err(RootDiskRolloverError::pre_rebind)?;
     // Persist newly created journal-directory bindings before publishing the journal itself.
@@ -1222,7 +1223,8 @@ mod tests {
         );
         let elsewhere = temp.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
-        std::os::unix::fs::symlink(&elsewhere, runtime.join("owned-disks")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, runtime.parent().unwrap().join("owned-disks"))
+            .unwrap();
         assert!(
             seed_runtime_owned_disk_chain(
                 &runtime,
