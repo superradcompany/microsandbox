@@ -13,8 +13,9 @@ import (
 )
 
 // Exercise the dynamic loader in a subprocess so its process-global load-once state cannot
-// affect other tests. The fixture exports the established required ABI but neither new symbol.
-// Every exported function aborts if called: unsupported detection must precede native dispatch.
+// affect other tests. The fixture exports the established required ABI but no optional storage or
+// Service symbol. Every exported function aborts if called: unsupported detection must precede
+// native dispatch.
 func TestStorageMissingOptionalSymbols(t *testing.T) {
 	if path := os.Getenv("MSB_STORAGE_TEST_LIBRARY"); path != "" {
 		if err := Load(path); err != nil {
@@ -23,9 +24,11 @@ func TestStorageMissingOptionalSymbols(t *testing.T) {
 		sandbox := &Sandbox{}
 		sandbox.handle.Store(42)
 		for name, operation := range map[string]func() error{
-			"usage":         func() error { _, err := StorageUsage(context.Background()); return err },
-			"prune":         func() error { _, err := PruneStorage(context.Background(), StoragePruneOptions{}); return err },
-			"sandbox usage": func() error { _, err := sandbox.StorageUsage(context.Background()); return err },
+			"usage":          func() error { _, err := StorageUsage(context.Background()); return err },
+			"prune":          func() error { _, err := PruneStorage(context.Background(), StoragePruneOptions{}); return err },
+			"sandbox usage":  func() error { _, err := sandbox.StorageUsage(context.Background()); return err },
+			"service get":    func() error { _, err := GetService(context.Background(), "shop"); return err },
+			"service remove": func() error { return RemoveService(context.Background(), 1) },
 		} {
 			var nativeError *Error
 			if err := operation(); !errors.As(err, &nativeError) || nativeError.Kind != KindUnsupportedOperation {
