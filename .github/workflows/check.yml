@@ -101,6 +101,20 @@ jobs:
       - name: Check TypeScript-first documentation
         run: python3 scripts/check-docs-language-order.py
 
+  # Offline installer fixtures need neither a built runtime nor KVM.
+  installer-tests:
+    name: Linux installer tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ACL test tools
+        run: scripts/ci/install-apt-packages.sh acl
+      - name: Test installer including inherited ACLs
+        run: python3 -m unittest discover -s scripts/ci -p test_install.py -v
+
   trust-helper:
     name: Application trust helper
     runs-on: ubuntu-latest
@@ -1648,7 +1662,6 @@ jobs:
 
       - name: CI helper and snapshot runner unit tests
         run: |
-          python3 -m unittest discover -s scripts/ci -p test_install.py
           python3 -m unittest discover -s scripts/ci -p test_bump_version.py
           python3 -m unittest discover -s scripts/ci -p test_runner_storage.py
           python3 -m unittest discover -s scripts/smoke/cli -p test_snapshot_branch.py
@@ -2277,6 +2290,7 @@ jobs:
     needs:
       - changes
       - docs-language-order
+      - installer-tests
       - test-linux-x86_64
       - check
     runs-on: ubuntu-latest
@@ -2297,6 +2311,7 @@ jobs:
     needs:
       - changes
       - docs-language-order
+      - installer-tests
       - trust-helper
       - build-kernel
       - build-kernel-x86_64
