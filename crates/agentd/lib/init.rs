@@ -245,7 +245,24 @@ mod linux {
             Some("devtmpfs"),
             MsFlags::MS_RELATIME,
             None::<&str>,
-        )
+        )?;
+
+        // devtmpfs defaults these nodes to 0600 without a userspace device manager.
+        // Opening them must also work for non-root guest workloads.
+        for path in ["/dev/fuse", "/dev/net/tun"] {
+            match fs::set_permissions(path, fs::Permissions::from_mode(0o666)) {
+                Ok(()) => {}
+                // A guest kernel may not provide both devices.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(AgentdError::Init(format!(
+                        "failed to chmod {path} to 666: {e}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn mount_sys() -> AgentdResult<()> {
