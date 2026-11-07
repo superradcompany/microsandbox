@@ -221,27 +221,6 @@ pub enum HostPermissions {
     Mirror,
 }
 
-/// Host close behavior for Unix virtiofs-backed mounts.
-///
-/// Neither policy guarantees durability; applications must use fsync/fdatasync.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
-#[serde(rename_all = "snake_case")]
-pub enum MountFlushPolicy {
-    /// Duplicate and close the host descriptor to report close-time write errors.
-    #[default]
-    DupClose,
-    /// Skip the synthetic close, losing close-time write error reporting.
-    None,
-}
-
-impl MountFlushPolicy {
-    fn is_dup_close(&self) -> bool {
-        *self == Self::DupClose
-    }
-}
-
 /// Sandbox-level in-guest security profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -299,15 +278,6 @@ pub struct MountOptions {
 
     /// Whether device files on the mount are ignored.
     pub nodev: bool,
-
-    /// Host close behavior on Unix virtiofs mounts. Defaults to `dup_close`.
-    ///
-    /// `none` avoids synthetic host closes but loses close-time write errors.
-    /// Requires runtime v0.7.13 or later advertising `mount_flush_policy`;
-    /// older runtimes are rejected before sandbox replacement or preparation.
-    /// Omitted when default so existing launch and spec payloads stay unchanged.
-    #[serde(default, skip_serializing_if = "MountFlushPolicy::is_dup_close")]
-    pub flush_policy: MountFlushPolicy,
 
     /// Guest uid presented for host files under this mount that carry no
     /// per-file stat override.
@@ -3489,40 +3459,6 @@ mod tests {
         let decoded: MountOptions = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.override_uid, None);
         assert_eq!(decoded.override_gid, None);
-    }
-
-    #[test]
-    fn mount_flush_policy_wire_round_trip() {
-        for (input, expected, serialized) in [
-            (serde_json::json!({}), MountFlushPolicy::DupClose, None),
-            (
-                serde_json::json!({"flush_policy": "dup_close"}),
-                MountFlushPolicy::DupClose,
-                None,
-            ),
-            (
-                serde_json::json!({"flush_policy": "none"}),
-                MountFlushPolicy::None,
-                Some("none"),
-            ),
-        ] {
-            let options: MountOptions = serde_json::from_value(input).unwrap();
-            assert_eq!(options.flush_policy, expected);
-
-            let wire = serde_json::to_value(options).unwrap();
-            assert_eq!(
-                wire.get("flush_policy").and_then(|value| value.as_str()),
-                serialized
-            );
-            let round_trip: MountOptions = serde_json::from_value(wire).unwrap();
-            assert_eq!(round_trip, options);
-        }
-        assert!(
-            serde_json::from_value::<MountOptions>(serde_json::json!({
-                "flush_policy": "dup-close"
-            }))
-            .is_err()
-        );
     }
 
     #[test]

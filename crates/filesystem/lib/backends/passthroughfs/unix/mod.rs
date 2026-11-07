@@ -10,11 +10,11 @@ mod create_ops;
 mod dax;
 mod dir_ops;
 mod file_ops;
+mod handle_table;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
 mod mobility;
-mod override_cache;
 mod remove_ops;
 mod special;
 mod xattr_ops;
@@ -38,7 +38,6 @@ use crate::{
     AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
     GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
     backends::shared::{
-        handle_table::HandleData,
         init_binary,
         inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap},
         platform, stat_override,
@@ -59,24 +58,6 @@ pub enum CachePolicy {
     Auto,
     /// Aggressively cache — assume the host filesystem is static.
     Always,
-}
-
-/// Host action for a guest FUSE FLUSH (each guest close).
-///
-/// Neither policy provides durability; explicit fsync/fdatasync is unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlushPolicy {
-    /// Acknowledge without a host syscall (explicit opt-in).
-    ///
-    /// The real descriptor closes at RELEASE. Close-time write errors are not
-    /// reported at each guest close; applications needing error reporting must
-    /// use fsync. FUSE RELEASE errors cannot be returned to the closing guest.
-    None,
-    /// Duplicate and close the host descriptor to detect close-time errors (default).
-    ///
-    /// On host FUSE mounts this can trigger an expensive FLUSH round trip on
-    /// every guest close, even when the handle remains open.
-    DupClose,
 }
 
 /// Stat virtualization policy for the passthrough filesystem.
@@ -186,9 +167,6 @@ pub struct PassthroughConfig {
     /// Cache policy.
     pub cache_policy: CachePolicy,
 
-    /// Host action for guest FLUSH. Default: [`FlushPolicy::DupClose`].
-    pub flush_policy: FlushPolicy,
-
     /// Whether to enable writeback caching.
     pub writeback: bool,
 
@@ -216,7 +194,6 @@ pub struct PassthroughConfig {
 /// Implements [`DynFileSystem`] by mapping guest filesystem operations to
 /// the host filesystem, with stat virtualization via xattr.
 pub struct PassthroughFs {
-    pub(crate) override_cache: override_cache::OverrideCache,
     /// Invalid restored node identities are never reused when a path later reappears.
     pub(crate) invalid_inodes: RwLock<std::collections::BTreeSet<u64>>,
     /// Configuration.
@@ -232,7 +209,7 @@ pub struct PassthroughFs {
     pub(crate) next_inode: AtomicU64,
 
     /// Open file handle table.
-    pub(crate) handles: RwLock<BTreeMap<u64, Arc<HandleData>>>,
+    pub(crate) handles: RwLock<handle_table::FileHandles>,
 
     /// Open directory handle table.
     pub(crate) dir_handles: RwLock<BTreeMap<u64, Arc<PassthroughDirHandle>>>,
@@ -421,10 +398,9 @@ impl PassthroughFs {
             invalid_inodes: RwLock::new(std::collections::BTreeSet::new()),
             cfg,
             root_fd,
-            override_cache: override_cache::OverrideCache::default(),
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
-            handles: RwLock::new(BTreeMap::new()),
+            handles: RwLock::new(Default::default()),
             dir_handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1), // 0=init handle
             writeback: AtomicBool::new(false),
@@ -595,7 +571,6 @@ impl Default for PassthroughConfig {
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
-            flush_policy: FlushPolicy::DupClose,
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
@@ -705,22 +680,12 @@ impl DynFileSystem for PassthroughFs {
     fn batch_forget(&self, _ctx: Context, requests: Vec<(u64, u64)>) {
         // Single lock acquisition for all entries (O(1) instead of O(n) locks).
         // batch_forget is called with hundreds of entries after directory traversals.
-        let forgotten = {
-            let mut inodes = self.inodes.write().unwrap();
-            let mut forgotten = Vec::with_capacity(requests.len());
-            for (ino, count) in requests {
-                if self.is_virtual_init_inode(ino) {
-                    continue;
-                }
-                if let Some(data) = inode::forget_one_locked(&mut inodes, ino, count) {
-                    forgotten.push(data);
-                }
+        let mut inodes = self.inodes.write().unwrap();
+        for (ino, count) in requests {
+            if self.is_virtual_init_inode(ino) {
+                continue;
             }
-            forgotten
-        };
-        for data in forgotten {
-            self.override_cache.invalidate(data.dev, data.ino);
-            drop(data);
+            inode::forget_one_locked(&mut inodes, ino, count);
         }
     }
 

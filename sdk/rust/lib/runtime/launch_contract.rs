@@ -22,7 +22,7 @@ use microsandbox_runtime::launch::{LaunchCapabilities, LaunchConfig};
 use microsandbox_types::HttpDenyResponseFormat;
 use microsandbox_types::compat as types_compat;
 use microsandbox_types::{
-    CpuPlacement, MountFlushPolicy, RootDisk, RootfsSource, TransparentHugePagePolicy, VolumeMount,
+    CpuPlacement, RootDisk, RootfsSource, TransparentHugePagePolicy, VolumeMount,
 };
 use semver::Version;
 use serde_json::{Value, json};
@@ -634,13 +634,13 @@ pub(crate) async fn validate_runtime_config(
     network.secrets.validate().map_err(|error| {
         MicrosandboxError::InvalidConfig(format!("invalid secret configuration: {error}"))
     })?;
-    let requires_runtime =
-        config.spec.resources.nested_virt == Some(true) || has_custom_mount_flush_policy(config);
     let runtime = match crate::setup::resolve_runtime(global) {
         Ok(runtime) => runtime,
         #[cfg(feature = "embed-binaries")]
-        Err(MicrosandboxError::RuntimeNotInstalled(_)) if requires_runtime => {
-            // Keep first-use installation working, but discover feature support
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt == Some(true) =>
+        {
+            // Keep first-use installation working, but discover host support
             // before replacement can remove the existing sandbox.
             crate::setup::ensure_runtime(
                 global,
@@ -651,7 +651,9 @@ pub(crate) async fn validate_runtime_config(
             )
             .await?
         }
-        Err(MicrosandboxError::RuntimeNotInstalled(_)) if !requires_runtime => {
+        Err(MicrosandboxError::RuntimeNotInstalled(_))
+            if config.spec.resources.nested_virt != Some(true) =>
+        {
             return Ok(());
         }
         Err(error) => return Err(error),
@@ -669,7 +671,6 @@ pub(crate) async fn validate_runtime_config(
         .await?;
     validate_exec_limits(&runtime.msb_path, config).await?;
     validate_guest_clock(&runtime.msb_path, config).await?;
-    validate_mount_flush_policy(&runtime.msb_path, config).await?;
     validate_fs_state_limit(&runtime.msb_path, global).await?;
     Ok(())
 }
@@ -876,43 +877,6 @@ pub(crate) async fn validate_guest_clock(
         ));
     }
     Ok(())
-}
-
-/// Refuse non-default mount flush behavior before replacement or preparation.
-/// Old mount-string parsers reject `flush`, and old spec readers silently drop the policy.
-pub(crate) async fn validate_mount_flush_policy(
-    path: &Path,
-    config: &SandboxConfig,
-) -> MicrosandboxResult<()> {
-    if !has_custom_mount_flush_policy(config) {
-        return Ok(());
-    }
-    let supported = capabilities(path).await.ok().is_some_and(|capabilities| {
-        capabilities.protocols.contains(&2) && capabilities.mount_flush_policy
-    });
-    if !supported {
-        return Err(MicrosandboxError::unsupported(
-            crate::error::Operation::SandboxStart,
-            crate::error::UnsupportedReason::NotAvailable(format!(
-                "runtime upgrade required: {} (minimum v0.7.13 with mount_flush_policy support)",
-                upgrade_required("mount flush_policy=none"),
-            )),
-        ));
-    }
-    Ok(())
-}
-
-fn has_custom_mount_flush_policy(config: &SandboxConfig) -> bool {
-    config.spec.mounts.iter().any(|mount| {
-        let options = match mount {
-            VolumeMount::Bind { options, .. }
-            | VolumeMount::Named { options, .. }
-            | VolumeMount::Owned { options, .. }
-            | VolumeMount::Tmpfs { options, .. }
-            | VolumeMount::DiskImage { options, .. } => options,
-        };
-        options.flush_policy != MountFlushPolicy::DupClose
-    })
 }
 
 /// Probe filesystem state budget support only when the budget differs from the default.
@@ -1811,56 +1775,6 @@ mod tests {
             r#"printf '%s' '{"protocols":[2,1],"guest_clock":true}'"#,
         );
         validate_guest_clock(&path, &config).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn mount_flush_policy_preflight_distinguishes_old_and_capable_runtimes() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = crate::test_support::fixtures::decode(include_str!(
-            "../db/fixtures/config-0.6.18.json"
-        ))
-        .unwrap();
-        config.spec.network.enabled = false;
-        let mut global = GlobalConfig::default();
-        let firmware = dir.path().join("libkrunfw");
-        std::fs::write(&firmware, b"not loaded by preflight").unwrap();
-        global.paths.libkrunfw = Some(firmware);
-
-        for (name, feature, supported) in [
-            ("old", "", false),
-            ("disabled", ",\"mount_flush_policy\":false", false),
-            ("current", ",\"mount_flush_policy\":true", true),
-        ] {
-            let runtime = script(
-                dir.path(),
-                name,
-                &format!(
-                    r#"case "$1" in --version) printf 'msb 0.6.18';; __launch-protocol) printf '%s' '{{"protocols":[2,1],"protected_guest_state":true{feature}}}';; *) exit 1;; esac"#
-                ),
-            );
-            global.paths.msb = Some(runtime);
-            for policy in [None, Some("dup_close"), Some("none")] {
-                let mut options = json!({});
-                if let Some(policy) = policy {
-                    options["flush_policy"] = policy.into();
-                }
-                config.spec.mounts = serde_json::from_value(json!([
-                    {"type": "Bind", "host": "/host/data", "guest": "/data", "options": options}
-                ]))
-                .unwrap();
-                let result = validate_runtime_config(&config, &global).await;
-                if policy == Some("none") && !supported {
-                    let error = result
-                        .expect_err("old runtime must refuse flush=none before preparation")
-                        .to_string();
-                    assert!(error.contains("runtime upgrade required"), "{error}");
-                    assert!(error.contains("flush_policy"), "{error}");
-                } else {
-                    result.unwrap();
-                }
-            }
-        }
     }
 
     #[cfg(unix)]

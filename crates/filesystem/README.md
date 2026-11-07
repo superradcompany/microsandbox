@@ -21,91 +21,22 @@ let fs = PassthroughFs::builder()
 
 Metadata like uid, gid, and mode are stored in an extended attribute on the host, so the actual host file permissions stay untouched. Special files (devices, sockets, FIFOs) are stored as regular files with their type bits in the xattr. Path confinement prevents the guest from escaping the root directory.
 
-#### Guest close policy (Unix)
+### Passthrough descriptor reuse
 
-`PassthroughConfig::flush_policy` and the builder's `.flush_policy(...)` control
-host work for guest FUSE FLUSH requests. The default, `FlushPolicy::DupClose`,
-duplicates and closes the host descriptor so backing filesystem close-time
-write errors (such as ENOSPC or EIO from host FUSE FLUSH) reach guest `close()`.
-Neither policy guarantees durability; explicit fsync/fdatasync is unchanged.
+CREATE retains the original host descriptor instead of closing, looking up,
+and reopening the file. Handle-based SETATTR and extended-attribute operations
+borrow open descriptors rather than making temporary copies. Extended-attribute
+requests find handles through an inode index, falling back to a temporary
+read-only descriptor when no handle is open.
 
-The Unix runtime accepts `flush=dup-close|none` in launch JSON mount strings,
-alongside `stat-virt=` and `host-perms=`. The launcher's `msb machine` command
-reads this JSON through `--config-fd` or `--config-file`; it has no `--mount` flag.
-For example, the `mounts` member of a complete launch configuration can contain:
+Permission overrides are read from the host on each metadata request; there is
+no additional metadata cache. Guest FLUSH still duplicates and closes the host
+descriptor to report close-time errors. Explicit fsync/fdatasync and RELEASE
+behavior are unchanged.
 
-```json
-{"mounts": ["named-volume:/srv/juicefs/volume:flush=none"]}
-```
-
-Shared sandbox specs use the typed per-mount `options.flush_policy` field:
-
-```json
-{
-  "mounts": [{
-    "type": "Bind",
-    "host": "/srv/juicefs/volume",
-    "guest": "/data",
-    "options": {"flush_policy": "none"}
-  }]
-}
-```
-
-The wire values are `"dup_close"` and `"none"`. The default is `"dup_close"`,
-which is omitted when serialized and emits no launch option. The Rust SDK
-builder exposes `.flush_policy(MountFlushPolicy::None)`; explicit `"none"`
-renders as `flush=none` for Unix virtiofs mounts. It is rejected for tmpfs,
-disk-backed mounts, and Windows runtimes.
-
-`flush=none` (`FlushPolicy::None`) validates the handle and returns success
-without duplicating or closing its fd. On backing filesystems such as JuiceFS,
-this avoids a metadata/object round trip for each synthetic close. Opt in only
-where that cost warrants losing close-time write error reporting: applications
-must fsync/fdatasync to detect write errors and request durability. The real fd
-closes at RELEASE, whose errors cannot be reported to guest `close()`; the
-current File drop discards those host close errors. This policy is persisted in
-the sandbox spec; it does not change filesystem metadata or the guest protocol.
-Older runtimes reject the new option; mount specifications omitting it retain
-the original dup-close behavior.
-
-Descriptor audit for a successful regular-file create/write sequence:
-
-- CREATE keeps its original fd as the guest handle; no close/reopen.
-- WRITE and handle-based SETATTR borrow that fd, including override-xattr work.
-- Guest set/get/list/remove xattr borrow an existing handle for the inode under
-  its file lock. Without a handle they open read-only and close once per request.
-- SETATTR without a handle opens read-only for metadata changes; truncation
-  requires one temporary writable fd. That close remains necessary when there
-  is no supplied handle.
-- Linux namespace resolution uses O_PATH descriptors; ordinary path-based
-  metadata reopens use read-only descriptors. These do not add writable closes.
-- Default FLUSH adds one synthetic close per request. With `flush=none` it adds
-  none. RELEASE closes the real handle once.
-
-The Linux `test_create_write_close_budget` traces CREATE → WRITE → handle-based
-truncate → four xattr operations → four FLUSH requests → fsync/fdatasync →
-RELEASE with `strace -f -yy`. It asserts **one close of the created file** with
-explicit `None`, and five with the default `DupClose` (one RELEASE plus four
-synthetic closes). Run with:
-
-```sh
-cargo test -p microsandbox-filesystem test_create_write_close_budget -- --nocapture
-```
-
-Install strace on Linux (`apt-get install strace`); the test **fails** if it is
-missing, including in CI and Docker. The count covers this direct handler sequence,
-not arbitrary guest path walks, extra opens, handleless truncates, error cleanup,
-or checkpoint/unlink retention. No live JuiceFS latency improvement is claimed.
-
-`test_flush_reports_backing_close_errors_by_default` uses strace's path-filtered
-close fault injection to emulate backing FUSE FLUSH failures. It verifies that
-the default reports ENOSPC/EIO and explicit `none` acknowledges the guest close.
-Both Linux tests run in the ordinary crate suite:
-
-```sh
-cargo test -p microsandbox-filesystem
-cargo clippy -p microsandbox-filesystem --all-targets -- -D warnings
-```
+The Linux `test_create_write_close_budget` traces the handler sequence with
+`strace` and checks that only explicit FLUSH requests and RELEASE close the
+created file. Install strace before running the filesystem test suite on Linux.
 
 ### MemFs
 

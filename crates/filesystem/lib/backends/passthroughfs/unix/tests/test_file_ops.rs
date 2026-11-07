@@ -189,19 +189,12 @@ fn test_getattr_via_handle_after_forget() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_create_write_close_budget() {
-    const CHILD_POLICY: &str = "MSB_TEST_CLOSE_BUDGET_POLICY";
+    const CHILD: &str = "MSB_TEST_CLOSE_BUDGET_CHILD";
     const TEST_NAME: &str =
         "backends::passthroughfs::unix::tests::test_file_ops::test_create_write_close_budget";
 
-    if let Ok(policy) = std::env::var(CHILD_POLICY) {
-        let sb = TestSandbox::with_config(|mut cfg| {
-            cfg.flush_policy = match policy.as_str() {
-                "none" => FlushPolicy::None,
-                "dup_close" => FlushPolicy::DupClose,
-                _ => panic!("unknown close policy"),
-            };
-            cfg
-        });
+    if std::env::var_os(CHILD).is_some() {
+        let sb = TestSandbox::new();
         let (entry, handle) = sb.fuse_create_root("close-budget.txt").unwrap();
         sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
         let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
@@ -245,40 +238,38 @@ fn test_create_write_close_budget() {
             .expect("Linux close-budget tests require strace (apt-get install strace)")
             .success()
     );
-    for (policy, expected_closes) in [("none", 1), ("dup_close", 5)] {
-        let trace = tempfile::NamedTempFile::new().unwrap();
-        let output = std::process::Command::new("strace")
-            .args(["-f", "-yy", "-e", "trace=close,dup,fsync,fdatasync", "-o"])
-            .arg(trace.path())
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", TEST_NAME, "--nocapture"])
-            .env(CHILD_POLICY, policy)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let calls = std::fs::read_to_string(trace.path()).unwrap();
-        let file_calls: Vec<_> = calls
-            .lines()
-            .filter(|line| line.contains("/close-budget.txt>"))
-            .collect();
-        let closes = file_calls
-            .iter()
-            .filter(|line| line.contains("close("))
-            .count();
-        assert_eq!(closes, expected_closes, "{policy}: {calls}");
-        assert!(
-            file_calls.iter().any(|line| line.contains("fsync(")),
-            "{calls}"
-        );
-        assert!(
-            file_calls.iter().any(|line| line.contains("fdatasync(")),
-            "{calls}"
-        );
-    }
+    let trace = tempfile::NamedTempFile::new().unwrap();
+    let output = std::process::Command::new("strace")
+        .args(["-f", "-yy", "-e", "trace=close,dup,fsync,fdatasync", "-o"])
+        .arg(trace.path())
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(trace.path()).unwrap();
+    let file_calls: Vec<_> = calls
+        .lines()
+        .filter(|line| line.contains("/close-budget.txt>"))
+        .collect();
+    let closes = file_calls
+        .iter()
+        .filter(|line| line.contains("close("))
+        .count();
+    assert_eq!(closes, 5, "{calls}");
+    assert!(
+        file_calls.iter().any(|line| line.contains("fsync(")),
+        "{calls}"
+    );
+    assert!(
+        file_calls.iter().any(|line| line.contains("fdatasync(")),
+        "{calls}"
+    );
 }
 
 /// Inject a backing close error at the syscall boundary, without mocking the
@@ -287,31 +278,24 @@ fn test_create_write_close_budget() {
 #[cfg(target_os = "linux")]
 fn test_flush_reports_backing_close_errors_by_default() {
     const CHILD_ROOT: &str = "MSB_TEST_FLUSH_ERROR_ROOT";
-    const CHILD_POLICY: &str = "MSB_TEST_FLUSH_ERROR_POLICY";
+    const CHILD_ERRNO: &str = "MSB_TEST_FLUSH_ERROR_ERRNO";
     const TEST_NAME: &str = "backends::passthroughfs::unix::tests::test_file_ops::test_flush_reports_backing_close_errors_by_default";
 
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        let policy = std::env::var(CHILD_POLICY).unwrap();
+        let errno = std::env::var(CHILD_ERRNO).unwrap();
         let sb = TestSandbox::with_config(|mut cfg| {
             cfg.root_dir = root.into();
-            if policy == "none" {
-                cfg.flush_policy = FlushPolicy::None;
-            }
             cfg
         });
         let (entry, handle) = sb.fuse_create_root("flush-error.txt").unwrap();
         sb.fuse_write(entry.inode, handle, b"pending write", 0)
             .unwrap();
         let result = sb.fs.flush(sb.ctx(), entry.inode, handle, 0);
-        if policy == "none" {
-            result.unwrap();
-        } else {
-            TestSandbox::assert_errno(result, policy.parse().unwrap());
-        }
+        TestSandbox::assert_errno(result, errno.parse().unwrap());
         return;
     }
 
-    for (policy, errno) in [("28", "ENOSPC"), ("5", "EIO"), ("none", "ENOSPC")] {
+    for (code, errno) in [("28", "ENOSPC"), ("5", "EIO")] {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("flush-error.txt");
         std::fs::write(&path, b"").unwrap();
@@ -323,13 +307,13 @@ fn test_flush_reports_backing_close_errors_by_default() {
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", TEST_NAME, "--nocapture"])
             .env(CHILD_ROOT, root.path())
-            .env(CHILD_POLICY, policy)
+            .env(CHILD_ERRNO, code)
             .output()
             .expect("Linux flush error tests require strace (apt-get install strace)");
         let trace = String::from_utf8_lossy(&output.stderr);
         assert!(
             output.status.success(),
-            "{policy}: {trace}\n{}",
+            "{code}: {trace}\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
         assert!(

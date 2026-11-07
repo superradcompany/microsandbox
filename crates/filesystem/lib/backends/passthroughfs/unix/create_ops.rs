@@ -29,7 +29,7 @@ use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchm
 use super::{PassthroughFs, inode};
 use crate::{
     Context, Entry, Extensions, OpenOptions,
-    backends::shared::{handle_table::HandleData, name_validation, platform},
+    backends::shared::{handle_table::HandleData, name_validation, platform, stat_override},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -118,10 +118,7 @@ pub(crate) fn do_create(
         }
 
         let full_mode = platform::MODE_REG | file_mode;
-        if let Err(e) = fs
-            .override_cache
-            .set_override(fd, ctx.uid, ctx.gid, full_mode, 0)
-        {
+        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, 0) {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
@@ -135,15 +132,12 @@ pub(crate) fn do_create(
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) =
-                fs.override_cache
-                    .get_override(open_fd, true, fs.cfg.strict_enabled())?
+            if let Some(ovr) = stat_override::get_override(open_fd, true, fs.cfg.strict_enabled())?
             {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ = fs
-                        .override_cache
-                        .set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ =
+                        stat_override::set_override(open_fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {
@@ -218,8 +212,7 @@ pub(crate) fn do_mkdir(
 
         let full_mode = platform::MODE_DIR | dir_mode;
         if let Err(e) =
-            fs.override_cache
-                .set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
+            stat_override::set_override_at(parent_fd.raw(), name, ctx.uid, ctx.gid, full_mode, 0)
         {
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), libc::AT_REMOVEDIR) };
             return Err(e);
@@ -297,10 +290,7 @@ pub(crate) fn do_mknod(
 
         // Store the requested type and permissions in xattr.
         let full_mode = file_type | perm_mode;
-        if let Err(e) = fs
-            .override_cache
-            .set_override(fd, ctx.uid, ctx.gid, full_mode, rdev)
-        {
+        if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, full_mode, rdev) {
             unsafe { libc::close(fd) };
             unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
             return Err(e);
@@ -388,10 +378,7 @@ pub(crate) fn do_symlink(
 
             // Set override xattr with S_IFLNK.
             let mode = platform::MODE_LNK | 0o777;
-            if let Err(e) = fs
-                .override_cache
-                .set_override(fd, ctx.uid, ctx.gid, mode, 0)
-            {
+            if let Err(e) = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0) {
                 unsafe { libc::close(fd) };
                 unsafe { libc::unlinkat(parent_fd.raw(), name.as_ptr(), 0) };
                 return Err(e);
@@ -434,9 +421,7 @@ pub(crate) fn do_symlink(
                 return Err(platform::linux_error(io::Error::last_os_error()));
             }
 
-            let xattr_result = fs
-                .override_cache
-                .set_override(fd, ctx.uid, ctx.gid, mode, 0);
+            let xattr_result = stat_override::set_override(fd, ctx.uid, ctx.gid, mode, 0);
             unsafe { libc::close(fd) };
 
             if let Err(err) = xattr_result {
@@ -543,7 +528,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         // Verify override xattr says S_IFLNK before reading file content.
         // Without this check, a guest could read any regular file's content via readlink.
-        match fs.override_cache.get_override(
+        match stat_override::get_override(
             inode_fd.raw(),
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),

@@ -424,15 +424,6 @@ impl MountBuilder {
         self
     }
 
-    /// Set host close behavior for Unix virtiofs mounts. Default: `DupClose`.
-    ///
-    /// `None` skips synthetic closes and their write error reporting; use
-    /// fsync/fdatasync for write errors and durability. Invalid for tmpfs/disks.
-    pub fn flush_policy(mut self, policy: MountFlushPolicy) -> Self {
-        self.options.flush_policy = policy;
-        self
-    }
-
     /// Set the guest stat virtualization policy. Default: [`StatVirtualization::Strict`].
     ///
     /// Valid for bind mounts and directory-backed named or owned mounts. Calling this
@@ -571,7 +562,6 @@ impl MountBuilder {
                 | MountKind::Named { .. }
                 | MountKind::Owned(OwnedVolumeStorage::Directory { .. })
         );
-        validate_mount_flush_policy(&self.options, is_virtiofs)?;
         if self.follow_root_symlinks && matches!(self.mount, MountKind::Owned(_)) {
             return Err(crate::MicrosandboxError::InvalidConfig(
                 "owned volumes cannot follow host root symlinks".into(),
@@ -624,7 +614,6 @@ impl MountBuilder {
         } = &self.mount
             && create.kind() == VolumeKind::Disk
         {
-            validate_mount_flush_policy(&self.options, false)?;
             // Disk-backed named volumes are passed to the VMM as block
             // devices, so virtiofs-only policies are invalid even when the
             // caller explicitly sets the same values as the defaults.
@@ -1426,7 +1415,6 @@ fn validate_virtiofs_policies(
     host_permissions: HostPermissions,
     options: &MountOptions,
 ) -> crate::MicrosandboxResult<()> {
-    validate_mount_flush_policy(options, true)?;
     if stat_virtualization == StatVirtualization::Off && host_permissions == HostPermissions::Mirror
     {
         return Err(crate::MicrosandboxError::InvalidConfig(
@@ -1462,20 +1450,7 @@ fn validate_mount_ownership(
     Ok(())
 }
 
-fn validate_mount_flush_policy(
-    options: &MountOptions,
-    virtiofs: bool,
-) -> crate::MicrosandboxResult<()> {
-    if options.flush_policy != MountFlushPolicy::DupClose && !virtiofs {
-        return Err(crate::MicrosandboxError::InvalidConfig(
-            "flush_policy is only valid for virtiofs-backed mounts".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_non_virtiofs_ownership(options: &MountOptions) -> crate::MicrosandboxResult<()> {
-    validate_mount_flush_policy(options, false)?;
     if has_mount_owner(options) {
         return Err(crate::MicrosandboxError::InvalidConfig(
             "mount owner is only valid for bind and directory-backed named or owned volume mounts"
@@ -1491,7 +1466,6 @@ pub(crate) fn validate_named_disk_mount_options(
     host_permissions: HostPermissions,
     options: &MountOptions,
 ) -> crate::MicrosandboxResult<()> {
-    validate_mount_flush_policy(options, false)?;
     if stat_virtualization != StatVirtualization::Strict {
         return Err(crate::MicrosandboxError::InvalidConfig(format!(
             "stat_virtualization is only valid for directory named volumes: {name}"
@@ -1559,7 +1533,7 @@ impl From<PathBuf> for ImageSource {
 //--------------------------------------------------------------------------------------------------
 
 pub use microsandbox_types::{
-    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountFlushPolicy, MountOptions,
+    DeploymentProfile, DiskImageFormat, FlatClone, HostPermissions, MountOptions,
     NamedVolumeCreate, NamedVolumeMode, OciRootfsSource, OwnedVolumeStorage, Patch, RootDisk,
     RootfsSource, SecurityProfile, StatVirtualization, VolumeKind, VolumeMount,
 };
@@ -1571,33 +1545,6 @@ pub use microsandbox_types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn mount_builder_carries_flush_policy_and_rejects_non_virtiofs() {
-        let mount = MountBuilder::new("/data")
-            .bind("/host/data")
-            .flush_policy(MountFlushPolicy::None)
-            .build()
-            .unwrap();
-        let wire = serde_json::to_value(mount).unwrap();
-        assert_eq!(wire["options"]["flush_policy"], "none");
-
-        for mount in [
-            MountBuilder::new("/tmp").tmpfs(),
-            MountBuilder::new("/disk").disk("/host/disk.raw"),
-            MountBuilder::new("/owned").owned_with(|owned| owned.disk().size(64_u32)),
-        ] {
-            assert!(
-                mount
-                    .flush_policy(MountFlushPolicy::None)
-                    .build()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("flush_policy is only valid")
-            );
-        }
-    }
 
     #[test]
     fn owned_mounts_cannot_allocate_replacements_during_restore() {

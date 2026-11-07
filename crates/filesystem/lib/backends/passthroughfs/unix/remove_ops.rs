@@ -149,7 +149,6 @@ pub(crate) fn do_unlink(
         }
     }
 
-    fs.override_cache.clear();
     Ok(())
 }
 
@@ -223,7 +222,6 @@ pub(crate) fn do_rmdir(
             unsafe { libc::close(fd) };
         }
     }
-    fs.override_cache.clear();
     Ok(())
 }
 
@@ -407,6 +405,5 @@ pub(crate) fn do_rename(
         }
     }
 
-    fs.override_cache.clear();
     Ok(())
 }

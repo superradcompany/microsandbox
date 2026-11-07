@@ -278,7 +278,7 @@ fn do_lookup_linux(
     let mnt_id = stx.stx_mnt_id;
     let alt_key = InodeAltKey::new(st.st_ino, st.st_dev, mnt_id);
     let alias = NamespaceAlias::new(parent, name.to_bytes());
-    let patched = fs.override_cache.patched_stat(
+    let patched = crate::backends::shared::stat_override::patched_stat(
         fd,
         st,
         fs.cfg.xattr_enabled(),
@@ -340,7 +340,7 @@ pub(crate) fn register_created_fd(
     let st = platform::fstat(fd)?;
     #[cfg(target_os = "linux")]
     let (st, alt_key) = linux_stat_from_fd(fd)?;
-    let patched = fs.override_cache.patched_stat(
+    let patched = crate::backends::shared::stat_override::patched_stat(
         fd,
         st,
         fs.cfg.xattr_enabled(),
@@ -418,7 +418,6 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
 
     // Open a real fd for xattr access via /.vol/dev/ino.
     let patched = open_and_patch_stat_macos(
-        fs,
         platform::stat_dev(&st),
         platform::stat_ino(&st),
         st,
@@ -489,7 +488,6 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
 /// temporary fd solely for `fgetxattr` to read the override stat.
 #[cfg(target_os = "macos")]
 fn open_and_patch_stat_macos(
-    fs: &PassthroughFs,
     dev: u64,
     ino: u64,
     st: stat64,
@@ -503,9 +501,13 @@ fn open_and_patch_stat_macos(
     // O_SYMLINK so we can read override metadata from the link itself without
     // following it.
     if let Ok(fd) = open_macos_path_for_stat(path.as_ptr()) {
-        let result =
-            fs.override_cache
-                .patched_stat(fd, st, xattr_enabled, strict, bind_identity_map);
+        let result = crate::backends::shared::stat_override::patched_stat(
+            fd,
+            st,
+            xattr_enabled,
+            strict,
+            bind_identity_map,
+        );
         unsafe { libc::close(fd) };
         return result;
     }
@@ -539,26 +541,14 @@ fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
 /// Decrement the reference count for an inode. Remove it from the table
 /// when the count reaches zero.
 pub(crate) fn forget_one(fs: &PassthroughFs, inode: u64, count: u64) {
-    let forgotten = {
-        let mut inodes = fs.inodes.write().unwrap();
-        forget_one_locked(&mut inodes, inode, count)
-    };
-    // Invalidation may wait for an in-flight xattr syscall on this identity.
-    // Never hold the mount-wide inode table while waiting for host I/O.
-    if let Some(data) = forgotten {
-        fs.override_cache.invalidate(data.dev, data.ino);
-        // The retained fd pins the host identity until its old cache entry is gone.
-        drop(data);
-    }
+    let mut inodes = fs.inodes.write().unwrap();
+    forget_one_locked(&mut inodes, inode, count);
 }
 
 /// Decrement the reference count under an already-held write lock.
 ///
 /// Used by [`super::PassthroughFs::batch_forget`] to process all entries
 /// under a single lock acquisition (O(1) lock ops vs O(n) for per-entry locking).
-///
-/// Returns a reference that keeps any backing descriptor alive until the caller
-/// invalidates the override cache after releasing the inode table lock.
 ///
 /// Uses a CAS loop to handle the race where a concurrent `lookup` may increment
 /// the refcount between our load and compare_exchange. `saturating_sub` prevents
@@ -567,27 +557,33 @@ pub(crate) fn forget_one_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
     count: u64,
-) -> Option<Arc<InodeData>> {
-    let data = inodes.get(&inode).cloned()?;
-    loop {
-        let old = data.refcount.load(Ordering::Relaxed);
-        let new = old.saturating_sub(count);
-        if data
-            .refcount
-            .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
-            .is_ok()
-        {
-            if new == 0 {
-                #[cfg(target_os = "linux")]
-                maybe_remove_inode_locked(inodes, inode);
+) {
+    if let Some(data) = inodes.get(&inode).cloned() {
+        loop {
+            let old = data.refcount.load(Ordering::Relaxed);
+            let new = old.saturating_sub(count);
+            if data
+                .refcount
+                .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                if new == 0 {
+                    #[cfg(target_os = "linux")]
+                    maybe_remove_inode_locked(inodes, inode);
 
-                #[cfg(target_os = "macos")]
-                inodes.remove(&inode);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
+                        if ufd >= 0 {
+                            unsafe { libc::close(ufd as i32) };
+                        }
+                        inodes.remove(&inode);
+                    }
+                }
+                break;
             }
-            break;
         }
     }
-    Some(data)
 }
 
 /// Get an fd for an inode suitable for `*at()` syscalls.
@@ -978,9 +974,9 @@ fn maybe_remove_inode_locked(
     }
 
     let anchor_parent = data.anchor_parent.load(Ordering::Acquire);
-    // Let the last Arc release retained descriptors. FORGET holds one through
-    // outside-lock cache invalidation, and concurrent operations may still use it.
-    inodes.remove(&inode);
+    if let Some(removed) = inodes.remove(&inode) {
+        let _ = removed.retained_fd.lock().unwrap().take();
+    }
 
     if anchor_parent != 0 {
         decrement_anchor_children_locked(inodes, anchor_parent);
@@ -1123,7 +1119,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
     {
         let fd = get_inode_fd(fs, inode)?;
         let st = platform::fstat(fd.raw())?;
-        fs.override_cache.patched_stat(
+        crate::backends::shared::stat_override::patched_stat(
             fd.raw(),
             st,
             fs.cfg.xattr_enabled(),
@@ -1141,7 +1137,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
         if ufd >= 0 {
             let st = platform::fstat(ufd as i32)?;
-            return fs.override_cache.patched_stat(
+            return crate::backends::shared::stat_override::patched_stat(
                 ufd as i32,
                 st,
                 fs.cfg.xattr_enabled(),
@@ -1152,7 +1148,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
 
         if let Ok(fd) = open_vol_fd(data.dev, data.ino) {
             let result = platform::fstat(fd).and_then(|st| {
-                fs.override_cache.patched_stat(
+                crate::backends::shared::stat_override::patched_stat(
                     fd,
                     st,
                     fs.cfg.xattr_enabled(),
@@ -1171,7 +1167,6 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             return Err(platform::linux_error(io::Error::last_os_error()));
         }
         open_and_patch_stat_macos(
-            fs,
             data.dev,
             data.ino,
             st,

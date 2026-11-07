@@ -144,11 +144,8 @@ pub(crate) fn do_setattr(
     //   - kill_priv            : kernel asked us to clear setuid/setgid
     if valid.intersects(SetattrValid::UID | SetattrValid::GID | SetattrValid::MODE) || kill_priv {
         if fs.cfg.xattr_enabled() {
-            let current = fs.override_cache.get_override(
-                fd,
-                fs.cfg.xattr_enabled(),
-                fs.cfg.strict_enabled(),
-            )?;
+            let current =
+                stat_override::get_override(fd, fs.cfg.xattr_enabled(), fs.cfg.strict_enabled())?;
             let (cur_uid, cur_gid, cur_mode, cur_rdev) = match current {
                 Some(ovr) => (ovr.uid, ovr.gid, ovr.mode, ovr.rdev),
                 None => {
@@ -193,8 +190,7 @@ pub(crate) fn do_setattr(
                 fchmod_mirror(fd, new_mode, new_mode & platform::MODE_TYPE_MASK)?;
             }
 
-            fs.override_cache
-                .set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
+            stat_override::set_override(fd, new_uid, new_gid, new_mode, cur_rdev)?;
         } else if valid.contains(SetattrValid::MODE) {
             // xattr off: guest sees real host stat. Apply chmod directly.
             // For REG/DIR we keep the owner-access floor so the host process
@@ -342,7 +338,7 @@ fn stat_handle(fs: &PassthroughFs, handle: u64) -> io::Result<stat64> {
     let fd = file.as_raw_fd();
     let st = platform::fstat(fd)?;
 
-    fs.override_cache.patched_stat(
+    stat_override::patched_stat(
         fd,
         st,
         fs.cfg.xattr_enabled(),

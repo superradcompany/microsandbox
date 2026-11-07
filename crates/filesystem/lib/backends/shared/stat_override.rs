@@ -145,7 +145,7 @@ impl BindIdentityMap {
 /// Returns `EIO` if the xattr is corrupt (wrong version, short read).
 pub(crate) fn patched_stat(
     fd: RawFd,
-    st: stat64,
+    mut st: stat64,
     xattr_enabled: bool,
     strict: bool,
     bind_identity_map: Option<&BindIdentityMapHandle>,
@@ -157,20 +157,12 @@ pub(crate) fn patched_stat(
     // Real symlinks on host cannot have user xattrs on Linux.
     #[cfg(target_os = "linux")]
     if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
-        return apply_override(st, None, bind_identity_map);
+        apply_bind_identity_map(&mut st, bind_identity_map);
+        return Ok(st);
     }
 
-    apply_override(st, read_override(fd, strict)?, bind_identity_map)
-}
-
-/// Apply an already validated override (or the bind identity fallback).
-pub(crate) fn apply_override(
-    mut st: stat64,
-    value: Option<OverrideStat>,
-    bind_identity_map: Option<&BindIdentityMapHandle>,
-) -> io::Result<stat64> {
-    match value {
-        Some(ovr) => {
+    match read_override(fd, strict) {
+        Ok(Some(ovr)) => {
             st.st_uid = ovr.uid;
             st.st_gid = ovr.gid;
 
@@ -197,10 +189,11 @@ pub(crate) fn apply_override(
             }
             Ok(st)
         }
-        None => {
+        Ok(None) => {
             apply_bind_identity_map(&mut st, bind_identity_map);
             Ok(st)
         } // No override xattr
+        Err(e) => Err(e),
     }
 }
 
@@ -380,6 +373,44 @@ pub(crate) fn set_override(fd: RawFd, uid: u32, gid: u32, mode: u32, rdev: u32) 
     }
 
     Ok(())
+}
+
+/// Set the override xattr on a path (for use when we don't have an fd).
+pub(crate) fn set_override_at(
+    dirfd: RawFd,
+    name: &CStr,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    rdev: u32,
+) -> io::Result<()> {
+    // Open the file to get an fd, then delegate.
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        // For directories, use O_RDONLY | O_DIRECTORY.
+        let fd = unsafe {
+            libc::openat(
+                dirfd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            )
+        };
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        let result = set_override(fd, uid, gid, mode, rdev);
+        unsafe { libc::close(fd) };
+        return result;
+    }
+    let result = set_override(fd, uid, gid, mode, rdev);
+    unsafe { libc::close(fd) };
+    result
 }
 
 /// Read the current override xattr values from a file descriptor.

@@ -105,11 +105,6 @@ pub struct LaunchCapabilities {
     #[serde(default)]
     pub fs_state_limit: bool,
 
-    /// Unix virtiofs mounts honor non-default `MountOptions::flush_policy`.
-    /// Older runtimes omit this capability and reject the `flush` mount option.
-    #[serde(default)]
-    pub mount_flush_policy: bool,
-
     /// Host nesting support. Presence means the runtime enforces nesting policy;
     /// omission identifies runtimes that predate this capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]

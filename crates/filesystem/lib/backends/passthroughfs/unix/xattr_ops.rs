@@ -366,13 +366,7 @@ fn with_xattr_fd<T>(
     ino: u64,
     operation: impl FnOnce(i32) -> io::Result<T>,
 ) -> io::Result<T> {
-    let data = fs
-        .handles
-        .read()
-        .unwrap()
-        .values()
-        .find(|data| data.inode == ino)
-        .cloned();
+    let data = fs.handles.read().unwrap().for_inode(ino).cloned();
     if let Some(data) = data {
         let file = data.file.read().unwrap();
         return operation(file.as_raw_fd());

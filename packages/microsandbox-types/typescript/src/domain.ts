@@ -76,13 +76,6 @@ export type MountOptions = {
    */
   nodev: boolean;
   /**
-   * Host close behavior on Unix virtiofs mounts. Defaults to `dup_close`.
-   *
-   * `none` avoids synthetic host closes but loses close-time write errors.
-   * Omitted when default so existing launch and spec payloads stay unchanged.
-   */
-  flush_policy?: MountFlushPolicy;
-  /**
    * Guest uid presented for host files under this mount that carry no
    * per-file stat override.
    *
@@ -99,8 +92,6 @@ export type MountOptions = {
    */
   override_gid?: number | null;
 };
-
-export type MountFlushPolicy = "dup_close" | "none";
 
 export type OwnedVolumeStorage = {
   "kind": "directory";

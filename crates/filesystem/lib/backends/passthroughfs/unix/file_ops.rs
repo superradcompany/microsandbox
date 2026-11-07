@@ -23,7 +23,7 @@ use super::host_mode::host_strip_priv_bits;
 use super::{PassthroughFs, inode};
 use crate::{
     Context, OpenOptions, ZeroCopyReader, ZeroCopyWriter,
-    backends::shared::{handle_table::HandleData, init_binary, platform},
+    backends::shared::{handle_table::HandleData, init_binary, platform, stat_override},
 };
 
 //--------------------------------------------------------------------------------------------------
@@ -78,15 +78,10 @@ pub(crate) fn do_open(
     // Clear SUID/SGID on open+truncate (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) = fs
-                .override_cache
-                .get_override(fd, true, fs.cfg.strict_enabled())?
-            {
+            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ = fs
-                        .override_cache
-                        .set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {
@@ -179,15 +174,10 @@ pub(crate) fn do_write(
 
     if kill_priv {
         if fs.cfg.xattr_enabled() {
-            if let Some(ovr) = fs
-                .override_cache
-                .get_override(fd, true, fs.cfg.strict_enabled())?
-            {
+            if let Some(ovr) = stat_override::get_override(fd, true, fs.cfg.strict_enabled())? {
                 let new_mode = ovr.mode & !(platform::MODE_SETUID | platform::MODE_SETGID);
                 if new_mode != ovr.mode {
-                    let _ = fs
-                        .override_cache
-                        .set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
+                    let _ = stat_override::set_override(fd, ovr.uid, ovr.gid, new_mode, ovr.rdev);
                 }
             }
         } else {
@@ -203,10 +193,11 @@ fn open_flags_mutate(flags: i32) -> bool {
     (flags & libc::O_ACCMODE) != libc::O_RDONLY || (flags & libc::O_TRUNC) != 0
 }
 
-/// Acknowledge a guest close, optionally requesting host close-time errors.
+/// Flush pending data for a file handle.
 ///
-/// The default duplicates and closes the host fd to report close-time errors.
-/// Explicit fsync and fdatasync remain necessary for durability.
+/// Emulates POSIX close semantics by duplicating and closing the fd.
+/// Called on every guest `close()` (may fire multiple times if the fd was `dup`'d).
+/// The dup+close flushes pending data and surfaces I/O errors without releasing the handle.
 pub(crate) fn do_flush(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -219,9 +210,6 @@ pub(crate) fn do_flush(
 
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
-    if fs.cfg.flush_policy == super::FlushPolicy::None {
-        return Ok(());
-    }
     let f = data.file.read().unwrap();
 
     let newfd = unsafe { libc::dup(f.as_raw_fd()) };

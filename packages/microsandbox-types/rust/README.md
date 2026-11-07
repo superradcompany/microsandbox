@@ -12,7 +12,7 @@ The crate models durable user and wire intent: what the user wants to exist, not
 
 - **Sandbox spec** (`domain` module): `SandboxSpec`, `SandboxResources`, `SandboxRuntimeOptions`, `EnvVar`, `SandboxPolicy`.
 - **Rootfs sources**: `RootfsSource` (bind, OCI, disk image), `OciRootfsSource`, `DiskImageFormat`, `PullPolicy`.
-- **Mounts and patches**: `VolumeMount`, `MountOptions`, `MountFlushPolicy`, `StatVirtualization`, `HostPermissions`, `Patch`, `SecurityProfile`.
+- **Mounts and patches**: `VolumeMount`, `MountOptions`, `StatVirtualization`, `HostPermissions`, `Patch`, `SecurityProfile`.
 - **Volumes and snapshots**: `VolumeSpec`, `VolumeKind`, `NamedVolumeCreate`, `NamedVolumeMode`, `SnapshotSpec`, and the canonical `SnapshotManifest` schema.
 - **Networking**: `NetworkSpec`, `PublishedPortSpec`, `PortProtocol`.
 - **Exec and logs**: `Rlimit`, `RlimitResource`, `SandboxLogLevel`, `LogSource`, `HandoffInit`.
@@ -68,15 +68,3 @@ A unit test (`checked_in_bindings_match_generated_output`) also fails when any g
 cargo test -p microsandbox-types
 cargo test -p microsandbox-types --features ts
 ```
-
-## Mount Close Policy
-
-Unix virtiofs-backed mounts accept `options.flush_policy`: `"dup_close"` (default)
-or `"none"`. The default is omitted from serialized specs. `"none"` skips the
-synthetic host close and loses close-time write error reporting; applications
-must use fsync/fdatasync for write errors and durability. The launcher renders
-it as `flush=none` in the launch JSON mount string. Older runtimes reject that
-option; older spec readers ignore the new field until upgraded.
-
-Regenerate `@microsandbox/types` after changing this contract. This package
-maintains Rust and TypeScript types, not Go or Python generated bindings.
