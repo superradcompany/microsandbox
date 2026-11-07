@@ -1,0 +1,55 @@
+{
+  "answers": {
+    "POST /v1/services": {
+      "status": 201,
+      "body_fixture": "service.json"
+    },
+    "POST /v1/services/shop/enable": {
+      "status": 409,
+      "headers": {
+        "Retry-After": "5"
+      },
+      "body": {
+        "error": {
+          "code": "target_unreachable",
+          "message": "target_unreachable",
+          "details": null
+        }
+      }
+    },
+    "DELETE /v1/services/shop": {
+      "status": 500
+    },
+    "GET /v1/services/gone": {
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "service_not_found",
+          "message": "service_not_found",
+          "details": null
+        }
+      }
+    }
+  },
+  "requests": [
+    {
+      "route": "POST /v1/services",
+      "body": {
+        "slug": "shop",
+        "target": {
+          "sandbox": "web-1",
+          "port": 8080
+        }
+      }
+    },
+    {
+      "route": "POST /v1/services/shop/enable"
+    },
+    {
+      "route": "DELETE /v1/services/shop"
+    },
+    {
+      "route": "GET /v1/services/gone"
+    }
+  ]
+}

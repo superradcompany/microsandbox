@@ -1,5 +1,8 @@
 //! Tests for the cloud wire contract.
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
 use super::*;
 use crate::compat;
 use crate::domain::{
@@ -7,6 +10,16 @@ use crate::domain::{
     RootfsSource, SecretSubstitution, SecretsConfig,
 };
 use crate::snapshot::cloud_manifest::Manifest as SnapshotManifest;
+
+fn assert_fixture_round_trips<T>(fixture: &str)
+where
+    T: DeserializeOwned + Serialize,
+{
+    let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    let decoded: T = serde_json::from_value(expected.clone()).unwrap();
+
+    assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+}
 
 fn spec(name: &str) -> CloudSandboxSpec {
     CloudSandboxSpec {
@@ -34,6 +47,55 @@ fn restore_request(name: &str) -> CloudCreateSandboxRequest {
         resources: CloudSandboxComputeResources::default(),
         pull_policy: CloudPullPolicy::default(),
     }
+}
+
+#[test]
+fn service_wire_fixtures_round_trip() {
+    assert_fixture_round_trips::<CloudService>(include_str!("fixtures/service.json"));
+    assert_fixture_round_trips::<CloudServiceTarget>(include_str!("fixtures/service-target.json"));
+    assert_fixture_round_trips::<CloudCreateServiceRequest>(include_str!(
+        "fixtures/create-service-request.json"
+    ));
+    assert_fixture_round_trips::<CloudUpdateServiceRequest>(include_str!(
+        "fixtures/update-service-request.json"
+    ));
+}
+
+#[test]
+fn unknown_service_status_decodes_as_unknown() {
+    let mut service: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/service.json")).unwrap();
+    service["status"] = serde_json::json!("future_status");
+
+    let service: CloudService = serde_json::from_value(service).unwrap();
+
+    assert_eq!(service.status, CloudServiceStatus::Unknown);
+}
+
+#[test]
+fn service_page_fixtures_decode_and_reencode() {
+    for fixture in [
+        include_str!("fixtures/service-page.json"),
+        include_str!("fixtures/empty-service-page.json"),
+    ] {
+        let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        expected.as_object_mut().unwrap().remove("has_more");
+        let page: CloudPaginated<CloudService> = serde_json::from_str(fixture).unwrap();
+
+        assert_eq!(serde_json::to_value(page).unwrap(), expected);
+    }
+}
+
+#[test]
+fn service_error_fixture_decodes_and_reencodes() {
+    let fixture = include_str!("fixtures/service-error.json");
+    let mut expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+    expected["code"] = serde_json::Value::Null;
+    expected["message"] = serde_json::Value::Null;
+    expected["error"].as_object_mut().unwrap().remove("details");
+    let error: CloudErrorBody = serde_json::from_str(fixture).unwrap();
+
+    assert_eq!(serde_json::to_value(error).unwrap(), expected);
 }
 
 #[test]
