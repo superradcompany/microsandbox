@@ -21,23 +21,6 @@ let fs = PassthroughFs::builder()
 
 Metadata like uid, gid, and mode are stored in an extended attribute on the host, so the actual host file permissions stay untouched. Special files (devices, sockets, FIFOs) are stored as regular files with their type bits in the xattr. Path confinement prevents the guest from escaping the root directory.
 
-### Passthrough descriptor reuse
-
-CREATE retains the original host descriptor instead of closing, looking up,
-and reopening the file. Handle-based SETATTR and extended-attribute operations
-borrow open descriptors rather than making temporary copies. Extended-attribute
-requests find handles through an inode index, falling back to a temporary
-read-only descriptor when no handle is open.
-
-Permission overrides are read from the host on each metadata request; there is
-no additional metadata cache. Guest FLUSH still duplicates and closes the host
-descriptor to report close-time errors. Explicit fsync/fdatasync and RELEASE
-behavior are unchanged.
-
-The Linux `test_create_write_close_budget` traces the handler sequence with
-`strace` and checks that only explicit FLUSH requests and RELEASE close the
-created file. Install strace before running the filesystem test suite on Linux.
-
 ### MemFs
 
 A pure in-memory filesystem — no host I/O at all. Good for scratch space and ephemeral workloads.
