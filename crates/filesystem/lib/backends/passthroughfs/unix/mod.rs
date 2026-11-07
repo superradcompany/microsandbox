@@ -61,6 +61,24 @@ pub enum CachePolicy {
     Always,
 }
 
+/// Host action for a guest FUSE FLUSH (each guest close).
+///
+/// Neither policy provides durability; explicit fsync/fdatasync is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushPolicy {
+    /// Acknowledge without a host syscall (default).
+    ///
+    /// The real descriptor closes at RELEASE. Close-time write errors are not
+    /// reported at each guest close; applications needing error reporting must
+    /// use fsync. FUSE RELEASE errors cannot be returned to the closing guest.
+    None,
+    /// Duplicate and close the host descriptor to detect close-time errors.
+    ///
+    /// On host FUSE mounts this can trigger an expensive FLUSH round trip on
+    /// every guest close, even when the handle remains open.
+    DupClose,
+}
+
 /// Stat virtualization policy for the passthrough filesystem.
 ///
 /// Controls how the guest-visible `stat` is derived from the host filesystem
@@ -167,6 +185,9 @@ pub struct PassthroughConfig {
 
     /// Cache policy.
     pub cache_policy: CachePolicy,
+
+    /// Host action for guest FLUSH. Default: [`FlushPolicy::None`].
+    pub flush_policy: FlushPolicy,
 
     /// Whether to enable writeback caching.
     pub writeback: bool,
@@ -574,6 +595,7 @@ impl Default for PassthroughConfig {
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
+            flush_policy: FlushPolicy::None,
             writeback: false,
             inject_init: true,
             bind_identity_map: None,

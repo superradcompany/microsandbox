@@ -203,11 +203,10 @@ fn open_flags_mutate(flags: i32) -> bool {
     (flags & libc::O_ACCMODE) != libc::O_RDONLY || (flags & libc::O_TRUNC) != 0
 }
 
-/// Flush pending data for a file handle.
+/// Acknowledge a guest close, optionally requesting host close-time errors.
 ///
-/// Emulates POSIX close semantics by duplicating and closing the fd.
-/// Called on every guest `close()` (may fire multiple times if the fd was `dup`'d).
-/// The dup+close flushes pending data and surfaces I/O errors without releasing the handle.
+/// The default avoids synthetic host FUSE FLUSH requests. Explicit fsync and
+/// fdatasync remain the durability and error-reporting boundary.
 pub(crate) fn do_flush(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -220,6 +219,9 @@ pub(crate) fn do_flush(
 
     let handles = fs.handles.read().unwrap();
     let data = handles.get(&handle).ok_or_else(platform::ebadf)?;
+    if fs.cfg.flush_policy == super::FlushPolicy::None {
+        return Ok(());
+    }
     let f = data.file.read().unwrap();
 
     let newfd = unsafe { libc::dup(f.as_raw_fd()) };

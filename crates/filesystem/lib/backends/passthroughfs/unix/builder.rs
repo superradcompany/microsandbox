@@ -25,7 +25,8 @@ use std::{
 use std::{fs::File, os::fd::FromRawFd};
 
 use super::{
-    BindIdentityMapHandle, CachePolicy, HostPermissions, PassthroughFs, StatVirtualization,
+    BindIdentityMapHandle, CachePolicy, FlushPolicy, HostPermissions, PassthroughFs,
+    StatVirtualization,
 };
 #[cfg(target_os = "linux")]
 use crate::backends::shared::platform;
@@ -45,6 +46,7 @@ pub struct PassthroughFsBuilder {
     entry_timeout: Duration,
     attr_timeout: Duration,
     cache_policy: CachePolicy,
+    flush_policy: FlushPolicy,
     writeback: bool,
     inject_init: bool,
     bind_identity_map: Option<BindIdentityMapHandle>,
@@ -68,6 +70,7 @@ impl PassthroughFsBuilder {
             entry_timeout: Duration::from_secs(5),
             attr_timeout: Duration::from_secs(5),
             cache_policy: CachePolicy::Auto,
+            flush_policy: FlushPolicy::None,
             writeback: false,
             inject_init: true,
             bind_identity_map: None,
@@ -135,6 +138,14 @@ impl PassthroughFsBuilder {
         self
     }
 
+    /// Set the host action for guest close. Default: [`FlushPolicy::None`].
+    ///
+    /// See [`FlushPolicy`] for close-time error reporting and durability limits.
+    pub fn flush_policy(mut self, policy: FlushPolicy) -> Self {
+        self.flush_policy = policy;
+        self
+    }
+
     /// Enable or disable writeback caching.
     pub fn writeback(mut self, enabled: bool) -> Self {
         self.writeback = enabled;
@@ -185,6 +196,7 @@ impl PassthroughFsBuilder {
             entry_timeout: self.entry_timeout,
             attr_timeout: self.attr_timeout,
             cache_policy: self.cache_policy,
+            flush_policy: self.flush_policy,
             writeback: self.writeback,
             inject_init: self.inject_init,
             bind_identity_map: self.bind_identity_map,

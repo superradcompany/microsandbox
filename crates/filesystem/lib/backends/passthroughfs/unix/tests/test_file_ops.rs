@@ -183,3 +183,99 @@ fn test_getattr_via_handle_after_forget() {
     let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, Some(handle)).unwrap();
     assert_eq!(st.st_size, 6);
 }
+
+/// Trace the real handler sequence, including repeated guest closes on one
+/// handle. Run on Linux with strace installed; no mock descriptor layer needed.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_create_write_close_budget() {
+    const CHILD_POLICY: &str = "MSB_TEST_CLOSE_BUDGET_POLICY";
+    const TEST_NAME: &str =
+        "backends::passthroughfs::unix::tests::test_file_ops::test_create_write_close_budget";
+
+    if let Ok(policy) = std::env::var(CHILD_POLICY) {
+        let sb = TestSandbox::with_config(|mut cfg| {
+            if policy == "dup_close" {
+                cfg.flush_policy = FlushPolicy::DupClose;
+            }
+            cfg
+        });
+        let (entry, handle) = sb.fuse_create_root("close-budget.txt").unwrap();
+        sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
+        let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
+        attr.st_size = 3;
+        sb.fs
+            .setattr(
+                sb.ctx(),
+                entry.inode,
+                attr,
+                Some(handle),
+                SetattrValid::SIZE,
+            )
+            .unwrap();
+        sb.fs
+            .setxattr(sb.ctx(), entry.inode, c"user.budget", b"value", 0)
+            .unwrap();
+        assert!(matches!(
+            sb.fs.getxattr(sb.ctx(), entry.inode, c"user.budget", 10).unwrap(),
+            GetxattrReply::Value(value) if value == b"value"
+        ));
+        sb.fs.listxattr(sb.ctx(), entry.inode, 0).unwrap();
+        sb.fs
+            .removexattr(sb.ctx(), entry.inode, c"user.budget")
+            .unwrap();
+        for _ in 0..4 {
+            sb.fs.flush(sb.ctx(), entry.inode, handle, 0).unwrap();
+        }
+        assert_eq!(sb.fuse_read(entry.inode, handle, 10, 0).unwrap(), b"dat");
+        sb.fs.fsync(sb.ctx(), entry.inode, false, handle).unwrap();
+        sb.fs.fsync(sb.ctx(), entry.inode, true, handle).unwrap();
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        return;
+    }
+
+    if std::process::Command::new("strace")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("close budget requires strace; expected one real file close at RELEASE");
+        return;
+    }
+    for (policy, expected_closes) in [("none", 1), ("dup_close", 5)] {
+        let trace = tempfile::NamedTempFile::new().unwrap();
+        let output = std::process::Command::new("strace")
+            .args(["-f", "-yy", "-e", "trace=close,dup,fsync,fdatasync", "-o"])
+            .arg(trace.path())
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_POLICY, policy)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = std::fs::read_to_string(trace.path()).unwrap();
+        let file_calls: Vec<_> = calls
+            .lines()
+            .filter(|line| line.contains("/close-budget.txt>"))
+            .collect();
+        let closes = file_calls
+            .iter()
+            .filter(|line| line.contains("close("))
+            .count();
+        assert_eq!(closes, expected_closes, "{policy}: {calls}");
+        assert!(
+            file_calls.iter().any(|line| line.contains("fsync(")),
+            "{calls}"
+        );
+        assert!(
+            file_calls.iter().any(|line| line.contains("fdatasync(")),
+            "{calls}"
+        );
+    }
+}
