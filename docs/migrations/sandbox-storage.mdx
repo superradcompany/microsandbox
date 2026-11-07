@@ -4,33 +4,44 @@ sidebarTitle: "v0.7.12 storage changes"
 description: "Migrate existing sandbox storage and repair sandboxes refused by the v0.7.12 storage change."
 ---
 
-This guide covers existing local sandboxes affected by the storage change introduced in v0.7.12, including upgrades from earlier v0.7 releases.
+v0.7.12 moved host-managed disk records and checkpoints out of guest-accessible directories to prevent guest code from rewriting them. Its strict migration checks can block startup for older local sandboxes using snapshots, forks, owned disks, or completed disk growth or compaction.
 
-Update both the SDK/CLI and runtime, then retry the operation. An upgrade-required error identifies the selected runtime; update an explicitly pinned runtime too. `msb self update` updates binaries; storage migration is a separate step described below. Existing VMs must restart to gain the protection.
+A refusal does not itself delete disk data. Preserve the affected sandbox: restoring an earlier snapshot omits writes made after that snapshot.
 
-The initial migration checks can refuse existing snapshots, forks, owned disks, and completed disk growth or compaction. A refusal does not itself delete the disk data. Preserve the original sandbox; restoring an earlier snapshot omits writes made after that snapshot.
+<Note>
+The diagnosis and repair commands below are not included in v0.7.12 or v0.7.13. They require a build containing the storage migration fixes.
+</Note>
 
-Local starts now require a runtime supporting protected sandbox state, including restarts and restores. Selecting an older runtime does not restore older SDK access to an upgraded database. Restart already-running older VMs with the patched runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available.
+Use an SDK/CLI and runtime that include those fixes, including any pinned runtime. Updating binaries does not itself migrate sandbox data. Restart older VMs with the updated runtime before snapshots, forks, disk growth, or compaction; exec and stop remain available. See [runtime setup](/sdk/setup).
 
-## Migrate existing storage
+## Migrate or repair
 
-On Linux and Windows, eligible storage migrates automatically on the next start or stopped storage operation. If the operation asks for repair, inspect the affected sandbox and follow the guided repair in a terminal.
+- **Linux and Windows:** supported storage migrates automatically on the next start or storage operation while stopped. If the operation asks for repair, use the commands below.
+- **macOS:** use guided repair. Before confirming the maintenance prompt, stop VMs using the old storage layout across all microsandbox homes and prevent old tools or other programs from writing to the disks until repair finishes. New and already migrated sandboxes can keep running.
+
+Run these commands in a terminal, replacing `app` with your sandbox's name. Repair asks before stopping a blocking VM.
 
 ```bash
 msb doctor --sandbox app
 msb self repair --sandbox app
 ```
 
-Repair identifies known VMs that must stop and asks before stopping one. On macOS, stop legacy VMs across all microsandbox homes and prevent new legacy writers until repair finishes. Confirm this in the prompt. New and already migrated sandboxes can keep running.
+Repair uses the sandbox's validated current disk data, including writes made after a snapshot, and retains the original disk files. External disks keep their configured paths. Omit `--sandbox` to select several sandboxes; blocked cases do not prevent independent repairs.
 
-Repair validates and imports the existing selected disk state for supported, intact layouts, including writes made after a snapshot. It retains the original disk files. External disks continue to use their configured paths after repair. Omit `--sandbox` to select several sandboxes; a blocked sandbox does not prevent independent repairs from completing.
+Successful repair leaves the sandbox stopped. When it reports `repaired; ready to start`, start it and verify your application's latest data:
+
+```bash
+msb start app
+```
 
 ## If repair cannot finish
 
-If repair cannot safely establish the active state or its dependencies, it reports "needs investigation" and offers a diagnostic report to review and copy for the [maintainers](https://github.com/superradcompany/microsandbox/issues). The report excludes guest file contents, secrets, and host paths; nothing is submitted automatically. Preserve the sandbox and recovery records. Cancelling waits for an in-progress stop or import to finish; it does not undo completed repairs, accepted stops, or catalog updates.
+For `needs investigation`, keep the sandbox and recovery records. Review and copy the diagnostic report for the [maintainers](https://github.com/superradcompany/microsandbox/issues). It excludes guest contents, secrets, and host paths; nothing is submitted automatically.
 
 Use `--format json` for structured diagnosis or repair results. Noninteractive repair refuses when a VM must stop, macOS maintenance needs confirmation, or storage needs investigation; run repair in a terminal to follow the prompts.
 
-An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. Pending memory or device restores still require their execution state.
+Rerun repair after an interruption if the original files and configuration are unchanged. Changed inputs, missing data, or unsafe permissions require investigation. Repair cannot replace missing memory or device state needed to finish a full restore.
 
-Do not delete journals, guards, or migration records to bypass an error, and do not downgrade in place to obtain a backup. Downgrade remains unavailable while protected or migrating sandboxes exist. Saved-configuration errors are a separate problem; see [configuration migration errors](/migrations/v0.7#recover-from-a-migration-error).
+Cancelling waits for an active stop or repair to finish; it does not undo completed repairs, accepted stops, or catalog updates.
+
+Do not delete migration records or edit disk metadata to bypass errors. Downgrade is blocked while sandboxes use the new layout or are mid-migration. For saved-configuration errors, see [configuration migration errors](/migrations/v0.7#recover-from-a-migration-error).
