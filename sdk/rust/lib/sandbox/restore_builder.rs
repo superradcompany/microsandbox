@@ -1,7 +1,14 @@
 //! Dedicated snapshot restoration with explicit destination resource choices.
 
 #[cfg(feature = "net")]
+use std::path::PathBuf;
+
+#[cfg(feature = "net")]
+use microsandbox_network::builder::SecretBuilder;
+#[cfg(feature = "net")]
 use microsandbox_network::policy::NetworkPolicy;
+#[cfg(feature = "net")]
+use microsandbox_types::{SecretEntry, SecretViolationAction};
 
 use super::config::SnapshotRestoreMode;
 use super::{ExternalMountRestorePolicy, MountBuilder, Sandbox, SandboxBuilder, SecurityProfile};
@@ -119,6 +126,52 @@ impl RestoreBuilder {
     #[cfg(feature = "net")]
     pub fn network_policy(mut self, policy: NetworkPolicy) -> Self {
         self.inner = self.inner.network(|network| network.policy(policy));
+        self
+    }
+
+    /// Bind a protected secret in the destination, as [`SandboxBuilder::secret`] does at creation.
+    ///
+    /// The value is resolved on the destination host; snapshots never store it. A full restore
+    /// resumes a guest that already holds its placeholders, so bind the same name and placeholder
+    /// the source used. Enables TLS interception, which a sandbox started with secrets relied on;
+    /// see [`Self::tls_intercept_ca`] when the source's interception CA is not the destination's default.
+    #[cfg(feature = "net")]
+    pub fn secret(mut self, f: impl FnOnce(SecretBuilder) -> SecretBuilder) -> Self {
+        self.inner = self.inner.secret(f);
+        self
+    }
+
+    /// Bind a materialized secret entry in the destination; see [`Self::secret`].
+    #[cfg(feature = "net")]
+    pub fn secret_entry(mut self, entry: SecretEntry) -> Self {
+        self.inner = self.inner.secret_entry(entry);
+        self
+    }
+
+    /// Intercept TLS with this CA certificate and key (PEM files) in the destination.
+    ///
+    /// A full restore resumes a guest that trusts only the CA it installed at boot, and does not
+    /// rerun that setup. When the source used a custom CA, or the destination's default CA differs
+    /// from the source's, pass the source's CA here; otherwise intercepted HTTPS fails the guest's
+    /// certificate checks.
+    #[cfg(feature = "net")]
+    pub fn tls_intercept_ca(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        let cert = cert.into();
+        let key = key.into();
+        self.inner = self.inner.network(|network| {
+            network.tls_overlay(|tls| {
+                tls.enabled(true)
+                    .intercept_ca_cert(cert)
+                    .intercept_ca_key(key)
+            })
+        });
+        self
+    }
+
+    /// Set the destination's default action for blocked secret placeholders.
+    #[cfg(feature = "net")]
+    pub fn secret_violation_action(mut self, action: SecretViolationAction) -> Self {
+        self.inner = self.inner.secret_violation_action(action);
         self
     }
 
@@ -450,6 +503,60 @@ mod tests {
         assert_eq!(config(&restore).spec.lifecycle.max_duration_secs, Some(600));
         assert_eq!(config(&restore).spec.lifecycle.idle_timeout_secs, Some(120));
         assert!(restore.inner.config.spec.security_profile.is_none());
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_secrets_rebind_captured_placeholders_with_interception() {
+        let restore = Sandbox::restore("saved")
+            .name("child")
+            .secret(|s| {
+                s.env("GKEY")
+                    .source(crate::sandbox::SecretSource::Env { var: "GKEY".into() })
+                    .placeholder("captured-placeholder")
+                    .allow("gate.test")
+            })
+            .secret_violation_action(SecretViolationAction::BlockAndLog);
+
+        let network = config(&restore).local_network_config().unwrap();
+
+        assert!(network.tls.enabled);
+        assert_eq!(network.secrets.secrets.len(), 1);
+        let entry = &network.secrets.secrets[0];
+        assert_eq!(entry.env_var, "GKEY");
+        assert_eq!(entry.placeholder, "captured-placeholder");
+        assert!(entry.value.is_empty());
+        assert_eq!(
+            network.secrets.violation_action,
+            SecretViolationAction::BlockAndLog
+        );
+    }
+
+    #[cfg(feature = "net")]
+    #[test]
+    fn destination_interception_ca_survives_secret_binding_in_either_order() {
+        let ca_first = Sandbox::restore("saved")
+            .name("child")
+            .tls_intercept_ca("/ca/source.pem", "/ca/source.key")
+            .secret(|s| s.env("GKEY").value("v").allow("gate.test"));
+        let secret_first = Sandbox::restore("saved")
+            .name("child")
+            .secret(|s| s.env("GKEY").value("v").allow("gate.test"))
+            .tls_intercept_ca("/ca/source.pem", "/ca/source.key");
+
+        for restore in [ca_first, secret_first] {
+            let network = config(&restore).local_network_config().unwrap();
+            assert!(network.tls.enabled);
+            assert_eq!(network.secrets.secrets.len(), 1);
+            assert_eq!(
+                network.tls.intercept_ca.cert_path.as_deref(),
+                Some(std::path::Path::new("/ca/source.pem"))
+            );
+            assert_eq!(
+                network.tls.intercept_ca.key_path.as_deref(),
+                Some(std::path::Path::new("/ca/source.key"))
+            );
+        }
     }
 
     #[cfg(feature = "net")]
