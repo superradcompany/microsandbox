@@ -269,6 +269,22 @@ mod tests {
     use super::super::mocks::{RecordingExporter, collection};
     use super::*;
 
+    /// Polls until `exporter` records a batch, returning false if none arrives
+    /// within 5 seconds.
+    ///
+    /// Exports give no completion signal, and a fixed sleep breaks when the
+    /// thread pauses during startup: the sleep and the driver's first ticks
+    /// expire together, and this single-threaded runtime polls the test first.
+    async fn wait_for_export(exporter: &RecordingExporter) -> bool {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while exporter.batches().is_empty() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     #[tokio::test]
     async fn injected_collections_are_exported_on_shutdown() {
         let collector = Arc::new(RecordingExporter::default());
@@ -380,10 +396,13 @@ mod tests {
             .await
             .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        let exported_before_shutdown = wait_for_export(&collector).await;
         handle.shutdown().await.unwrap();
 
-        assert!(!collector.batches().is_empty());
+        assert!(
+            exported_before_shutdown,
+            "expected the scheduled loop to export before shutdown"
+        );
         assert!(counter.load(Ordering::Acquire) > 0);
     }
 
@@ -401,12 +420,14 @@ mod tests {
 
         handle.inject_for_test(collection(1)).await;
         handle.flush();
-        tokio::time::sleep(Duration::from_millis(20)).await;
 
-        let pre_shutdown = collector.batches().len();
+        // The wait is shorter than `flush_interval` and ends before shutdown, so
+        // neither the scheduled ticker nor the final flush can explain an export.
+        let exported_before_shutdown = wait_for_export(&collector).await;
         handle.shutdown().await.unwrap();
+
         assert!(
-            pre_shutdown >= 1,
+            exported_before_shutdown,
             "expected flush() to trigger an export before shutdown"
         );
     }
