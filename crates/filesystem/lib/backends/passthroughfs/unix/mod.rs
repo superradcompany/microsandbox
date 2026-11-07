@@ -705,22 +705,22 @@ impl DynFileSystem for PassthroughFs {
     fn batch_forget(&self, _ctx: Context, requests: Vec<(u64, u64)>) {
         // Single lock acquisition for all entries (O(1) instead of O(n) locks).
         // batch_forget is called with hundreds of entries after directory traversals.
-        let identities = {
+        let forgotten = {
             let mut inodes = self.inodes.write().unwrap();
-            let mut identities = Vec::with_capacity(requests.len());
+            let mut forgotten = Vec::with_capacity(requests.len());
             for (ino, count) in requests {
                 if self.is_virtual_init_inode(ino) {
                     continue;
                 }
-                if let Some(data) = inodes.get(&ino) {
-                    identities.push((data.dev, data.ino));
+                if let Some(data) = inode::forget_one_locked(&mut inodes, ino, count) {
+                    forgotten.push(data);
                 }
-                inode::forget_one_locked(&mut inodes, ino, count);
             }
-            identities
+            forgotten
         };
-        for (dev, ino) in identities {
-            self.override_cache.invalidate(dev, ino);
+        for data in forgotten {
+            self.override_cache.invalidate(data.dev, data.ino);
+            drop(data);
         }
     }
 

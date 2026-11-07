@@ -303,6 +303,8 @@ pub struct MountOptions {
     /// Host close behavior on Unix virtiofs mounts. Defaults to `dup_close`.
     ///
     /// `none` avoids synthetic host closes but loses close-time write errors.
+    /// Requires runtime v0.7.13 or later advertising `mount_flush_policy`;
+    /// older runtimes are rejected before sandbox replacement or preparation.
     /// Omitted when default so existing launch and spec payloads stay unchanged.
     #[serde(default, skip_serializing_if = "MountFlushPolicy::is_dup_close")]
     pub flush_policy: MountFlushPolicy,

@@ -309,6 +309,7 @@ fn main() {
                     http_connect_proxy_auth: cfg!(feature = "net"),
                     guest_clock: true,
                     fs_state_limit: true,
+                    mount_flush_policy: cfg!(unix),
                     nested_virt: Some(
                         microsandbox_runtime::nested_virt_supported().unwrap_or(false)
                     ),

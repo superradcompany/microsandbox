@@ -539,16 +539,16 @@ fn open_macos_path_for_stat(path: *const libc::c_char) -> io::Result<i32> {
 /// Decrement the reference count for an inode. Remove it from the table
 /// when the count reaches zero.
 pub(crate) fn forget_one(fs: &PassthroughFs, inode: u64, count: u64) {
-    let identity = {
+    let forgotten = {
         let mut inodes = fs.inodes.write().unwrap();
-        let identity = inodes.get(&inode).map(|data| (data.dev, data.ino));
-        forget_one_locked(&mut inodes, inode, count);
-        identity
+        forget_one_locked(&mut inodes, inode, count)
     };
     // Invalidation may wait for an in-flight xattr syscall on this identity.
     // Never hold the mount-wide inode table while waiting for host I/O.
-    if let Some((dev, ino)) = identity {
-        fs.override_cache.invalidate(dev, ino);
+    if let Some(data) = forgotten {
+        fs.override_cache.invalidate(data.dev, data.ino);
+        // The retained fd pins the host identity until its old cache entry is gone.
+        drop(data);
     }
 }
 
@@ -557,6 +557,9 @@ pub(crate) fn forget_one(fs: &PassthroughFs, inode: u64, count: u64) {
 /// Used by [`super::PassthroughFs::batch_forget`] to process all entries
 /// under a single lock acquisition (O(1) lock ops vs O(n) for per-entry locking).
 ///
+/// Returns a reference that keeps any backing descriptor alive until the caller
+/// invalidates the override cache after releasing the inode table lock.
+///
 /// Uses a CAS loop to handle the race where a concurrent `lookup` may increment
 /// the refcount between our load and compare_exchange. `saturating_sub` prevents
 /// underflow if the kernel sends a forget count larger than the current refcount.
@@ -564,33 +567,27 @@ pub(crate) fn forget_one_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
     count: u64,
-) {
-    if let Some(data) = inodes.get(&inode).cloned() {
-        loop {
-            let old = data.refcount.load(Ordering::Relaxed);
-            let new = old.saturating_sub(count);
-            if data
-                .refcount
-                .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                if new == 0 {
-                    #[cfg(target_os = "linux")]
-                    maybe_remove_inode_locked(inodes, inode);
+) -> Option<Arc<InodeData>> {
+    let data = inodes.get(&inode).cloned()?;
+    loop {
+        let old = data.refcount.load(Ordering::Relaxed);
+        let new = old.saturating_sub(count);
+        if data
+            .refcount
+            .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            if new == 0 {
+                #[cfg(target_os = "linux")]
+                maybe_remove_inode_locked(inodes, inode);
 
-                    #[cfg(target_os = "macos")]
-                    {
-                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
-                        if ufd >= 0 {
-                            unsafe { libc::close(ufd as i32) };
-                        }
-                        inodes.remove(&inode);
-                    }
-                }
-                break;
+                #[cfg(target_os = "macos")]
+                inodes.remove(&inode);
             }
+            break;
         }
     }
+    Some(data)
 }
 
 /// Get an fd for an inode suitable for `*at()` syscalls.
@@ -981,9 +978,9 @@ fn maybe_remove_inode_locked(
     }
 
     let anchor_parent = data.anchor_parent.load(Ordering::Acquire);
-    if let Some(removed) = inodes.remove(&inode) {
-        let _ = removed.retained_fd.lock().unwrap().take();
-    }
+    // Let the last Arc release retained descriptors. FORGET holds one through
+    // outside-lock cache invalidation, and concurrent operations may still use it.
+    inodes.remove(&inode);
 
     if anchor_parent != 0 {
         decrement_anchor_children_locked(inodes, anchor_parent);

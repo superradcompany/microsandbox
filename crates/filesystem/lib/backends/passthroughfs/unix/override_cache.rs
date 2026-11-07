@@ -471,6 +471,107 @@ mod tests {
     }
 
     #[test]
+    fn forget_pins_unlinked_identity_until_invalidation_before_reuse() {
+        for batch in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let fs = PassthroughFs::new(PassthroughConfig {
+                root_dir: root.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap();
+            fs.init(FsOptions::empty()).unwrap();
+            let ctx = Context {
+                uid: 0,
+                gid: 0,
+                pid: 1,
+            };
+            let path = root.path().join("data");
+            let file = File::create(&path).unwrap();
+            stat_override::set_override(
+                file.as_raw_fd(),
+                1234,
+                5678,
+                platform::MODE_REG | 0o600,
+                0,
+            )
+            .unwrap();
+            drop(file);
+            let old = fs.lookup(ctx, 1, c"data").unwrap();
+            fs.unlink(ctx, 1, c"data").unwrap();
+            let fd = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&old.inode).unwrap();
+                #[cfg(target_os = "linux")]
+                {
+                    data.retained_fd
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .as_raw_fd()
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    data.unlinked_fd.load(std::sync::atomic::Ordering::Acquire) as i32
+                }
+            };
+            let old_stat = platform::fstat(fd).unwrap();
+            assert_eq!(
+                {
+                    fs.override_cache
+                        .get_override(fd, true, true)
+                        .unwrap()
+                        .unwrap()
+                        .uid
+                },
+                1234
+            );
+
+            BEFORE_INVALIDATE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    // No test-owned fd or Arc pins this unlinked object. FORGET
+                    // must keep it alive across the outside-lock invalidation.
+                    let pinned = platform::fstat(fd)
+                        .expect("FORGET released the identity before invalidation");
+                    assert_eq!(identity(&pinned), identity(&old_stat));
+                }));
+            });
+            if batch {
+                fs.batch_forget(ctx, vec![(old.inode, 1)]);
+            } else {
+                fs.forget(ctx, old.inode, 1);
+            }
+
+            let replacement = File::create(&path).unwrap();
+            stat_override::set_override(
+                replacement.as_raw_fd(),
+                8000,
+                9000,
+                platform::MODE_REG | 0o640,
+                0,
+            )
+            .unwrap();
+            // Model immediate host identity reuse with an identical ctime. Real
+            // allocator reuse is nondeterministic, especially on APFS; supplying
+            // the old stat exercises exactly the colliding cache lookup.
+            let patched = fs
+                .override_cache
+                .patched_stat(replacement.as_raw_fd(), old_stat, true, true, None)
+                .unwrap();
+            assert_eq!(
+                (
+                    patched.st_uid,
+                    patched.st_gid,
+                    platform::mode_u32(patched.st_mode) & 0o777
+                ),
+                (8000, 9000, 0o640)
+            );
+            let new = fs.lookup(ctx, 1, c"data").unwrap();
+            assert_eq!((new.attr.st_uid, new.attr.st_gid), (8000, 9000));
+        }
+    }
+
+    #[test]
     fn caches_absence_mutations_and_invalidates_without_hiding_errors() {
         let cache = OverrideCache::default();
         let file = tempfile::tempfile().unwrap();
