@@ -2977,7 +2977,7 @@ mod tests {
                 warning
                     .getattr("category")
                     .unwrap()
-                    .is(&py.get_type::<pyo3::exceptions::PyDeprecationWarning>())
+                    .is(py.get_type::<pyo3::exceptions::PyDeprecationWarning>())
             );
             assert!(
                 warning

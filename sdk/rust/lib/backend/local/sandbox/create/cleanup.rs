@@ -298,7 +298,7 @@ mod tests {
                 self.backend
                     .ensure_named_volumes(
                         &CreationStorage::for_test(
-                            &self.backend.sandboxes_dir().join(&self.config.spec.name),
+                            self.backend.sandboxes_dir().join(&self.config.spec.name),
                         ),
                         &self.config,
                     )
@@ -757,7 +757,7 @@ mod tests {
         let volumes = Arc::new(
             backend
                 .ensure_named_volumes(
-                    &CreationStorage::for_test(&backend.sandboxes_dir().join(&config.spec.name)),
+                    &CreationStorage::for_test(backend.sandboxes_dir().join(&config.spec.name)),
                     &config,
                 )
                 .await
