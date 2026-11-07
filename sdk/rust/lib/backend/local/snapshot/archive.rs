@@ -1606,8 +1606,10 @@ where
     // The inventory is also the write allowlist. Never sweep artifact
     // directories: migration backups, locks, journals and unknown files are
     // intentionally not exportable. Member hashes are filled while these
-    // required writes consume the source; archive.json is written last so no
-    // payload needs a preparatory content pass.
+    // required writes consume the source; archive.json is written last so an
+    // unshared payload needs no preparatory content pass. Shared file layers were
+    // checked for matching contents during inventory construction.
+    let mut written_file_layers = HashSet::new();
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
         // The reader may project a previous descriptor without rewriting its
@@ -1664,6 +1666,9 @@ where
                         .iter()
                         .any(|entry| entry.path == payload_name && !entry.included)
                     {
+                        continue;
+                    }
+                    if !written_file_layers.insert(payload_name.clone()) {
                         continue;
                     }
                     let written = append_artifact_file(
@@ -1791,6 +1796,8 @@ async fn build_archive_inventory(
 ) -> MicrosandboxResult<ArchiveInventory> {
     let mut snapshot_members = Vec::with_capacity(snapshots.len());
     let mut entries = Vec::new();
+    let mut file_payloads: HashMap<String, (usize, PathBuf)> = HashMap::new();
+    let mut file_fingerprints = HashMap::new();
     for snapshot in snapshots {
         let snapshot_id = snapshot.id().as_str();
         let descriptor_path = format!("snapshots/{snapshot_id}/{DESCRIPTOR_FILENAME}");
@@ -1846,6 +1853,25 @@ async fn build_archive_inventory(
                     let encoded_size = archive_encoded_size(&path).await?;
                     require_json_safe_size(encoded_size, &archive_path)?;
                     require_json_safe_size(layer.virtual_size, &archive_path)?;
+                    if let Some((index, source)) = file_payloads.get(&archive_path) {
+                        let entry = &entries[*index];
+                        if entry.apparent_size != layer.virtual_size
+                            || entry.integrity != layer.payload.integrity
+                            || shared_layer_fingerprint(source, &mut file_fingerprints).await?
+                                != shared_layer_fingerprint(&path, &mut file_fingerprints).await?
+                        {
+                            return Err(MicrosandboxError::SnapshotIntegrity(format!(
+                                "conflicting shared snapshot layer: {archive_path}"
+                            )));
+                        }
+                        // Dependency omissions belong to the archive head, even
+                        // when its ancestor supplied the identical physical bytes.
+                        if snapshot.id() == head.id() {
+                            entries[*index].owner_snapshot = Some(snapshot_id.to_string());
+                        }
+                        continue;
+                    }
+                    file_payloads.insert(archive_path.clone(), (entries.len(), path));
                     entries.push(ArchiveEntry {
                         path: archive_path,
                         owner_snapshot: Some(snapshot_id.to_string()),
@@ -1958,6 +1984,21 @@ async fn build_archive_inventory(
         extensions,
         requires: archive_requires(head.manifest())?,
     })
+}
+
+/// Compare shared source bytes without changing their declared inventory integrity.
+async fn shared_layer_fingerprint(
+    path: &Path,
+    fingerprints: &mut HashMap<PathBuf, UpperIntegrity>,
+) -> MicrosandboxResult<UpperIntegrity> {
+    if let Some(fingerprint) = fingerprints.get(path) {
+        return Ok(fingerprint.clone());
+    }
+    // Reuse sparse Merkle hashing: equal holes and allocated zeroes have the
+    // same identity without scanning every virtual byte on extent-aware filesystems.
+    let fingerprint = super::verify::compute_merkle_integrity(path).await?;
+    fingerprints.insert(path.to_path_buf(), fingerprint.clone());
+    Ok(fingerprint)
 }
 
 /// Released SDKs restore archives without checking descriptor `requires`, but they
@@ -4989,6 +5030,283 @@ mod tests {
             std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
             std::fs::write(payload, vec![42; layer.virtual_size as usize]).unwrap();
         }
+    }
+
+    async fn publish_shared_layer_fixture(
+        local: &LocalBackend,
+        parent: &Manifest,
+        child: &Manifest,
+    ) {
+        let group = super::super::group::ensure(&local.snapshots_dir(), Some("source"))
+            .await
+            .unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        for manifest in [parent, child] {
+            write_grouped_archive_fixture(
+                &stage.path().join(manifest.snapshot_id.as_str()),
+                manifest,
+            );
+        }
+        let aliases = BTreeMap::from([
+            (parent.snapshot_id.to_string(), "base".into()),
+            (child.snapshot_id.to_string(), "child".into()),
+        ]);
+        super::super::group::publish(&group, stage.path(), &aliases, &child.snapshot_id, false)
+            .await
+            .unwrap();
+        store::reindex_dir(local, &local.snapshots_dir())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_file_layer_conflicts_preserve_existing_archive() {
+        for conflict in ["bytes", "virtual_size", "integrity"] {
+            let home = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap();
+            let parent = grouped_archive_manifest(1, None);
+            let mut child = grouped_archive_manifest(2, Some(&parent));
+            child.state = parent.state.clone();
+            let SnapshotState::File(file) = &mut child.state else {
+                unreachable!()
+            };
+            if conflict == "virtual_size" {
+                file.virtual_size = 8192;
+                file.layers[0].virtual_size = 8192;
+            } else if conflict == "integrity" {
+                file.layers[0].payload.integrity = Some(UpperIntegrity::Sha256 {
+                    digest: format!("sha256:{}", hex::encode(Sha256::digest(vec![42; 4096]))),
+                });
+            }
+            publish_shared_layer_fixture(&local, &parent, &child).await;
+            if conflict == "bytes" {
+                let snapshot = store::open_snapshot_leased(&local, "source:child")
+                    .await
+                    .unwrap();
+                let SnapshotState::File(file) = &snapshot.manifest().state else {
+                    unreachable!()
+                };
+                std::fs::write(snapshot.layer_path(&file.layers[0]), vec![43; 4096]).unwrap();
+            }
+            let archive = home.path().join("existing.msb");
+            std::fs::write(&archive, b"existing archive").unwrap();
+
+            let error = save_snapshot(
+                &local,
+                "source:child",
+                &archive,
+                SaveOpts {
+                    with_parents: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("conflicting shared snapshot layer"),
+                "{conflict}: {error}"
+            );
+            assert_eq!(std::fs::read(&archive).unwrap(), b"existing archive");
+            assert!(!std::fs::read_dir(home.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".existing.msb.tmp.")
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_layer_fingerprint_ignores_hole_allocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let sparse = directory.path().join("sparse.raw");
+        let allocated = directory.path().join("allocated.raw");
+        std::fs::File::create(&sparse)
+            .unwrap()
+            .set_len(4 * 1024 * 1024)
+            .unwrap();
+        std::fs::write(&allocated, vec![0; 4 * 1024 * 1024]).unwrap();
+        let mut fingerprints = HashMap::new();
+
+        assert_eq!(
+            shared_layer_fingerprint(&sparse, &mut fingerprints)
+                .await
+                .unwrap(),
+            shared_layer_fingerprint(&allocated, &mut fingerprints)
+                .await
+                .unwrap()
+        );
+        assert_eq!(fingerprints.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn shared_layer_fingerprint_handles_large_holes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-hole.raw");
+        let file = std::fs::File::create(&path).unwrap();
+        let logical_size = 64 * 1024 * 1024 * 1024;
+        file.set_len(logical_size).unwrap();
+        let Some(map) = ExtentMap::scan_file(&file).unwrap() else {
+            // Dense fallback is covered separately; this control requires extent support.
+            return;
+        };
+        assert!(map.data_bytes() < logical_size);
+
+        let fingerprint = shared_layer_fingerprint(&path, &mut HashMap::new())
+            .await
+            .unwrap();
+
+        assert!(matches!(fingerprint, UpperIntegrity::FileMerkleBlake3V1 {
+            logical_size: size, ..
+        } if size == logical_size));
+    }
+
+    #[tokio::test]
+    async fn with_parents_round_trips_a_shared_raw_qcow_chain() {
+        for plain_tar in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let local = crate::test_support::local_backend_builder(home.path())
+                .build()
+                .await
+                .unwrap();
+            let parent = grouped_archive_manifest(1, None);
+            let mut child = grouped_archive_manifest(2, Some(&parent));
+            child.state = parent.state.clone();
+            let SnapshotState::File(file) = &mut child.state else {
+                unreachable!()
+            };
+            let parent_layer = file.layers[0].layer_id.clone();
+            let child_layer = DiskLayerId::new(format!("layer_{:032x}", 2)).unwrap();
+            file.head = child_layer.clone();
+            file.disk_format = SnapshotFormat::Qcow2;
+            file.layers.push(DiskLayer {
+                layer_id: child_layer,
+                format: SnapshotFormat::Qcow2,
+                virtual_size: 4096,
+                backing: Some(parent_layer),
+                payload: LayerPayload {
+                    file_kind: LayerFileKind::Regular,
+                    integrity: None,
+                },
+            });
+            publish_shared_layer_fixture(&local, &parent, &child).await;
+            let source = store::open_snapshot_leased(&local, "source:child")
+                .await
+                .unwrap();
+            let SnapshotState::File(file) = &source.manifest().state else {
+                unreachable!()
+            };
+            let raw = source.layer_path(&file.layers[0]);
+            let qcow = source.layer_path(&file.layers[1]);
+            std::fs::remove_file(&qcow).unwrap();
+            microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 4096, &raw, "raw")
+                .await
+                .unwrap();
+            let expected = [std::fs::read(&raw).unwrap(), std::fs::read(&qcow).unwrap()];
+            let archive = home.path().join("mixed.msb");
+
+            save_snapshot(
+                &local,
+                "source:child",
+                &archive,
+                SaveOpts {
+                    with_parents: true,
+                    plain_tar,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+            let restored = store::open_snapshot_leased(&local, loaded.path().to_str().unwrap())
+                .await
+                .unwrap();
+
+            let SnapshotState::File(file) = &restored.manifest().state else {
+                unreachable!()
+            };
+            assert_eq!(file.layers.len(), 2);
+            for (layer, bytes) in file.layers.iter().zip(&expected) {
+                assert_eq!(std::fs::read(restored.layer_path(layer)).unwrap(), *bytes);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn with_parents_exports_a_shared_file_layer_once() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let parent = grouped_archive_manifest(1, None);
+        let mut child = grouped_archive_manifest(2, Some(&parent));
+        child.state = parent.state.clone();
+        publish_shared_layer_fixture(&local, &parent, &child).await;
+        let archive = home.path().join("shared-layers.msb");
+
+        save_snapshot(
+            &local,
+            "source:child",
+            &archive,
+            SaveOpts {
+                with_parents: true,
+                plain_tar: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let loaded = load_snapshot(&local, &archive, None).await.unwrap();
+
+        assert_eq!(loaded.id(), child.snapshot_id.as_str());
+        let loaded_group = loaded.group().unwrap();
+        for (name, manifest) in [("base", &parent), ("child", &child)] {
+            let restored = store::get_handle(&local, &format!("{loaded_group}:{name}"))
+                .await
+                .unwrap();
+            assert_eq!(restored.id(), manifest.snapshot_id.as_str());
+        }
+        let mut archive = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+        let mut paths = Vec::new();
+        let mut inventory = None;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            if path == Path::new("archive.json") {
+                inventory = Some(serde_json::from_reader::<_, ArchiveInventory>(entry).unwrap());
+            }
+            paths.push(path);
+        }
+        assert_eq!(paths.iter().collect::<HashSet<_>>().len(), paths.len());
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|path| path.starts_with("layers"))
+                .count(),
+            1
+        );
+        let inventory = inventory.unwrap();
+        let shared = inventory
+            .entries
+            .iter()
+            .find(|entry| entry.kind == "file-payload")
+            .unwrap();
+        assert_eq!(
+            shared.owner_snapshot.as_deref(),
+            Some(child.snapshot_id.as_str())
+        );
+        assert!(
+            shared.integrity.is_none(),
+            "transient equality fingerprints are not persisted"
+        );
     }
 
     #[tokio::test]
