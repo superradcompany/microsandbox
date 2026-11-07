@@ -577,6 +577,10 @@ pub(super) fn cloud_http_error(
             return MicrosandboxError::SnapshotNotFound(message);
         }
         Some("volume_not_found") => return MicrosandboxError::VolumeNotFound(message),
+        Some("service_not_found") => return MicrosandboxError::ServiceNotFound(message),
+        Some("service_already_exists") => {
+            return MicrosandboxError::ServiceAlreadyExists(message);
+        }
         Some("volume_file_not_found") => return MicrosandboxError::SandboxFsOps(message),
         Some("snapshot_name_already_exists") | Some("snapshot_already_exists") => {
             return MicrosandboxError::SnapshotAlreadyExists(message);
@@ -606,6 +610,7 @@ pub(super) fn cloud_http_error(
             MicrosandboxError::SnapshotNotFound(message)
         }
         404 if op.contains("/v1/volumes") => MicrosandboxError::VolumeNotFound(message),
+        404 if op.contains("/v1/services") => MicrosandboxError::ServiceNotFound(message),
         404 => MicrosandboxError::SandboxNotFound(message),
         409 if op == "POST /v1/sandboxes" => MicrosandboxError::SandboxAlreadyExists(message),
         409 if op == "POST /v1/volumes" => MicrosandboxError::VolumeAlreadyExists(message),

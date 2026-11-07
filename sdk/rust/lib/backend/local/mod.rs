@@ -56,7 +56,7 @@ use self::control::identity::DatabaseIdentity;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
-use crate::backend::SnapshotBackend;
+use crate::backend::{ServiceBackend, SnapshotBackend};
 use crate::config::{
     DatabaseConfig, GlobalConfig, GlobalConfigPatch, RegistryConfig, RegistryEntry,
     RegistryOptions, RegistrySettingsPatch, layers::BackendConfig,
@@ -541,6 +541,10 @@ impl Backend for LocalBackend {
     }
 
     fn snapshots(&self) -> &dyn SnapshotBackend {
+        self
+    }
+
+    fn services(&self) -> &dyn ServiceBackend {
         self
     }
 

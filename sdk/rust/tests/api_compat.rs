@@ -70,6 +70,49 @@ fn rust_identity_and_generated_patch_surface_is_backend_neutral() {
     );
 }
 
+#[test]
+fn rust_service_surface_stays_available() {
+    use microsandbox::{
+        ChangeState, MicrosandboxError, Operation, Service, ServiceBackend, ServiceBuilder,
+        ServiceError, ServiceListBuilder, ServicePage, ServiceTarget, ServiceUpdate,
+    };
+
+    let _ = Service::get;
+    let _ = Service::list;
+    let _ = Service::refresh;
+    let _ = Service::remove;
+    let _: ServiceBuilder = Service::builder("shop").target("web-1", 8080);
+    let _ = Service::enable;
+    let _ = Service::disable;
+    let _ = ServiceUpdate::default().target("web-1", 8080);
+    let _ = ServiceListBuilder::default()
+        .sandbox("web-1")
+        .cursor("shop")
+        .limit(20);
+    let _: Option<(ServicePage, ServiceTarget, &dyn ServiceBackend)> = None;
+    let _ = [
+        Operation::ServiceCreate,
+        Operation::ServiceGet,
+        Operation::ServiceList,
+        Operation::ServiceUpdate,
+        Operation::ServiceEnable,
+        Operation::ServiceDisable,
+        Operation::ServiceRemove,
+    ];
+
+    let error = MicrosandboxError::Service {
+        slug: "shop".into(),
+        error: ServiceError::OutcomeUnknown,
+    };
+    assert_eq!(error.changed(), ChangeState::Unknown);
+    let reason = ServiceError::Other {
+        code: "new_service_refusal".into(),
+        status: 409,
+        message: "change refused".into(),
+    };
+    assert_eq!(reason.changed(), ChangeState::Unchanged);
+}
+
 #[allow(dead_code)]
 async fn rust_sandbox_fs_handle_api_stays_available(
     fs: &microsandbox::sandbox::SandboxFsOps<'_>,
