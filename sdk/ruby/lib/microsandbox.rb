@@ -2,6 +2,10 @@
 
 require_relative "microsandbox/version"
 
+module Microsandbox
+  ServiceTarget = Data.define(:sandbox, :port)
+end
+
 # Platform gems stage the binary under lib/microsandbox/<major.minor>/ (one per
 # Ruby ABI); source builds produce the flat path. Try the ABI dir first. When
 # both misses are plain "no such file", either message will do; but a binary
@@ -21,6 +25,13 @@ end
 require_relative "microsandbox/errors"
 
 module Microsandbox
+  class Service
+    def target
+      value = _target
+      value && ServiceTarget.new(sandbox: value.fetch("sandbox"), port: value.fetch("port"))
+    end
+  end
+
   class HttpBuilder
     attr_reader :network_message, :secret_message, :response, :format, :message
 
