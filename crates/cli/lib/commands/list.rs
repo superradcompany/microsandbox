@@ -1,6 +1,7 @@
 //! `msb list` command — list all sandboxes.
 
 use clap::Args;
+use microsandbox::BackendKind;
 use microsandbox::sandbox::{SandboxConfig, SandboxHandle, SandboxStatus};
 
 use crate::ui::{self, OutputFormat};
@@ -77,7 +78,7 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
     let mut table = ui::Table::new(&["NAME", "IMAGE", "STATUS", "CREATED"]);
 
     for s in &filtered {
-        let image = extract_image(s.config_json());
+        let image = extract_image(s.config_json(), s.backend_kind());
         let status = format!("{:?}", s.status_snapshot());
         let created = s
             .created_at()
@@ -98,7 +99,19 @@ pub async fn run(args: ListArgs) -> anyhow::Result<()> {
 }
 
 /// Extract image name from config JSON.
-fn extract_image(config_json: &str) -> String {
+fn extract_image(config_json: &str, backend: BackendKind) -> String {
+    if backend == BackendKind::Cloud {
+        // Cloud inspection returns a curated projection, not a serialized local
+        // SandboxConfig. Do not fill absent cloud fields with local defaults.
+        return serde_json::from_str::<serde_json::Value>(config_json)
+            .ok()
+            .and_then(|spec| {
+                spec.get("image")
+                    .and_then(|image| image.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "-".to_string());
+    }
     serde_json::from_str::<SandboxConfig>(config_json)
         .ok()
         .map(|c| match c.spec.image {
@@ -121,10 +134,48 @@ fn print_json(sandboxes: &[SandboxHandle]) -> anyhow::Result<()> {
                 "name": s.name(),
                 "status": format!("{:?}", s.status_snapshot()),
                 "created_at": s.created_at().map(|dt| ui::format_json_datetime(&dt)),
-                "image": extract_image(s.config_json()),
+                "image": extract_image(s.config_json(), s.backend_kind()),
             })
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&entries)?);
     Ok(())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests
+//--------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use microsandbox::sandbox::RootfsSource;
+    use microsandbox_types::OciRootfsSource;
+
+    #[test]
+    fn cloud_image_uses_the_curated_inspection_projection() {
+        assert_eq!(
+            extract_image(
+                r#"{"image":"python:3.12","memory_mib":512}"#,
+                BackendKind::Cloud
+            ),
+            "python:3.12"
+        );
+        for json in ["null", "{}", r#"{"image":null}"#, "invalid"] {
+            assert_eq!(extract_image(json, BackendKind::Cloud), "-");
+        }
+    }
+
+    #[test]
+    fn local_image_keeps_the_local_config_contract() {
+        let mut config = SandboxConfig::default();
+        config.spec.image = RootfsSource::Oci(OciRootfsSource {
+            reference: "node:22".into(),
+            root_disk: None,
+        });
+        assert_eq!(
+            extract_image(&serde_json::to_string(&config).unwrap(), BackendKind::Local),
+            "node:22"
+        );
+    }
 }
