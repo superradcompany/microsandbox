@@ -1,0 +1,347 @@
+---
+title: Services
+description: Give a sandbox port a public URL
+keywords: ["sandbox services", "public URL", "expose port", "microsandbox cloud"]
+icon: "globe"
+---
+
+<Tooltip tip="Available only on microsandbox cloud; on the local backend, every Service call and msb service command fails with an unsupported error (`ErrCloudOnly` in Go)."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+A Service gives a sandbox port a public HTTPS URL. Requests to the URL go to the Service's target: one sandbox and port. The URL is `https://<slug>.<domain>` and stays the same when you change the target.
+
+## Create a Service
+
+Start the target sandbox, then create the Service:
+
+<CodeGroup>
+```typescript TypeScript
+import { Service } from "microsandbox";
+
+const svc = await Service.builder("my-app").target("my-sandbox", 8080).create();
+console.log(svc.url);
+```
+
+```rust Rust
+use microsandbox::Service;
+
+let svc = Service::builder("my-app")
+    .target("my-sandbox", 8080)
+    .create()
+    .await?;
+println!("{}", svc.url());
+```
+
+```python Python
+from microsandbox import Service, ServiceTarget
+
+svc = await Service.create("my-app", target=ServiceTarget("my-sandbox", 8080))
+print(svc.url)
+```
+
+```go Go
+svc, err := m.CreateService(ctx, "my-app", m.ServiceTarget{
+    Sandbox: "my-sandbox",
+    Port:    8080,
+})
+if err != nil {
+    return err
+}
+fmt.Println(svc.URL())
+```
+
+```ruby Ruby
+target = Microsandbox::ServiceTarget.new("my-sandbox", 8080)
+svc = Microsandbox::Service.create("my-app", target: target)
+puts svc.url
+```
+
+```bash CLI
+msb service create my-app --target my-sandbox:8080
+```
+</CodeGroup>
+
+Slugs contain 3–63 lowercase letters, digits, and single hyphens. They cannot start or end with a hyphen and are not normalized. If a slug is unavailable, choose another. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+
+Use the returned URL as-is. Service URLs are public, so add authentication in your application when needed.
+
+The URL usually works when create, enable, or a target change returns; sometimes it takes a few more seconds. A URL requested shortly before you created the Service or set its target can return [`404 not_found`](#error-responses) for a short time.
+
+## Move, disable, or enable a Service
+
+A Service is `enabled`, `disabled`, or `detached` (it has no target). Disabling keeps the target. Enabling the Service, or setting a target, turns it back on; the target sandbox must be running.
+
+<CodeGroup>
+```typescript TypeScript
+let svc = await Service.get("my-app");
+svc = await svc.update({ target: { sandbox: "new-sandbox", port: 8080 } });
+svc = await svc.disable();
+svc = await svc.enable();
+```
+
+```rust Rust
+let svc = Service::get("my-app").await?;
+let svc = svc.update(|u| u.target("new-sandbox", 8080)).await?;
+let svc = svc.disable().await?;
+let svc = svc.enable().await?;
+```
+
+```python Python
+svc = await Service.get("my-app")
+svc = await svc.update(target=ServiceTarget("new-sandbox", 8080))
+svc = await svc.disable()
+svc = await svc.enable()
+```
+
+```go Go
+svc, err := m.GetService(ctx, "my-app")
+if err != nil {
+    return err
+}
+if svc, err = svc.Update(ctx, m.ServiceTarget{Sandbox: "new-sandbox", Port: 8080}); err != nil {
+    return err
+}
+if svc, err = svc.Disable(ctx); err != nil {
+    return err
+}
+if svc, err = svc.Enable(ctx); err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+svc = Microsandbox::Service.get("my-app")
+svc = svc.update(target: Microsandbox::ServiceTarget.new("new-sandbox", 8080))
+svc = svc.disable
+svc = svc.enable
+```
+
+```bash CLI
+msb service update my-app --target new-sandbox:8080
+msb service disable my-app
+msb service enable my-app
+```
+</CodeGroup>
+
+Each call returns the updated Service. Enabling and disabling both need a target: on a detached Service, both fail with the [`service_detached` reason](/sdk/errors#service-changes), so set a target instead.
+
+If the target sandbox stops, the Service keeps its target and requests return `503 sandbox_not_running` until the sandbox runs again. If the target sandbox is removed, the Service becomes detached and keeps its slug. After a few seconds, requests return `503 no_target` or `404 not_found` until you set a new target.
+
+## Handle requests
+
+In the sandbox, your application must listen on the target port at `0.0.0.0` or `127.0.0.1`. Services support HTTP, WebSocket, and server-sent events (SSE). Microsandbox does not time out slow responses, so set your own timeouts where you need them. Your application receives the original method, path, query, and body, plus these headers:
+
+- `Host`: the Service hostname
+- `X-Forwarded-Host`: the Service hostname
+- `X-Forwarded-Proto`: `https`
+- `X-Forwarded-For`: the client IP address
+
+Microsandbox sets these headers itself and replaces any copies the client sent, so your application can trust them. Header names starting with `msb-` or `x-msb-`, and cookies named `msb_*` or `__Host-msb_*`, are reserved for Microsandbox: they never reach your application, and your responses cannot set those cookies.
+
+On the Free plan, a browser's first visit shows a one-time notice page before your application. Automated browsers, such as end-to-end tests, can skip it by sending an `msb-skip-browser-warning` header with any value.
+
+## Error responses
+
+When Microsandbox answers instead of your application, the response has an `x-msb-error` header. Microsandbox removes this header from your application's responses, so it always means Microsandbox answered. The body is JSON with the same code in `error.code`, or an HTML page when the client asks for `text/html`.
+
+| Status | `x-msb-error` | Meaning | What to do |
+|--------|---------------|---------|------------|
+| `404` | `not_found` | The Service does not exist, or is disabled or detached. | Check the URL. Enable the Service or set a target. |
+| `429` | `service_busy_inflight` | The target sandbox has too many requests in progress. | Retry with backoff, or spread traffic across more sandboxes. |
+| `431` | `request_header_too_large` | The request headers are too large. | Send fewer or smaller headers. |
+| `502` | `port_closed` | Nothing is listening on the target port. | Start your application on that port. |
+| `502` | `guest_closed` | Your application closed the connection or sent an invalid HTTP response. | Check your application's logs. |
+| `503` | `no_target` | The target sandbox was removed. | Set a new target. |
+| `503` | `sandbox_not_running` | The target sandbox is not running. | Start the sandbox. |
+| `503` | `service_unavailable` | Microsandbox cannot serve the request right now. | Retry. If `Retry-After` is set, wait that many seconds first. |
+| `504` | `upstream_timeout` | The target port did not accept the connection within 10 seconds. | Retry. If it persists, check that your application is running and not overloaded. |
+
+Only `service_unavailable` means Microsandbox itself cannot serve the request. The other codes describe the Service, its target sandbox, your application, or the request.
+
+## Get a Service
+
+Get a Service by its slug to read its URL, its status (`enabled`, `disabled` or `detached`), its target, and when it was created and last changed. A Service object holds the state from the response that returned it; `refresh` returns a current copy.
+
+<CodeGroup>
+```typescript TypeScript
+let svc = await Service.get("my-app");
+console.log(svc.url, svc.status, svc.updatedAt);
+svc = await svc.refresh();
+```
+
+```rust Rust
+let svc = Service::get("my-app").await?;
+println!("{} {:?} {}", svc.url(), svc.status(), svc.updated_at());
+let svc = svc.refresh().await?;
+```
+
+```python Python
+svc = await Service.get("my-app")
+print(svc.url, svc.status, svc.updated_at)
+svc = await svc.refresh()
+```
+
+```go Go
+svc, err := m.GetService(ctx, "my-app")
+if err != nil {
+    return err
+}
+fmt.Println(svc.URL(), svc.Status(), svc.UpdatedAt())
+if svc, err = svc.Refresh(ctx); err != nil {
+    return err
+}
+```
+
+```ruby Ruby
+svc = Microsandbox::Service.get("my-app")
+puts [svc.url, svc.status, svc.updated_at]
+svc = svc.refresh
+```
+
+```bash CLI
+msb service inspect my-app
+msb service inspect my-app --format json
+```
+</CodeGroup>
+
+For scripts, add `--format json` to any `msb service` command except `remove`. A Service prints as an object with `slug`, `url`, `status`, `target`, `created_at`, and `updated_at`.
+
+## List Services
+
+Lists are in slug order and include disabled and detached Services. Filter by sandbox to find its Services.
+
+<CodeGroup>
+```typescript TypeScript
+const page = await Service.listWith((l) => l.sandbox("new-sandbox"));
+```
+
+```rust Rust
+let page = Service::list_with(|l| l.sandbox("new-sandbox")).await?;
+```
+
+```python Python
+page = await Service.list_with(sandbox="new-sandbox")
+```
+
+```go Go
+page, err := m.ListServicesWith(ctx, m.WithServiceListSandbox("new-sandbox"))
+```
+
+```ruby Ruby
+page = Microsandbox::Service.list(sandbox: "new-sandbox")
+```
+
+```bash CLI
+msb service ls --sandbox new-sandbox
+```
+</CodeGroup>
+
+The SDKs return one page at a time: 20 Services by default, up to 100 with a limit. Pass a page's next cursor to get the following page; the last page has none. `msb service ls` lists every Service.
+
+<CodeGroup>
+```typescript TypeScript
+let cursor: string | undefined;
+do {
+  const page = await Service.listWith((l) => (cursor ? l.cursor(cursor) : l));
+  for (const svc of page.services) console.log(svc.slug, svc.url);
+  cursor = page.nextCursor;
+} while (cursor);
+```
+
+```rust Rust
+let mut cursor: Option<String> = None;
+loop {
+    let page = Service::list_with(|l| match cursor.take() {
+        Some(next) => l.cursor(next),
+        None => l,
+    })
+    .await?;
+    for svc in &page.services {
+        println!("{} {}", svc.slug(), svc.url());
+    }
+    cursor = page.next_cursor;
+    if cursor.is_none() {
+        break;
+    }
+}
+```
+
+```python Python
+cursor = None
+while True:
+    page = await Service.list_with(cursor=cursor)
+    for svc in page.services:
+        print(svc.slug, svc.url)
+    cursor = page.next_cursor
+    if cursor is None:
+        break
+```
+
+```go Go
+var opts []m.ServiceListOption
+for {
+    page, err := m.ListServicesWith(ctx, opts...)
+    if err != nil {
+        return err
+    }
+    for _, svc := range page.Services {
+        fmt.Println(svc.Slug(), svc.URL())
+    }
+    if page.NextCursor == nil {
+        break
+    }
+    opts = []m.ServiceListOption{m.WithServiceListCursor(*page.NextCursor)}
+}
+```
+
+```ruby Ruby
+cursor = nil
+loop do
+  page = Microsandbox::Service.list(cursor: cursor)
+  page.fetch("services").each { |svc| puts [svc.slug, svc.url] }
+  cursor = page.fetch("next_cursor")
+  break unless cursor
+end
+```
+
+```bash CLI
+msb service ls --format json
+```
+</CodeGroup>
+
+## Remove a Service
+
+Removing a Service releases its slug.
+
+<CodeGroup>
+```typescript TypeScript
+await svc.remove();
+```
+
+```rust Rust
+svc.remove().await?;
+```
+
+```python Python
+await svc.remove()
+```
+
+```go Go
+err := svc.Remove(ctx)
+```
+
+```ruby Ruby
+svc.remove
+```
+
+```bash CLI
+msb service remove my-app
+```
+</CodeGroup>
+
+## When a change fails
+
+Create, update, enable, disable, and remove each send one request and never retry. Most errors mean nothing changed. If an error says the change may have been applied, get the Service and check it before trying again. An update, enable, or disable that is already in effect succeeds without a change. See [SDK errors](/sdk/errors#service-changes).
+
+## Limits
+
+Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
