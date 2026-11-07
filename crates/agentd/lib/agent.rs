@@ -4252,7 +4252,7 @@ fn request_guest_poweroff() -> AgentdResult<()> {
 
     // Foreign init owns both shutdown duration and filesystem teardown. No timer or
     // fallback signal may convert this graceful request into forced termination.
-    crate::handoff::signal_init_shutdown()
+    crate::handoff::request_init_shutdown()
 }
 
 //--------------------------------------------------------------------------------------------------

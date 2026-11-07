@@ -1072,7 +1072,7 @@ async fn owned_delta_reuses_bytes_and_restores_private_renamed_namespace_after_s
             &volumes,
             &source,
             &crate::backend::local::creation::CreationStorage::for_test(
-                &temp.path().join("conflict")
+                temp.path().join("conflict")
             ),
             &conflict
         )

@@ -1,0 +1,5 @@
+__pycache__/
+test_*.py
+requirements.in
+README.md
+*.local.json

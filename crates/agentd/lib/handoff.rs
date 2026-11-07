@@ -30,6 +30,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
 use nix::unistd::{ForkResult, fork, setsid};
@@ -49,6 +50,21 @@ use crate::error::{AgentdError, AgentdResult};
 /// serial console and their output interleaves. The directory is
 /// created in `init::init` (see `create_run_dir`).
 const POST_HANDOFF_STDERR: &str = "/run/microsandbox/agentd.log";
+
+/// Status file that reports which signals PID 1 handles.
+const INIT_STATUS_PATH: &str = "/proc/1/status";
+
+/// Link to the program running as PID 1.
+const INIT_EXE_PATH: &str = "/proc/1/exe";
+
+/// File name of the multi-call binary that provides BusyBox init.
+const BUSYBOX_NAME: &str = "busybox";
+
+/// Delay between repeats of a shutdown request PID 1 could not yet receive.
+const INIT_SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How many times to repeat a shutdown request PID 1 could not yet receive.
+const INIT_SHUTDOWN_RETRIES: u32 = 50;
 
 //--------------------------------------------------------------------------------------------------
 // Functions
@@ -310,32 +326,93 @@ pub fn is_pid_1() -> bool {
     nix::unistd::getpid().as_raw() == 1
 }
 
-/// Sends `SIGRTMIN+4` to PID 1 to request shutdown.
+/// Asks PID 1 to shut down with a signal it can receive.
 ///
-/// systemd interprets this as "start poweroff.target". Other inits
-/// typically default-handle it as "exit cleanly," which causes the
-/// kernel to panic on PID 1 exit and triggers VMM shutdown.
+/// The kernel drops signals PID 1 neither handles nor blocks, so the request has to match
+/// the init. systemd powers off on `SIGRTMIN+4`, BusyBox init on `SIGUSR2`, and other inits
+/// conventionally treat `SIGTERM` as the shutdown request. Inits that collect signals with
+/// `sigwait`, such as tini, receive the default signal and pass it to their child.
+///
+/// A short-lived workload can finish while the init is still starting, before it can
+/// receive anything. The same request is repeated in the background until the init shows it
+/// can receive it, or the retries run out. Repeating never escalates: the init still owns
+/// the shutdown.
 ///
 /// `SIGRTMIN` is a function on Linux (glibc reserves the first few
 /// RT signals for libc internals), so the value is computed at
 /// runtime via `libc::SIGRTMIN()`.
-pub fn signal_init_shutdown() -> AgentdResult<()> {
-    let sig = libc::SIGRTMIN() + 4;
+pub fn request_init_shutdown() -> AgentdResult<()> {
+    if send_init_shutdown_signal()? {
+        return Ok(());
+    }
+
+    std::thread::Builder::new()
+        .name("init-shutdown".into())
+        .spawn(|| {
+            for _ in 0..INIT_SHUTDOWN_RETRIES {
+                std::thread::sleep(INIT_SHUTDOWN_RETRY_INTERVAL);
+                if !matches!(send_init_shutdown_signal(), Ok(false)) {
+                    return;
+                }
+            }
+        })?;
+
+    Ok(())
+}
+
+/// Sends the shutdown request once. Returns whether PID 1 showed it can receive the signal.
+fn send_init_shutdown_signal() -> AgentdResult<bool> {
+    let handled = std::fs::read_to_string(INIT_STATUS_PATH)
+        .ok()
+        .and_then(|status| parse_handled_signals(&status));
+    let init_is_busybox = std::fs::read_link(INIT_EXE_PATH)
+        .is_ok_and(|exe| exe.file_name() == Some(BUSYBOX_NAME.as_ref()));
+    let sig = select_init_shutdown_signal(handled, init_is_busybox, libc::SIGRTMIN() + 4);
+
     // SAFETY: kill(2) is signal-safe and pid=1 is always valid.
     let ret = unsafe { libc::kill(1, sig) };
     if ret != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    Ok(())
+
+    Ok(handled.is_some_and(|mask| handles_signal(mask, sig)))
 }
 
-/// Sends `SIGTERM` to PID 1 as a sysvinit-friendly shutdown fallback.
-pub fn signal_init_term() -> AgentdResult<()> {
-    let ret = unsafe { libc::kill(1, libc::SIGTERM) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error().into());
+/// Reads the signals a process catches or blocks from `/proc/<pid>/status` text.
+fn parse_handled_signals(status: &str) -> Option<u64> {
+    let mask = |field: &str| {
+        let value = status.lines().find_map(|line| line.strip_prefix(field))?;
+        u64::from_str_radix(value.trim(), 16).ok()
+    };
+
+    Some(mask("SigCgt:")? | mask("SigBlk:")?)
+}
+
+/// Whether a signal mask includes `signal`. Bit zero of the mask is signal 1.
+fn handles_signal(handled: u64, signal: libc::c_int) -> bool {
+    (1..=64).contains(&signal) && handled & (1 << (signal - 1)) != 0
+}
+
+/// Chooses the shutdown request for PID 1.
+///
+/// BusyBox init is matched by name because `/proc` hides the signals it is waiting for in
+/// `sigtimedwait`. Anything else unknown keeps the default request.
+fn select_init_shutdown_signal(
+    handled: Option<u64>,
+    init_is_busybox: bool,
+    default_signal: libc::c_int,
+) -> libc::c_int {
+    let handles = |signal| handled.is_some_and(|mask| handles_signal(mask, signal));
+
+    if handles(default_signal) {
+        default_signal
+    } else if init_is_busybox {
+        libc::SIGUSR2
+    } else if handles(libc::SIGTERM) {
+        libc::SIGTERM
+    } else {
+        default_signal
     }
-    Ok(())
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -355,6 +432,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp test dir");
         dir
+    }
+
+    const RT_SHUTDOWN: libc::c_int = 39;
+
+    fn mask(signals: &[libc::c_int]) -> u64 {
+        signals
+            .iter()
+            .fold(0, |mask, signal| mask | 1 << (signal - 1))
+    }
+
+    #[test]
+    fn parses_handled_signals_from_proc_status() {
+        // Taken from a running systemd, which blocks its shutdown signals and reads them from
+        // a signalfd, so they appear in SigBlk rather than SigCgt.
+        let status = "Name:\tsystemd\nSigBlk:\t7fe3c0fe28014a03\nSigCgt:\t00000000000004ec\n";
+
+        let handled = parse_handled_signals(status).unwrap();
+
+        assert!(handles_signal(handled, RT_SHUTDOWN));
+        assert!(handles_signal(handled, libc::SIGTERM));
+        assert!(!handles_signal(handled, libc::SIGSTOP));
+    }
+
+    #[test]
+    fn rejects_unreadable_proc_status() {
+        assert_eq!(parse_handled_signals("Name:\tinit\n"), None);
+        assert_eq!(parse_handled_signals("SigBlk:\t0\n"), None);
+        assert_eq!(
+            parse_handled_signals("SigBlk:\t0\nSigCgt:\tnot-hex\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_starting_init_cannot_receive_shutdown_signals() {
+        let status = "SigBlk:\t0000000000000000\nSigCgt:\t0000000000000000\n";
+
+        let handled = parse_handled_signals(status).unwrap();
+
+        assert!(!handles_signal(handled, RT_SHUTDOWN));
+        assert_eq!(
+            select_init_shutdown_signal(Some(handled), false, RT_SHUTDOWN),
+            RT_SHUTDOWN
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_signals() {
+        assert!(!handles_signal(u64::MAX, 0));
+        assert!(!handles_signal(u64::MAX, 65));
+    }
+
+    #[test]
+    fn shutdown_keeps_the_default_signal_for_inits_that_handle_it() {
+        let handled = mask(&[libc::SIGTERM, libc::SIGUSR2, RT_SHUTDOWN]);
+
+        assert_eq!(
+            select_init_shutdown_signal(Some(handled), false, RT_SHUTDOWN),
+            RT_SHUTDOWN
+        );
+        assert_eq!(
+            select_init_shutdown_signal(Some(handled), true, RT_SHUTDOWN),
+            RT_SHUTDOWN
+        );
+    }
+
+    #[test]
+    fn shutdown_uses_poweroff_signal_for_busybox_init() {
+        // Taken from a running BusyBox init, which only installs a handler for SIGTSTP.
+        let handled = mask(&[libc::SIGTSTP]);
+
+        assert_eq!(
+            select_init_shutdown_signal(Some(handled), true, RT_SHUTDOWN),
+            libc::SIGUSR2
+        );
+        assert_eq!(
+            select_init_shutdown_signal(None, true, RT_SHUTDOWN),
+            libc::SIGUSR2
+        );
+    }
+
+    #[test]
+    fn shutdown_uses_sigterm_for_other_inits_that_handle_it() {
+        let handled = mask(&[libc::SIGTERM, libc::SIGUSR2]);
+
+        assert_eq!(
+            select_init_shutdown_signal(Some(handled), false, RT_SHUTDOWN),
+            libc::SIGTERM
+        );
+    }
+
+    #[test]
+    fn shutdown_keeps_the_default_signal_when_init_handlers_are_unknown() {
+        assert_eq!(
+            select_init_shutdown_signal(None, false, RT_SHUTDOWN),
+            RT_SHUTDOWN
+        );
+        assert_eq!(
+            select_init_shutdown_signal(Some(0), false, RT_SHUTDOWN),
+            RT_SHUTDOWN
+        );
     }
 
     #[test]

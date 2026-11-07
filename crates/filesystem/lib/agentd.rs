@@ -15,6 +15,9 @@ use sha2::{Digest as _, Sha256};
 
 static AGENTD_PAYLOAD: OnceLock<AgentdPayload> = OnceLock::new();
 
+/// Build-time capability of the actual embedded agent. Runtime overrides cannot grant it.
+pub const EMBEDDED_STORAGE_READER: bool = cfg!(msb_embedded_storage_reader_v1);
+
 #[cfg(feature = "embed-binaries")]
 const EMBEDDED_AGENTD_BYTES: Option<&[u8]> =
     Some(include_bytes!(concat!(env!("OUT_DIR"), "/agentd")));
@@ -135,6 +138,19 @@ pub fn agentd_bytes() -> &'static [u8] {
 /// Return the embedded Agentd payload, when this build contains one.
 pub fn embedded_agentd_payload() -> Option<AgentdPayload> {
     EMBEDDED_AGENTD_BYTES.map(AgentdPayload::Embedded)
+}
+
+/// Recovery VMs run only the reader shipped with this host binary. Pin that payload in the
+/// very same slot used for filesystem injection, even if a caller configured another agent.
+pub fn initialize_embedded_reader() -> Result<&'static [u8], AgentdPayloadError> {
+    let payload = AgentdPayload::resolve_from(None)?;
+    let selected = AGENTD_PAYLOAD.get_or_init(|| payload);
+    match selected {
+        AgentdPayload::Embedded(bytes) => Ok(bytes),
+        AgentdPayload::External(_) => Err(AgentdPayloadError::Invalid(
+            "recovery requires the host binary's embedded guest reader".into(),
+        )),
+    }
 }
 
 fn validate_agentd(bytes: &[u8]) -> Result<(), AgentdPayloadError> {

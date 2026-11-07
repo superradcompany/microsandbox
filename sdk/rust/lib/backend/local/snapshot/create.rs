@@ -2868,6 +2868,9 @@ mod tests {
     fn stopped_async_capture_fixture(sandbox: &Path) -> Vec<microsandbox_types::VolumeMount> {
         use microsandbox_types::{OwnedVolumeStorage, VolumeMount};
 
+        // These capture tests model already protected storage; migration has its own tests.
+        std::fs::create_dir_all(sandbox.join("runtime")).unwrap();
+        microsandbox_runtime::checkpoint::layout::initialize_new(&sandbox.join("runtime")).unwrap();
         let owned = sandbox.join("owned-volumes");
         let data = owned.join(microsandbox_types::owned_volume_mount_id("/data"));
         let cache = owned
@@ -3027,8 +3030,17 @@ mod tests {
                     Some(Arc::clone(&guard)),
                     microsandbox_types::GuestFlush::Auto,
                 ));
-                while !sandbox.join("state-layout.json").exists() {
+                // Ready storage already has a layout marker. Observe the actual storage
+                // reservation to ensure cancellation targets the queued capture worker.
+                loop {
                     assert!(futures::poll!(capture.as_mut()).is_pending());
+                    match crate::backend::local::creation::CreationStorage::acquire(&local, "box") {
+                        Ok(storage) => drop(storage),
+                        Err(error) => {
+                            assert!(error.to_string().contains("retry"), "{error}");
+                            break;
+                        }
+                    }
                     tokio::task::yield_now().await;
                 }
                 drop(capture);
@@ -3399,7 +3411,7 @@ mod tests {
                         &sources,
                         file.virtual_size,
                         &CreationStorage::for_test(
-                            &temp.path().join(format!("child-{}", loaded.id())),
+                            temp.path().join(format!("child-{}", loaded.id())),
                         ),
                         &root_disk,
                     )

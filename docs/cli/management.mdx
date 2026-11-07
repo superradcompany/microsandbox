@@ -63,6 +63,7 @@ msb self uninstall --yes      # Skip confirmation
 | Subcommand | Description |
 |------------|-------------|
 | `doctor` (alias: `check`) | Check runtime files, supported host virtualization prerequisites, and non-blocking host performance capabilities |
+| `repair [--sandbox SANDBOX]` | Inspect and repair legacy sandbox storage. In a terminal, omit `--sandbox` to select multiple sandboxes |
 | `update` (alias: `upgrade`) | Update msb and libkrunfw to the latest release and refresh command links |
 | `downgrade <version>` | Downgrade msb and compatible local state to a supported older release at or above 0.6.0, refusing unsafe downgrades before touching files or state |
 | `uninstall` | Remove msb, libkrunfw, and command links |
@@ -88,5 +89,13 @@ Downgrade checks compatibility and requires affected sandboxes to be stopped. Re
 Doctor reports supported virtualization and storage capabilities. Disabled interrupt acceleration is a performance warning, not a failed health check; doctor does not reload kernel modules.
 
 A temporary clone probe checks whether flat roots can use native copy-on-write. Probe files are removed afterward. See [Performance](/sandboxes/optimization) for details.
+
+### Check sandbox storage
+
+`msb doctor --sandbox app` inspects storage for one local sandbox. Use `msb doctor --all` to inspect every sandbox in the configured home. Add `--format json` for automation. These checks read storage metadata and leave VMs running. Bare `msb doctor` checks the host. Positional sandbox names remain supported for both diagnosis and repair.
+
+Storage checks exit with `0` for ready or eligible storage, `2` for a blocker or incomplete migration, `3` when a sandbox could not be inspected, and `1` for a command-level failure. Results for running sandboxes are provisional.
+
+Run `msb self repair --sandbox app` in a terminal when the report calls for repair, or omit `--sandbox` to select multiple sandboxes. The picker hides verified-ready sandboxes by default; press `r` to show them. Repair imports supported storage without asking you to choose disk versions, asks before stopping a blocking VM, and reports each sandbox's result. Unresolved cases offer a diagnostic report to review and copy for the maintainers; nothing is uploaded automatically. Safety confirmations are interactive. For JSON output limits and macOS maintenance requirements, see [sandbox storage migration](/migrations/sandbox-storage).
 
 See [Performance](/sandboxes/optimization) for interpreting these checks, choosing sandbox-level policies, and preparing the host storage and virtualization environment.

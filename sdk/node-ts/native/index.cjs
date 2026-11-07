@@ -688,6 +688,7 @@ module.exports.JsVolumeHandle = nativeBinding.JsVolumeHandle
 module.exports.allSandboxMetrics = nativeBinding.allSandboxMetrics
 module.exports.defaultBackendInfo = nativeBinding.defaultBackendInfo
 module.exports.defaultBackendKind = nativeBinding.defaultBackendKind
+module.exports.diagnoseStorage = nativeBinding.diagnoseStorage
 module.exports.ensureRuntime = nativeBinding.ensureRuntime
 module.exports.imageGet = nativeBinding.imageGet
 module.exports.imageInspect = nativeBinding.imageInspect
