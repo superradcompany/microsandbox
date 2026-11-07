@@ -3,13 +3,15 @@
 import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import legacy_storage_migration as smoke
+import legacy_storage_preview as terminal
 
 
 class LegacyStorageMigrationTests(unittest.TestCase):
@@ -116,13 +118,76 @@ class LegacyStorageMigrationTests(unittest.TestCase):
                         return subprocess.CompletedProcess(command, 1, "", "storage upgrade required")
                     return subprocess.CompletedProcess(command, 0, "", "")
 
-                with patch.object(smoke.subprocess, "run", side_effect=execute) as run:
+                refused = subprocess.CompletedProcess([], 1, "", "storage upgrade required")
+                with patch.object(smoke.subprocess, "run", side_effect=execute) as run, \
+                        patch.object(terminal, "repair_in_terminal", return_value=refused):
                     if expected == "start":
                         with self.assertRaises(SystemExit):
                             smoke.verify(args)
                     else:
                         smoke.verify(args)
                 self.assertFalse(any(call.args[0][1] in ("stop", "kill") for call in run.call_args_list))
+
+    def test_mac_confirmation_needs_test_operator_opt_in_and_is_not_a_cli_argument(self):
+        with patch.object(smoke.sys, "platform", "darwin"):
+            for args in (SimpleNamespace(), SimpleNamespace(legacy_writers_stopped=False)):
+                with self.assertRaisesRegex(ValueError, "maintenance"):
+                    smoke.maintenance_confirmed(args)
+            self.assertIs(smoke.maintenance_confirmed(SimpleNamespace(legacy_writers_stopped=True)), True)
+        with patch.object(smoke.sys, "platform", "linux"):
+            self.assertIs(smoke.maintenance_confirmed(SimpleNamespace()), False)
+
+    def test_terminal_exit_after_a_prompt_can_be_waited_without_reading_eof_twice(self):
+        wizard = terminal.Terminal.__new__(terminal.Terminal)
+        wizard.finished = False
+        wizard.pending = ""
+        wizard.transcript = ""
+        wizard.chunks = queue.Queue()
+        wizard.chunks.put("repaired; ready to start\r\n")
+        wizard.chunks.put(None)
+        wizard.tty = MagicMock()
+        wizard.tty.wait.return_value = 0
+        self.assertIsNone(wizard.expect("enter select · esc back", allow_exit=True))
+        self.assertEqual(wizard.wait(), 0)
+        self.assertIn("repaired; ready to start", wizard.transcript)
+
+    def test_terminal_repair_uses_real_confirmation_without_forwarding_removed_flags(self):
+        wizard = MagicMock()
+        wizard.__enter__.return_value = wizard
+        wizard.expect.side_effect = ["Confirm storage repairs", "macOS maintenance confirmation", None]
+        wizard.wait.return_value = 0
+        wizard.transcript = "repaired; ready to start"
+        with patch.object(terminal, "Terminal", return_value=wizard) as spawn:
+            result = terminal.repair_in_terminal("fixture", "repair", "app", maintenance=True)
+        self.assertEqual(spawn.call_args.args, ("fixture", "repair", ["self", "repair", "--sandbox", "app"]))
+        self.assertEqual([call.args[0] for call in wizard.send_key.call_args_list], ["y", "y"])
+        self.assertEqual(result.returncode, 0)
+
+    def test_terminal_repair_never_guesses_maintenance_or_stop_consent(self):
+        for prompt, exception in (("macOS maintenance confirmation", ValueError),
+                                  ("Stop 'another-vm' gracefully?", AssertionError)):
+            with self.subTest(prompt=prompt):
+                wizard = MagicMock()
+                wizard.__enter__.return_value = wizard
+                wizard.expect.side_effect = ["Confirm storage repairs", prompt]
+                with patch.object(terminal, "Terminal", return_value=wizard):
+                    with self.assertRaises(exception):
+                        terminal.repair_in_terminal("fixture", "repair", "app")
+                replies = [call.args[0] for call in wizard.send_key.call_args_list]
+                self.assertEqual(replies.count("y"), 1, "only the initial fixture repair may be approved")
+                if exception is ValueError:
+                    self.assertEqual(replies[-1], "\x1b")
+
+    def test_terminal_investigation_does_not_choose_a_disk_or_confirm_maintenance(self):
+        wizard = MagicMock()
+        wizard.__enter__.return_value = wizard
+        wizard.expect.side_effect = ["Couldn't safely repair 'app'.", "Repair results", None]
+        wizard.wait.return_value = 2
+        wizard.transcript = "needs investigation"
+        with patch.object(terminal, "Terminal", return_value=wizard):
+            result = terminal.repair_in_terminal("fixture", "investigate", "app")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual([call.args[0] for call in wizard.send_key.call_args_list], ["\x1b", "\x1b"])
 
     def test_failed_post_migration_start_never_stops_a_copied_fixture(self):
         harness = smoke.Harness(self.root, self.binary, self.firmware, "post-start-refused")

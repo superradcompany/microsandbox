@@ -131,7 +131,7 @@ def baseline(args):
 def verify(args):
     manifest = migration.read_manifest(args.output.resolve())
     migration.IMAGE = manifest.get("image", migration.IMAGE)
-    maintenance = migration.maintenance_arguments(args)
+    maintenance = migration.maintenance_confirmed(args)
     harness = migration.Harness(args.output, args.candidate, args.candidate_firmware, args.label)
     cases = {case["name"]: case for case in manifest["cases"]}
     assert set(cases) == CASES, "fixture production did not complete"
@@ -147,7 +147,7 @@ def verify(args):
         version_output = harness.run("candidate-version", "--version").stdout
         version = re.search(r"\d+\.\d+\.\d+(?:[-+][\w.-]+)?", version_output).group()
         catalog = catalog_state(harness.home)
-        with Terminal(harness, "unresolved-report", ["self", "repair", "database", *maintenance]) as wizard:
+        with Terminal(harness, "unresolved-report", ["self", "repair", "--sandbox", "database"]) as wizard:
             current = frame(wizard)
             assert "Couldn't safely repair 'database'." in current, current
             assert "We couldn't establish which saved disk state is active." in current, current
@@ -173,7 +173,7 @@ def verify(args):
         record("unresolved-report", catalog_and_originals_unchanged=True, no_disk_browser=True,
                reviewed_report_has_versions=True, guest_contents_and_host_paths_absent=True)
 
-        with Terminal(harness, "decline-repair", ["self", "repair", "app", *maintenance]) as wizard:
+        with Terminal(harness, "decline-repair", ["self", "repair", "--sandbox", "app"]) as wizard:
             current = frame(wizard)
             assert "Confirm storage repairs" in current, current
             wizard.send_key("n")
@@ -183,6 +183,36 @@ def verify(args):
         unchanged_inputs(harness, before)
         assert catalog_state(harness.home) == catalog
         record("decline-repair", catalog_and_originals_unchanged=True)
+
+        if maintenance:
+            # JSON output cannot silently attest to the cross-home maintenance window.
+            refused = harness.run("scripted-maintenance-refused", "self", "repair", "--sandbox", "app",
+                                  "--format", "json", required=False)
+            assert refused.returncode == 2, refused.stderr
+            report = json.loads(refused.stdout)
+            assert "interactive maintenance confirmation" in report["next_step"], report
+            assert "without --format json" in report["next_step"], report
+            unchanged_inputs(harness, before)
+            assert catalog_state(harness.home) == catalog
+            assert not (harness.home / "sandboxes/app/.storage-migration").exists()
+            assert not (harness.home / "sandboxes/app/state-layout.json").exists()
+            record("scripted-maintenance-refused", interactive_remedy=True, catalog_and_originals_unchanged=True)
+
+            with Terminal(harness, "decline-maintenance", ["self", "repair", "--sandbox", "app"]) as wizard:
+                current = frame(wizard)
+                assert "Confirm storage repairs" in current, current
+                wizard.send_key("y")
+                current = frame(wizard)
+                assert "macOS maintenance confirmation" in current, current
+                wizard.send_key("n")
+                assert wizard.wait() == 2, wizard.transcript[-2000:]
+                assert "maintenance not confirmed" in wizard.transcript, wizard.transcript
+                assert_no_browser(wizard)
+            unchanged_inputs(harness, before)
+            assert catalog_state(harness.home) == catalog
+            assert not (harness.home / "sandboxes/app/.storage-migration").exists()
+            assert not (harness.home / "sandboxes/app/state-layout.json").exists()
+            record("decline-maintenance", catalog_and_originals_unchanged=True, no_admission=True)
 
         # New storage is created normally, then checked as a ready entry without legacy
         # capture. It must remain hidden from the initial repair picker by default.
@@ -246,7 +276,7 @@ def verify(args):
         record("mixed-batch", independent_repairs_completed=True, unresolved_originals_retained=True,
                ready_unchanged=True, no_disk_browser=True)
 
-        with Terminal(harness, "already-ready", ["self", "repair", "app", *maintenance]) as wizard:
+        with Terminal(harness, "already-ready", ["self", "repair", "--sandbox", "app"]) as wizard:
             assert wizard.wait() == 0, wizard.transcript[-2000:]
             assert "already ready" in wizard.transcript, wizard.transcript
             assert_no_browser(wizard)
@@ -275,7 +305,8 @@ def main():
     candidate.add_argument("--candidate", type=Path, required=True)
     candidate.add_argument("--candidate-firmware", type=Path, required=True)
     candidate.add_argument("--label", default="guided-repair")
-    candidate.add_argument("--legacy-writers-stopped", action="store_true")
+    candidate.add_argument("--legacy-writers-stopped", action="store_true",
+                           help="Test-only consent to answer the Mac maintenance prompt after excluding legacy writers across homes")
     candidate.set_defaults(action=verify)
     args = parser.parse_args()
     if args.phase in ("baseline", "verify") and (Path(args.label).name != args.label or args.label in ("", ".", "..", "produce")):

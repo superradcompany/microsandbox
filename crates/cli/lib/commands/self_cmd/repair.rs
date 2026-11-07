@@ -1,17 +1,13 @@
 //! Guided repair of selected local sandboxes, with explicit consent for each blocking VM.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use clap::Args;
-use microsandbox::sandbox::{
-    Sandbox, StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection,
-};
+use microsandbox::sandbox::{Sandbox, StorageRecovery, StorageRecoveryOptions};
 use microsandbox::setup::{
     self, StorageDiagnosticReason, StorageDiagnosticStatus, StorageSelection,
 };
-use microsandbox_runtime::checkpoint::migration::CandidateSummary;
 
 use super::storage_doctor::{StorageDoctorExit, terminal_text, write_diagnosis};
 use crate::ui::OutputFormat;
@@ -45,18 +41,6 @@ pub struct RepairArgs {
     )]
     pub name: Option<String>,
 
-    /// For automation, select one diagnosed view per disk.
-    #[arg(long, value_name = "DISK_ID=CANDIDATE_ID", value_parser = selection, requires_all = ["repair_target", "accept_selected_view"])]
-    pub select: Vec<StorageRecoverySelection>,
-
-    /// Accept that these exact disk views may omit later writes.
-    #[arg(long, requires = "select")]
-    pub accept_selected_view: bool,
-
-    /// On macOS, attest that legacy VMs across all homes are stopped and new writers are excluded.
-    #[arg(long, requires = "repair_target")]
-    pub legacy_writers_stopped: bool,
-
     /// Print a machine-readable result without interactive prompts.
     #[arg(long, value_enum, requires = "repair_target")]
     pub format: Option<OutputFormat>,
@@ -81,10 +65,9 @@ impl RepairArgs {
 
 pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
     let args = args.normalize_target();
-    // Keep the existing machine interface and explicit selections stable. The normal
-    // terminal flow repairs the validated active state and reports unresolved layouts.
+    // JSON and redirected input never supply consent. The terminal flow asks for
+    // required shutdown and macOS maintenance confirmations before repairing storage.
     if args.format != Some(OutputFormat::Json)
-        && args.select.is_empty()
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && io::stderr().is_terminal()
@@ -96,218 +79,97 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
 
 async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
     let json = args.format == Some(OutputFormat::Json);
-    let interactive = !json
-        && io::stdin().is_terminal()
-        && io::stdout().is_terminal()
-        && io::stderr().is_terminal();
     let name = args
         .name
         .context("provide a sandbox name: msb self repair --sandbox SANDBOX")?;
 
-    // Keep the read-only inventory ahead of backend initialization or any stop request.
-    // A stopped row can precede actual process teardown; the SDK takes locks and checks again.
-    let item = loop {
-        let report = setup::diagnose_storage(
-            Default::default(),
-            StorageSelection::Named(vec![name.clone()]),
-        )
-        .await?;
-        let item = report
-            .sandboxes
-            .into_iter()
-            .next()
-            .context("sandbox inspection returned no result")?;
-        if item.status == StorageDiagnosticStatus::Ready {
-            ensure!(
-                args.select.is_empty(),
-                "sandbox storage is already ready; an applied view cannot be replaced"
-            );
-            if json {
-                // A no-op removes no originals and returns the same success shape as an import.
-                return done(
-                    StorageRecovery {
-                        name,
-                        ready: true,
-                        originals_retained: true,
-                    },
-                    true,
-                );
-            }
-            println!("Storage for '{}' is already ready.", terminal_text(&name));
-            return Ok(());
-        }
-        if item.reason == Some(StorageDiagnosticReason::IncompleteCreation) {
-            return blocked(
-                &item,
-                2,
-                json,
-                "Finish or recover the interrupted creation before repairing its disks.",
+    // Keep the read-only inventory ahead of backend initialization. A stopped row can
+    // precede actual process teardown; the SDK takes locks and checks again before capture.
+    let report = setup::diagnose_storage(
+        Default::default(),
+        StorageSelection::Named(vec![name.clone()]),
+    )
+    .await?;
+    let item = report
+        .sandboxes
+        .into_iter()
+        .next()
+        .context("sandbox inspection returned no result")?;
+    if item.status == StorageDiagnosticStatus::Ready {
+        if json {
+            // A no-op removes no originals and returns the same success shape as an import.
+            return done(
+                StorageRecovery {
+                    name,
+                    ready: true,
+                    originals_retained: true,
+                },
+                true,
             );
         }
-        // A running Windows VM may deny even read-only disk opens. Its observed run can
-        // still authorize a graceful stop, after which inspection is repeated. Malformed
-        // configuration or an incomplete creation never justifies stopping a peer.
-        if item.status == StorageDiagnosticStatus::Unavailable
-            && !(item.running && item.reason == Some(StorageDiagnosticReason::StorageUnavailable))
-        {
-            return blocked(&item, 3, json, "Repair needs a complete diagnosis.");
-        }
-        let blockers = setup::storage_repair_blockers(Default::default(), &name).await?;
-        if let Some(blocker) = blockers.first() {
-            let explanation = format!(
+        println!("Storage for '{}' is already ready.", terminal_text(&name));
+        return Ok(());
+    }
+    if item.reason == Some(StorageDiagnosticReason::IncompleteCreation) {
+        return blocked(
+            &item,
+            2,
+            json,
+            "Finish or recover the interrupted creation before repairing its disks.",
+        );
+    }
+    // A running Windows VM may deny read-only disk opens. Report its verified blocker
+    // without attempting a shutdown; only interactive repair can request stop consent.
+    if item.status == StorageDiagnosticStatus::Unavailable
+        && !(item.running && item.reason == Some(StorageDiagnosticReason::StorageUnavailable))
+    {
+        return blocked(&item, 3, json, "Repair needs a complete diagnosis.");
+    }
+    let blockers = setup::storage_repair_blockers(Default::default(), &name).await?;
+    if let Some(blocker) = blockers.first() {
+        return blocked(
+            &item,
+            2,
+            json,
+            &format!(
                 "Run 'msb stop {}', then 'msb self repair --sandbox {}'.",
                 terminal_text(&blocker.name),
                 terminal_text(&name)
-            );
-            if !interactive {
-                return blocked(&item, 2, json, &explanation);
-            }
-            let names = blockers
-                .iter()
-                .map(|entry| terminal_text(&entry.name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("Repair requires these sandboxes to stop: {names}.");
-            println!(
-                "Stopping a VM can upgrade this home's catalog. Older tools may then refuse to open it."
-            );
-            if !confirm(&format!(
-                "Stop '{}' gracefully?",
-                terminal_text(&blocker.name)
-            ))? {
-                return cancelled();
-            }
-            // The SDK verifies this observed sandbox and run. Never signal a reported PID.
-            Sandbox::stop_storage_repair_blocker(blocker).await?;
-            continue;
-        }
-        if item.status == StorageDiagnosticStatus::Unavailable {
-            return blocked(&item, 3, json, "Repair needs a complete diagnosis.");
-        }
-        if item.running {
-            return blocked(
-                &item,
-                2,
-                json,
-                "Wait for the sandbox to finish stopping, then run repair again.",
-            );
-        }
-        if item.status == StorageDiagnosticStatus::RecoveryRequired {
-            let Some(inspection) = item
-                .inspection
-                .as_ref()
-                .filter(|report| !report.candidates.is_empty())
-            else {
-                return blocked(
-                    &item,
-                    2,
-                    json,
-                    "Resolve the reported storage problem, then run repair again.",
-                );
-            };
-            // The combined preview has a resource bound. Previously identified explicit
-            // choices can still be independently validated as a smaller selected group.
-            if !inspection.can_preview() && args.select.is_empty() {
-                return blocked(
-                    &item,
-                    2,
-                    json,
-                    "These disk views cannot be previewed together. Preserve the originals; only supply --select if you have independently identified the views to recover.",
-                );
-            }
-        }
-        break item;
-    };
-    let needs_choice = item.status == StorageDiagnosticStatus::RecoveryRequired;
-    if !needs_choice && !args.select.is_empty() {
+            ),
+        );
+    }
+    if item.status == StorageDiagnosticStatus::Unavailable {
+        return blocked(&item, 3, json, "Repair needs a complete diagnosis.");
+    }
+    if item.running {
         return blocked(
             &item,
             2,
             json,
-            "These selections do not apply to this repair. Inspect the sandbox again.",
+            "Wait for the sandbox to finish stopping, then run repair again.",
         );
     }
-    if needs_choice && args.select.is_empty() && !interactive {
+    if item.status == StorageDiagnosticStatus::RecoveryRequired {
         return blocked(
             &item,
             2,
             json,
-            "Storage needs investigation. Run interactive repair to review a diagnostic report, or supply independently verified --select values and --accept-selected-view.",
+            "Storage needs investigation. Run repair in an interactive terminal without --format json to review a diagnostic report.",
+        );
+    }
+    if cfg!(target_os = "macos") {
+        // Never infer cross-home writer safety from this home's inventory or redirected
+        // input. The interactive path is the only CLI source of maintenance consent.
+        return blocked(
+            &item,
+            2,
+            json,
+            "macOS legacy repair requires interactive maintenance confirmation. Run repair in an interactive terminal without --format json after stopping legacy VMs across all homes and excluding new writers until repair finishes.",
         );
     }
 
-    if !args.select.is_empty() {
-        let views = &item
-            .inspection
-            .as_ref()
-            .context("disk choices are unavailable")?
-            .candidates;
-        if !current_choices(views, &args.select) {
-            return blocked(
-                &item,
-                2,
-                json,
-                "Choose exactly one current view for every disk. Run doctor again to refresh the IDs.",
-            );
-        }
-    }
-
-    let mut maintenance = args.legacy_writers_stopped;
-    if cfg!(target_os = "macos") && !maintenance {
-        let instruction = "Stop legacy VMs across all homes and keep old tools and other writers away from these disks until repair finishes.";
-        if !interactive {
-            return blocked(
-                &item,
-                2,
-                json,
-                &format!("{instruction} After doing so, pass --legacy-writers-stopped."),
-            );
-        }
-        println!("{instruction}");
-        if !confirm("Have you stopped those VMs and excluded new writers?")? {
-            return cancelled();
-        }
-        maintenance = true;
-    }
-    let options = StorageRecoveryOptions {
-        legacy_writers_stopped: maintenance,
-        ..Default::default()
-    };
-    let result = if needs_choice {
-        ensure!(
-            args.accept_selected_view,
-            "explicit choices require --accept-selected-view"
-        );
-        // Headless callers explicitly identified the views. Capture only their selected
-        // group; the SDK rechecks the metadata-bound IDs under lifecycle ownership.
-        Sandbox::recover_storage(
-            &name,
-            StorageRecoveryOptions {
-                selections: args.select,
-                accept_selected_view: true,
-                ..options
-            },
-        )
-        .await?
-    } else {
-        Sandbox::recover_storage(&name, options).await?
-    };
+    let result = Sandbox::recover_storage(&name, StorageRecoveryOptions::default()).await?;
     done(result, json)
-}
-
-// Reject stale, incomplete, or duplicate machine choices before allocating any preview.
-// The immutable session independently validates these IDs again when it applies them.
-fn current_choices(candidates: &[CandidateSummary], choices: &[StorageRecoverySelection]) -> bool {
-    let mut disks = BTreeMap::<&str, BTreeSet<&str>>::new();
-    for view in candidates {
-        disks.entry(&view.disk_id).or_default().insert(&view.id);
-    }
-    disks.len() == choices.len()
-        && choices.iter().all(|choice| {
-            disks
-                .remove(choice.disk_id.as_str())
-                .is_some_and(|views| views.contains(choice.candidate_id.as_str()))
-        })
 }
 
 fn done(result: StorageRecovery, json: bool) -> anyhow::Result<()> {
@@ -339,43 +201,6 @@ fn blocked(
     Err(StorageDoctorExit { code }.into())
 }
 
-fn cancelled() -> anyhow::Result<()> {
-    eprintln!("Repair cancelled.");
-    Err(StorageDoctorExit { code: 2 }.into())
-}
-
-fn selection(value: &str) -> Result<StorageRecoverySelection, String> {
-    let (disk, view) = value
-        .split_once('=')
-        .ok_or("use DISK_ID=CANDIDATE_ID from sandbox diagnosis")?;
-    if value.len() > 512 || disk.is_empty() || view.is_empty() {
-        return Err("use bounded, non-empty disk and candidate IDs".into());
-    }
-    Ok(StorageRecoverySelection {
-        disk_id: disk.into(),
-        candidate_id: view.into(),
-    })
-}
-
-/// EOF and oversize input must never accept a default choice or advance the wizard.
-fn answer(prompt: &str) -> anyhow::Result<String> {
-    eprint!("{prompt}");
-    io::stderr().flush()?;
-    let mut line = String::new();
-    let n = io::stdin().lock().take(4097).read_line(&mut line)?;
-    ensure!(n <= 4096, "reply exceeds 4096 bytes");
-    Ok(line.trim().to_owned())
-}
-
-fn confirm(prompt: &str) -> anyhow::Result<bool> {
-    Ok(matches!(
-        answer(&format!("{prompt} [y/N] "))?
-            .to_ascii_lowercase()
-            .as_str(),
-        "y" | "yes"
-    ))
-}
-
 //--------------------------------------------------------------------------------------------------
 // Tests
 //--------------------------------------------------------------------------------------------------
@@ -392,80 +217,19 @@ mod tests {
     }
 
     #[test]
-    fn explicit_choices_cover_each_role_once_and_cannot_name_another_roles_view() {
-        let view = |role: &str, id: &str| CandidateSummary {
-            disk_id: role.into(),
-            id: id.into(),
-            layers: 1,
-            virtual_size: 512,
-            estimated_bytes: 512,
-        };
-        let views = [
-            view("root", "one"),
-            view("root", "two"),
-            view("data", "three"),
-        ];
-        let choices = |input: &[&str]| {
-            input
-                .iter()
-                .map(|s| selection(s).unwrap())
-                .collect::<Vec<_>>()
-        };
-        assert!(current_choices(
-            &views,
-            &choices(&["data=three", "root=two"])
-        ));
-        for invalid in [
-            vec!["root=two"],
-            vec!["root=one", "root=two"],
-            vec!["root=three", "data=three"],
-            vec!["root=stale", "data=three"],
-        ] {
-            assert!(!current_choices(&views, &choices(&invalid)));
-        }
-    }
-
-    #[test]
-    fn automation_requires_a_target_and_acknowledgment_for_each_explicit_run() {
+    fn automation_requires_a_target() {
         for args in [
             vec!["repair"],
             vec!["repair", "api"],
             vec!["repair", "--sandbox", "api"],
             vec!["repair", "api", "--format", "json"],
             vec!["repair", "--sandbox", "api", "--format", "json"],
-            vec!["repair", "--sandbox", "api", "--legacy-writers-stopped"],
-            vec![
-                "repair",
-                "api",
-                "--select",
-                "root=view-a",
-                "--accept-selected-view",
-            ],
-            vec![
-                "repair",
-                "--sandbox",
-                "api",
-                "--select",
-                "root=view-a",
-                "--accept-selected-view",
-            ],
         ] {
             Command::try_parse_from(args).unwrap();
         }
         for args in [
             vec!["repair", "--format", "json"],
-            vec!["repair", "api", "--select", "root=view-a"],
-            vec!["repair", "api", "--accept-selected-view"],
-            vec!["repair", "--legacy-writers-stopped"],
             vec!["repair", "--sandbox"],
-            vec!["repair", "--sandbox", "api", "--select", "root=view-a"],
-            vec!["repair", "--sandbox", "api", "--accept-selected-view"],
-            vec![
-                "repair",
-                "--select",
-                "root=view-a",
-                "--accept-selected-view",
-            ],
             vec!["repair", "--sandbox", "api", "api"],
             vec!["repair", "api", "--sandbox", "other"],
             vec!["repair", "--sandbox", "api", "--sandbox", "api"],
@@ -476,18 +240,28 @@ mod tests {
     }
 
     #[test]
+    fn removed_selection_and_confirmation_flags_are_rejected() {
+        for target in [vec!["api"], vec!["--sandbox", "api"]] {
+            for flag in [
+                "--select=root=view-a",
+                "--accept-selected-view",
+                "--legacy-writers-stopped",
+            ] {
+                let mut arguments = vec!["repair"];
+                arguments.extend_from_slice(&target);
+                arguments.push(flag);
+                let error = Command::try_parse_from(arguments).err().unwrap();
+                assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+            }
+        }
+    }
+
+    #[test]
     fn sandbox_flag_and_positional_target_use_the_same_repair_path() {
         for target in [vec!["api"], vec!["--sandbox", "api"]] {
             let mut arguments = vec!["repair"];
             arguments.extend(target);
-            arguments.extend([
-                "--format",
-                "json",
-                "--legacy-writers-stopped",
-                "--select",
-                "root=view-a",
-                "--accept-selected-view",
-            ]);
+            arguments.extend(["--format", "json"]);
             let args = Command::try_parse_from(arguments)
                 .unwrap()
                 .args
@@ -496,10 +270,6 @@ mod tests {
             assert_eq!(args.name.as_deref(), Some("api"));
             assert!(args.sandbox.is_none());
             assert_eq!(args.format, Some(OutputFormat::Json));
-            assert!(args.legacy_writers_stopped);
-            assert!(args.accept_selected_view);
-            assert_eq!(args.select[0].disk_id, "root");
-            assert_eq!(args.select[0].candidate_id, "view-a");
         }
 
         let args = Command::try_parse_from(["repair"])

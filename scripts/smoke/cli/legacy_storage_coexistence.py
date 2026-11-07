@@ -8,11 +8,12 @@ import json
 import sys
 from pathlib import Path
 
-from legacy_storage_migration import Harness, guest_check, inventory, maintenance_arguments, reserve_output
+from legacy_storage_migration import Harness, guest_check, inventory, maintenance_confirmed, reserve_output
+from legacy_storage_preview import repair_in_terminal
 
 
 def verify(args):
-    maintenance = maintenance_arguments(args)
+    maintenance = maintenance_confirmed(args)
     reserve_output(args.output)
     old = Harness(args.output, args.producer, args.producer_firmware, "produce")
     new = Harness(args.output, args.candidate, args.candidate_firmware, "candidate")
@@ -35,9 +36,9 @@ def verify(args):
         attempted = new.run("migration-with-unrelated-old-vm", "start", "legacy-target", required=False)
         if sys.platform == "darwin":
             assert 0 < attempted.returncode < 124 and "explicit maintenance recovery" in attempted.stderr, attempted.stderr
-            # Deliberately claiming maintenance cannot bypass a known local live peer.
-            confirmed = new.run("confirmation-does-not-bypass-live-peer", "self", "repair", "legacy-target",
-                                *maintenance, required=False)
+            # Noninteractive repair cannot stop a known peer or claim maintenance consent.
+            confirmed = new.run("scripted-repair-keeps-live-peer", "self", "repair", "--sandbox", "legacy-target",
+                                required=False)
             assert 0 < confirmed.returncode < 124 and "legacy-peer" in confirmed.stderr, confirmed.stderr
             assert before == inventory(target)
             assert not (target / "state-layout.json").exists()
@@ -54,7 +55,8 @@ def verify(args):
 
         new.stop("legacy-peer")
         if maintenance:
-            new.run("explicit-maintenance-after-teardown", "self", "repair", "legacy-target", *maintenance)
+            repaired = repair_in_terminal(new, "interactive-maintenance-after-teardown", "legacy-target", maintenance)
+            assert repaired.returncode == 0, repaired.stderr
         new.run("migration-after-old-teardown", "start", "legacy-target")
         new.guest("migrated-data", "legacy-target", guest_check("latest:legacy-target", protected=True))
         new.guest("protected-vm-not-stopped", "protected-peer",
@@ -73,7 +75,7 @@ def verify(args):
 
 def verify_cross_home_maintenance(args):
     """An old VM absent from the selected catalog must not enable automatic Mac import."""
-    maintenance = maintenance_arguments(args)
+    maintenance = maintenance_confirmed(args)
     foreign_output = args.output / "foreign-home"
     target_output = args.output / "target-home"
     reserve_output(foreign_output)
@@ -93,7 +95,8 @@ def verify_cross_home_maintenance(args):
         before = inventory(sandbox)
         for command in (("start",), ("self", "repair")):
             refused = candidate.run(command[-1] + "-requires-maintenance", *command, "cross-target", required=False)
-            assert 0 < refused.returncode < 124 and "explicit maintenance recovery" in refused.stderr, refused.stderr
+            assert 0 < refused.returncode < 124, refused.stderr
+            assert "maintenance" in refused.stderr.lower(), refused.stderr
         assert before == inventory(sandbox)
         assert not (sandbox / ".storage-migration").exists()
         assert not (sandbox / "state-layout.json").exists()
@@ -104,7 +107,8 @@ def verify_cross_home_maintenance(args):
         assert entry["status"] == "maintenance_required" and not entry["protection_registered"], entry
         old.guest("foreign-not-stopped", "foreign-legacy", 'test "$(cat /dev/shm/cross-home)" = foreign-live')
         old.stop("foreign-legacy")
-        candidate.run("cross-home-maintenance", "self", "repair", "cross-target", *maintenance)
+        repaired = repair_in_terminal(candidate, "cross-home-maintenance", "cross-target", maintenance)
+        assert repaired.returncode == 0, repaired.stderr
         candidate.run("cross-home-start", "start", "cross-target")
         candidate.names.append("cross-target")
         candidate.guest("cross-home-data", "cross-target", guest_check("latest:cross-target", protected=True))
@@ -128,7 +132,8 @@ def main():
     parser.add_argument("--producer-firmware", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--candidate-firmware", required=True, type=Path)
-    parser.add_argument("--legacy-writers-stopped", action="store_true")
+    parser.add_argument("--legacy-writers-stopped", action="store_true",
+                        help="Test-only consent to answer the Mac maintenance prompt after excluding unrelated legacy writers across homes")
     args = parser.parse_args()
     verify(args)
     if sys.platform == "darwin":

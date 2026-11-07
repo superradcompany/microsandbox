@@ -61,9 +61,9 @@ Repair validates and imports the existing selected disk state for supported, int
 
 If repair cannot safely establish the active state or its dependencies, it reports "needs investigation" and offers a diagnostic report to review and copy for the [maintainers](https://github.com/superradcompany/microsandbox/issues). The report excludes guest file contents, secrets, and host paths; nothing is submitted automatically. Preserve the sandbox and recovery records. Cancelling waits for an in-progress stop or import to finish; it does not undo completed repairs, accepted stops, or catalog updates.
 
-For automation, use `msb self repair --sandbox app --format json`. Existing `--select DISK_ID=CANDIDATE_ID` and `--accept-selected-view` options remain available for independently verified recovery selections; choosing a view can omit writes unique to another branch. `msb doctor --sandbox app --format json` reports the IDs. On macOS, pass `--legacy-writers-stopped` only after establishing the maintenance conditions above.
+Use `--format json` for structured diagnosis or repair results. Noninteractive repair refuses when a VM must stop, macOS maintenance needs confirmation, or storage needs investigation; run repair in a terminal to follow the prompts.
 
-An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. A candidate selection cannot supply missing bytes. Pending memory or device restores still require their execution state.
+An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. Pending memory or device restores still require their execution state.
 
 Do not delete journals, guards, or migration records to bypass an error, and do not downgrade in place to obtain a backup. Downgrade remains unavailable while protected or migrating sandboxes exist. Saved-configuration errors described below are a separate problem.
 

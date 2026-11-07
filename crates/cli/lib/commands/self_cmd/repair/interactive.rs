@@ -343,7 +343,6 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
             &mut operations,
             &mut screen,
             cfg!(target_os = "macos"),
-            args.legacy_writers_stopped,
             cancellation,
         )
         .await;
@@ -373,7 +372,6 @@ async fn process_batch<B: Operations, U: Interaction>(
     backend: &mut B,
     ui: &mut U,
     needs_maintenance: bool,
-    mut maintenance_confirmed: bool,
     cancellation: &Cancellation,
 ) -> io::Result<bool> {
     for index in 0..entries.len() {
@@ -392,8 +390,9 @@ async fn process_batch<B: Operations, U: Interaction>(
         cancel_pending(entries);
         return Ok(true);
     }
+    // Every batch obtains its own consent in this terminal; no argument can pre-authorize it.
+    let mut maintenance_confirmed = false;
     if needs_maintenance
-        && !maintenance_confirmed
         && entries
             .iter()
             .any(|entry| entry.outcome == Outcome::Pending)
@@ -805,6 +804,7 @@ mod tests {
     struct FakeOperations {
         states: BTreeMap<String, FakeState>,
         repaired: Vec<String>,
+        maintenance_confirmed: Vec<bool>,
         stops: Vec<String>,
         cancel_during_stop: Option<Cancellation>,
         cancel_during_repair: Option<Cancellation>,
@@ -869,7 +869,11 @@ mod tests {
             self.stops.push(name.clone());
             Ok(())
         }
-        async fn repair(&mut self, name: &str, _: bool) -> MicrosandboxResult<StorageRecovery> {
+        async fn repair(
+            &mut self,
+            name: &str,
+            maintenance: bool,
+        ) -> MicrosandboxResult<StorageRecovery> {
             if let Some(cancellation) = self.cancel_during_repair.take() {
                 cancellation.request();
                 tokio::task::yield_now().await;
@@ -888,6 +892,7 @@ mod tests {
                 ));
             }
             self.repaired.push(name.into());
+            self.maintenance_confirmed.push(maintenance);
             Ok(StorageRecovery {
                 name: name.into(),
                 ready: true,
@@ -935,6 +940,7 @@ mod tests {
                     })
                     .collect(),
                 repaired: Vec::new(),
+                maintenance_confirmed: Vec::new(),
                 stops: Vec::new(),
                 cancel_during_stop: None,
                 cancel_during_repair: None,
@@ -982,7 +988,6 @@ mod tests {
                 &mut backend,
                 &mut Answers(VecDeque::new()),
                 false,
-                false,
                 &Cancellation::default(),
             )
             .await
@@ -1028,7 +1033,6 @@ mod tests {
                     &mut backend,
                     &mut answers,
                     false,
-                    false,
                     &Cancellation::default()
                 )
                 .await
@@ -1059,7 +1063,6 @@ mod tests {
                 &mut entries,
                 &mut backend,
                 &mut Answers(VecDeque::new()),
-                false,
                 false,
                 &Cancellation::default(),
             )
@@ -1093,7 +1096,6 @@ mod tests {
                 &mut backend,
                 &mut answers,
                 false,
-                false,
                 &Cancellation::default()
             )
             .await
@@ -1118,7 +1120,6 @@ mod tests {
                 &mut entries,
                 &mut backend,
                 &mut answers,
-                false,
                 false,
                 &Cancellation::default()
             )
@@ -1148,7 +1149,6 @@ mod tests {
                 &mut backend,
                 &mut answers,
                 false,
-                false,
                 &Cancellation::default()
             )
             .await
@@ -1175,7 +1175,6 @@ mod tests {
                 &mut entries,
                 &mut backend,
                 &mut Answers(VecDeque::new()),
-                false,
                 false,
                 &cancellation,
             )
@@ -1205,7 +1204,6 @@ mod tests {
                 &mut backend,
                 &mut answers,
                 false,
-                false,
                 &cancellation,
             )
             .await
@@ -1233,7 +1231,6 @@ mod tests {
                 &mut backend,
                 &mut Answers(VecDeque::new()),
                 true,
-                false,
                 &Cancellation::default(),
             )
             .await
@@ -1241,25 +1238,39 @@ mod tests {
         );
         assert!(backend.repaired.is_empty());
 
-        let (mut entries, mut backend) =
-            fixtures(&[("old", StorageDiagnosticStatus::MaintenanceRequired, false)]);
-        let mut answers = Answers(VecDeque::from([Some(false)]));
-        assert!(
-            !process_batch(
+        for answer in [Some(true), Some(false), None] {
+            let (mut entries, mut backend) =
+                fixtures(&[("old", StorageDiagnosticStatus::MaintenanceRequired, false)]);
+            let mut answers = Answers(VecDeque::from([answer]));
+
+            let cancelled = process_batch(
                 &mut entries,
                 &mut backend,
                 &mut answers,
                 true,
-                false,
-                &Cancellation::default()
+                &Cancellation::default(),
             )
             .await
-            .unwrap()
-        );
-        assert!(backend.repaired.is_empty());
-        assert_eq!(
-            entries[0].outcome,
-            Outcome::Skipped("maintenance not confirmed")
-        );
+            .unwrap();
+
+            assert_eq!(cancelled, answer.is_none());
+            assert!(answers.0.is_empty(), "must ask for maintenance consent");
+            if answer == Some(true) {
+                assert_eq!(backend.repaired, ["old"]);
+                assert_eq!(backend.maintenance_confirmed, [true]);
+                assert_eq!(entries[0].outcome, Outcome::Repaired);
+            } else {
+                assert!(backend.repaired.is_empty());
+                assert!(backend.maintenance_confirmed.is_empty());
+                assert_eq!(
+                    entries[0].outcome,
+                    if answer.is_none() {
+                        Outcome::Cancelled
+                    } else {
+                        Outcome::Skipped("maintenance not confirmed")
+                    }
+                );
+            }
+        }
     }
 }

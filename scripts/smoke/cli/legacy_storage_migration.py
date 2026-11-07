@@ -391,17 +391,19 @@ def produce(args):
         raise SystemExit("Some fixture producers failed; see fixtures.json. Successful fixtures remain usable.")
 
 
-def maintenance_arguments(args):
-    """The test operator must establish the Mac maintenance window explicitly."""
+def maintenance_confirmed(args):
+    """Test-only opt-in to answering the Mac prompt; never an argument sent to msb."""
     if sys.platform != "darwin":
-        return []
+        return False
     if not getattr(args, "legacy_writers_stopped", False):
-        raise ValueError("macOS legacy qualification requires --legacy-writers-stopped after stopping old writers")
-    return ["--legacy-writers-stopped"]
+        raise ValueError("macOS test maintenance requires --legacy-writers-stopped after stopping old writers")
+    return True
 
 
 def verify(args):
-    maintenance = maintenance_arguments(args)
+    from legacy_storage_preview import repair_in_terminal
+
+    maintenance = maintenance_confirmed(args)
     manifest = read_manifest(args.output.resolve())
     harness = Harness(args.output, args.candidate, args.candidate_firmware, args.label)
     results = []
@@ -443,8 +445,7 @@ def verify(args):
                     if "explicit maintenance recovery" not in automatic.stderr or before != inventory(sandbox, case["external"]):
                         record(name, passed=False, error="automatic start did not safely require maintenance", stderr=automatic.stderr)
                         continue
-                result = harness.run(name + "-maintenance-recover", "self", "repair", name,
-                                     *maintenance, required=False)
+                result = repair_in_terminal(harness, name + "-maintenance-repair", name, maintenance)
                 # An invalid view must fail recovery itself, rather than merely failing a
                 # later boot or satisfying the missing-maintenance gate accidentally.
                 if result.returncode == 0 and case["expected"] != "refuse":
@@ -708,7 +709,7 @@ def main():
     candidate.add_argument("--candidate-firmware", required=True, type=Path)
     candidate.add_argument("--label", default="verify")
     candidate.add_argument("--legacy-writers-stopped", action="store_true",
-                           help="Confirm the Mac legacy test maintenance window across homes")
+                           help="Test-only consent to answer the Mac maintenance prompt after excluding legacy writers across homes")
     candidate.add_argument("--execution-restore", action="store_true")
     candidate.add_argument("--storage-operations", action="store_true")
     candidate.add_argument("--unrelated-live", action="store_true",

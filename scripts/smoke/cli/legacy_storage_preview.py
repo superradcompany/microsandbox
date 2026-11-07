@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Qualify explicit scripted disk selection and share legacy fixtures/terminal helpers.
+"""Qualify unresolved disk-state refusal and share legacy fixtures/terminal helpers.
 
-Normal interactive repair does not expose a disk browser. This script retains the
-documented --select contract; legacy_storage_repair.py exercises the guided UI.
+Normal repair does not choose a disk view. Both scripted and interactive repair
+must preserve unresolved inputs and offer investigation instead.
 Use a fresh disposable fixture directory and the same absolute paths for both phases.
 """
 
@@ -16,6 +16,7 @@ import queue
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
@@ -78,7 +79,7 @@ def produce(args):
             sandbox = harness.home / "sandboxes" / name
             (sandbox / "runtime/root-disk.json").rename(
                 harness.output / (name + "-original-root-disk.json"))
-            cases.append(dict(name=name, branch=branch, kind="scripted-selection", before=migration.inventory(sandbox)))
+            cases.append(dict(name=name, branch=branch, kind="unresolved-state", before=migration.inventory(sandbox)))
         manifest = {"schema": migration.SCHEMA, "output": str(harness.output), "image": args.image, "cases": cases}
         (harness.output / "fixtures.json").write_text(json.dumps(manifest, indent=2))
     finally:
@@ -113,6 +114,7 @@ class Terminal:
         self.chunks = queue.Queue()
         self.transcript = ""
         self.pending = ""
+        self.finished = False
         self.reader = threading.Thread(target=self._read, daemon=True)
         self.reader.start()
 
@@ -143,7 +145,11 @@ class Terminal:
         finally:
             self.chunks.put(None)
 
-    def expect(self, marker=None):
+    def expect(self, marker=None, allow_exit=False):
+        if self.finished:
+            if marker and not allow_exit:
+                raise AssertionError(f"repair already exited before {marker!r}")
+            return None if marker else self.pending
         deadline = time.monotonic() + 180
         while marker is None or marker not in self.pending:
             try:
@@ -151,9 +157,10 @@ class Terminal:
             except queue.Empty as exc:
                 raise TimeoutError(f"waiting for {marker!r}: {self.pending[-1500:]}") from exc
             if chunk is None:
-                if marker:
+                self.finished = True
+                if marker and not allow_exit:
                     raise AssertionError(f"repair exited before {marker!r}: {self.pending[-1500:]}")
-                return self.pending
+                return None if marker else self.pending
             self.transcript += chunk
             if len(self.transcript) > 8 * 1024 * 1024:
                 raise RuntimeError("repair exceeded the test transcript limit")
@@ -174,6 +181,36 @@ class Terminal:
         return self.tty.wait()
 
 
+def repair_in_terminal(harness, label, name, maintenance=False):
+    """Drive only this fixture's repair and a separately authorized Mac confirmation.
+
+    Unknown prompts, including requests to stop a VM, fail the harness. This helper
+    never derives cross-home maintenance safety from the fixture's own catalog.
+    """
+    command = ["self", "repair", "--sandbox", name]
+    marker = "enter select · esc back"
+    with Terminal(harness, label, command) as wizard:
+        while (current := wizard.expect(marker, allow_exit=True)) is not None:
+            if "Confirm storage repairs" in current:
+                wizard.send_key("y")
+            elif "macOS maintenance confirmation" in current:
+                if not maintenance:
+                    wizard.send_key("\x1b")
+                    raise ValueError("the test operator has not authorized the Mac maintenance confirmation")
+                wizard.send_key("y")
+            elif "Couldn't safely repair" in current:
+                wizard.send_key("\x1b")
+            elif "Repair results" in current:
+                # Escape closes this read-only result menu without selecting a candidate.
+                wizard.send_key("\x1b")
+            else:
+                raise AssertionError(f"unexpected repair prompt: {current}")
+        result = subprocess.CompletedProcess(command, wizard.wait(), wizard.transcript, wizard.transcript)
+        assert not any(text in wizard.transcript for text in (
+            "View number", "Browse with", "Preparing read-only copies", "Apply these disk views"))
+        return result
+
+
 def catalog_state(home):
     # Disk hashes alone would miss a shared catalog upgrade that prevents a
     # released CLI from reopening the sandbox after its operator cancels.
@@ -186,14 +223,14 @@ def catalog_state(home):
 
 def verify(args):
     manifest = migration.read_manifest(args.output.resolve())
-    maintenance = migration.maintenance_arguments(args)
     harness = migration.Harness(args.output, args.candidate, args.candidate_firmware, args.label)
     results = []
     try:
         for index, case in enumerate(manifest["cases"]):
             name = case["name"]
             branch = case.get("branch")
-            assert case.get("kind") == "scripted-selection" and branch in BRANCHES, case
+            # Older disposable fixtures used the prior harness label, not a storage format.
+            assert case.get("kind") in ("unresolved-state", "scripted-selection") and branch in BRANCHES, case
             sandbox = harness.home / "sandboxes" / name
             before = migration.inventory(sandbox)
             assert before == case["before"]
@@ -206,37 +243,18 @@ def verify(args):
                 old.run("before-diagnosis", "inspect", name)
             catalog = catalog_state(harness.home)
             diagnosis = inspect(harness, name)
-            refused = harness.run(name + "-script-needs-choice", "self", "repair", name,
-                                  "--format", "json", *maintenance, required=False)
-            assert refused.returncode == 2 and not (sandbox / ".storage-migration").exists()
-            choice = next(view for view in diagnosis["inspection"]["candidates"] if view["layers"] == 2)
-            rejected = harness.run(name + "-unknown-selection", "self", "repair", name,
-                                   "--select", "root=view-not-authorized", "--accept-selected-view",
-                                   "--format", "json", *maintenance, required=False)
-            assert 0 < rejected.returncode < 124
+            refused = harness.run(name + "-script-needs-investigation", "self", "repair", "--sandbox", name,
+                                  "--format", "json", required=False)
+            assert refused.returncode == 2 and "investigation" in refused.stdout
+            interactive = repair_in_terminal(harness, name + "-interactive-investigation", name)
+            assert interactive.returncode == 2 and "Couldn't safely repair" in interactive.stdout
             assert inspect(harness, name) == diagnosis and migration.inventory(sandbox) == before
-            assert catalog_state(harness.home) == catalog, "refused selection changed the source catalog"
+            assert catalog_state(harness.home) == catalog, "investigation changed the source catalog"
             if old:
-                old.run("after-refused-selection", "inspect", name)
+                old.run("after-investigation", "inspect", name)
             assert not (sandbox / ".storage-migration").exists() and not (sandbox / "state-layout.json").exists()
-            # The producer made exactly one two-layer branch. This fixture's known structure
-            # identifies the explicit selection; it is not a general-purpose latest-view heuristic.
-            recovered = harness.run(name + "-apply", "self", "repair", name,
-                                    "--select", "root=" + choice["id"], "--accept-selected-view",
-                                    "--format", "json", *maintenance)
-            result = json.loads(recovered.stdout)
-            assert result["ready"] and result["originals_retained"], result
-            after = migration.inventory(sandbox)
-            assert all(after.get(path) == checksum for path, checksum in before.items())
-            harness.run(name + "-boot", "start", name)
-            harness.names.append(name)
-            other = next(label for label in BRANCHES if label != branch)
-            harness.guest(name + "-data", name, f'test "$(cat {BRANCH_FILE})" = {branch}; '
-                          f'test -f /work/imports/{branch}.json; test ! -e /work/imports/{other}.json; '
-                          'test "$(cat /work/imports/base)" = common')
-            harness.stop(name)
-            results.append({"case": name, "selected_fixture_branch": branch,
-                            "refused_selection_preserved_inputs": True, "explicit_selection_verified": True})
+            results.append({"case": name, "fixture_branch": branch, "scripted_and_interactive_refusal": True,
+                            "original_disks_and_catalog_unchanged": True, "no_candidate_selected": True})
             (harness.log / "results.json").write_text(json.dumps(results, indent=2))
     finally:
         harness.shutdown()
@@ -255,9 +273,8 @@ def main():
     candidate.add_argument("--output", type=Path, required=True)
     candidate.add_argument("--candidate", type=Path, required=True)
     candidate.add_argument("--candidate-firmware", type=Path, required=True)
-    candidate.add_argument("--label", default="scripted-selection")
-    candidate.add_argument("--legacy-writers-stopped", action="store_true")
-    candidate.add_argument("--producer", type=Path, help="Also reopen the old home after a refused scripted selection")
+    candidate.add_argument("--label", default="unresolved-state")
+    candidate.add_argument("--producer", type=Path, help="Also reopen the old home after read-only investigation")
     candidate.add_argument("--producer-firmware", type=Path)
     candidate.set_defaults(action=verify)
     args = parser.parse_args()
