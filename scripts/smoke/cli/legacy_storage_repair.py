@@ -15,10 +15,6 @@ from pathlib import Path
 import re
 
 import legacy_storage_migration as migration
-from legacy_storage_migration import (
-    Harness, SCHEMA, guest_check, guest_seed, inventory, maintenance_arguments,
-    read_manifest, reserve_output,
-)
 from legacy_storage_preview import Terminal, catalog_state, produce_branches
 
 
@@ -30,15 +26,15 @@ CASES = {"app", "worker", "restored", "grown", "compacted", "database"}
 
 def produce(args):
     migration.IMAGE = args.image
-    reserve_output(args.output)
-    harness = Harness(args.output, args.producer, args.producer_firmware, "produce")
+    migration.reserve_output(args.output)
+    harness = migration.Harness(args.output, args.producer, args.producer_firmware, "produce")
     cases = []
 
     def remember(name, owned=(), value=None, unresolved=False):
         cases.append(dict(name=name, owned=owned, value=value or "latest:" + name,
-                          unresolved=unresolved, before=inventory(harness.home / "sandboxes" / name)))
+                          unresolved=unresolved, before=migration.inventory(harness.home / "sandboxes" / name)))
         (harness.output / "fixtures.json").write_text(json.dumps(
-            dict(schema=SCHEMA, output=str(harness.output), image=args.image, cases=cases), indent=2))
+            dict(schema=migration.SCHEMA, output=str(harness.output), image=args.image, cases=cases), indent=2))
 
     try:
         harness.run("producer-version", "--version")
@@ -48,16 +44,16 @@ def produce(args):
 
         harness.create("worker")
         snapshot = harness.capture("worker", "saved")
-        harness.guest("worker-post-snapshot", "worker", guest_seed("post-snapshot:worker"))
+        harness.guest("worker-post-snapshot", "worker", migration.guest_seed("post-snapshot:worker"))
         harness.stop("worker")
         harness.run("worker-old-restart", "start", "worker")
-        harness.guest("worker-old-latest", "worker", guest_check("post-snapshot:worker"))
+        harness.guest("worker-old-latest", "worker", migration.guest_check("post-snapshot:worker"))
         harness.stop("worker")
         remember("worker", value="post-snapshot:worker")
 
         harness.names.append("restored")
         harness.run("restored-old", "restore", snapshot, "--name", "restored")
-        harness.guest("restored-post-snapshot", "restored", guest_seed("post-restore:restored"))
+        harness.guest("restored-post-snapshot", "restored", migration.guest_seed("post-restore:restored"))
         harness.stop("restored")
         remember("restored", value="post-restore:restored")
 
@@ -65,14 +61,14 @@ def produce(args):
             harness.create(name)
             if operation == "--compact":
                 harness.capture(name, "first")
-                harness.guest(name + "-middle", name, guest_seed("middle:" + name))
+                harness.guest(name + "-middle", name, migration.guest_seed("middle:" + name))
                 harness.capture(name, "second")
-                harness.guest(name + "-latest", name, guest_seed("latest:" + name))
+                harness.guest(name + "-latest", name, migration.guest_seed("latest:" + name))
             harness.stop(name)
             harness.run(name + "-operation", "modify", name, operation,
                         *(["320M"] if operation == "--root-disk" else []))
             harness.run(name + "-old-restart", "start", name)
-            harness.guest(name + "-old-latest", name, guest_check("latest:" + name))
+            harness.guest(name + "-old-latest", name, migration.guest_check("latest:" + name))
             harness.stop(name)
             remember(name)
 
@@ -97,7 +93,7 @@ def choose(wizard, current, label):
     wanted = labels.index(label)
     for _ in range(abs(wanted - pointer)):
         wizard.send_key("\x1b[B" if wanted > pointer else "\x1b[A")
-        current = frame(wizard)
+        frame(wizard)
     wizard.send_key("\r")
 
 
@@ -107,13 +103,13 @@ def assert_no_browser(wizard):
 
 def unchanged_inputs(harness, expected):
     for name, before in expected.items():
-        assert inventory(harness.home / "sandboxes" / name) == before, name
+        assert migration.inventory(harness.home / "sandboxes" / name) == before, name
 
 
 def baseline(args):
     """Reproduce the actual strict-admission regression before running the candidate."""
-    manifest = read_manifest(args.output.resolve())
-    harness = Harness(args.output, args.baseline, args.baseline_firmware, args.label)
+    manifest = migration.read_manifest(args.output.resolve())
+    harness = migration.Harness(args.output, args.baseline, args.baseline_firmware, args.label)
     cases = {case["name"]: case for case in manifest["cases"]}
     assert set(cases) == CASES, "fixture production did not complete"
     results = []
@@ -121,22 +117,22 @@ def baseline(args):
         if case["unresolved"]:
             continue
         sandbox = harness.home / "sandboxes" / name
-        assert inventory(sandbox) == case["before"], name
+        assert migration.inventory(sandbox) == case["before"], name
         result = harness.run(name + "-strict-refusal", "start", name, required=False)
         if result.returncode == 0:
             # A surprising successful start still authorizes stopping this exact fixture.
             harness.stop(name)
         assert 0 < result.returncode < 124 and "migration/recovery required" in result.stderr, result.stderr
-        assert inventory(sandbox) == case["before"], name
+        assert migration.inventory(sandbox) == case["before"], name
         results.append(dict(case=name, strict_admission_refused=True, original_disks_unchanged=True))
         (harness.log / "results.json").write_text(json.dumps(results, indent=2))
 
 
 def verify(args):
-    manifest = read_manifest(args.output.resolve())
+    manifest = migration.read_manifest(args.output.resolve())
     migration.IMAGE = manifest.get("image", migration.IMAGE)
-    maintenance = maintenance_arguments(args)
-    harness = Harness(args.output, args.candidate, args.candidate_firmware, args.label)
+    maintenance = migration.maintenance_arguments(args)
+    harness = migration.Harness(args.output, args.candidate, args.candidate_firmware, args.label)
     cases = {case["name"]: case for case in manifest["cases"]}
     assert set(cases) == CASES, "fixture production did not complete"
     before = {name: case["before"] for name, case in cases.items()}
@@ -193,7 +189,7 @@ def verify(args):
         harness.create("ready")
         harness.stop("ready")
         ready = harness.home / "sandboxes/ready"
-        ready_before = inventory(ready)
+        ready_before = migration.inventory(ready)
         with Terminal(harness, "ready-picker", ["self", "repair"]) as wizard:
             current = wizard.expect(PICKER)
             assert "database" in current and "app" in current
@@ -206,7 +202,7 @@ def verify(args):
             assert not re.search(r"\] ready\s", current), current
             wizard.send_key("\x1b")
             assert wizard.wait() == 2, wizard.transcript[-2000:]
-        assert inventory(ready) == ready_before
+        assert migration.inventory(ready) == ready_before
         unchanged_inputs(harness, before)
         record("ready-picker", hidden_by_default=True, explicit_toggle=True, cancellation_preserved_inputs=True)
 
@@ -231,19 +227,19 @@ def verify(args):
             choose(wizard, current, "Finish")
             assert wizard.wait() == 2, wizard.transcript[-4000:]
             assert_no_browser(wizard)
-        assert inventory(ready) == ready_before
-        assert inventory(harness.home / "sandboxes/database") == before["database"]
+        assert migration.inventory(ready) == ready_before
+        assert migration.inventory(harness.home / "sandboxes/database") == before["database"]
         for name, case in cases.items():
             if case["unresolved"]:
                 continue
             sandbox = harness.home / "sandboxes" / name
-            after = inventory(sandbox)
+            after = migration.inventory(sandbox)
             assert all(after.get(path) == checksum for path, checksum in before[name].items()), name
             assert (sandbox / "state-layout.json").is_file(), name
             harness.names.append(name)
             harness.run(name + "-boot", "start", name)
             harness.guest(name + "-latest-and-boundary", name,
-                          guest_check(case["value"], tuple(case["owned"]), True))
+                          migration.guest_check(case["value"], tuple(case["owned"]), True))
             harness.stop(name)
             record(name, automatic_selected_state=True, latest_writes=True, protected_boundary=True,
                    original_disks_unchanged_before_boot=True)

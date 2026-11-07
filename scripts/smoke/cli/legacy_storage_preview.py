@@ -21,16 +21,13 @@ import time
 import uuid
 
 import legacy_storage_migration as migration
-from legacy_storage_migration import (
-    Harness, SCHEMA, digest, environment, inventory, maintenance_arguments, read_manifest, reserve_output,
-)
 
 
 BRANCH_FILE = "/work/imports/current"
 BRANCHES = ("east", "west")
 
 
-def produce_branches(harness: Harness, name: str) -> dict:
+def produce_branches(harness: migration.Harness, name: str) -> dict:
     harness.create(name)
     harness.guest(name + "-base", name, "mkdir -p /work/imports; echo common >/work/imports/base; sync")
     harness.capture(name, "common")
@@ -59,13 +56,13 @@ def produce_branches(harness: Harness, name: str) -> dict:
     # Model loss of the active journal. Keep it outside the sandbox so test
     # teardown can establish which inputs were present before candidate access.
     journal.rename(harness.output / (name + "-original-root-disk.json"))
-    return {"name": name, "before": inventory(sandbox)}
+    return {"name": name, "before": migration.inventory(sandbox)}
 
 
 def produce(args):
     migration.IMAGE = args.image
-    reserve_output(args.output)
-    harness = Harness(args.output, args.producer, args.producer_firmware, "produce")
+    migration.reserve_output(args.output)
+    harness = migration.Harness(args.output, args.producer, args.producer_firmware, "produce")
     try:
         harness.run("producer-version", "--version")
         cases = []
@@ -81,8 +78,8 @@ def produce(args):
             sandbox = harness.home / "sandboxes" / name
             (sandbox / "runtime/root-disk.json").rename(
                 harness.output / (name + "-original-root-disk.json"))
-            cases.append(dict(name=name, branch=branch, kind="scripted-selection", before=inventory(sandbox)))
-        manifest = {"schema": SCHEMA, "output": str(harness.output), "image": args.image, "cases": cases}
+            cases.append(dict(name=name, branch=branch, kind="scripted-selection", before=migration.inventory(sandbox)))
+        manifest = {"schema": migration.SCHEMA, "output": str(harness.output), "image": args.image, "cases": cases}
         (harness.output / "fixtures.json").write_text(json.dumps(manifest, indent=2))
     finally:
         harness.shutdown()
@@ -112,7 +109,7 @@ class Terminal:
         self.log = harness.log / (label + ".terminal")
         self.tty = PtyProcess.spawn([str(harness.binary), *args], cwd=str(harness.output),
                                     dimensions=(60, 200),
-                                    env=environment(harness.binary, harness.firmware, harness.home))
+                                    env=migration.environment(harness.binary, harness.firmware, harness.home))
         self.chunks = queue.Queue()
         self.transcript = ""
         self.pending = ""
@@ -188,9 +185,9 @@ def catalog_state(home):
 
 
 def verify(args):
-    manifest = read_manifest(args.output.resolve())
-    maintenance = maintenance_arguments(args)
-    harness = Harness(args.output, args.candidate, args.candidate_firmware, args.label)
+    manifest = migration.read_manifest(args.output.resolve())
+    maintenance = migration.maintenance_arguments(args)
+    harness = migration.Harness(args.output, args.candidate, args.candidate_firmware, args.label)
     results = []
     try:
         for index, case in enumerate(manifest["cases"]):
@@ -198,14 +195,14 @@ def verify(args):
             branch = case.get("branch")
             assert case.get("kind") == "scripted-selection" and branch in BRANCHES, case
             sandbox = harness.home / "sandboxes" / name
-            before = inventory(sandbox)
+            before = migration.inventory(sandbox)
             assert before == case["before"]
             old = None
             if index == 0 and args.producer:
                 artifacts = json.loads((harness.output / "produce/artifacts.json").read_text())
-                assert digest(args.producer) == artifacts["binary_sha256"]
-                assert digest(args.producer_firmware) == artifacts["firmware_sha256"]
-                old = Harness(args.output, args.producer, args.producer_firmware, args.label + "-old-cli")
+                assert migration.digest(args.producer) == artifacts["binary_sha256"]
+                assert migration.digest(args.producer_firmware) == artifacts["firmware_sha256"]
+                old = migration.Harness(args.output, args.producer, args.producer_firmware, args.label + "-old-cli")
                 old.run("before-diagnosis", "inspect", name)
             catalog = catalog_state(harness.home)
             diagnosis = inspect(harness, name)
@@ -217,7 +214,7 @@ def verify(args):
                                    "--select", "root=view-not-authorized", "--accept-selected-view",
                                    "--format", "json", *maintenance, required=False)
             assert 0 < rejected.returncode < 124
-            assert inspect(harness, name) == diagnosis and inventory(sandbox) == before
+            assert inspect(harness, name) == diagnosis and migration.inventory(sandbox) == before
             assert catalog_state(harness.home) == catalog, "refused selection changed the source catalog"
             if old:
                 old.run("after-refused-selection", "inspect", name)
@@ -229,8 +226,8 @@ def verify(args):
                                     "--format", "json", *maintenance)
             result = json.loads(recovered.stdout)
             assert result["ready"] and result["originals_retained"], result
-            after = inventory(sandbox)
-            assert all(after.get(path) == digest for path, digest in before.items())
+            after = migration.inventory(sandbox)
+            assert all(after.get(path) == checksum for path, checksum in before.items())
             harness.run(name + "-boot", "start", name)
             harness.names.append(name)
             other = next(label for label in BRANCHES if label != branch)

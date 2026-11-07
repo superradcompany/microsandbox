@@ -108,6 +108,19 @@ impl Entry {
         self.inspection_unavailable = item.status == StorageDiagnosticStatus::Unavailable;
         self.diagnosis = Some(item);
     }
+
+    fn blocker_check_failed(&mut self, error: &MicrosandboxError) {
+        // Discovery is supplementary: an unusable active-state record can also prevent
+        // identifying related writers. Keep the specific storage diagnosis in that case,
+        // rather than replacing it with the later probe's generic refusal. Neither permits
+        // a stop or repair; pending or unclassified entries still report the probe failure.
+        if matches!(self.outcome, Outcome::Investigation(failure) if failure != Failure::Unclassified)
+        {
+            return;
+        }
+        self.inspection_unavailable = true;
+        self.outcome = Outcome::Investigation(Failure::from_error(error));
+    }
 }
 
 impl Cancellation {
@@ -464,8 +477,7 @@ async fn prepare<B: Operations, U: Interaction>(
         let blockers = match backend.blockers(&entry.name).await {
             Ok(blockers) => blockers,
             Err(error) => {
-                entry.inspection_unavailable = true;
-                entry.outcome = Outcome::Investigation(Failure::from_error(&error));
+                entry.blocker_check_failed(&error);
                 return Ok(false);
             }
         };
@@ -534,10 +546,7 @@ async fn discover_blockers<B: Operations>(
         match backend.blockers(&entry.name).await {
             Ok(blockers) if !blockers.is_empty() => entry.outcome = Outcome::Pending,
             Ok(_) => {}
-            Err(error) => {
-                entry.inspection_unavailable = true;
-                entry.outcome = Outcome::Investigation(Failure::from_error(&error));
-            }
+            Err(error) => entry.blocker_check_failed(&error),
         }
     }
 }
@@ -799,6 +808,7 @@ mod tests {
         stops: Vec<String>,
         cancel_during_stop: Option<Cancellation>,
         cancel_during_repair: Option<Cancellation>,
+        blocker_error: Option<String>,
     }
 
     struct Answers(VecDeque<Option<bool>>);
@@ -819,6 +829,9 @@ mod tests {
             Ok(diagnosis(name, state.status, state.running))
         }
         async fn blockers(&mut self, name: &str) -> MicrosandboxResult<Vec<String>> {
+            if let Some(error) = &self.blocker_error {
+                return Err(MicrosandboxError::Custom(error.clone()));
+            }
             Ok(if self.states[name].running {
                 vec![name.into()]
             } else if let Some(peer) = &self.states[name].blocked_by {
@@ -925,8 +938,34 @@ mod tests {
                 stops: Vec::new(),
                 cancel_during_stop: None,
                 cancel_during_repair: None,
+                blocker_error: None,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn failed_blocker_discovery_preserves_specific_storage_diagnosis() {
+        for failure in [Failure::SelectionUnknown, Failure::Unclassified] {
+            let (mut entries, mut backend) =
+                fixtures(&[("unknown", StorageDiagnosticStatus::RecoveryRequired, false)]);
+            entries[0].outcome = Outcome::Investigation(failure);
+            backend.blocker_error = Some("cannot establish host authority".into());
+
+            discover_blockers(&mut entries, &mut backend, &Cancellation::default()).await;
+
+            let expected = if failure == Failure::Unclassified {
+                Failure::Permissions
+            } else {
+                failure
+            };
+            assert_eq!(entries[0].outcome, Outcome::Investigation(expected));
+            assert_eq!(
+                entries[0].inspection_unavailable,
+                failure == Failure::Unclassified
+            );
+            assert!(backend.stops.is_empty());
+            assert!(backend.repaired.is_empty());
+        }
     }
 
     #[tokio::test]
