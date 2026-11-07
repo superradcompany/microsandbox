@@ -140,7 +140,11 @@ pub struct WindowsSelfSwapArgs {
 #[derive(Debug, Args, Clone)]
 pub struct DoctorArgs {
     /// Inspect this sandbox's storage. Omit to check the host.
-    #[arg(value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["fix", "yes"])]
+    #[arg(long = "sandbox", value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    pub sandbox_flag: Option<String>,
+
+    /// Positional sandbox name retained for existing scripts.
+    #[arg(value_name = "SANDBOX", hide = true, group = "storage_scope", conflicts_with_all = ["sandbox_flag", "fix", "yes"])]
     pub sandbox: Option<String>,
 
     /// Attempt supported host virtualization setup fixes.
@@ -152,7 +156,7 @@ pub struct DoctorArgs {
     pub yes: bool,
 
     /// Inspect every sandbox in the configured local home.
-    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "sandbox_flag", "fix", "yes"])]
     pub all: bool,
 
     /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).

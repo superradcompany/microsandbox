@@ -28,11 +28,25 @@ mod terminal;
 #[derive(Debug, Args)]
 pub struct RepairArgs {
     /// Sandbox to repair. In a terminal, omit to select multiple sandboxes.
-    #[arg(value_name = "SANDBOX")]
+    #[arg(
+        long,
+        value_name = "SANDBOX",
+        group = "repair_target",
+        conflicts_with = "name"
+    )]
+    pub sandbox: Option<String>,
+
+    /// Positional sandbox name retained for existing scripts.
+    #[arg(
+        value_name = "SANDBOX",
+        hide = true,
+        group = "repair_target",
+        conflicts_with = "sandbox"
+    )]
     pub name: Option<String>,
 
     /// For automation, select one diagnosed view per disk.
-    #[arg(long, value_name = "DISK_ID=CANDIDATE_ID", value_parser = selection, requires_all = ["name", "accept_selected_view"])]
+    #[arg(long, value_name = "DISK_ID=CANDIDATE_ID", value_parser = selection, requires_all = ["repair_target", "accept_selected_view"])]
     pub select: Vec<StorageRecoverySelection>,
 
     /// Accept that these exact disk views may omit later writes.
@@ -40,12 +54,25 @@ pub struct RepairArgs {
     pub accept_selected_view: bool,
 
     /// On macOS, attest that legacy VMs across all homes are stopped and new writers are excluded.
-    #[arg(long, requires = "name")]
+    #[arg(long, requires = "repair_target")]
     pub legacy_writers_stopped: bool,
 
     /// Print a machine-readable result without interactive prompts.
-    #[arg(long, value_enum, requires = "name")]
+    #[arg(long, value_enum, requires = "repair_target")]
     pub format: Option<OutputFormat>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl RepairArgs {
+    fn normalize_target(mut self) -> Self {
+        // Normalize before choosing interactive or scripted execution. Both spellings
+        // must select the same sandbox and retain the same automation requirements.
+        self.name = self.sandbox.take().or(self.name);
+        self
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -53,6 +80,7 @@ pub struct RepairArgs {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
+    let args = args.normalize_target();
     // Keep the existing machine interface and explicit selections stable. The normal
     // terminal flow repairs the validated active state and reports unresolved layouts.
     if args.format != Some(OutputFormat::Json)
@@ -74,7 +102,7 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
         && io::stderr().is_terminal();
     let name = args
         .name
-        .context("provide a sandbox name: msb self repair SANDBOX")?;
+        .context("provide a sandbox name: msb self repair --sandbox SANDBOX")?;
 
     // Keep the read-only inventory ahead of backend initialization or any stop request.
     // A stopped row can precede actual process teardown; the SDK takes locks and checks again.
@@ -127,7 +155,7 @@ async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
         let blockers = setup::storage_repair_blockers(Default::default(), &name).await?;
         if let Some(blocker) = blockers.first() {
             let explanation = format!(
-                "Run 'msb stop {}', then 'msb self repair {}'.",
+                "Run 'msb stop {}', then 'msb self repair --sandbox {}'.",
                 terminal_text(&blocker.name),
                 terminal_text(&name)
             );
@@ -402,9 +430,20 @@ mod tests {
         for args in [
             vec!["repair"],
             vec!["repair", "api"],
+            vec!["repair", "--sandbox", "api"],
             vec!["repair", "api", "--format", "json"],
+            vec!["repair", "--sandbox", "api", "--format", "json"],
+            vec!["repair", "--sandbox", "api", "--legacy-writers-stopped"],
             vec![
                 "repair",
+                "api",
+                "--select",
+                "root=view-a",
+                "--accept-selected-view",
+            ],
+            vec![
+                "repair",
+                "--sandbox",
                 "api",
                 "--select",
                 "root=view-a",
@@ -418,8 +457,55 @@ mod tests {
             vec!["repair", "api", "--select", "root=view-a"],
             vec!["repair", "api", "--accept-selected-view"],
             vec!["repair", "--legacy-writers-stopped"],
+            vec!["repair", "--sandbox"],
+            vec!["repair", "--sandbox", "api", "--select", "root=view-a"],
+            vec!["repair", "--sandbox", "api", "--accept-selected-view"],
+            vec![
+                "repair",
+                "--select",
+                "root=view-a",
+                "--accept-selected-view",
+            ],
+            vec!["repair", "--sandbox", "api", "api"],
+            vec!["repair", "api", "--sandbox", "other"],
+            vec!["repair", "--sandbox", "api", "--sandbox", "api"],
+            vec!["repair", "--sandbox", "api", "--all"],
         ] {
             assert!(Command::try_parse_from(args).is_err());
         }
+    }
+
+    #[test]
+    fn sandbox_flag_and_positional_target_use_the_same_repair_path() {
+        for target in [vec!["api"], vec!["--sandbox", "api"]] {
+            let mut arguments = vec!["repair"];
+            arguments.extend(target);
+            arguments.extend([
+                "--format",
+                "json",
+                "--legacy-writers-stopped",
+                "--select",
+                "root=view-a",
+                "--accept-selected-view",
+            ]);
+            let args = Command::try_parse_from(arguments)
+                .unwrap()
+                .args
+                .normalize_target();
+
+            assert_eq!(args.name.as_deref(), Some("api"));
+            assert!(args.sandbox.is_none());
+            assert_eq!(args.format, Some(OutputFormat::Json));
+            assert!(args.legacy_writers_stopped);
+            assert!(args.accept_selected_view);
+            assert_eq!(args.select[0].disk_id, "root");
+            assert_eq!(args.select[0].candidate_id, "view-a");
+        }
+
+        let args = Command::try_parse_from(["repair"])
+            .unwrap()
+            .args
+            .normalize_target();
+        assert!(args.name.is_none(), "bare repair must retain the picker");
     }
 }

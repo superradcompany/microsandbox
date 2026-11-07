@@ -41,11 +41,14 @@ impl std::error::Error for StorageDoctorExit {}
 //--------------------------------------------------------------------------------------------------
 
 /// Dispatch before host probes, which can create filesystem probe files.
-pub async fn run_doctor_command(args: DoctorArgs) -> anyhow::Result<()> {
+pub async fn run_doctor_command(mut args: DoctorArgs) -> anyhow::Result<()> {
+    // Resolve the explicit flag before host/storage dispatch, so a named request
+    // never falls through to host probes merely because its positional field is empty.
+    args.sandbox = args.sandbox_flag.take().or(args.sandbox);
     if args.sandbox.is_none() && !args.all {
         anyhow::ensure!(
             args.format.is_none(),
-            "provide a sandbox name for JSON output"
+            "provide --sandbox SANDBOX or --all for JSON output"
         );
         return super::run_doctor(args);
     }
@@ -56,7 +59,7 @@ pub async fn run_doctor_command(args: DoctorArgs) -> anyhow::Result<()> {
     let selection = match (args.sandbox, args.all) {
         (Some(name), false) => StorageSelection::Named(vec![name]),
         (None, true) => StorageSelection::All,
-        _ => anyhow::bail!("choose one sandbox name or --all"),
+        _ => anyhow::bail!("choose --sandbox SANDBOX or --all"),
     };
     let report = microsandbox::setup::diagnose_storage(Default::default(), selection).await?;
     if args.format == Some(OutputFormat::Json) {
@@ -141,17 +144,18 @@ pub(super) fn write_diagnosis(
     if item.running && item.status != Ready {
         writeln!(
             out,
-            "The sandbox is running or changing state. Run 'msb self repair {name}' to check what needs to stop."
+            "The sandbox is running or changing state. Run 'msb self repair --sandbox {name}' to check what needs to stop."
         )?;
     } else {
         match item.status {
             Eligible => writeln!(
                 out,
-                "Run 'msb start {name}' to upgrade and start, or 'msb self repair {name}' to upgrade while stopped."
+                "Run 'msb start {name}' to upgrade and start, or 'msb self repair --sandbox {name}' to upgrade while stopped."
             )?,
-            MaintenanceRequired | InProgress | RecoveryRequired => {
-                writeln!(out, "Run 'msb self repair {name}' for the next step.")?
-            }
+            MaintenanceRequired | InProgress | RecoveryRequired => writeln!(
+                out,
+                "Run 'msb self repair --sandbox {name}' for the next step."
+            )?,
             Ready | Unavailable => {}
         }
     }
@@ -256,8 +260,11 @@ mod tests {
             vec!["doctor"],
             vec!["doctor", "--fix", "--yes"],
             vec!["doctor", "api"],
+            vec!["doctor", "--sandbox", "api"],
             vec!["doctor", "api", "--format", "json"],
+            vec!["doctor", "--sandbox", "api", "--format", "json"],
             vec!["doctor", "--all", "--format", "json"],
+            vec!["doctor", "-a", "--format", "json"],
         ] {
             Command::try_parse_from(args).unwrap();
         }
@@ -267,6 +274,13 @@ mod tests {
             vec!["doctor", "--format", "json"],
             vec!["doctor", "worker", "api"],
             vec!["doctor", "api", "--all"],
+            vec!["doctor", "--sandbox", "api", "--all"],
+            vec!["doctor", "--sandbox", "api", "--fix"],
+            vec!["doctor", "--sandbox", "api", "--yes"],
+            vec!["doctor", "--sandbox", "api", "api"],
+            vec!["doctor", "api", "--sandbox", "other"],
+            vec!["doctor", "--sandbox", "api", "--sandbox", "api"],
+            vec!["doctor", "--sandbox"],
             vec!["doctor", "--storage", "--all-sandboxes"],
         ] {
             assert!(Command::try_parse_from(args).is_err());

@@ -837,7 +837,9 @@ mod command_tests {
             ),
             (vec!["msb", "doctor"], false),
             (vec!["msb", "doctor", "app"], false),
+            (vec!["msb", "doctor", "--sandbox", "app"], false),
             (vec!["msb", "self", "repair", "app"], false),
+            (vec!["msb", "self", "repair", "--sandbox", "app"], false),
             (vec!["msb", "context"], false),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
@@ -846,12 +848,15 @@ mod command_tests {
     }
 
     #[test]
-    fn sandbox_repair_is_an_installation_command_and_positional_doctor_is_read_only() {
+    fn sandbox_repair_and_both_doctor_target_spellings_stay_backend_independent() {
         for args in [
             vec!["msb", "self", "repair"],
             vec!["msb", "self", "repair", "app"],
+            vec!["msb", "self", "repair", "--sandbox", "app"],
             vec!["msb", "doctor", "app"],
+            vec!["msb", "doctor", "--sandbox", "app"],
             vec!["msb", "self", "doctor", "app"],
+            vec!["msb", "self", "doctor", "--sandbox", "app"],
             vec!["msb", "doctor", "--all"],
         ] {
             let command = Cli::try_parse_from(args).unwrap().command;
