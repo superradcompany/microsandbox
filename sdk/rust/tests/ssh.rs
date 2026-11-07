@@ -43,6 +43,33 @@ async fn ssh_exec_preserves_status_stdout_and_stderr() {
 }
 
 #[msb_test]
+async fn ssh_exec_killed_shell_is_not_successful() {
+    let name = "ssh-exec-killed-shell";
+    let sandbox = create_sandbox(name).await;
+    let ssh = sandbox
+        .ssh()
+        .open_client()
+        .await
+        .expect("connect SSH client");
+    let mut statuses = Vec::new();
+
+    for tty in [false, true] {
+        // Kill the shell supervised by agentd itself, rather than a child whose parent
+        // shell could translate SIGKILL into an ordinary exit code of 137.
+        let output = ssh
+            .exec_with("kill -KILL $$", |exec| exec.tty(tty))
+            .await
+            .expect("collect killed shell outcome");
+        statuses.push(output.status);
+    }
+
+    ssh.close().await.expect("close SSH client");
+    cleanup(sandbox, name).await;
+
+    assert!(statuses.iter().all(|status| *status != 0), "{statuses:?}");
+}
+
+#[msb_test]
 async fn ssh_exec_with_pty_merges_stderr_into_stdout() {
     let name = "ssh-exec-pty";
     let sandbox = create_sandbox(name).await;
