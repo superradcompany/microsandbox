@@ -75,6 +75,7 @@ async fn restored_creation_progress_and_ignored_observer() {
                 rows: 24,
                 cols: 80,
                 rlimits: Vec::new(),
+                capture: false,
             };
 
             let mut running = Vec::new();

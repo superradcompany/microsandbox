@@ -198,6 +198,7 @@ class Sandbox:
         scripts: Mapping[str, str] | None = None,
         pull_policy: PullPolicy | None = None,
         log_level: LogLevel | None = None,
+        disable_exec_log: bool = False,
         registry_auth: RegistryAuth | None = None,
         registry_insecure: bool = False,
         registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
@@ -239,6 +240,7 @@ class Sandbox:
         scripts: Mapping[str, str] | None = None,
         pull_policy: PullPolicy | None = None,
         log_level: LogLevel | None = None,
+        disable_exec_log: bool = False,
         registry_auth: RegistryAuth | None = None,
         registry_insecure: bool = False,
         registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
@@ -295,6 +297,7 @@ class Sandbox:
         scripts: Mapping[str, str] | None = None,
         pull_policy: PullPolicy | None = None,
         log_level: LogLevel | None = None,
+        disable_exec_log: bool = False,
         registry_auth: RegistryAuth | None = None,
         registry_insecure: bool = False,
         registry_ca_certs: list[bytes | bytearray | str | os.PathLike[str]] | None = None,
@@ -324,6 +327,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecOutput: ...
     async def exec_default_stream(
         self,
@@ -335,6 +339,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecHandle: ...
     async def exec(
         self,
@@ -348,6 +353,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecOutput: ...
     async def exec_detached(
         self,
@@ -361,6 +367,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> Job: ...
     async def exec_stream(
         self,
@@ -374,6 +381,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecHandle: ...
     async def shell(
         self,
@@ -386,6 +394,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecOutput: ...
     async def shell_stream(
         self,
@@ -398,6 +407,7 @@ class Sandbox:
         stdin: Stdin | bytes | None = None,
         tty: bool = False,
         rlimits: list[Rlimit] | None = None,
+        capture: bool | None = None,
     ) -> ExecHandle: ...
     def ssh(self) -> SandboxSshOps: ...
     async def attach_default(
@@ -407,6 +417,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         detach_keys: str | None = None,
+        capture: bool | None = None,
     ) -> int: ...
     async def attach(
         self,
@@ -417,6 +428,7 @@ class Sandbox:
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         detach_keys: str | None = None,
+        capture: bool | None = None,
     ) -> int: ...
     async def attach_shell(self) -> int: ...
     async def metrics(self) -> SandboxMetrics: ...
