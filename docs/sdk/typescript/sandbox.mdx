@@ -96,6 +96,43 @@ Get a live handle to an existing sandbox (running or stopped). The handle provid
   </div>
 </div>
 
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
+
+```typescript
+static recoverStorage(
+  name: string,
+  options?: StorageRecoveryOptions,
+): Promise<StorageRecovery>
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [protected-state migration](/migrations/v0.7#protected-sandbox-state) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Options</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">readonly StorageRecoverySelection[]</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>diskId</code> and <code>candidateId</code> strings. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>acceptSelectedView</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacyWritersStopped</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">list()</span>
 
 ```typescript

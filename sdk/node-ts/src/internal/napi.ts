@@ -89,6 +89,7 @@ export interface NativeBindings {
     outputPath: string,
     format?: string,
   ) => Promise<void>;
+  readonly diagnoseStorage?: (configJson: string, selectionJson: string) => Promise<string>;
   readonly resolveRuntimeVersion: (executable: string) => Promise<string | null>;
   readonly resolveRuntime: (configJson: string) => string;
   readonly isRuntimeInstalled: (configJson: string) => boolean;
@@ -158,6 +159,7 @@ export interface NapiSandboxPage {
 }
 
 export interface NapiSandboxStatic {
+  recoverStorage?(name: string, optionsJson: string): Promise<string>;
   start(name: string): Promise<NapiSandbox>;
   startDetached(name: string): Promise<NapiSandbox>;
   get(name: string): Promise<NapiSandboxHandle>;

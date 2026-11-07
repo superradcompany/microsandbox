@@ -1,3 +1,4 @@
+import { recoverStorage, type StorageRecovery, type StorageRecoveryOptions } from "./storage-recovery.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
@@ -238,6 +239,11 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
+  /** Recover stopped storage after diagnosis. Never boots or stops a VM; originals are retained. */
+  static async recoverStorage(name: string, options: StorageRecoveryOptions = {}): Promise<StorageRecovery> {
+    return recoverStorage(name, options);
+  }
+
   async getJob(id: string): Promise<Job> { return new Job(await jobCall(() => this.inner.getJob(id))); }
   async listJobs(): Promise<JobPage> { return this.listJobsWith(b => b); }
   async listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage> {

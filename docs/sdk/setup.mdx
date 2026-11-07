@@ -141,6 +141,18 @@ To use a custom installation, set both `MSB_PATH` and `MSB_LIBKRUNFW_PATH` befor
 
 ## Advanced setup
 
+### Inspect legacy storage
+
+Storage diagnostics require an explicit list of sandbox names or an explicit whole-home selection. They report readiness, blockers, candidate views, and estimated staging space without installing a runtime or migrating sandbox data. Running results are provisional; SQLite may maintain its normal WAL read-lock sidecars.
+
+- **Rust:** `setup::diagnose_storage(GlobalConfigPatch, StorageSelection)`; recover stopped storage with `Sandbox::recover_storage(name, StorageRecoveryOptions)`.
+- **Python:** `diagnose_storage(names, *, all_sandboxes=False, config=None)`; `Sandbox.recover_storage(name, ...)`.
+- **TypeScript:** `diagnoseStorage(selection, config?)`; `Sandbox.recoverStorage(name, options?)`.
+- **Go:** `DiagnoseStorage(ctx, config, selection)`; `RecoverStorage(ctx, name, options)`.
+- **Ruby:** `Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)`; `Microsandbox::Sandbox.recover_storage(name, ...)`.
+
+Recovery never starts or stops a VM. macOS legacy recovery requires the explicit `legacy_writers_stopped` confirmation (`legacyWritersStopped` in TypeScript, `LegacyWritersStopped` in Go) under the maintenance conditions in the migration guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [protected-state migration](/migrations/v0.7#protected-sandbox-state) for the CLI workflow and recovery limits.
+
 ### Bring your own runtime
 
 Use an existing `msb` executable and its matching `libkrunfw` library instead of downloading a runtime at application startup. Install the pair with the [CLI installer](/getting-started/quickstart), or provision it yourself.

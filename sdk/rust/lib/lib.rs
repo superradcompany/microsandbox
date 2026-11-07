@@ -98,7 +98,8 @@ pub use sandbox::{
     MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
     SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult, SandboxPolicyPatch,
     SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch, SandboxTouchResult,
-    VsockSpecPatch, validate_sandbox_name,
+    StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection, VsockSpecPatch,
+    validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use sandbox::{
