@@ -35,6 +35,7 @@ mod restore;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use microsandbox_db::DbWriteConnection;
 use microsandbox_db::pool::DbPools;
@@ -54,6 +55,7 @@ use super::LocalBackend;
 use crate::agent::AgentClient;
 use crate::backend::Backend;
 use crate::backend::local::creation::{self, CreationStorage};
+use crate::backend::local::host_paths;
 use crate::backend::local::sandbox::create::restore::RestoreStaging;
 use crate::backend::local::volume::EnsuredNamedVolumes;
 use crate::config::RegistryOptions;
@@ -63,6 +65,7 @@ use crate::db::entity::{
 };
 use crate::runtime::handle::StartupProcess;
 use crate::runtime::launch_contract;
+use crate::runtime::spawn::DiskReservations;
 use crate::runtime::{ProcessHandle, SpawnMode};
 use crate::sandbox::{
     FsEntryKind, PullPolicy, RootDisk, RootfsSource, Sandbox, SandboxBuilder, SandboxConfig,
@@ -429,15 +432,8 @@ impl LocalBackend {
                 // pull, archive decode, child materialization, a `--replace` deletion) has already
                 // happened, as with the runtime's own boot-time failure. Older runtimes follow
                 // root symlinks, so only a runtime that refuses them is checked.
-                let enforce = match crate::setup::resolve_runtime(self.config()) {
-                    Ok(runtime) => launch_contract::resolve(&runtime.msb_path)
-                        .await?
-                        .refuses_symlinked_bind_roots(),
-                    Err(MicrosandboxError::RuntimeNotInstalled(_)) => true,
-                    Err(error) => return Err(error),
-                };
-                if enforce {
-                    super::super::host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
+                if host_paths::runtime_refuses_symlinked_bind_roots(self.config()).await? {
+                    host_paths::check_bind_roots_do_not_follow_symlinks(&config)?;
                 }
 
                 if !installed_file_sources.is_empty() {
@@ -926,9 +922,14 @@ impl LocalBackend {
             .checkpoint_restore
             .as_ref()
             .map(|restore| restore.closure.clone());
-        let created =
-            Box::pin(self.create_sandbox_inner(config, sandbox_id, mode, Some(lifecycle_guard)))
-                .await;
+        let created = Box::pin(self.create_sandbox_inner(
+            config,
+            sandbox_id,
+            mode,
+            Some(lifecycle_guard),
+            DiskReservations::default(),
+        ))
+        .await;
         let (local_state, mut returned_config) = match created {
             Ok(pair) => pair,
             Err(e) => {
@@ -1206,11 +1207,18 @@ impl LocalBackend {
         sandbox_id: i32,
         mode: SpawnMode,
         lifecycle_guard: Option<microsandbox_runtime::ipc::SandboxLifecycleGuard>,
+        disk_reservations: DiskReservations,
     ) -> MicrosandboxResult<(crate::backend::SandboxLocalState, SandboxConfig)> {
         let (handle, agent_sock_path) = timing::measure(
             &config.spec.name,
             "process_launch",
-            self.launch_sandbox(&config, sandbox_id, mode, lifecycle_guard),
+            self.launch_sandbox(
+                &config,
+                sandbox_id,
+                mode,
+                lifecycle_guard,
+                disk_reservations,
+            ),
         )
         .await?;
         let mut startup_process = StartupProcess::new(handle);
@@ -1903,6 +1911,31 @@ impl LocalBackend {
         run_dir: &Path,
         name: &str,
     ) -> MicrosandboxResult<SandboxTransitionGuard> {
+        Self::acquire_sandbox_transition_guard_with_timeout(run_dir, name, None).await
+    }
+
+    /// Like [`Self::acquire_sandbox_transition_guard`], but `Some(timeout)` gives up with a
+    /// runtime error instead of waiting indefinitely behind another lifecycle operation.
+    pub(crate) async fn acquire_sandbox_transition_guard_with_timeout(
+        run_dir: &Path,
+        name: &str,
+        timeout: Option<Duration>,
+    ) -> MicrosandboxResult<SandboxTransitionGuard> {
+        let acquire = Self::acquire_sandbox_transition_guard_unbounded(run_dir, name);
+        match timeout {
+            None => acquire.await,
+            Some(timeout) => tokio::time::timeout(timeout, acquire).await.map_err(|_| {
+                MicrosandboxError::Runtime(format!(
+                    "sandbox {name:?}: timed out waiting for a concurrent lifecycle operation"
+                ))
+            })?,
+        }
+    }
+
+    async fn acquire_sandbox_transition_guard_unbounded(
+        run_dir: &Path,
+        name: &str,
+    ) -> MicrosandboxResult<SandboxTransitionGuard> {
         let path = sandbox_transition_lock_path(run_dir, name);
         let parent = path.parent().ok_or_else(|| {
             std::io::Error::new(
@@ -2440,6 +2473,7 @@ mod tests {
     use crate::backend::{Backend, LocalBackend};
     use crate::db::entity::{sandbox, volume};
     use crate::runtime::SpawnMode;
+    use crate::runtime::spawn::DiskReservations;
     use crate::sandbox::{
         HostPermissions, MAX_HOSTNAME_BYTES, MountOptions, OciRootfsSource, PullPolicy,
         RootfsSource, SandboxBuilder, SandboxConfig, SandboxListBuilder, SandboxStatus,
@@ -4280,7 +4314,14 @@ esac
                 if phase == "before-storage" { 1 } else { 2 }
             );
             let error = local
-                .start_sandbox(local.clone(), "interrupted", None, SpawnMode::Detached)
+                .start_sandbox(
+                    local.clone(),
+                    "interrupted",
+                    None,
+                    SpawnMode::Detached,
+                    None,
+                    DiskReservations::default(),
+                )
                 .await
                 .err()
                 .unwrap();

@@ -1,8 +1,8 @@
 use microsandbox::sandbox::{
-    CpuPlacement, DeploymentProfile, NetworkPolicy, Patch, PullPolicy, SandboxBuilder,
-    SecretSource, SecurityProfile, TransparentHugePagePolicy,
+    CpuPlacement, DeploymentProfile, MountBuilder, NetworkPolicy, Patch, PullPolicy,
+    SandboxBuilder, SecretSource, SecurityProfile, TransparentHugePagePolicy, VolumeMount,
 };
-use microsandbox::{LogLevel, RegistryAuth, SnapshotReference};
+use microsandbox::{LogLevel, MicrosandboxError, RegistryAuth, SnapshotReference};
 use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
@@ -63,15 +63,17 @@ const KNOWN_CREATE_KWARGS: &[&str] = &[
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Shared parsing vocabulary; restore applies its own resource authorization rules.
-pub(crate) trait ResourceBuilder: Sized {
+/// Anything `apply_mount` can add a volume to.
+pub(crate) trait VolumeBuilder: Sized {
     fn volume(
         self,
         guest: impl Into<String>,
-        configure: impl FnOnce(
-            microsandbox::sandbox::MountBuilder,
-        ) -> microsandbox::sandbox::MountBuilder,
+        configure: impl FnOnce(MountBuilder) -> MountBuilder,
     ) -> Self;
+}
+
+/// Shared parsing vocabulary; restore applies its own resource authorization rules.
+pub(crate) trait ResourceBuilder: VolumeBuilder {
     fn port(self, host: u16, guest: u16) -> Self;
     fn port_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
     fn port_udp_bind(self, bind: std::net::IpAddr, host: u16, guest: u16) -> Self;
@@ -94,6 +96,13 @@ struct RootDiskSpec {
     format: Option<microsandbox::sandbox::DiskImageFormat>,
     fstype: Option<String>,
     clone: Option<microsandbox::sandbox::FlatClone>,
+}
+
+/// Collects built mounts for a modification patch.
+#[derive(Default)]
+struct MountPatchBuilder {
+    mounts: Vec<VolumeMount>,
+    error: Option<MicrosandboxError>,
 }
 
 /// Identifies whether port entries came directly from the public kwarg or
@@ -137,6 +146,27 @@ impl RootDiskSpec {
             }
             d
         })
+    }
+}
+
+//--------------------------------------------------------------------------------------------------
+// Trait Implementations
+//--------------------------------------------------------------------------------------------------
+
+impl VolumeBuilder for MountPatchBuilder {
+    fn volume(
+        mut self,
+        guest: impl Into<String>,
+        configure: impl FnOnce(MountBuilder) -> MountBuilder,
+    ) -> Self {
+        match configure(MountBuilder::new(guest)).build() {
+            Ok(mount) => self.mounts.push(mount),
+            Err(error) => {
+                self.error.get_or_insert(error);
+            }
+        }
+
+        self
     }
 }
 
@@ -997,6 +1027,61 @@ fn extract_root_disk(image_obj: &Bound<'_, PyAny>) -> PyResult<Option<RootDiskSp
 // Functions: Mount
 //--------------------------------------------------------------------------------------------------
 
+/// Convert the `mounts=` kwarg of `modify()` into mounts, sorted by guest
+/// path for deterministic patch (and plan) ordering. A local backend anchors
+/// relative `bind` and `disk` paths here, before the modification runs in the
+/// background, so a later working-directory change does not retarget them.
+pub(crate) fn parse_mount_patches(
+    mounts: Option<&Bound<'_, PyAny>>,
+    local: bool,
+) -> PyResult<Vec<VolumeMount>> {
+    let Some(mounts) = mounts.filter(|mounts| !mounts.is_none()) else {
+        return Ok(Vec::new());
+    };
+
+    let mut entries = Vec::new();
+    for (guest, mount) in require_mapping_dict(mounts, "mounts")?.iter() {
+        let mount = config_dict(&mount, "MountConfig")?;
+        if local {
+            anchor_local_host_paths(&mount)?;
+        }
+        entries.push((guest.extract::<String>()?, mount));
+    }
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut builder = MountPatchBuilder::default();
+    for (guest, mount) in entries {
+        reject_named_volume_settings(&guest, &mount)?;
+        builder = apply_mount(builder, guest, &mount)?;
+    }
+
+    match builder.error {
+        Some(error) => Err(crate::error::to_py_err(error)),
+        None => Ok(builder.mounts),
+    }
+}
+
+/// Refuse named-volume creation settings in `modify()`. Modify never provisions volumes,
+/// and the shared builder drops these settings for existing volumes, so they would be lost.
+fn reject_named_volume_settings(guest: &str, mount: &Bound<'_, PyDict>) -> PyResult<()> {
+    if extract_opt::<String>(mount, "named")?.is_none() {
+        return Ok(());
+    }
+
+    let mode = extract_opt::<String>(mount, "named_mode")?;
+    let kind = extract_opt::<String>(mount, "named_kind")?;
+    let configures = mode.as_deref() == Some("create")
+        || kind.as_deref() == Some("disk")
+        || extract_opt::<u32>(mount, "size_mib")?.is_some()
+        || extract_opt::<u32>(mount, "quota_mib")?.is_some();
+    if configures {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "mount {guest:?}: modify does not create or configure named volumes; create the volume first"
+        )));
+    }
+    Ok(())
+}
+
 /// Copy a fork's `Mapping[str, MountConfig]` into one owned dict per guest path.
 /// A local backend anchors relative `bind` and `disk` paths here, so later changes
 /// to the mapping or the working directory do not affect the fork.
@@ -1012,21 +1097,28 @@ pub(crate) fn prepare_fork_volumes(
         .map(|(guest, mount)| {
             let mount = config_dict(&mount, "MountConfig")?;
             if local {
-                for key in ["bind", "disk"] {
-                    if let Some(path) = extract_opt::<String>(&mount, key)? {
-                        let path = std::path::absolute(path)?;
-                        let path = path.to_str().ok_or_else(|| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "cannot encode {key} host path as UTF-8"
-                            ))
-                        })?;
-                        mount.set_item(key, path)?;
-                    }
-                }
+                anchor_local_host_paths(&mount)?;
             }
             Ok((guest.extract()?, mount.unbind()))
         })
         .collect()
+}
+
+/// Make a mount config's relative `bind` and `disk` host paths absolute against
+/// the current working directory.
+fn anchor_local_host_paths(mount: &Bound<'_, PyDict>) -> PyResult<()> {
+    for key in ["bind", "disk"] {
+        if let Some(path) = extract_opt::<String>(mount, key)? {
+            let path = std::path::absolute(path)?;
+            let path = path.to_str().ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "cannot encode {key} host path as UTF-8"
+                ))
+            })?;
+            mount.set_item(key, path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Apply the mounts from [`prepare_fork_volumes`] to a fork builder.
@@ -1042,7 +1134,7 @@ pub(crate) fn apply_fork_volumes<B: ResourceBuilder>(
     })
 }
 
-fn apply_mount<B: ResourceBuilder>(
+fn apply_mount<B: VolumeBuilder>(
     builder: B,
     guest_path: String,
     mount: &Bound<'_, PyDict>,
@@ -2466,7 +2558,7 @@ fn extract_required<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
 
 macro_rules! resource_builder {
     ($builder:ty) => {
-        impl ResourceBuilder for $builder {
+        impl VolumeBuilder for $builder {
             fn volume(
                 self,
                 guest: impl Into<String>,
@@ -2476,6 +2568,8 @@ macro_rules! resource_builder {
             ) -> Self {
                 self.volume(guest, configure)
             }
+        }
+        impl ResourceBuilder for $builder {
             fn port(self, host: u16, guest: u16) -> Self {
                 self.port(host, guest)
             }

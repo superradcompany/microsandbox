@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use microsandbox_types::{EnvVar, SecretSubstitution, SecretViolationAction};
+use microsandbox_types::{EnvVar, SecretSubstitution, SecretViolationAction, VolumeMount};
 
 #[cfg(feature = "local")]
 use super::local;
@@ -141,6 +141,33 @@ impl SandboxModificationBuilder {
         self
     }
 
+    /// Add a volume mount, or replace the mount already at its guest path.
+    ///
+    /// Mounts are fixed when the VM boots, so a running sandbox needs
+    /// [`next_start`](Self::next_start) or [`restart`](Self::restart).
+    /// Sandbox-owned volumes cannot be added here: they are created with the
+    /// sandbox. A named volume must already exist, so a mount that carries
+    /// creation settings such as a quota is a conflict.
+    ///
+    /// ```ignore
+    /// sandbox.modify()
+    ///     .mount(MountBuilder::new("/opt/apps").bind("/host/apps").readonly().build()?)
+    ///     .next_start()
+    ///     .apply()
+    ///     .await?;
+    /// ```
+    pub fn mount(mut self, mount: VolumeMount) -> Self {
+        self.patch.mounts.push(mount);
+        self
+    }
+
+    /// Remove the mount at a guest path. Sandbox-owned volumes cannot be
+    /// removed, since that would delete their data.
+    pub fn remove_mount(mut self, guest: impl Into<String>) -> Self {
+        self.patch.mounts_remove.push(guest.into());
+        self
+    }
+
     /// Add or update a published mapping without changing other host endpoints.
     /// This requires restart or next-start policy on a running sandbox.
     pub fn port(self, host_port: u16, guest_port: u16) -> Self {
@@ -243,11 +270,13 @@ impl SandboxModificationBuilder {
     /// live label changes are saved with it. For
     /// stopped sandboxes or `next_start` requests, changes persist for the next
     /// start. When the policy is `restart`, the existing stop/start lifecycle
-    /// path makes restart-required changes active. Live secret rotation,
-    /// removal, and allowed-host updates go through the runtime control
-    /// socket; the durable config records host-side source references for
-    /// source-based specs and persists the value for value-based specs (the
-    /// same at-rest property as create's `secret_env`).
+    /// path makes restart-required changes active; if that start fails, the
+    /// previous config is restored and started again, and `apply` returns an
+    /// error. Live secret rotation, removal, and allowed-host updates go
+    /// through the runtime control socket; the durable config records
+    /// host-side source references for source-based specs and persists the
+    /// value for value-based specs (the same at-rest property as create's
+    /// `secret_env`).
     ///
     /// Configuring a secret that requires TLS identity on a sandbox with
     /// interception off also turns interception on. That is planned as a

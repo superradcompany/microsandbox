@@ -61,6 +61,12 @@ char *msb_sandbox_create(uint64_t cancel_id,
                          uintptr_t buf_len);
 
 /**
+ * Capability marker: this library's modify patch understands `mounts` and
+ * `mounts_remove`. Older libraries lack the symbol and would ignore the fields.
+ */
+bool msb_sandbox_modify_mounts_supported(void);
+
+/**
  * Capability marker for published-port modification in the Go bindings.
  */
 bool msb_supports_port_modification(void);

@@ -151,10 +151,23 @@ impl JsSandboxHandle {
 
     /// Plan or apply a sandbox modification. Returns the plan as a JSON
     /// string; the TS wrapper parses it into a `SandboxModificationPlan`.
-    #[napi]
-    pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn modify<'env>(
+        &self,
+        env: &'env Env,
+        mut options: Option<SandboxModifyOptions>,
+    ) -> Result<PromiseRaw<'env, String>> {
+        // Capture local mount paths before the async operation starts.
+        crate::sandbox::capture_modify_host_paths(
+            &mut options,
+            self.inner.backend_kind().as_str() == "local",
+        )?;
         let builder = crate::sandbox::configure_modify(self.inner.modify(), options.as_ref())?;
-        crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref())).await
+
+        env.spawn_future(async move {
+            crate::sandbox::run_modify(builder, crate::sandbox::modify_dry_run(options.as_ref()))
+                .await
+        })
     }
 
     /// Compact root and owned-data disk prefixes of a running or stopped sandbox.

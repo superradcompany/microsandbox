@@ -476,13 +476,23 @@ impl Sandbox {
 
     /// Plan or apply a sandbox modification. Returns the plan as a JSON
     /// string; the TS wrapper parses it into a `SandboxModificationPlan`.
-    #[napi]
-    pub async fn modify(&self, options: Option<SandboxModifyOptions>) -> Result<String> {
-        let builder = {
-            let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-            configure_modify(sb.modify(), options.as_ref())?
-        };
-        run_modify(builder, modify_dry_run(options.as_ref())).await
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn modify<'env>(
+        &self,
+        env: &'env Env,
+        mut options: Option<SandboxModifyOptions>,
+    ) -> Result<PromiseRaw<'env, String>> {
+        // Capture local mount paths before the async operation starts.
+        capture_modify_host_paths(&mut options, self.backend_kind == "local")?;
+        let inner = self.inner.clone();
+
+        env.spawn_future(async move {
+            let builder = {
+                let sb = inner.get().await.ok_or_else(consumed_error)?;
+                configure_modify(sb.modify(), options.as_ref())?
+            };
+            run_modify(builder, modify_dry_run(options.as_ref())).await
+        })
     }
 
     /// Compact root and owned-data disk prefixes; the limit includes the base, not the writable head.
@@ -1202,6 +1212,22 @@ pub fn sandbox_touch_result_to_js(
     }
 }
 
+/// Anchor relative `bind` and `disk` mount paths for a local backend while still
+/// on the calling thread, before the modification runs on the async runtime.
+pub(crate) fn capture_modify_host_paths(
+    options: &mut Option<SandboxModifyOptions>,
+    local: bool,
+) -> Result<()> {
+    if !local {
+        return Ok(());
+    }
+    let mounts = options.as_mut().and_then(|options| options.mounts.as_mut());
+    for mount in mounts.into_iter().flatten() {
+        mount.capture_local_host_path()?;
+    }
+    Ok(())
+}
+
 /// Inject the modify options into a core modification builder.
 ///
 /// Map entries are sorted so repeated calls with the same options produce the
@@ -1245,6 +1271,14 @@ pub(crate) fn configure_modify(
         .map(|(name, spec)| secret_patch_from_spec(name, spec))
         .collect::<Result<Vec<_>>>()?;
 
+    let mounts = options
+        .mounts
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mount| mount.into_core())
+        .collect::<Result<Vec<_>>>()?;
+
     let patch = SandboxModificationPatch {
         cpus: options.cpus.map(cpu_count_u8).transpose()?,
         max_cpus: options.max_cpus.map(cpu_count_u8).transpose()?,
@@ -1261,6 +1295,8 @@ pub(crate) fn configure_modify(
         workdir: options.workdir.clone(),
         secrets,
         secrets_remove: options.secrets_remove.clone().unwrap_or_default(),
+        mounts,
+        mounts_remove: options.mounts_remove.clone().unwrap_or_default(),
         ports: options
             .ports
             .as_deref()

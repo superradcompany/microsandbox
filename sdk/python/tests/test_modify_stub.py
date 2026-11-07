@@ -23,6 +23,8 @@ EXPECTED_KWARGS = [
     "workdir",
     "secrets",
     "secrets_rm",
+    "mounts",
+    "mounts_rm",
     "ports",
     "ports_rm",
     "policy",
