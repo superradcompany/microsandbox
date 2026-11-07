@@ -16,6 +16,21 @@ curl -fsSL https://install.microsandbox.dev | sh
 ```
 </CodeGroup>
 
+## Storage directory permissions
+
+If a command reports `catalog ancestor ... permits path substitution`, check the directory named in the error. Starting with v0.7.12, microsandbox rejects catalog paths that other accounts can replace. Older installers could create `MSB_HOME` with mode `0775` under `umask 002`, so this can appear after an upgrade.
+
+For your own private `MSB_HOME`, remove access for other accounts and retry:
+
+<CodeGroup>
+```bash Shell
+chmod 700 "${MSB_HOME:-$HOME/.microsandbox}"
+msb list
+```
+</CodeGroup>
+
+If the error names an ancestor above `MSB_HOME`, check that directory's ownership and permissions too. Do not change a shared directory's permissions without coordinating with its users; choose a private storage location instead. The installer preserves existing directory permissions and warns when the install root is group or world writable.
+
 ## glibc version
 
 Microsandbox Linux releases require glibc 2.28 or newer on x64 and ARM64 hosts. Check the version provided by your distribution:
