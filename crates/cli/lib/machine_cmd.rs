@@ -36,6 +36,9 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct MachineArgs {
+    /// Verify the selected guest reader before attaching detached recovery data.
+    #[arg(long, hide = true)]
+    pub require_storage_reader: bool,
     /// Set by legacy command routing, never inferred from a missing execution field.
     #[arg(skip)]
     pub legacy_launch: bool,
@@ -803,6 +806,7 @@ mod tests {
         let _ = config_fd;
 
         MachineArgs {
+            require_storage_reader: false,
             legacy_launch: false,
             restore: false,
             agent_transport: AgentTransportProfile::Auto,

@@ -33,5 +33,5 @@ pub use qcow::{
 pub use resolver::{CheckpointClosure, CheckpointObjectReadTiming};
 pub use store::{
     AdmittedObject, CaptureObjectBatch, CaptureObjectBatchStats, LocalObjectStore, ObjectId,
-    SparseFileIntegrity, sparse_file_integrity,
+    SparseFileIntegrity, sparse_file_integrity, sparse_file_integrity_handle,
 };
