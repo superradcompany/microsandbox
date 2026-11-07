@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Produce divergent legacy disks, then inspect and apply them through a real terminal.
+"""Qualify explicit scripted disk selection and share legacy fixtures/terminal helpers.
 
-The verify phase uses pywinpty on Windows and ptyprocess on Unix. Use a fresh
-disposable fixture directory and the same absolute paths for both phases.
+Normal interactive repair does not expose a disk browser. This script retains the
+documented --select contract; legacy_storage_repair.py exercises the guided UI.
+Use a fresh disposable fixture directory and the same absolute paths for both phases.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import threading
 import time
 import uuid
 
+import legacy_storage_migration as migration
 from legacy_storage_migration import (
     Harness, SCHEMA, digest, environment, inventory, maintenance_arguments, read_manifest, reserve_output,
 )
@@ -61,12 +63,26 @@ def produce_branches(harness: Harness, name: str) -> dict:
 
 
 def produce(args):
+    migration.IMAGE = args.image
     reserve_output(args.output)
     harness = Harness(args.output, args.producer, args.producer_firmware, "produce")
     try:
         harness.run("producer-version", "--version")
-        cases = [produce_branches(harness, "pick-" + branch) for branch in BRANCHES]
-        manifest = {"schema": SCHEMA, "output": str(harness.output), "cases": cases}
+        cases = []
+        for branch in BRANCHES:
+            name = "select-" + branch
+            harness.create(name)
+            harness.guest(name + "-base", name,
+                          "mkdir -p /work/imports; echo common >/work/imports/base; sync")
+            harness.capture(name, "common")
+            harness.guest(name + "-latest", name,
+                          f"echo {branch} >{BRANCH_FILE}; echo received >/work/imports/{branch}.json; sync")
+            harness.stop(name)
+            sandbox = harness.home / "sandboxes" / name
+            (sandbox / "runtime/root-disk.json").rename(
+                harness.output / (name + "-original-root-disk.json"))
+            cases.append(dict(name=name, branch=branch, kind="scripted-selection", before=inventory(sandbox)))
+        manifest = {"schema": SCHEMA, "output": str(harness.output), "image": args.image, "cases": cases}
         (harness.output / "fixtures.json").write_text(json.dumps(manifest, indent=2))
     finally:
         harness.shutdown()
@@ -79,8 +95,8 @@ def inspect(harness, name):
     assert diagnosis["status"] == "recovery_required" and not diagnosis["running"], diagnosis
     candidates = diagnosis["inspection"]["candidates"]
     heads = [view for view in candidates if view["layers"] == 2]
-    assert len(heads) == 2 and heads[0]["virtual_size"] == heads[1]["virtual_size"], candidates
-    assert heads[0]["id"] != heads[1]["id"] and {view["disk_id"] for view in candidates} == {"root"}
+    assert len(heads) == 1 and len(candidates) == 2, candidates
+    assert {view["disk_id"] for view in candidates} == {"root"}
     return diagnosis
 
 
@@ -152,39 +168,13 @@ class Terminal:
     def send(self, line):
         self.tty.write(line + ("\r" if os.name == "nt" else "\n"))
 
+    def send_key(self, key):
+        """Send raw menu input without an extra Enter that could accept the next screen."""
+        self.tty.write(key)
+
     def wait(self):
         self.expect()
         return self.tty.wait()
-
-
-def interact(harness, name, maintenance, branch, cancel):
-    prompt = "View number, browse command, or q to cancel: "
-    label = name + ("-cancel" if cancel else "-apply")
-    with Terminal(harness, label, ["self", "repair", name, *maintenance]) as tty:
-        tty.expect(prompt)
-        tty.send("compare " + BRANCH_FILE)
-        compared = tty.expect(prompt)
-        # Select by inspected guest contents. Discovery order and candidate IDs
-        # deliberately play no part in deciding which head to keep.
-        views = {int(number): body for number, body in
-                 re.findall(r"View (\d+):\s*(.*?)(?=View \d+:|$)", compared, re.S)}
-        choices = {label: [n for n, body in views.items() if f"bytes: {label}" in body] for label in BRANCHES}
-        assert all(len(matching) == 1 for matching in choices.values()), compared
-        assert sum("path is absent" in body for body in views.values()) == 1, compared
-        selected = choices[branch][0]
-        tty.send(f"cat {selected} /etc/alpine-release")
-        lower = tty.expect(prompt)
-        assert "bytes: 3.20." in lower, f"missing OCI lower in preview: {lower}"
-        tty.send(f"ls {selected} /work/imports")
-        listing = tty.expect(prompt)
-        assert branch + ".json" in listing, listing
-        if cancel:
-            tty.send("q")
-        else:
-            tty.send(str(selected))
-            tty.expect("Apply these disk views? [y/N]")
-            tty.send("y")
-        assert tty.wait() == (2 if cancel else 0), tty.transcript[-1500:]
 
 
 def catalog_state(home):
@@ -205,8 +195,8 @@ def verify(args):
     try:
         for index, case in enumerate(manifest["cases"]):
             name = case["name"]
-            branch = name.removeprefix("pick-")
-            assert branch in BRANCHES
+            branch = case.get("branch")
+            assert case.get("kind") == "scripted-selection" and branch in BRANCHES, case
             sandbox = harness.home / "sandboxes" / name
             before = inventory(sandbox)
             assert before == case["before"]
@@ -216,19 +206,29 @@ def verify(args):
                 assert digest(args.producer) == artifacts["binary_sha256"]
                 assert digest(args.producer_firmware) == artifacts["firmware_sha256"]
                 old = Harness(args.output, args.producer, args.producer_firmware, args.label + "-old-cli")
-                old.run("before-preview", "inspect", name)
+                old.run("before-diagnosis", "inspect", name)
             catalog = catalog_state(harness.home)
             diagnosis = inspect(harness, name)
             refused = harness.run(name + "-script-needs-choice", "self", "repair", name,
                                   "--format", "json", *maintenance, required=False)
             assert refused.returncode == 2 and not (sandbox / ".storage-migration").exists()
-            interact(harness, name, maintenance, branch, cancel=True)
+            choice = next(view for view in diagnosis["inspection"]["candidates"] if view["layers"] == 2)
+            rejected = harness.run(name + "-unknown-selection", "self", "repair", name,
+                                   "--select", "root=view-not-authorized", "--accept-selected-view",
+                                   "--format", "json", *maintenance, required=False)
+            assert 0 < rejected.returncode < 124
             assert inspect(harness, name) == diagnosis and inventory(sandbox) == before
-            assert catalog_state(harness.home) == catalog, "private inspection changed the source catalog"
+            assert catalog_state(harness.home) == catalog, "refused selection changed the source catalog"
             if old:
-                old.run("after-cancel", "inspect", name)
+                old.run("after-refused-selection", "inspect", name)
             assert not (sandbox / ".storage-migration").exists() and not (sandbox / "state-layout.json").exists()
-            interact(harness, name, maintenance, branch, cancel=False)
+            # The producer made exactly one two-layer branch. This fixture's known structure
+            # identifies the explicit selection; it is not a general-purpose latest-view heuristic.
+            recovered = harness.run(name + "-apply", "self", "repair", name,
+                                    "--select", "root=" + choice["id"], "--accept-selected-view",
+                                    "--format", "json", *maintenance)
+            result = json.loads(recovered.stdout)
+            assert result["ready"] and result["originals_retained"], result
             after = inventory(sandbox)
             assert all(after.get(path) == digest for path, digest in before.items())
             harness.run(name + "-boot", "start", name)
@@ -238,7 +238,8 @@ def verify(args):
                           f'test -f /work/imports/{branch}.json; test ! -e /work/imports/{other}.json; '
                           'test "$(cat /work/imports/base)" = common')
             harness.stop(name)
-            results.append({"case": name, "selected_by_contents": branch, "cancel_preserved_inputs": True})
+            results.append({"case": name, "selected_fixture_branch": branch,
+                            "refused_selection_preserved_inputs": True, "explicit_selection_verified": True})
             (harness.log / "results.json").write_text(json.dumps(results, indent=2))
     finally:
         harness.shutdown()
@@ -251,14 +252,15 @@ def main():
     producer.add_argument("--output", type=Path, required=True)
     producer.add_argument("--producer", type=Path, required=True)
     producer.add_argument("--producer-firmware", type=Path, required=True)
+    producer.add_argument("--image", default=migration.IMAGE, help="Released guest image used by the isolated fixtures")
     producer.set_defaults(action=produce)
     candidate = phases.add_parser("verify")
     candidate.add_argument("--output", type=Path, required=True)
     candidate.add_argument("--candidate", type=Path, required=True)
     candidate.add_argument("--candidate-firmware", type=Path, required=True)
-    candidate.add_argument("--label", default="guided-repair")
+    candidate.add_argument("--label", default="scripted-selection")
     candidate.add_argument("--legacy-writers-stopped", action="store_true")
-    candidate.add_argument("--producer", type=Path, help="Also reopen the old home with its original CLI after cancellation")
+    candidate.add_argument("--producer", type=Path, help="Also reopen the old home after a refused scripted selection")
     candidate.add_argument("--producer-firmware", type=Path)
     candidate.set_defaults(action=verify)
     args = parser.parse_args()

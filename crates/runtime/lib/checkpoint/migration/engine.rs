@@ -1756,6 +1756,58 @@ mod tests {
     }
 
     #[test]
+    fn intact_root_journal_imports_selected_state_without_choosing_alternatives() {
+        for stage in [".grow-Ab12Cd", ".compact-Ab12Cd"] {
+            let (_temp, runtime, bindings) = fixture();
+            let nominal = &bindings.root.as_ref().unwrap().path;
+            let previous_head = nominal
+                .parent()
+                .unwrap()
+                .join(format!("upper-{}.qcow2", "1".repeat(32)));
+            overlay(&previous_head, nominal, "raw");
+
+            // Completed growth/compaction can retain the old complete disk view. Its mere
+            // presence must not override or make ambiguous the validated current selection.
+            let directory = runtime.join(stage);
+            fs::create_dir(&directory).unwrap();
+            let current_base = directory.join("upper.ext4");
+            fs::write(&current_base, vec![91; 131072]).unwrap();
+            let current_head = directory.join(format!("upper-{}.qcow2", "2".repeat(32)));
+            overlay(&current_head, &current_base, "raw");
+            root_journal(
+                &runtime,
+                &bindings,
+                &[
+                    (current_base.clone(), "raw"),
+                    (current_head.clone(), "qcow2"),
+                ],
+            );
+            let originals = [nominal, &previous_head, &current_base, &current_head]
+                .into_iter()
+                .map(|path| (path.clone(), fs::read(path).unwrap()))
+                .collect::<Vec<_>>();
+
+            let inspection = inspect(&runtime, &bindings).unwrap();
+            assert_eq!(inspection.status, MigrationStatus::Eligible);
+            assert_eq!(inspection.candidates.len(), 1);
+            assert!(!inspection.can_preview());
+            execute(&runtime, &bindings);
+
+            let chain = load_runtime_owned_root_chain(&runtime).unwrap().unwrap();
+            assert_eq!(chain.layers.len(), 2);
+            assert_eq!(fs::read(&chain.layers[0].path).unwrap(), vec![91; 131072]);
+            assert_eq!(
+                microsandbox_image::checkpoint::qcow2_backing_basename(&chain.layers[1].path)
+                    .unwrap(),
+                chain.layers[0].path.file_name().unwrap().to_str().unwrap()
+            );
+            for (path, contents) in originals {
+                assert_eq!(fs::read(path).unwrap(), contents);
+            }
+        }
+    }
+
+    #[test]
     fn restored_root_can_have_no_nominal_base_and_deleted_parent() {
         let (_temp, runtime, bindings) = fixture();
         let nominal = &bindings.root.as_ref().unwrap().path;
@@ -1800,6 +1852,13 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let base = directory.join("sealed-000.raw");
         fs::write(&base, vec![74u8; 131072]).unwrap();
+        // A retained nominal disk and an older complete branch are not a reason to ask the
+        // operator to reconstruct a choice already recorded by a valid owned-disk journal.
+        let nominal = directory.join("disk.raw");
+        fs::write(&nominal, vec![13u8; 131072]).unwrap();
+        let previous_head = directory.join(format!("head_{}.qcow2", "d".repeat(32)));
+        overlay(&previous_head, &nominal, "raw");
+        let previous_bytes = fs::read(&previous_head).unwrap();
         let head = directory.join("writable.qcow2");
         overlay(&head, &base, "raw");
         let journal_dir = runtime.join("owned-disks").join(id);
@@ -1816,7 +1875,12 @@ mod tests {
             capacity: 131072,
             readonly: false,
         });
+
+        let inspection = inspect(&runtime, &bindings).unwrap();
+        assert_eq!(inspection.status, MigrationStatus::Eligible);
+        assert_eq!(inspection.candidates.len(), 2);
         execute(&runtime, &bindings);
+
         let chain = load_runtime_owned_disk_chain(&runtime, id)
             .unwrap()
             .unwrap();
@@ -1824,6 +1888,8 @@ mod tests {
         assert_eq!(fs::read(&chain.layers[0].path).unwrap()[0], 74);
         assert!(load_runtime_owned_root_chain(&runtime).unwrap().is_some());
         assert!(journal_dir.join("disk.json").exists());
+        assert_eq!(fs::read(nominal).unwrap(), vec![13u8; 131072]);
+        assert_eq!(fs::read(previous_head).unwrap(), previous_bytes);
     }
 
     #[test]

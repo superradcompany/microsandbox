@@ -57,9 +57,11 @@ msb self repair app
 
 Repair identifies known VMs that must stop and asks before stopping one. On macOS, stop legacy VMs across all microsandbox homes and prevent new legacy writers until repair finishes. Confirm this in the prompt. New and already migrated sandboxes can keep running.
 
-If repair finds several complete versions of a disk, compare a guest file you recognize. For example, `compare /work/imports/current` shows what each view contains. Select the version you want to keep using, or enter `q` if you cannot tell. Applying a view can omit writes unique to another branch. Repair retains the original disk files. External disks continue to use their configured paths after repair.
+Repair validates and imports the existing selected disk state for supported, intact layouts, including writes made after a snapshot. It retains the original disk files. External disks continue to use their configured paths after repair. Omit the sandbox name to select several sandboxes; a blocked sandbox does not prevent independent repairs from completing.
 
-For automation, `msb doctor app --format json` reports disk and candidate IDs. Pass each selection to `msb self repair app` with `--select DISK_ID=CANDIDATE_ID` and acknowledge the choice with `--accept-selected-view`. On macOS, pass `--legacy-writers-stopped` only after establishing the maintenance conditions above. Pass `--format json` for a result without prompts.
+If repair cannot safely establish the active state or its dependencies, it reports "needs investigation" and offers a diagnostic report to review and copy for the [maintainers](https://github.com/superradcompany/microsandbox/issues). The report excludes guest file contents, secrets, and host paths; nothing is submitted automatically. Preserve the sandbox and recovery records. Cancelling waits for an in-progress stop or import to finish; it does not undo completed repairs, accepted stops, or catalog updates.
+
+For automation, use `msb self repair app --format json`. Existing `--select DISK_ID=CANDIDATE_ID` and `--accept-selected-view` options remain available for independently verified recovery selections; choosing a view can omit writes unique to another branch. `msb doctor app --format json` reports the IDs. On macOS, pass `--legacy-writers-stopped` only after establishing the maintenance conditions above.
 
 An interrupted import can resume with unchanged inputs. If a saved plan is stale, disk data is missing, or permissions are unsafe, preserve the home and recovery records. A candidate selection cannot supply missing bytes. Pending memory or device restores still require their execution state.
 

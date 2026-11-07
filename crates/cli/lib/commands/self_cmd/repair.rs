@@ -1,4 +1,4 @@
-//! Guided repair of one local sandbox. Each prompt is scoped to the named target or blocker.
+//! Guided repair of selected local sandboxes, with explicit consent for each blocking VM.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -16,16 +16,18 @@ use microsandbox_runtime::checkpoint::migration::CandidateSummary;
 use super::storage_doctor::{StorageDoctorExit, terminal_text, write_diagnosis};
 use crate::ui::OutputFormat;
 
-mod views;
+mod interactive;
+mod report;
+mod terminal;
 
 //--------------------------------------------------------------------------------------------------
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Repair one stopped local sandbox, retaining the original disk files.
+/// Repair selected local sandboxes, retaining the original disk files.
 #[derive(Debug, Args)]
 pub struct RepairArgs {
-    /// Sandbox to repair. In a terminal, omit to choose one.
+    /// Sandbox to repair. In a terminal, omit to select multiple sandboxes.
     #[arg(value_name = "SANDBOX")]
     pub name: Option<String>,
 
@@ -51,30 +53,28 @@ pub struct RepairArgs {
 //--------------------------------------------------------------------------------------------------
 
 pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
+    // Keep the existing machine interface and explicit selections stable. The normal
+    // terminal flow repairs the validated active state and reports unresolved layouts.
+    if args.format != Some(OutputFormat::Json)
+        && args.select.is_empty()
+        && io::stdin().is_terminal()
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+    {
+        return interactive::run(args).await;
+    }
+    run_scripted(args).await
+}
+
+async fn run_scripted(args: RepairArgs) -> anyhow::Result<()> {
     let json = args.format == Some(OutputFormat::Json);
     let interactive = !json
         && io::stdin().is_terminal()
         && io::stdout().is_terminal()
         && io::stderr().is_terminal();
-    let name = match args.name {
-        Some(name) => name,
-        None if interactive => {
-            let names = setup::storage_repair_targets(Default::default()).await?;
-            if names.is_empty() {
-                println!("There are no local sandboxes to repair.");
-                return Ok(());
-            }
-            println!("Choose a sandbox to inspect:");
-            for (index, name) in names.iter().enumerate() {
-                println!("  {}. {}", index + 1, terminal_text(name));
-            }
-            let Some(index) = choose_index("Sandbox number (or cancel): ", names.len())? else {
-                return cancelled();
-            };
-            names[index].clone()
-        }
-        None => anyhow::bail!("provide a sandbox name: msb self repair SANDBOX"),
-    };
+    let name = args
+        .name
+        .context("provide a sandbox name: msb self repair SANDBOX")?;
 
     // Keep the read-only inventory ahead of backend initialization or any stop request.
     // A stopped row can precede actual process teardown; the SDK takes locks and checks again.
@@ -204,7 +204,7 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
             &item,
             2,
             json,
-            "Choose a disk view in an interactive repair, or supply diagnosed --select values and --accept-selected-view.",
+            "Storage needs investigation. Run interactive repair to review a diagnostic report, or supply independently verified --select values and --accept-selected-view.",
         );
     }
 
@@ -246,30 +246,21 @@ pub(super) async fn run(args: RepairArgs) -> anyhow::Result<()> {
         ..Default::default()
     };
     let result = if needs_choice {
-        if args.select.is_empty() {
-            println!("Preparing read-only copies of the candidate disks for inspection…");
-            let preview = Sandbox::preview_storage(&name, options).await?;
-            let Some(result) = views::choose(preview).await? else {
-                return cancelled();
-            };
-            result
-        } else {
-            ensure!(
-                args.accept_selected_view,
-                "explicit choices require --accept-selected-view"
-            );
-            // Headless callers explicitly identified the views. Capture only their selected
-            // group; the SDK rechecks the metadata-bound IDs under lifecycle ownership.
-            Sandbox::recover_storage(
-                &name,
-                StorageRecoveryOptions {
-                    selections: args.select,
-                    accept_selected_view: true,
-                    ..options
-                },
-            )
-            .await?
-        }
+        ensure!(
+            args.accept_selected_view,
+            "explicit choices require --accept-selected-view"
+        );
+        // Headless callers explicitly identified the views. Capture only their selected
+        // group; the SDK rechecks the metadata-bound IDs under lifecycle ownership.
+        Sandbox::recover_storage(
+            &name,
+            StorageRecoveryOptions {
+                selections: args.select,
+                accept_selected_view: true,
+                ..options
+            },
+        )
+        .await?
     } else {
         Sandbox::recover_storage(&name, options).await?
     };
@@ -355,29 +346,6 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
             .as_str(),
         "y" | "yes"
     ))
-}
-
-fn choose_index(prompt: &str, count: usize) -> anyhow::Result<Option<usize>> {
-    loop {
-        let input = answer(prompt)?;
-        if input.is_empty()
-            || (input.eq_ignore_ascii_case("cancel") || input.eq_ignore_ascii_case("q"))
-        {
-            return Ok(None);
-        }
-        if let Some(index) = index(&input, count) {
-            return Ok(Some(index));
-        }
-        eprintln!("Choose a number from 1 to {count}, or type cancel.");
-    }
-}
-
-fn index(input: &str, count: usize) -> Option<usize> {
-    input
-        .parse::<usize>()
-        .ok()?
-        .checked_sub(1)
-        .filter(|n| *n < count)
 }
 
 //--------------------------------------------------------------------------------------------------

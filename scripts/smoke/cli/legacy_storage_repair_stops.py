@@ -11,12 +11,21 @@ import sys
 
 from legacy_storage_migration import Harness, SCHEMA, inventory, reserve_output
 from legacy_storage_preview import Terminal
+from legacy_storage_repair import choose, frame
 
 
 PEER = "wizard-peer"
 TARGET = "wizard-target"
-STOP = f"Stop '{PEER}' gracefully? [y/N]"
-MAINTENANCE = "Have you stopped those VMs and excluded new writers? [y/N]"
+STOP = f"Stop '{PEER}' gracefully?"
+MAINTENANCE = "Have you stopped legacy VMs and excluded new writers?"
+
+
+def confirm_repair(wizard):
+    current = frame(wizard)
+    assert "Confirm storage repairs" in current, current
+    wizard.send_key("y")
+    current = frame(wizard)
+    assert STOP in current, current
 
 
 def producer(args):
@@ -62,8 +71,8 @@ def verify(args):
         assert first["sandbox_status"] == first["run_status"] == "Running"
 
         with Terminal(new, "decline-stop", command) as wizard:
-            wizard.expect(STOP)
-            wizard.send("n")
+            confirm_repair(wizard)
+            wizard.send_key("n")
             assert wizard.wait() == 2
         old.guest("decline-kept-ram", PEER, 'test "$(cat /dev/shm/repair-stop-check)" = first')
         assert latest_run(old.home, PEER) == first
@@ -71,30 +80,39 @@ def verify(args):
         result["declined_run"] = first
 
         with Terminal(new, "reject-stale-generation", command) as wizard:
-            wizard.expect(STOP)
+            confirm_repair(wizard)
             old.stop(PEER)
             old.run("replace-peer", "start", PEER)
             old.guest("replacement-ram", PEER, "echo replacement >/dev/shm/repair-stop-check")
             second = latest_run(old.home, PEER)
             assert first["sandbox_id"] == second["sandbox_id"] and first["run_id"] != second["run_id"]
-            wizard.send("y")
+            wizard.send_key("y")
+            current = frame(wizard)
+            assert "Couldn't safely repair" in current, current
+            wizard.send_key("\x1b")
+            current = frame(wizard)
+            choose(wizard, current, "Finish")
             assert wizard.wait() != 0
         old.guest("stale-consent-kept-ram", PEER, 'test "$(cat /dev/shm/repair-stop-check)" = replacement')
         assert latest_run(old.home, PEER) == second
         result["replacement_survived_stale_stop"] = second
 
         with Terminal(new, "stop-and-recheck", command) as wizard:
-            wizard.expect(STOP)
-            wizard.send("y")
-            wizard.expect(MAINTENANCE)
+            confirm_repair(wizard)
+            wizard.send_key("y")
+            current = frame(wizard)
+            assert MAINTENANCE in current, current
             stopped = latest_run(old.home, PEER)
             assert stopped["run_id"] == second["run_id"] and stopped["sandbox_status"] == "Stopped"
             assert stopped["run_status"] == "Terminated" and stopped["reason"] == "ShutdownRequested"
             assert stopped["signals"] is None
             # The check must reach the separate cross-home prerequisite after the peer exits.
             # This fixture cannot attest to other homes or know about unrelated host workloads.
-            wizard.send("n")
+            wizard.send_key("\x1b")
             assert wizard.wait() == 2
+            assert "Repair cancelled. Results:" in wizard.transcript
+            assert f"stopped {PEER}" in wizard.transcript
+            assert "Completed actions were not undone" in wizard.transcript
         result["consented_run_stopped"] = stopped
         assert inventory(target) == before
         assert not (target / ".storage-migration").exists() and not (target / "state-layout.json").exists()

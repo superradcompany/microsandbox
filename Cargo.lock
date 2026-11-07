@@ -3911,6 +3911,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "console",
+ "crossterm",
  "dirs",
  "futures",
  "indicatif",

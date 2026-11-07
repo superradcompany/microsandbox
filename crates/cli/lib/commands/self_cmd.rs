@@ -74,7 +74,7 @@ pub enum SelfCommand {
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
 
-    /// Repair a local sandbox without starting it.
+    /// Repair local sandboxes without starting them.
     Repair(RepairArgs),
 
     /// Update msb and libkrunfw to the latest release.
