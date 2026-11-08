@@ -1213,6 +1213,16 @@ mod tests {
         std::fs::write(&target, "hidden").unwrap();
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
 
+        // Root can open a 0o444 file for writing, so the file wouldn't reproduce the bug.
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .is_ok()
+        {
+            eprintln!("skipping: this user can write to read-only files (root?)");
+            return;
+        }
+
         linux::ensure_file_bind_target(target.to_str().unwrap()).unwrap();
 
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hidden");
