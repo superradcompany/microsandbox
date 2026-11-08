@@ -10,8 +10,8 @@ use microsandbox_image::snapshot::migration::{
     translate_released_flat_forward, translate_v066_forward,
 };
 use microsandbox_image::snapshot::{DESCRIPTOR_FILENAME, Manifest, SnapshotState};
+use tar::{EntryType, Header};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, BufReader};
-use tokio_tar::{EntryType, Header};
 
 use crate::sandbox::{RootfsSource, SandboxConfig, config::SnapshotRestoreMode};
 use crate::snapshot::validate_checkpoint_owned_inventory;

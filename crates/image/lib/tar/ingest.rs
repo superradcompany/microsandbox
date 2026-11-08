@@ -11,16 +11,16 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use async_compression::tokio::bufread::{GzipDecoder, ZstdDecoder};
-use futures::StreamExt;
 use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
-use tokio_tar as tar;
 
-use super::pax::EmptyXattrFilter;
 use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata,
     RegularFileId, RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
 };
+
+use super::pax::EmptyXattrFilter;
+use super::records::{Member, Records};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -193,7 +193,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
     limits: &ResourceLimits,
     mut spool: Option<&mut DataSpool>,
 ) -> Result<FileTree, IngestError> {
-    let mut archive = tar::Archive::new(EmptyXattrFilter::new(reader));
+    let mut archive = Records::new(EmptyXattrFilter::new(reader));
     let mut tree = FileTree::new();
     let mut entry_count: u64 = 0;
     let mut total_size: u64 = 0;
@@ -201,20 +201,14 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
     let mut spool_read_buf = Vec::new();
     let mut spool_write_buf = Vec::new();
 
-    let mut entries = archive.entries().map_err(IngestError::Io)?;
-
-    while let Some(entry_result) = entries.next().await {
-        let mut entry = entry_result.map_err(IngestError::Io)?;
-
+    while let Some(entry) = archive.next().await? {
         entry_count += 1;
         if entry_count > limits.max_entry_count {
             return Err(IngestError::EntryCountExceeded);
         }
 
-        let header = entry.header().clone();
-
-        // Get the raw path bytes. Entry::path_bytes handles PAX extended headers.
-        let raw_path = entry.path_bytes().map_err(IngestError::Io)?;
+        let header = &entry.header;
+        let raw_path = entry.path_bytes();
         let path = normalize_path(&raw_path, limits)?;
 
         // Skip empty paths (root directory entry `./` after stripping).
@@ -226,17 +220,14 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
         let entry_type = header.entry_type();
 
         // Extract metadata from the header.
-        let metadata = extract_metadata(&header);
+        let metadata = extract_metadata(&entry);
 
         match entry_type {
             tar::EntryType::Link => {
                 // Hardlink — look up the target in the tree and clone its data.
-                let link_target_bytes = entry
-                    .link_name_bytes()
-                    .map_err(IngestError::Io)?
-                    .ok_or_else(|| {
-                        IngestError::InvalidEntry("hardlink with no target".to_string())
-                    })?;
+                let link_target_bytes = entry.link_name_bytes().ok_or_else(|| {
+                    IngestError::InvalidEntry("hardlink with no target".to_string())
+                })?;
                 let target_path = normalize_path(&link_target_bytes, limits)?;
                 let target_path = match target_path {
                     Some(p) => p,
@@ -259,12 +250,9 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                 tree.insert(&path, node)?;
             }
             tar::EntryType::Symlink => {
-                let link_target = entry
-                    .link_name_bytes()
-                    .map_err(IngestError::Io)?
-                    .ok_or_else(|| {
-                        IngestError::InvalidEntry("symlink with no target".to_string())
-                    })?;
+                let link_target = entry.link_name_bytes().ok_or_else(|| {
+                    IngestError::InvalidEntry("symlink with no target".to_string())
+                })?;
 
                 if link_target.len() > limits.max_symlink_target {
                     return Err(IngestError::SymlinkTargetTooLong(
@@ -300,7 +288,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
             }
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 // Read file data.
-                let size = header.size().map_err(IngestError::Io)?;
+                let size = entry.size;
                 if size > limits.max_file_size {
                     return Err(IngestError::FileTooLarge(
                         String::from_utf8_lossy(&path).into_owned(),
@@ -332,7 +320,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                             && let Some(spool) = spool.as_mut()
                         {
                             stream_entry_to_spool(
-                                &mut entry,
+                                archive.body(),
                                 size,
                                 spool,
                                 &mut spool_read_buf,
@@ -340,7 +328,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                             )
                             .await?
                         } else {
-                            FileData::Memory(read_entry_to_memory(&mut entry, size).await?)
+                            FileData::Memory(read_entry_to_memory(archive.body(), size).await?)
                         };
 
                         let node = TreeNode::RegularFile(RegularFileNode {
@@ -378,17 +366,15 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
                 let node = TreeNode::Fifo(metadata);
                 tree.insert(&path, node)?;
             }
-            // GNU extensions and PAX headers are handled internally by the tar library.
             // Socket type is not a standard tar entry type but we handle it if encountered.
-            tar::EntryType::Other(0o140) => {
+            kind if kind.as_byte() == 0o140 => {
                 // Unix socket (type '`' = 0o140 = 96).
                 let node = TreeNode::Socket(metadata);
                 tree.insert(&path, node)?;
             }
             _ => {
-                // Skip GNU long name/link, PAX headers, and other extension entries.
-                // These are handled internally by the tar library when reading
-                // subsequent entries.
+                // Ignore unsupported member types, including GNU sparse files.
+                // The record reader validates their framing and drains their bodies.
             }
         }
 
@@ -595,9 +581,10 @@ fn strip_leading_slashes(path: &[u8]) -> &[u8] {
 }
 
 /// Extract metadata from a tar header.
-fn extract_metadata(header: &tar::Header) -> InodeMetadata {
-    let uid = header.uid().unwrap_or(0) as u32;
-    let gid = header.gid().unwrap_or(0) as u32;
+fn extract_metadata(entry: &Member) -> InodeMetadata {
+    let header = &entry.header;
+    let uid = entry.uid.unwrap_or_else(|| header.uid().unwrap_or(0)) as u32;
+    let gid = entry.gid.unwrap_or_else(|| header.gid().unwrap_or(0)) as u32;
     let mode = (header.mode().unwrap_or(0o644) & 0o7777) as u16;
     let mtime = header.mtime().unwrap_or(0);
 
@@ -745,7 +732,7 @@ fn handle_hardlink(
 }
 
 async fn read_entry_to_memory<R: AsyncRead + Unpin>(
-    entry: &mut tar::Entry<R>,
+    entry: &mut R,
     size: u64,
 ) -> Result<Vec<u8>, IngestError> {
     let size = usize::try_from(size)
@@ -783,7 +770,7 @@ async fn read_entry_to_memory<R: AsyncRead + Unpin>(
 }
 
 async fn stream_entry_to_spool<R: AsyncRead + Unpin>(
-    entry: &mut tar::Entry<R>,
+    entry: &mut R,
     size: u64,
     spool: &mut DataSpool,
     read_buf: &mut Vec<u8>,
@@ -1051,13 +1038,236 @@ mod tests {
 
     // ---- Integration tests using the sync `tar` crate to build test archives ----
 
-    // Use the sync `tar` crate (dev-dependency) for building test tarballs.
-    // The parent module aliases `tokio_tar` as `tar`, so we use the explicit
-    // crate path here to avoid ambiguity.
+    // Use the synchronous builder only to construct test fixtures.
     use ::tar as sync_tar;
     use async_compression::tokio::write::GzipEncoder;
     use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
+
+    fn physical_record(
+        archive: &mut Vec<u8>,
+        kind: u8,
+        name: &[u8],
+        declared_size: u64,
+        body: &[u8],
+    ) {
+        let mut header = sync_tar::Header::new_ustar();
+        header.as_ustar_mut().unwrap().name[..name.len()].copy_from_slice(name);
+        header.set_entry_type(sync_tar::EntryType::new(kind));
+        header.set_size(declared_size);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.extend_from_slice(header.as_bytes());
+        archive.extend_from_slice(body);
+        archive.resize(archive.len().next_multiple_of(512), 0);
+    }
+
+    fn pax_records(fields: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut records = Vec::new();
+        for (key, value) in fields {
+            let base = key.len() + value.len() + 3;
+            let mut len = base + 1;
+            while len != base + len.to_string().len() {
+                len = base + len.to_string().len();
+            }
+            records.extend_from_slice(format!("{len} ").as_bytes());
+            records.extend_from_slice(key);
+            records.push(b'=');
+            records.extend_from_slice(value);
+            records.push(b'\n');
+        }
+        records
+    }
+
+    #[tokio::test]
+    async fn ingest_pax_overrides_names_ids_and_body_framing() {
+        use tokio::io::AsyncWriteExt;
+
+        let mut archive = Vec::new();
+        let pax = pax_records(&[
+            (b"path", b"discarded"),
+            (b"path", b"dir/\xff"),
+            (b"size", b"513"),
+            (b"uid", b"1234"),
+            (b"gid", b"2345"),
+        ]);
+        physical_record(&mut archive, b'x', b"PaxHeader", pax.len() as u64, &pax);
+        let body = vec![b'q'; 513];
+        physical_record(&mut archive, b'0', b"placeholder", 0, &body);
+        let pax = pax_records(&[(b"linkpath", b"discarded"), (b"linkpath", b"dir/\xff")]);
+        physical_record(&mut archive, b'x', b"PaxHeader", pax.len() as u64, &pax);
+        physical_record(&mut archive, b'1', b"hardlink", 0, b"");
+        let (mut sender, reader) = tokio::io::duplex(7);
+        let send = async move { sender.write_all(&archive).await.unwrap() };
+        let limits = ResourceLimits::default();
+        let ((), tree) = tokio::join!(send, ingest_tar(reader, &limits, None));
+        let tree = tree.unwrap();
+        let Some(TreeNode::RegularFile(file)) = tree.get(b"dir/\xff") else {
+            panic!("expected effective PAX path");
+        };
+        let Some(TreeNode::RegularFile(link)) = tree.get(b"hardlink") else {
+            panic!("expected hardlink via effective PAX linkpath");
+        };
+        assert_eq!(file.data, FileData::Memory(body));
+        assert_eq!((file.metadata.uid, file.metadata.gid), (1234, 2345));
+        assert_eq!((file.id, file.nlink), (link.id, 2));
+        assert!(tree.get(b"placeholder").is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_gnu_names_stop_at_first_nul_without_consuming_pax_size() {
+        let mut archive = Vec::new();
+        let pax = pax_records(&[(b"size", b"513")]);
+        physical_record(&mut archive, b'x', b"PaxHeader", pax.len() as u64, &pax);
+        let name = b"gnu-name\0ignored";
+        physical_record(&mut archive, b'L', b"LongName", name.len() as u64, name);
+        let body = vec![b'q'; 513];
+        physical_record(&mut archive, b'0', b"placeholder", 0, &body);
+        let target = b"gnu-name\0ignored";
+        physical_record(&mut archive, b'K', b"LongLink", target.len() as u64, target);
+        physical_record(&mut archive, b'2', b"symlink", 0, b"");
+        let tree = ingest_tar(archive.as_slice(), &ResourceLimits::default(), None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(tree.get(b"gnu-name"), Some(TreeNode::RegularFile(file)) if file.data == FileData::Memory(body))
+        );
+        assert!(
+            matches!(tree.get(b"symlink"), Some(TreeNode::Symlink(link)) if link.target == b"gnu-name")
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_invalid_or_ambiguous_local_extensions() {
+        let path = pax_records(&[(b"path", b"equal")]);
+        let link = pax_records(&[(b"linkpath", b"equal")]);
+        for records in [
+            vec![(b'x', b"12 path=x\n".as_slice())],
+            vec![(b'x', path.as_slice()), (b'x', path.as_slice())],
+            vec![(b'L', b"equal\0"), (b'L', b"equal\0")],
+            vec![(b'x', path.as_slice()), (b'L', b"equal\0")],
+            vec![(b'L', b"equal\0"), (b'x', path.as_slice())],
+            vec![(b'x', link.as_slice()), (b'K', b"equal\0")],
+            vec![(b'K', b"equal\0"), (b'x', link.as_slice())],
+        ] {
+            let mut archive = Vec::new();
+            for (kind, payload) in records {
+                physical_record(
+                    &mut archive,
+                    kind,
+                    b"Extension",
+                    payload.len() as u64,
+                    payload,
+                );
+            }
+            physical_record(&mut archive, b'0', b"file", 0, b"");
+            assert!(matches!(
+                ingest_tar(archive.as_slice(), &ResourceLimits::default(), None).await,
+                Err(IngestError::Io(_))
+            ));
+        }
+        let mut archive = Vec::new();
+        physical_record(&mut archive, b'x', b"PaxHeader", path.len() as u64, &path);
+        assert!(matches!(
+            ingest_tar(archive.as_slice(), &ResourceLimits::default(), None).await,
+            Err(IngestError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ingest_preserves_solaris_local_and_ignored_global_pax_framing() {
+        let mut archive = Vec::new();
+        let pax = pax_records(&[(b"size", b"9999"), (b"path", b"ignored-name")]);
+        physical_record(&mut archive, b'x', b"PaxHeader", pax.len() as u64, &pax);
+        // Global metadata is neither parsed nor inherited.
+        physical_record(&mut archive, b'g', b"Global", 7, b"ignored");
+        let pax = pax_records(&[(b"path", b"solaris"), (b"uid", b"42")]);
+        physical_record(&mut archive, b'X', b"Solaris", pax.len() as u64, &pax);
+        physical_record(&mut archive, b'0', b"placeholder", 2, b"ok");
+
+        let tree = ingest_tar(archive.as_slice(), &ResourceLimits::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(tree.node_count(), 1);
+        assert!(
+            matches!(tree.get(b"solaris"), Some(TreeNode::RegularFile(file))
+            if file.data == FileData::Memory(b"ok".to_vec()) && file.metadata.uid == 42)
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_validates_and_skips_gnu_sparse_without_expanding_holes() {
+        let mut header = sync_tar::Header::new_gnu();
+        header.set_path("sparse").unwrap();
+        header.set_entry_type(sync_tar::EntryType::GNUSparse);
+        header.set_size(3);
+        let hole = 1_u64 << 38; // forces base-256 GNU sparse numbers
+        let gnu = header.as_gnu_mut().unwrap();
+        gnu.set_real_size(hole + 3);
+        gnu.set_is_extended(true);
+        header.set_cksum();
+        let mut extension = sync_tar::GnuExtSparseHeader::new();
+        let first = &mut extension.sparse_mut()[0];
+        first.set_offset(hole);
+        first.set_length(3);
+
+        let mut archive = header.as_bytes().to_vec();
+        archive.extend_from_slice(extension.as_bytes());
+        archive.extend_from_slice(b"abc");
+        archive.resize(archive.len().next_multiple_of(512), 0);
+        physical_record(&mut archive, b'0', b"after", 2, b"ok");
+        let tree = ingest_tar(archive.as_slice(), &ResourceLimits::default(), None)
+            .await
+            .unwrap();
+        assert!(tree.get(b"sparse").is_none());
+        assert!(
+            matches!(tree.get(b"after"), Some(TreeNode::RegularFile(file))
+            if file.data == FileData::Memory(b"ok".to_vec()))
+        );
+
+        // A half-empty descriptor must not be silently ignored.
+        let incomplete = &mut extension.sparse_mut()[1];
+        incomplete.set_length(0);
+        archive[512..1024].copy_from_slice(extension.as_bytes());
+        assert!(matches!(
+            ingest_tar(archive.as_slice(), &ResourceLimits::default(), None).await,
+            Err(IngestError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn ingest_rejects_incomplete_records_and_ambiguous_ustar() {
+        let mut archive = Vec::new();
+        physical_record(&mut archive, b'0', b"file", 3, b"abc");
+        for end in [511, 514, 1023] {
+            assert!(matches!(
+                ingest_tar(&archive[..end], &ResourceLimits::default(), None).await,
+                Err(IngestError::Io(_))
+            ));
+        }
+
+        let mut header = sync_tar::Header::new_ustar();
+        header.set_path("file").unwrap();
+        header.set_size(0);
+        header.as_ustar_mut().unwrap().version = [0; 2];
+        header.set_cksum();
+        assert!(matches!(
+            ingest_tar(
+                header.as_bytes().as_slice(),
+                &ResourceLimits::default(),
+                None
+            )
+            .await,
+            Err(IngestError::Io(_))
+        ));
+
+        let mut archive = Vec::new();
+        physical_record(&mut archive, b'0', b"file", u64::MAX, b"");
+        assert!(matches!(
+            ingest_tar(archive.as_slice(), &ResourceLimits::default(), None).await,
+            Err(IngestError::Io(_))
+        ));
+    }
 
     fn build_tar(build: impl FnOnce(&mut sync_tar::Builder<Vec<u8>>)) -> Vec<u8> {
         let mut builder = sync_tar::Builder::new(Vec::new());

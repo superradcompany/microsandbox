@@ -5,9 +5,9 @@
 //! written, are stored as old-GNU sparse entries (type `S`): only allocated extents are read and archived, so save cost scales with the data a sandbox actually wrote instead of
 //! the upper layer's logical size. Dense files keep plain regular entries. Plain `.tar` archives are also accepted on load.
 //!
-//! Load walks the tar records itself rather than going through `tokio_tar::Archive`: the entry grammar is closed (regular files, directories, and old-GNU sparse entries at fixed
+//! Load walks the tar records itself: the entry grammar is closed (regular files, directories, and old-GNU sparse entries at fixed
 //! depths, produced by our own save path), and owning the walk lets sparse entries be restored map-driven: data runs copied straight off the wire, holes never written and kept
-//! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tokio_tar` remains the header codec and the dense-entry writer.
+//! unallocated per platform ([`extent::mark_sparse`] on NTFS, [`extent::punch_hole_aligned`] on APFS). `tar` encodes and decodes headers; Tokio streams the bodies.
 
 mod batch;
 mod delta;
@@ -36,8 +36,10 @@ use microsandbox_types::snapshot::GUEST_CLOCK_EXTENSION;
 use microsandbox_utils::extent::{self, ExtentMap};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader, ReadBuf};
-use tokio_tar::{Builder, EntryType, Header, HeaderMode};
+use tar::{EntryType, GnuExtSparseHeader, GnuSparseHeader, Header, HeaderMode};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -74,6 +76,9 @@ struct UnpackedArchive {
     head: Option<String>,
     inventory: Option<ArchiveInventory>,
 }
+
+/// Writes the existing snapshot tar grammar without doing work on drop.
+struct ArchiveWriter<W>(W);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -612,8 +617,6 @@ impl SparseMap {
         header: &Header,
         archived: u64,
     ) -> MicrosandboxResult<Self> {
-        use tokio_tar::GnuExtSparseHeader;
-
         let gnu = header.as_gnu().ok_or_else(|| {
             MicrosandboxError::Custom("sparse entry does not carry a GNU header".into())
         })?;
@@ -622,8 +625,9 @@ impl SparseMap {
         })?;
 
         let mut map: Vec<(u64, u64)> = Vec::new();
-        let mut push_slot = |slot: &tokio_tar::GnuSparseHeader| -> MicrosandboxResult<()> {
-            if slot.is_empty() {
+        let mut push_slot = |slot: &GnuSparseHeader| -> MicrosandboxResult<()> {
+            // A half-empty slot must be rejected by the numeric decoder.
+            if slot.offset[0] == 0 && slot.numbytes[0] == 0 {
                 return Ok(());
             }
 
@@ -717,6 +721,68 @@ impl SparseMap {
             entries.push((self.len, 0));
         }
         entries
+    }
+}
+
+impl<W: AsyncWrite + Unpin> ArchiveWriter<W> {
+    fn new(writer: W) -> Self {
+        Self(writer)
+    }
+
+    fn get_mut(&mut self) -> &mut W {
+        &mut self.0
+    }
+
+    async fn into_inner(mut self) -> std::io::Result<W> {
+        self.0.write_all(&[0; 2 * TAR_BLOCK as usize]).await?;
+        Ok(self.0)
+    }
+
+    async fn append_data<R: AsyncRead + Unpin>(
+        &mut self,
+        header: &mut Header,
+        name: &str,
+        mut body: R,
+    ) -> MicrosandboxResult<()> {
+        if let Err(error) = header.set_path(name) {
+            let width = header.as_old().name.len();
+            if name.len() <= width
+                || name.as_bytes().contains(&0)
+                || portable_archive_path(Path::new(name))? != name
+            {
+                return Err(error.into());
+            }
+
+            let mut long = Header::new_gnu();
+            long.as_gnu_mut().expect("GNU header").name[..13].copy_from_slice(b"././@LongLink");
+            long.set_entry_type(EntryType::GNULongName);
+            long.set_mode(0o644);
+            long.set_uid(0);
+            long.set_gid(0);
+            let size = name.len() as u64 + 1;
+            long.set_size(size);
+            long.set_cksum();
+            self.0.write_all(long.as_bytes()).await?;
+            self.0.write_all(name.as_bytes()).await?;
+            self.0.write_all(&[0]).await?;
+            self.0
+                .write_all(&[0; TAR_BLOCK as usize][..tar_pad(size) as usize])
+                .await?;
+
+            // The long-name record supplies the actual path. Keep the same
+            // UTF-8 boundary used by the previous writer for the short field.
+            let prefix = &name.as_bytes()[..name.floor_char_boundary(width)];
+            let field = &mut header.as_old_mut().name;
+            field.fill(0);
+            field[..prefix.len()].copy_from_slice(prefix);
+        }
+        header.set_cksum();
+        self.0.write_all(header.as_bytes()).await?;
+        let size = tokio::io::copy(&mut body, &mut self.0).await?;
+        self.0
+            .write_all(&[0; TAR_BLOCK as usize][..tar_pad(size) as usize])
+            .await?;
+        Ok(())
     }
 }
 
@@ -897,7 +963,7 @@ pub(crate) async fn save_snapshot_expected(
     let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if opts.plain_tar {
-            let mut builder = Builder::new(out_file);
+            let mut builder = ArchiveWriter::new(out_file);
             // Entry writers retain hashing and sparse-I/O buffers across await
             // points. Keep that state off Windows' smaller worker stack.
             Box::pin(write_archive_entries(
@@ -914,7 +980,7 @@ pub(crate) async fn save_snapshot_expected(
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         } else {
             let writer = ZstdEncoder::new(out_file);
-            let mut builder = Builder::new(writer);
+            let mut builder = ArchiveWriter::new(writer);
             Box::pin(write_archive_entries(
                 &mut builder,
                 &snapshots,
@@ -1024,7 +1090,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
     let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if plain_tar {
-            let mut builder = Builder::new(out_file);
+            let mut builder = ArchiveWriter::new(out_file);
             write_direct_archive_entries(
                 &mut builder,
                 manifest,
@@ -1038,7 +1104,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         } else {
             let writer = ZstdEncoder::new(out_file);
-            let mut builder = Builder::new(writer);
+            let mut builder = ArchiveWriter::new(writer);
             write_direct_archive_entries(
                 &mut builder,
                 manifest,
@@ -1128,7 +1194,7 @@ pub(in crate::backend::local) async fn save_direct_checkpoint_snapshot(
     let write_started = Instant::now();
     let write_result: MicrosandboxResult<()> = async {
         if plain_tar {
-            let mut builder = Builder::new(out_file);
+            let mut builder = ArchiveWriter::new(out_file);
             write_direct_checkpoint_archive_entries(
                 &mut builder,
                 manifest,
@@ -1142,7 +1208,7 @@ pub(in crate::backend::local) async fn save_direct_checkpoint_snapshot(
             tokio::io::AsyncWriteExt::shutdown(&mut inner).await?;
         } else {
             let writer = ZstdEncoder::new(out_file);
-            let mut builder = Builder::new(writer);
+            let mut builder = ArchiveWriter::new(writer);
             write_direct_checkpoint_archive_entries(
                 &mut builder,
                 manifest,
@@ -1192,7 +1258,7 @@ pub(in crate::backend::local) async fn save_direct_checkpoint_snapshot(
 }
 
 async fn write_direct_archive_entries<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
@@ -1346,7 +1412,7 @@ where
 }
 
 async fn write_direct_checkpoint_archive_entries<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     manifest: &microsandbox_image::snapshot::Manifest,
     labels: &BTreeMap<String, String>,
     suggested_name: &str,
@@ -1585,7 +1651,7 @@ async fn remove_private_stage_leases(child_stage: &Path) -> MicrosandboxResult<(
 }
 
 async fn write_archive_entries<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     snapshots: &[Snapshot],
     cache_files: &[(PathBuf, String)],
     head: &Snapshot,
@@ -1735,7 +1801,7 @@ where
 }
 
 async fn append_bytes<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     name: &str,
     bytes: &[u8],
 ) -> MicrosandboxResult<()>
@@ -2210,7 +2276,7 @@ fn archive_temp_path(out: &Path) -> MicrosandboxResult<PathBuf> {
 /// Append one file, as an old-GNU sparse entry when it has holes so
 /// only allocated extents are read, dense otherwise.
 async fn append_artifact_file<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     path: &Path,
     name: &str,
     kind: &str,
@@ -2222,7 +2288,7 @@ where
 }
 
 async fn append_artifact_file_with_prefix<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     path: &Path,
     name: &str,
     kind: &str,
@@ -2275,7 +2341,7 @@ where
 /// Append `path` as an old-GNU sparse entry if it has holes. Returns `false` without writing anything when the file is better served by the dense path (no holes, empty, extents
 /// not enumerable on this filesystem, or a name too long for the fixed GNU header path field).
 async fn try_append_sparse<W>(
-    builder: &mut Builder<W>,
+    builder: &mut ArchiveWriter<W>,
     path: &Path,
     name: &str,
     kind: &str,
@@ -2284,8 +2350,7 @@ async fn try_append_sparse<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-    use tokio_tar::GnuExtSparseHeader;
+    use tokio::io::AsyncSeekExt;
 
     let meta = tokio::fs::metadata(path).await?;
     if !meta.is_file() {
@@ -2478,7 +2543,7 @@ fn write_tar_numeric(field: &mut [u8; 12], value: u64) {
 }
 
 /// Walk the archive's 512-byte records directly. The grammar is closed — regular files, directories, and old-GNU sparse entries at fixed depths, produced by our own exporter — so
-/// a small owned walker replaces `tokio_tar::Archive` and lets sparse entries restore map-driven instead of through the library's opaque unpack.
+/// this walker restores sparse ranges directly and leaves holes unallocated.
 async fn unpack_archive<R>(
     reader: R,
     snapshots_dir: &Path,
@@ -4678,6 +4743,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extracts_legacy_base256_sparse_ranges_without_expanding_holes() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("disk.ext4");
+        let offset = 8 * 1024 * 1024 * 1024;
+        let body = [0x5a; TAR_BLOCK as usize];
+        let size = body.len() as u64;
+        let logical_size = offset + size;
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::GNUSparse);
+        header.set_size(size);
+        let gnu = header.as_gnu_mut().unwrap();
+        write_tar_numeric(&mut gnu.realsize, logical_size);
+        write_tar_numeric(&mut gnu.sparse[0].offset, offset);
+        // A GNU producer can also encode a small nonzero run length in base 256.
+        gnu.sparse[0].numbytes[0] = 0x80;
+        gnu.sparse[0].numbytes[4..].copy_from_slice(&size.to_be_bytes());
+        header.set_cksum();
+
+        let member = unpack_sparse_entry(
+            &mut body.as_slice(),
+            &header,
+            size,
+            &target,
+            "file-payload",
+            "files/digest/disk.ext4",
+        )
+        .await
+        .unwrap();
+        assert_eq!(member.sparse_ranges, [[offset, size]]);
+        assert_eq!(member.encoded_size, size);
+        let mut restored = tokio::fs::File::open(target).await.unwrap();
+        let metadata = restored.metadata().await.unwrap();
+        assert_eq!(metadata.len(), logical_size);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert!(metadata.blocks() * TAR_BLOCK < logical_size);
+        }
+        restored
+            .seek(std::io::SeekFrom::Start(offset))
+            .await
+            .unwrap();
+        let mut actual = [0; TAR_BLOCK as usize];
+        restored.read_exact(&mut actual).await.unwrap();
+        assert_eq!(actual, body);
+    }
+
+    #[tokio::test]
     async fn released_archive_uses_the_descriptors_payload_filename() {
         use tokio::io::AsyncWriteExt;
 
@@ -6031,22 +6146,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // Inspect the actual transport, not just same-reader roundtrip results.
-        let compressed = tokio::fs::File::open(&archive).await.unwrap();
-        let decoder = ZstdDecoder::new(tokio::io::BufReader::new(compressed));
-        let mut tar = tokio_tar::Archive::new(decoder);
-        let mut entries = tar.entries().unwrap();
-        let mut found_sparse = false;
-        while let Some(entry) = futures::StreamExt::next(&mut entries).await {
-            let entry = entry.unwrap();
-            if entry.path().unwrap() == Path::new(&archive_layer_path) {
-                assert!(entry.header().entry_type().is_gnu_sparse());
-                assert!(entry.header().as_gnu().unwrap().is_extended());
-                assert!(entry.header().entry_size().unwrap() < 4 * 1024 * 1024);
-                found_sparse = true;
-            }
-        }
-        assert!(found_sparse);
         let plain_archive = directory.path().join("checkpoint-plain.msnap");
         let mut decoder = ZstdDecoder::new(BufReader::new(
             tokio::fs::File::open(&archive).await.unwrap(),
@@ -6057,6 +6156,19 @@ mod tests {
             .unwrap();
         plain_file.sync_all().await.unwrap();
         drop(plain_file);
+        // Inspect the actual transport with an independent archive reader.
+        let mut transport = tar::Archive::new(std::fs::File::open(&plain_archive).unwrap());
+        let mut found_sparse = false;
+        for entry in transport.entries().unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().unwrap() == Path::new(&archive_layer_path) {
+                assert!(entry.header().entry_type().is_gnu_sparse());
+                assert!(entry.header().as_gnu().unwrap().is_extended());
+                assert!(entry.header().entry_size().unwrap() < 4 * 1024 * 1024);
+                found_sparse = true;
+            }
+        }
+        assert!(found_sparse);
 
         for archive_path in [&archive, &plain_archive] {
             for disk_only in [false, true] {
