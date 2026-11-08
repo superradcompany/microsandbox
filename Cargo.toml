@@ -103,7 +103,6 @@ test-utils = { path = "crates/testing/utils" }
 
 # External crates.
 anyhow = "1.0"
-astral-tokio-tar = "0.6"
 base64 = "0.23"
 async-compression = "0.4"
 blake3 = "1.8"

@@ -11,7 +11,6 @@ edition.workspace = true
 path = "lib/lib.rs"
 
 [dependencies]
-astral-tokio-tar = { workspace = true }
 async-compression = { workspace = true, features = ["gzip", "tokio", "zstd"] }
 blake3.workspace = true
 chrono.workspace = true
