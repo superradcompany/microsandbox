@@ -456,8 +456,9 @@ jobs:
           # The target KVM job installs the freshly built runtime separately.
           # The KVM job supplies both the host runtime and Agentd explicitly,
           # so this archive needs neither download nor embedded binary features.
+          # Include SSH so the exec and SFTP VM regressions are present in the archive.
           mold -run cargo nextest archive -p microsandbox --tests \
-            --no-default-features --features keyring,local,net \
+            --no-default-features --features keyring,local,net,ssh \
             --archive-file artifacts/rust-integration-tests.tar.zst
 
       - name: Upload nextest archive
