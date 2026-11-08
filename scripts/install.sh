@@ -109,7 +109,7 @@ link_command() {
     fi
 
     mkdir -p "$LOCAL_BIN_DIR"
-    ln -sf "$_target" "$_link"
+    ln -sfn "$_target" "$_link"
     success "Linked $_link -> $_target"
 }
 
