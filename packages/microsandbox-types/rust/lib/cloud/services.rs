@@ -33,6 +33,7 @@ pub struct CloudService {
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CloudServiceStatus {
     /// The Service routes requests to its target.
     Enabled,
@@ -75,4 +76,20 @@ pub struct CloudUpdateServiceRequest {
     /// New target when moving or reattaching the Service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<CloudServiceTarget>,
+}
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl CloudServiceStatus {
+    /// Return the lowercase status used by Service API and SDK surfaces.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Disabled => "disabled",
+            Self::Detached => "detached",
+            Self::Unknown => "unknown",
+        }
+    }
 }

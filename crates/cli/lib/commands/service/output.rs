@@ -58,10 +58,5 @@ fn target_label(target: Option<&ServiceTarget>) -> String {
 }
 
 fn status_label(status: CloudServiceStatus) -> &'static str {
-    match status {
-        CloudServiceStatus::Enabled => "enabled",
-        CloudServiceStatus::Disabled => "disabled",
-        CloudServiceStatus::Detached => "detached",
-        CloudServiceStatus::Unknown => "unknown",
-    }
+    status.as_str()
 }

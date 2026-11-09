@@ -238,10 +238,5 @@ fn target_to_py(py: Python<'_>, target: ServiceTarget) -> PyResult<Py<PyAny>> {
 }
 
 fn service_status(status: ServiceStatus) -> &'static str {
-    match status {
-        ServiceStatus::Enabled => "enabled",
-        ServiceStatus::Disabled => "disabled",
-        ServiceStatus::Detached => "detached",
-        ServiceStatus::Unknown => "unknown",
-    }
+    status.as_str()
 }

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use magnus::{
     Error, RHash, Ruby, Value, function, method, prelude::*, scan_args::scan_args, typed_data,
 };
-use microsandbox_core::{Service, ServiceBuilder, ServicePage, ServiceStatus, ServiceTarget};
+use microsandbox_core::{Service, ServiceBuilder, ServicePage, ServiceTarget};
 
 use crate::{
     current_ruby, keyword, reject_unknown_keywords, required_keyword, run, run_service_change,
@@ -40,12 +40,7 @@ impl RubyService {
     }
 
     fn status(&self) -> &'static str {
-        match self.inner.status() {
-            ServiceStatus::Enabled => "enabled",
-            ServiceStatus::Disabled => "disabled",
-            ServiceStatus::Detached => "detached",
-            ServiceStatus::Unknown => "unknown",
-        }
+        self.inner.status().as_str()
     }
 
     fn target(ruby: &Ruby, this: &Self) -> Result<Option<RHash>, Error> {

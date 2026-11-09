@@ -220,10 +220,5 @@ fn target_port_for_change(port: f64) -> Result<u16> {
 }
 
 fn service_status(status: ServiceStatus) -> &'static str {
-    match status {
-        ServiceStatus::Enabled => "enabled",
-        ServiceStatus::Disabled => "disabled",
-        ServiceStatus::Detached => "detached",
-        ServiceStatus::Unknown => "unknown",
-    }
+    status.as_str()
 }
