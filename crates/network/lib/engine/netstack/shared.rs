@@ -92,17 +92,20 @@ pub struct SharedState {
     /// NAT64 `/96` prefixes used by policy classification.
     nat64_prefixes: OnceLock<Vec<Ipv6Network>>,
 
-    /// Aggregate network byte counters at the guest/runtime boundary.
+    /// Aggregate network counters at the guest/runtime boundary.
     metrics: NetworkMetrics,
 
     /// HTTP denial settings installed before the network starts.
     http: OnceLock<HttpConfig>,
 }
 
-/// Aggregate network byte counters shared with the runtime metrics sampler.
+/// Aggregate network counters shared with the runtime metrics sampler.
 pub struct NetworkMetrics {
     tx_bytes: AtomicU64,
     rx_bytes: AtomicU64,
+    inbound_tcp_rejected: AtomicU64,
+    outbound_tcp_rejected: AtomicU64,
+    outbound_udp_evicted: AtomicU64,
 }
 
 /// Address family for resolved hostname entries.
@@ -350,6 +353,42 @@ impl SharedState {
         true
     }
 
+    /// Count a published TCP connection rejected by the admission queue.
+    pub(crate) fn record_inbound_tcp_rejection(&self) {
+        self.metrics
+            .inbound_tcp_rejected
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Cumulative published TCP connections rejected by the admission queue.
+    pub fn inbound_tcp_rejected(&self) -> u64 {
+        self.metrics.inbound_tcp_rejected.load(Ordering::Relaxed)
+    }
+
+    /// Publish the outbound tracker's cumulative active-cap rejection count.
+    pub(crate) fn set_outbound_tcp_rejected(&self, total: u64) {
+        self.metrics
+            .outbound_tcp_rejected
+            .store(total, Ordering::Relaxed);
+    }
+
+    /// Outbound TCP connections rejected by the active connection cap.
+    pub fn outbound_tcp_rejected(&self) -> u64 {
+        self.metrics.outbound_tcp_rejected.load(Ordering::Relaxed)
+    }
+
+    /// Count an outbound UDP session evicted to enforce the session cap.
+    pub(crate) fn record_outbound_udp_eviction(&self) {
+        self.metrics
+            .outbound_udp_evicted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Outbound UDP sessions evicted to enforce the session cap.
+    pub fn outbound_udp_evicted(&self) -> u64 {
+        self.metrics.outbound_udp_evicted.load(Ordering::Relaxed)
+    }
+
     /// Total bytes transmitted by the guest into the runtime.
     pub fn tx_bytes(&self) -> u64 {
         self.metrics.tx_bytes.load(Ordering::Relaxed)
@@ -366,6 +405,9 @@ impl Default for NetworkMetrics {
         Self {
             tx_bytes: AtomicU64::new(0),
             rx_bytes: AtomicU64::new(0),
+            inbound_tcp_rejected: AtomicU64::new(0),
+            outbound_tcp_rejected: AtomicU64::new(0),
+            outbound_udp_evicted: AtomicU64::new(0),
         }
     }
 }

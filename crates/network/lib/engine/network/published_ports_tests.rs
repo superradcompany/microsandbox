@@ -60,6 +60,38 @@ fn published_ports_work_without_host_routes() {
     });
 }
 
+#[tokio::test]
+async fn start_fails_when_a_published_port_is_taken() {
+    let holder = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let host_address = holder.local_addr().unwrap();
+    let mut config = NetworkConfig::default();
+    config.tls.enabled = false;
+    config.ports.push(PublishedPort {
+        host_port: host_address.port(),
+        guest_port: 8000,
+        protocol: PortProtocol::Tcp,
+        host_bind: host_address.ip(),
+    });
+    let mut network = SmoltcpNetwork::build(
+        config.resolve(&EnvNetworkSecretResolver).unwrap(),
+        7,
+        microsandbox_types::DeploymentProfile::SingleTenant,
+        HostRoutes {
+            ipv4: false,
+            ipv6: false,
+        },
+    )
+    .unwrap();
+
+    let error = network
+        .start(tokio::runtime::Handle::current())
+        .unwrap_err();
+
+    assert_eq!(error.bind_addr, host_address);
+    assert_eq!(error.source.kind(), std::io::ErrorKind::AddrInUse);
+    assert!(network.poll_handle.is_none());
+}
+
 async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
     let host_address = match protocol {
         PortProtocol::Tcp => {
@@ -141,7 +173,7 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
             sockets.add(socket)
         }
     };
-    network.start(tokio::runtime::Handle::current());
+    network.start(tokio::runtime::Handle::current()).unwrap();
     let client = tokio::spawn(async move {
         let client_ip = if bind.is_unspecified() {
             Ipv4Addr::LOCALHOST.into()

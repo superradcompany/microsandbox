@@ -239,7 +239,7 @@ See that repository's README for setup, workload descriptions, and usage.
 Pre-commit hooks are installed by `just setup`. They run automatically on every commit and check:
 
 - `cargo fmt --all --check` — formatting
-- `cargo clippy --workspace -- -D warnings` — lints
+- `cargo clippy --workspace --all-targets -- -D warnings` — lints
 - `cargo doc` — documentation builds without warnings
 - `cargo build -p microsandbox-cli` — CLI compiles
 - Standard checks (trailing whitespace, merge conflicts, TOML/YAML validity)
@@ -259,8 +259,72 @@ If pre-commit is not installed, install it with `pip install pre-commit` (or `br
 
 ```bash
 cargo fmt --all           # Format code
-cargo clippy --workspace  # Run lints
+cargo clippy --workspace --all-targets  # Run lints
 ```
+
+### Cross-target (Windows) Check
+
+`just check-windows-target` (or `./scripts/check-windows-target.sh`) compiles and
+lints the `msb` CLI and its test targets, and compiles the library test targets of
+the SDK, runtime, network, and filesystem crates, for `x86_64-pc-windows-gnu`
+from a macOS or Linux host. No other local gate compiles the `cfg(windows)` side,
+so a name that resolves on one platform but not the other, or an item gated to
+one platform and unused on the other, is otherwise first seen in the Windows CI
+job.
+
+The script installs the `x86_64-pc-windows-gnu` Rust target when it is missing,
+and needs [zig](https://ziglang.org/download/) (`brew install zig` on macOS) for
+the workspace's C dependencies. It mirrors the "Check msb" and "Clippy msb" steps
+and the `--lib` unit-test steps of the `windows-quality` job in
+`.github/workflows/check.yml`:
+
+```bash
+cargo check  --no-default-features --features net,ssh,keyring -p microsandbox-cli        --target x86_64-pc-windows-gnu
+cargo clippy --no-default-features --features net,ssh,keyring -p microsandbox-cli        --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+cargo check  --no-default-features --features local,net       -p microsandbox            --lib --profile test --target x86_64-pc-windows-gnu
+cargo check  --no-default-features --features net,runner      -p microsandbox-runtime    --lib --profile test --target x86_64-pc-windows-gnu
+cargo check                                                   -p microsandbox-network    --lib --profile test --target x86_64-pc-windows-gnu
+cargo check  --no-default-features                            -p microsandbox-filesystem --lib --profile test --target x86_64-pc-windows-gnu
+```
+
+The CLI steps mirror CI's `check` plus `clippy --all-targets -- -D warnings`. The
+SDK, runtime, network, and filesystem steps are `check` only, because the CI
+steps they stand in for compile those targets with `cargo test` and do not deny
+warnings. They still print the Windows-target dead-code and unused warnings for
+those packages, so read the output rather than only the exit status. `--lib`
+with `--profile test` compiles the library's unit-test target, so `#[cfg(test)]`
+modules are in scope, without linking a test binary.
+
+CI builds the MSVC targets, which need the Windows SDK; a macOS or Linux host
+does not have one without vendoring it. This check uses the `-gnu` target
+instead, which needs only a Windows C toolchain. No `build/agentd` is needed:
+none of the checks enables `embed-binaries`, so the guest-agent staging in the
+`crates/filesystem` build script stays off.
+
+What it does not cover:
+
+- **Linking.** `cargo check` and `cargo clippy` do not link, so linker, ABI,
+  `libkrunfw.dll` import-library, and MSVC environment problems stay out of
+  reach. The `windows-quality` and `windows-build` CI jobs remain the authority
+  for those.
+- **MSVC-only code.** The gnu target stands in for the x86_64 MSVC target CI
+  uses. It selects the same `cfg(windows)` code as long as nothing depends on
+  `target_env` or the MSVC ABI.
+- **Windows ARM64.** Only the x86_64 Windows target is checked, so
+  `cfg(target_arch = "aarch64")` code is left to the `windows-aarch64` runs of
+  the `windows-quality` job.
+- **Integration tests outside the CLI.** `--all-targets` covers the CLI's own
+  integration tests, and the `--lib --profile test` checks cover the SDK,
+  runtime, network, and filesystem library unit tests. Other packages' library
+  unit tests and the SDK's `tests/` integration tests are compiled for no
+  Windows target anywhere in CI.
+- **The Go FFI crate.** `windows-build` compiles `sdk/go/native` against real
+  runtime artifacts staged in `build/`. Nothing local mirrors that, so a
+  Windows-only break there is still first seen in CI.
+
+It is deliberately not part of the pre-commit hooks: it downloads an extra
+toolchain target and takes minutes, where the existing hooks are expected to
+stay quick.
 
 ### Self-hosted CI disk space
 

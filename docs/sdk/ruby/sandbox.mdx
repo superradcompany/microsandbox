@@ -239,6 +239,43 @@ Obtain persisted metadata without connecting to the guest agent.
   </div>
 </div>
 
+#### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">recover_storage()</span>
+
+```ruby
+Microsandbox::Sandbox.recover_storage(
+  name, selections: {}, accept_selected_view: false,
+  legacy_writers_stopped: false
+) # => StorageRecovery
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">Hash&lt;String, String&gt;</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with disk ID keys and candidate ID values. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>accept_selected_view</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacy_writers_stopped</code><span className="msb-type">Boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originals_retained</code> (boolean) confirms the original disks were retained.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">Microsandbox::Sandbox.</span><span className="msb-hn">list()</span>
 
 ```ruby
@@ -548,6 +585,8 @@ Record activity to refresh the sandbox idle timer.
 </div>
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
+
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```ruby
 sandbox.metrics # => SandboxMetrics
@@ -1597,6 +1636,8 @@ Record activity to refresh the sandbox idle timer.
 </div>
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
+
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```ruby
 handle.metrics # => SandboxMetrics

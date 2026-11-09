@@ -58,7 +58,10 @@
 //! |  0xa8  name_len         AU16                                    |
 //! |  0xaa  _pad1            [AU8; 6]                                |
 //! |  0xb0  name_bytes       [AU8; 128]                              |
-//! |  0x130 _tail            [u8; 208]                               |
+//! |  0x130 inbound_rejected AU64  optional active-cap rejection count |
+//! |  0x138 outbound_rejected AU64 optional TCP active-cap rejections |
+//! |  0x140 outbound_evicted AU64 optional UDP session-cap evictions  |
+//! |  0x148 _tail            [u8; 184]                               |
 //! +-----------------------------------------------------------------+ 0x300
 //! | SLOT 1 ... SLOT capacity-1                                      |
 //! ~                                                                 ~
@@ -164,6 +167,12 @@ pub const SAMPLE_FLAG_UPPER_FREE: u32 = 1 << 5;
 pub const SAMPLE_FLAG_UPPER_HOST_ALLOCATED: u32 = 1 << 6;
 /// Sample flag: `memory_limit_bytes` was refreshed from live VM memory state.
 pub const SAMPLE_FLAG_MEMORY_LIMIT_LIVE: u32 = 1 << 7;
+/// Sample flag: the tail extension reports published TCP admission rejections.
+pub const SAMPLE_FLAG_INBOUND_TCP_REJECTED: u32 = 1 << 8;
+/// Sample flag: outbound TCP active-cap rejections are available.
+pub const SAMPLE_FLAG_OUTBOUND_TCP_REJECTED: u32 = 1 << 9;
+/// Sample flag: outbound UDP session-cap evictions are available.
+pub const SAMPLE_FLAG_OUTBOUND_UDP_EVICTED: u32 = 1 << 10;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -255,6 +264,12 @@ pub struct Slot {
     /// UTF-8 encoded sandbox name. Public SDK callers reject names longer
     /// than `NAME_BYTES`.
     pub name_bytes: [AtomicU8; NAME_BYTES],
+    /// Optional ABI-v3 tail extension; older writers leave its presence flag unset.
+    pub net_inbound_tcp_rejected: AtomicU64,
+    /// Outbound TCP cap rejections, guarded by their sample flag.
+    pub net_outbound_tcp_rejected: AtomicU64,
+    /// Outbound UDP session-cap evictions, guarded by their sample flag.
+    pub net_outbound_udp_evicted: AtomicU64,
     /// Padding to round the struct up to `SLOT_SIZE`.
     _tail: [u8; SLOT_TAIL_PAD],
 }
@@ -267,12 +282,17 @@ pub struct Slot {
 //   cpu_percent_bits(4) + pad(4) + memory fields(24)                        = +32  -> 112
 //   disk_read(8) + disk_write(8) + net_rx(8) + net_tx(8)                    = +32  -> 144
 //   upper_used_bytes(8) + upper_free_bytes(8) + upper_host_allocated(8)      = +24  -> 168
-//   name_len(2) + _pad1(6) + name_bytes(NAME_BYTES)                         = +8 + NAME_BYTES
-const SLOT_BASE_BYTES: usize = 176 + NAME_BYTES;
+//   name_len(2) + _pad1(6) + name_bytes(NAME_BYTES) + network counters(24) = +32 + NAME_BYTES
+const SLOT_BASE_BYTES: usize = 200 + NAME_BYTES;
 
 const SLOT_TAIL_PAD: usize = SLOT_SIZE - SLOT_BASE_BYTES;
 
 const _: () = assert!(std::mem::size_of::<Slot>() == SLOT_SIZE);
+// Append within the reserved tail; existing v3 field offsets must not move.
+const _: () = assert!(std::mem::offset_of!(Slot, name_bytes) == 0xb0);
+const _: () = assert!(std::mem::offset_of!(Slot, net_inbound_tcp_rejected) == 0x130);
+const _: () = assert!(std::mem::offset_of!(Slot, net_outbound_tcp_rejected) == 0x138);
+const _: () = assert!(std::mem::offset_of!(Slot, net_outbound_udp_evicted) == 0x140);
 
 //--------------------------------------------------------------------------------------------------
 // Functions

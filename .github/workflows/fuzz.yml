@@ -43,7 +43,9 @@ jobs:
 
       - name: Fuzz unpack_archive (10 min budget)
         working-directory: sdk/rust
-        run: cargo +nightly fuzz run unpack_archive fuzz/corpus/unpack_archive fuzz/seeds/unpack_archive -- -max_total_time=600 -timeout=30
+        run: |
+          mkdir -p fuzz/corpus/unpack_archive
+          cargo +nightly fuzz run --target x86_64-unknown-linux-gnu unpack_archive fuzz/corpus/unpack_archive fuzz/seeds/unpack_archive -- -max_total_time=600 -timeout=30
 
       - name: Upload crash artifacts
         if: failure()
