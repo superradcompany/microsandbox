@@ -342,6 +342,32 @@ msb service remove my-app
 
 Create, update, enable, disable, and remove each send one request and never retry. Most errors mean nothing changed. If an error says the change may have been applied, get the Service and check it before trying again. An update, enable, or disable that is already in effect succeeds without a change. See [SDK errors](/sdk/errors#service-changes).
 
+## Audit events
+
+Each committed Service change records one event in the organization's audit log. A change that is already in effect records nothing.
+
+Read Service events with the audit-log API. Authenticate with an API key.
+
+```http
+GET /v1/events?event_type=service_created
+```
+
+You can also filter with `since`, `until`, `cursor`, and `limit`. Each event has `id`, `org_id`, `category` (`audit`), `event_type`, `actor`, `payload`, and `timestamp`.
+
+| Event type | Payload keys |
+| --- | --- |
+| `service_created` | `slug`, `sandbox_id`, `port` |
+| `service_rotated` | `slug`, `from_sandbox_id`, `to_sandbox_id`, `port` |
+| `service_disabled` | `slug`, `sandbox_id` |
+| `service_enabled` | `slug`, `sandbox_id` |
+| `service_deleted` | `slug`, `sandbox_id` |
+
+Every payload also has `org_id`. A `service_rotated` event means the Service was pointed at a new target. Its `from_sandbox_id` is `null` when the Service had no target.
+
+The `sandbox_id` on `service_disabled` and `service_enabled` is `null` when the target sandbox was deleted during the change. On `service_deleted`, it is `null` when the Service was detached.
+
+Events contain sandbox IDs, not sandbox names. Deleting a target sandbox automatically detaches its Service without recording a `service_*` event.
+
 ## Limits
 
 Organization and per-sandbox Service limits apply; going over them fails with `service_quota_exceeded` or `sandbox_service_limit_exceeded` (see [Service changes](/sdk/errors#service-changes)). Disabled Services count toward both limits, and detached Services count toward the organization limit. Too many concurrent requests to one sandbox return `429 service_busy_inflight`.
