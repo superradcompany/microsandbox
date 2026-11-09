@@ -34,6 +34,7 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "getting-started/installation",
               "cloud/overview",
               "getting-started/agents"
             ]
