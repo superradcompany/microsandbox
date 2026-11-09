@@ -56,6 +56,28 @@ fn test_getxattr_size_query() {
 }
 
 #[test]
+fn test_getxattr_buffer_too_small() {
+    let sb = TestSandbox::new();
+    let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+    sb.fs
+        .setxattr(
+            sb.ctx(),
+            entry.inode,
+            &TestSandbox::cstr("user.test"),
+            b"hello_xattr",
+            0,
+        )
+        .unwrap();
+
+    // Guests retry with a larger buffer only on ERANGE.
+    let result = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, &TestSandbox::cstr("user.test"), 4);
+
+    TestSandbox::assert_errno(result, LINUX_ERANGE);
+}
+
+#[test]
 fn test_getxattr_nonexistent_key() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
@@ -166,6 +188,59 @@ fn test_listxattr_size_query_hides_override() {
         name_list.iter().any(|n| *n == b"user.custom"),
         "user.custom should be in the filtered names"
     );
+}
+
+#[test]
+fn test_listxattr_exact_size_from_size_query() {
+    let sb = TestSandbox::new();
+    let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+    sb.fs
+        .setxattr(
+            sb.ctx(),
+            entry.inode,
+            &TestSandbox::cstr("user.custom"),
+            b"v",
+            0,
+        )
+        .unwrap();
+
+    // Guests size the buffer from the size query, which excludes the hidden
+    // override xattr. The host list still contains it.
+    let count = match sb.fs.listxattr(sb.ctx(), entry.inode, 0).unwrap() {
+        ListxattrReply::Count(c) => c,
+        ListxattrReply::Names(_) => panic!("expected Count for size=0 query"),
+    };
+    let reply = sb.fs.listxattr(sb.ctx(), entry.inode, count).unwrap();
+
+    match reply {
+        ListxattrReply::Names(names) => {
+            // The host can add its own xattrs, such as macOS provenance.
+            let name_list: Vec<&[u8]> =
+                names.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+            assert_eq!(names.len(), count as usize);
+            assert!(name_list.iter().any(|n| *n == b"user.custom"));
+        }
+        ListxattrReply::Count(_) => panic!("expected Names, got Count"),
+    }
+}
+
+#[test]
+fn test_listxattr_buffer_smaller_than_filtered_list() {
+    let sb = TestSandbox::new();
+    let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();
+    sb.fs
+        .setxattr(
+            sb.ctx(),
+            entry.inode,
+            &TestSandbox::cstr("user.custom"),
+            b"v",
+            0,
+        )
+        .unwrap();
+
+    let result = sb.fs.listxattr(sb.ctx(), entry.inode, 4);
+
+    TestSandbox::assert_errno(result, LINUX_ERANGE);
 }
 
 #[test]
