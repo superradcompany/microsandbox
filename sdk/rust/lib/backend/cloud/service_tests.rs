@@ -309,7 +309,7 @@ async fn get_and_list_decode_services_including_detached_ones() {
         "/v1/services?sandbox=web-1&cursor=c1&limit=5"
     );
     assert_eq!(page.services.len(), 1);
-    assert_eq!(page.next_cursor.as_deref(), Some("shop"));
+    assert_eq!(page.next_cursor.as_deref(), Some("c2hvcA"));
 
     let server = FakeServer::start(respond(200, None, SERVICE_PAGE)).await;
     with_backend(server.backend(), Service::list())

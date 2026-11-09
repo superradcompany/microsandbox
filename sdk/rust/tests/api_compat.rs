@@ -87,7 +87,7 @@ fn rust_service_surface_stays_available() {
     let _ = ServiceUpdate::default().target("web-1", 8080);
     let _ = ServiceListBuilder::default()
         .sandbox("web-1")
-        .cursor("shop")
+        .cursor("c2hvcA")
         .limit(20);
     let _: Option<(ServicePage, ServiceTarget, &dyn ServiceBackend)> = None;
     let _ = [

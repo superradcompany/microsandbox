@@ -12,7 +12,7 @@
       "body": {
         "error": {
           "code": "target_unreachable",
-          "message": "target_unreachable",
+          "message": "sandbox is temporarily unavailable; try again",
           "details": null
         }
       }
@@ -25,7 +25,7 @@
       "body": {
         "error": {
           "code": "service_not_found",
-          "message": "service_not_found",
+          "message": "service not found",
           "details": null
         }
       }

@@ -267,7 +267,7 @@ async fn list_collects_every_page_and_json_keeps_the_list_shape() {
         requests.await.unwrap(),
         [
             "GET /v1/services?limit=100 HTTP/1.1",
-            "GET /v1/services?cursor=shop&limit=100 HTTP/1.1"
+            "GET /v1/services?cursor=c2hvcA&limit=100 HTTP/1.1"
         ]
     );
 }

@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "sandbox_not_found",
-    "message": "sandbox 'web-1' not found",
+    "message": "sandbox not found",
     "details": null
   }
 }
