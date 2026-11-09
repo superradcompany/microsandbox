@@ -89,6 +89,10 @@ For release candidates or an exact version, see [Installation](/getting-started/
     Create a sandbox, execute code inside it, and get the result back.
 
     <CodeGroup>
+    ```bash CLI
+    msb run python -- python3 -c "print('Hello from a microVM!')"
+    ```
+
     ```typescript TypeScript
     import { Sandbox } from "microsandbox";
 
@@ -178,10 +182,6 @@ For release candidates or an exact version, see [Installation](/getting-started/
       puts output.stdout
     end
     Microsandbox::Sandbox.remove("hello")
-    ```
-
-    ```bash CLI
-    msb run python -- python3 -c "print('Hello from a microVM!')"
     ```
 
     </CodeGroup>
