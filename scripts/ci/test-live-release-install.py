@@ -16,9 +16,11 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import urllib.request
+import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +28,7 @@ DOCS = ROOT / "docs/getting-started/versions.mdx"
 API = "https://api.github.com/repos/superradcompany/microsandbox/releases"
 
 
-def read_json(url):
+def read_bytes(url):
     headers = {"User-Agent": "microsandbox-live-install-smoke"}
     # Authenticate only harness metadata requests on GitHub-hosted runners.
     # Never forward this credential to registries, bootstrap URLs or installers.
@@ -34,7 +36,11 @@ def read_json(url):
         headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
     request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
-        return json.load(response)
+        return response.read()
+
+
+def read_json(url):
+    return json.loads(read_bytes(url))
 
 
 def snippet(section, label):
@@ -76,6 +82,20 @@ class BootstrapHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path in ("/github-api", "/github-api/latest") or self.path.startswith("/github-api?"):
+            # A credential stays in this harness process. The installer sees
+            # unchanged live JSON, and bundle/checksum downloads bypass us.
+            try:
+                data = read_bytes(API + self.path.removeprefix("/github-api"))
+                status = 200
+            except urllib.error.HTTPError as error:
+                data, status = error.read(), error.code
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/windows":
             self.path = "/install.ps1"
         elif self.path == "/":
@@ -118,6 +138,24 @@ def main():
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         endpoint = f"http://127.0.0.1:{server.server_port}"
+        api_transport = "direct public API"
+        if args.source == "pr" and args.shell == "sh" and os.environ.get("GITHUB_TOKEN"):
+            # Shared macOS runner IPs often exhaust GitHub's anonymous quota.
+            # Rewrite only this repository's metadata URL to an authenticated
+            # live proxy; do not replace curl for bundles or fabricate releases.
+            shim = root / "transport"
+            shim.mkdir()
+            curl = shutil.which("curl")
+            wrapper = shim / "curl"
+            wrapper.write_text(
+                f"#!{sys.executable}\nimport os, sys\n"
+                f"args = [arg.replace({API!r}, {endpoint + '/github-api'!r}, 1) "
+                f"if arg.startswith({API!r}) else arg for arg in sys.argv[1:]]\n"
+                f"os.execv({curl!r}, [{curl!r}, *args])\n"
+            )
+            wrapper.chmod(0o755)
+            env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+            api_transport = "authenticated live GitHub metadata proxy; direct artifact downloads"
 
         def run_example(section):
             code = snippet(section, label)
@@ -230,6 +268,7 @@ def main():
                 record("Docker stable image", lambda: docker_install("latest", latest))
 
     report = {"platform": platform.platform(), "shell": args.shell, "source": args.source,
+              "api_transport": api_transport,
               "results": results, "scope": "Installation, binary startup and SDK import; no VM boot or registry publication"}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n")
