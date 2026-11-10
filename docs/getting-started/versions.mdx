@@ -1,14 +1,34 @@
 ---
-title: Installation
-description: Install a release candidate or choose an exact microsandbox version.
+title: Versions
+description: Choose a stable release, an exact version, or a release candidate.
 icon: "download"
 ---
 
-For the default stable installation and your first sandbox, follow the [Quickstart](/getting-started/quickstart).
+Installers use the latest stable release by default. Follow the [Quickstart](/getting-started/quickstart) for your first sandbox, or choose a version below.
+
+## Install an exact version
+
+Use a published version number to install that release. For example, install `0.7.13`:
+
+<CodeGroup>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh -s -- --version 0.7.13
+```
+
+```powershell Windows
+$env:MSB_INSTALL_VERSION = "0.7.13"
+try { irm https://install.microsandbox.dev/windows | iex }
+finally { Remove-Item Env:MSB_INSTALL_VERSION }
+```
+</CodeGroup>
+
+Replace `0.7.13` with the version you want. The same commands accept an exact release candidate such as `0.8.0-rc.1`, once published. The release must include a bundle for your platform. Do not combine an exact version with a channel selection.
+
+A downloaded PowerShell script also accepts `./install.ps1 -Version 0.7.13` or `./install.ps1 -Channel rc`.
 
 ## Install a release candidate
 
-Installers select the latest stable release by default. To try the newest active release candidate, explicitly select the `rc` channel:
+To try the newest active release candidate, select the `rc` channel:
 
 <CodeGroup>
 ```bash macOS & Linux
@@ -21,10 +41,6 @@ try { irm https://install.microsandbox.dev/windows | iex }
 finally { Remove-Item Env:MSB_INSTALL_CHANNEL }
 ```
 </CodeGroup>
-
-## Install an exact version
-
-To pin an exact release, use `--version 0.8.0-rc.1` on Unix or set `$env:MSB_INSTALL_VERSION = "0.8.0-rc.1"` on Windows before invoking the installer. This is an example version; it must have a published release with a bundle for your platform. A downloaded PowerShell script also accepts `./install.ps1 -Channel rc` or `./install.ps1 -Version 0.8.0-rc.1`.
 
 ## Selection behavior
 
