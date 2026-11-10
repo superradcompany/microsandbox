@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -89,6 +90,36 @@ class SelectionTests(unittest.TestCase):
                                 env={**os.environ, 'PATH': str(self.root) + ':/usr/bin:/bin'})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Could not list RC releases', result.stderr)
+
+
+class LiveSmokeSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        smoke = runpy.run_path(str(Path(__file__).with_name("test-live-release-install.py")))
+        cls.select = staticmethod(smoke["active_candidates"])
+
+    @staticmethod
+    def release(tag, prerelease=False, draft=False):
+        return {"tag_name": tag, "prerelease": prerelease, "draft": draft}
+
+    def test_backport_does_not_reactivate_retired_candidate(self):
+        releases = [self.release("v0.7.14"), self.release("v0.8.0+build.1"),
+                    self.release("v0.8.0-rc.1", True)]
+        self.assertEqual(self.select(releases), [])
+        self.assertEqual(self.select(list(reversed(releases))), [])
+
+    def test_canonical_candidates_and_draft_stable_releases(self):
+        releases = [self.release("v0.8.0"), self.release("v0.7.14"),
+                    self.release("v1.0.0", draft=True)]
+        releases += [self.release(tag, True) for tag in
+                     ["v0.9.0-rc.9", "v0.9.0-rc.10", "v0.9.0-rc.01", "v0.9.0-beta.1"]]
+        releases += [self.release("v0.10.0-rc.1", True, True), self.release("v0.10.0-rc.2")]
+        self.assertEqual(max(self.select(releases))[1], "0.9.0-rc.10")
+        self.assertEqual(len(self.select(releases)), 2)
+
+    def test_candidate_before_first_stable_release(self):
+        self.assertEqual(self.select([self.release("v0.0.0-rc.1", True)]),
+                         [((0, 0, 0, 1), "0.0.0-rc.1")])
 
 
 if __name__ == '__main__':

@@ -77,6 +77,28 @@ def assert_version(output, version):
         raise AssertionError(f"Expected runtime {version}, got: {output}")
 
 
+def active_candidates(releases):
+    number = r"(0|[1-9][0-9]*)"
+    core = rf"v{number}\.{number}\.{number}"
+    stable_core = (-1, -1, -1)
+    candidates = []
+    for release in releases:
+        if release["draft"]:
+            continue
+        tag = release["tag_name"]
+        if not release["prerelease"]:
+            match = re.fullmatch(core + r"(?:\+[0-9A-Za-z.-]+)?", tag)
+            if match:
+                stable_core = max(stable_core, tuple(map(int, match.groups())))
+        else:
+            match = re.fullmatch(core + rf"-rc\.{number}", tag)
+            if match:
+                candidates.append((tuple(map(int, match.groups())), tag[1:]))
+    # GitHub /latest can point at a backport. RC retirement follows the
+    # highest stable core anywhere in release history, just like the installers.
+    return [candidate for candidate in candidates if candidate[0][:3] > stable_core]
+
+
 class BootstrapHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *_args):
         pass
@@ -187,14 +209,7 @@ def main():
                     break
             else:
                 raise RuntimeError("Release list exceeds smoke-test pagination bound")
-            stable_core = tuple(map(int, latest.split(".")))
-            candidates = []
-            for release in releases:
-                match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)-rc\.(\d+)", release["tag_name"])
-                if match and release["prerelease"] and not release["draft"]:
-                    numbers = tuple(map(int, match.groups()))
-                    if numbers[:3] > stable_core:
-                        candidates.append((numbers, release["tag_name"][1:]))
+            candidates = active_candidates(releases)
             record("exact version from docs", lambda: install("Install an exact version", "0.7.13"))
             if candidates:
                 record("published RC", lambda: install("Install a release candidate", max(candidates)[1]))
