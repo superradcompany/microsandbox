@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::{Sandbox, SandboxStatus, SandboxStopResult};
 
-use crate::ui::OutputFormat;
+use crate::{context::SandboxCompleter, ui::OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -15,6 +16,11 @@ use crate::ui::OutputFormat;
 #[derive(Debug, Args)]
 pub struct WaitArgs {
     /// Sandbox to wait for.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub name: String,
 
     /// Wait for a managed job instead of sandbox shutdown.

@@ -1,9 +1,10 @@
 //! Direct local execution forking without a durable full snapshot.
 
 use clap::Args;
-use microsandbox::Sandbox;
+use clap_complete::ArgValueCompleter;
+use microsandbox::{Sandbox, sandbox::SandboxStatus};
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,6 +17,11 @@ pub struct BranchArgs {
     #[arg(long, default_value = "auto")]
     pub guest_flush: microsandbox::snapshot::GuestFlush,
     /// Source sandbox name.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub source: String,
     /// Name of the new child sandbox.
     #[arg(

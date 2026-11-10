@@ -1,9 +1,13 @@
 //! `msb status` command — show sandbox status.
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::{Sandbox, SandboxConfig, SandboxHandle, SandboxStatus};
 
-use crate::ui::{self, OutputFormat};
+use crate::{
+    context::SandboxCompleter,
+    ui::{self, OutputFormat},
+};
 
 use super::common;
 
@@ -15,6 +19,12 @@ use super::common;
 #[derive(Debug, Args)]
 pub struct PsArgs {
     /// Sandbox to inspect. Omit to show running sandboxes.
+    #[arg(
+        required_unless_present = "label",
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[]})
+    )]
     pub name: Option<String>,
 
     /// Show all sandboxes, not just running ones.

@@ -4,10 +4,14 @@ use std::io::{IsTerminal, Read, Write};
 use std::time::Duration;
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::exec::{ExecEvent, ExecHandle, ExecSink};
-use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
+use microsandbox::sandbox::{
+    ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox, SandboxStatus,
+};
 use tokio::io::AsyncWriteExt;
 
+use crate::context::SandboxCompleter;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
@@ -28,6 +32,11 @@ const PTY_END_OF_INPUT: &[u8] = &[0x04, 0x04];
 #[derive(Debug, Args)]
 pub struct ExecArgs {
     /// Sandbox to run the command in.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub name: String,
 
     /// Start a runtime-owned job and print its ID without consuming host stdin.

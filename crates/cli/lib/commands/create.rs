@@ -1,10 +1,11 @@
 //! `msb create` command — create and boot a fresh sandbox.
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use microsandbox::sandbox::Sandbox;
 
 use super::common::{SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
-use crate::{sandbox_config, ui};
+use crate::{context::ImageCompleter, sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -16,6 +17,11 @@ pub struct CreateArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
     /// May be omitted when a config file supplies `image`.
+    #[arg(
+        value_name = "Image",
+        required = false,
+        add = ArgValueCompleter::new(ImageCompleter)
+    )]
     pub image: Option<String>,
 
     /// Sandbox configuration options.

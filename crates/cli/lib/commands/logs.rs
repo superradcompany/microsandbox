@@ -20,6 +20,7 @@ use anyhow::{Context, anyhow};
 use base64::Engine as _;
 use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, ValueEnum};
+use clap_complete::ArgValueCompleter;
 use console::style;
 use futures::{Stream, StreamExt};
 use microsandbox::backend::default_backend;
@@ -28,6 +29,8 @@ use microsandbox::{MicrosandboxError, Sandbox};
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
+
+use crate::context::SandboxCompleter;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -44,6 +47,11 @@ const FOLLOW_DRAIN_IDLE: Duration = Duration::from_millis(300);
 #[derive(Debug, Args)]
 pub struct LogsArgs {
     /// Sandbox to read logs from.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[]})
+    )]
     pub name: String,
 
     /// Select one managed job's captured output.
