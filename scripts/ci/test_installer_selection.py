@@ -34,6 +34,20 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "v0.8.0-rc.1 false true\n#1\n")
 
+    def test_large_release_response_and_chunk_boundaries(self):
+        # Real GitHub responses include megabytes of notes and nested assets.
+        # Keep this compact so strings and escapes also cross parser chunks.
+        releases = [{"tag_name": f"v0.8.0-rc.{index}", "draft": False, "prerelease": True,
+                     "body": ("Unicode ☃, quotes \" and backslash \\ \n" * 140),
+                     "assets": [{"tag_name": "v99.0.0-rc.1"}]}
+                    for index in range(200)]
+        payload = json.dumps(releases, ensure_ascii=False)
+        self.assertGreater(len(payload), 1_000_000)
+        result = self.call("release_records", payload)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = "".join(f"v0.8.0-rc.{index} false true\n" for index in range(200)) + "#200\n"
+        self.assertEqual(result.stdout, expected)
+
     def test_malformed_metadata_fails_closed(self):
         for data in ['{}', 'null', '[', '[{}]', '[false]', '[] trailing', '[{},]',
                      '[{"tag_name":"v0.8.0-rc.1","draft":"false","prerelease":true}]',

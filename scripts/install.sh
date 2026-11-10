@@ -364,22 +364,37 @@ release_records() {
     # Parse JSON structurally: notes and nested assets can contain tag_name,
     # braces or escaped quotes. Grepping those fields can select the wrong
     # release. This small parser needs only POSIX awk, not jq/Python/Node.
-    awk '
-        { document=document $0 "\n" }
+    LC_ALL=C awk '
+        # BSD awk can rescan the whole string for each substr call. Keep
+        # character lookups bounded even when GitHub returns megabytes of JSON.
+        {
+            line=$0 "\n"
+            for (start=1; start<=length(line); start+=4096) {
+                chunks[++chunk_count]=substr(line,start,4096)
+                document_length+=length(chunks[chunk_count])
+                chunk_ends[chunk_count]=document_length
+            }
+        }
+        function char_at(position) {
+            if (position<1 || position>document_length) return ""
+            while (position>chunk_ends[chunk_index]) chunk_index++
+            while (chunk_index>1 && position<=chunk_ends[chunk_index-1]) chunk_index--
+            return substr(chunks[chunk_index],position-chunk_ends[chunk_index-1],1)
+        }
         function fail() { failed=1; exit 1 }
         function next_token(    c,escape,i) {
-            while (substr(document,pos,1) ~ /[ \t\r\n]/ && pos<=length(document)) pos++
-            token=substr(document,pos++,1); value=token
+            while (char_at(pos) ~ /[ \t\r\n]/ && pos<=document_length) pos++
+            token=char_at(pos++); value=token
             if (token=="\"") {
                 value=""
-                while (pos<=length(document)) {
-                    c=substr(document,pos++,1)
+                while (pos<=document_length) {
+                    c=char_at(pos++)
                     if (c=="\"") return
                     if (c ~ /[[:cntrl:]]/) fail()
                     if (c=="\\") {
-                        escape=substr(document,pos++,1)
+                        escape=char_at(pos++)
                         if (escape=="u") {
-                            for (i=0;i<4;i++) if (substr(document,pos+i,1) !~ /^[0-9a-fA-F]$/) fail()
+                            for (i=0;i<4;i++) if (char_at(pos+i) !~ /^[0-9a-fA-F]$/) fail()
                             pos+=4
                         } else if (escape !~ /^["\\\/bfnrt]$/) fail()
                         # Escaped release identifiers are deliberately rejected;
@@ -392,7 +407,7 @@ release_records() {
             }
             if (token ~ /[0-9tfn-]/ && token!="") {
                 pos--; token="literal"; value=""
-                while (substr(document,pos,1) ~ /[0-9A-Za-z.eE+-]/ && pos<=length(document)) value=value substr(document,pos++,1)
+                while (char_at(pos) ~ /[0-9A-Za-z.eE+-]/ && pos<=document_length) value=value char_at(pos++)
                 if (value !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) fail()
             }
         }

@@ -54,6 +54,8 @@ jobs:
   live-install:
     name: Real release installs (${{ matrix.os }}, ${{ matrix.shell }})
     timeout-minutes: 25
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
     strategy:
       fail-fast: false
       matrix:

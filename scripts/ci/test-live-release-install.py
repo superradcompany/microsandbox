@@ -27,7 +27,12 @@ API = "https://api.github.com/repos/superradcompany/microsandbox/releases"
 
 
 def read_json(url):
-    request = urllib.request.Request(url, headers={"User-Agent": "microsandbox-live-install-smoke"})
+    headers = {"User-Agent": "microsandbox-live-install-smoke"}
+    # Authenticate only harness metadata requests on GitHub-hosted runners.
+    # Never forward this credential to registries, bootstrap URLs or installers.
+    if url.startswith("https://api.github.com/") and os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.load(response)
 
