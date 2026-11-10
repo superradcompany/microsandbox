@@ -55,14 +55,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Install build deps (Linux)
+        if: inputs.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev strace python3-dev
+
+      - name: Configure Python linking (Linux)
+        if: inputs.os == 'linux'
+        id: python
+        run: |
+          # Rust tests embed Python, so select the interpreter whose headers and
+          # shared library were installed together by apt, not a toolcache Python.
+          echo 'PYO3_PYTHON=/usr/bin/python3' >> "$GITHUB_ENV"
+          # PyO3 caches its linker configuration. Include the system Python
+          # configuration so runner image upgrades cannot restore stale libpython paths.
+          python_config=$(/usr/bin/python3 -m sysconfig | sha256sum | cut -d ' ' -f 1)
+          echo "cache-key=system-python-${python_config}" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           cache-bin: false
           cache-targets: true
-
-      - name: Install build deps (Linux)
-        if: inputs.os == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev strace
+          key: ${{ steps.python.outputs.cache-key }}
 
       # Reuse the runtime already built by Check Platform. The SDK build script
       # discovers build/ in CI, so unit tests no longer repeat the release/LTO

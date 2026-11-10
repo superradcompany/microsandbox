@@ -12,6 +12,8 @@ on:
       - .github/workflows/release-macos.yml
       - .github/workflows/release-windows.yml
       - .github/actions/cache-libkrunfw-kernel/action.yml
+      - scripts/ci/release-channel.cjs
+      - scripts/ci/test-release-channel.mjs
       - scripts/ci/release-context.cjs
       - scripts/ci/test-release-context.cjs
       - scripts/ci/publish-crates.py
@@ -60,6 +62,8 @@ jobs:
       source_sha: ${{ steps.resolve.outputs.source_sha }}
       tag: ${{ steps.resolve.outputs.tag }}
       publish: ${{ steps.resolve.outputs.publish }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
     steps:
       # Load the recovery helper from the workflow commit, then pin all build
       # and publication checkouts to the resolved release source instead.
@@ -1184,13 +1188,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Auto-prerelease for rc / alpha / beta / dev tags so consumers
-          # querying /releases/latest (e.g. install.microsandbox.dev) don't
-          # accidentally promote them. Matches v0.5.0-rc-1, v1.2.3-rc1,
-          # v1.0.0-alpha.4, etc.
+          # Every SemVer prerelease is excluded from GitHub latest.
           PRERELEASE=""
-          if [[ "${{ needs.release-context.outputs.tag }}" =~ -(rc|alpha|beta|dev) ]]; then
-            PRERELEASE="--prerelease"
+          if [ "${{ needs.release-context.outputs.prerelease }}" = true ]; then
+            PRERELEASE="--prerelease --latest=false"
           fi
           gh release create "${{ needs.release-context.outputs.tag }}" \
             --verify-tag \
@@ -1215,7 +1216,7 @@ jobs:
   sync-mintlify:
     name: Sync mintlify branch
     needs: [release-context, assemble]
-    if: needs.release-context.outputs.publish == 'true'
+    if: needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1276,7 +1277,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew Formula
     needs: [release-context, assemble]
-    if: needs.release-context.outputs.publish == 'true'
+    if: needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch to homebrew tap
@@ -1311,19 +1312,14 @@ jobs:
   # The job is skipped unless publishing is enabled, and the submit step is a
   # no-op when WINGET_TOKEN is unset. This keeps releases from failing before
   # the initial package is accepted or for forks that have not configured
-  # winget publishing. Prerelease tags (rc/alpha/beta/dev) are skipped to match
-  # the assemble job's --prerelease detection.
+  # winget publishing. All prereleases are excluded by the shared release classification.
   # ---------------------------------------------------------------------------
   update-winget:
     name: Update winget package
     needs: [release-context, assemble]
     if: >-
-      needs.release-context.outputs.publish == 'true'
+      needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable'
       && vars.WINGET_RELEASE_ENABLED == 'true'
-      && !contains(needs.release-context.outputs.tag, '-rc')
-      && !contains(needs.release-context.outputs.tag, '-alpha')
-      && !contains(needs.release-context.outputs.tag, '-beta')
-      && !contains(needs.release-context.outputs.tag, '-dev')
     runs-on: ubuntu-latest
     env:
       WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
@@ -1492,7 +1488,7 @@ jobs:
   refresh-lockfile:
     name: Refresh lockfiles
     needs: [release-context, npm-publish, crates-publish]
-    if: ${{ !cancelled() && needs.release-context.outputs.publish == 'true' && (needs.npm-publish.result == 'success' || needs.crates-publish.result == 'success') }}
+    if: ${{ !cancelled() && needs.release-context.outputs.publish == 'true' && needs.release-context.outputs.channel == 'stable' && (needs.npm-publish.result == 'success' || needs.crates-publish.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1824,10 +1820,12 @@ jobs:
         id: meta
         with:
           images: ghcr.io/superradcompany/microsandbox
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release-context.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-context.outputs.tag }}
-            type=raw,value=latest
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-context.outputs.tag }},enable=${{ needs.release-context.outputs.channel == 'stable' }}
+            type=raw,value=latest,enable=${{ needs.release-context.outputs.channel == 'stable' }}
+            type=raw,value=rc,enable=${{ needs.release-context.outputs.channel == 'rc' }}
 
       - name: Create multi-arch manifest
         run: |

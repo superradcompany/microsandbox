@@ -351,7 +351,7 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 
 The workflow then regenerates `Cargo.lock`, the shared `packages/package-lock.json`, and the SDK npm lockfile and opens a PR titled `chore: release vX.Y.Z`.
 
-`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
+`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes the pinned `microsandbox-mcp` version and requires it to match the release tag.
 
 ### 2. Tag and Release
 
@@ -375,6 +375,23 @@ The release workflow (`.github/workflows/release.yml`) will:
 9. Build and publish Docker images to GHCR
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
+
+### Release candidates
+
+RC support is independent of GPU bundles. Use canonical versions such as `0.8.0-rc.1`, `0.8.0-rc.2`, then `0.8.0` for the final release. Follow the normal version-bump process to align package versions and exact internal dependencies before tagging the approved commit.
+
+```bash
+# After reviewing and merging the version bump, tag the approved commit.
+git tag -s v0.8.0-rc.1 <approved-commit> -m "microsandbox 0.8.0-rc.1"
+git push origin refs/tags/v0.8.0-rc.1
+```
+
+The existing `v*` trigger runs the same platform builds and release validation for candidates and finals. The release context validates the tag against the source workspace version and classifies SemVer prereleases centrally. npm also checks each package version against the release tag before publishing. Explicit recovery through the Release workflow uses the same classification and source validation.
+
+Candidates become GitHub prereleases and publish to npm `rc` and Docker exact-version/`rc` tags. Other prerelease names never use stable channels. Only stable releases update npm `latest`, Docker `latest` and major/minor aliases, the Homebrew formula, Winget, deployed docs, and the post-release lockfile PR against main. RC lockfile maintenance on a stabilization branch remains manual. PyPI and crates.io retain their normal prerelease-version handling; no new publishing credentials are required. Homebrew does not gain a separate RC formula in this change.
+
+To publish the final release, bump the accepted candidate source to the final version and create a new signed tag. Never move a published tag or replace candidate packages with final artifacts. Publishing across registries is not atomic, and the existing workflow recovery restrictions still apply. Local fixture tests do not replace a controlled RC publication: verify GitHub prerelease status, exact-version installs on supported platforms, npm and Docker channel tags, and unchanged stable distribution pointers before treating the first candidate pipeline run as validated.
+
 
 ### Recovering an unpublished release
 

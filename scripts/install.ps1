@@ -13,7 +13,8 @@ Usage:
 
 Environment overrides:
   MSB_HOME                 Install root. Defaults to %USERPROFILE%\.microsandbox.
-  MSB_INSTALL_VERSION      Release tag to install, such as v0.5.7. Defaults to latest release.
+  MSB_INSTALL_VERSION      Exact version or tag, such as 0.8.0-rc.1.
+  MSB_INSTALL_CHANNEL      stable (default) or rc. Cannot be combined with VERSION.
   MSB_INSTALL_BASE_URL     Release asset base URL. Defaults to the selected GitHub release URL.
   MSB_INSTALL_NO_PATH=1    Do not add the install bin directory to user PATH.
   MSB_INSTALL_NO_DOCTOR=1  Do not run the post-install doctor check.
@@ -22,7 +23,10 @@ Environment overrides:
 #>
 
 [CmdletBinding()]
-param()
+param(
+    [string]$Channel = $env:MSB_INSTALL_CHANNEL,
+    [string]$Version = $env:MSB_INSTALL_VERSION
+)
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
@@ -108,18 +112,83 @@ function Resolve-Target {
     }
 }
 
+function ConvertTo-ReleaseTag {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $pattern = '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+    if ($Value -cnotmatch $pattern -or $Value -match '[\r\n]') {
+        throw "Invalid release version: $Value"
+    }
+    $prerelease = $Matches[4]
+    if ($prerelease) {
+        foreach ($part in $prerelease.Split('.')) {
+            if ($part -match '^0[0-9]+$') { throw "Invalid release version: $Value" }
+        }
+    }
+    return 'v' + ($Value -creplace '^v', '')
+}
+
+function Compare-ReleaseNumber {
+    param([string]$Left, [string]$Right)
+    # String comparison avoids Int32/Double limits on SemVer numeric fields.
+    if ($Left.Length -ne $Right.Length) { return [Math]::Sign($Left.Length - $Right.Length) }
+    return [Math]::Sign([String]::CompareOrdinal($Left, $Right))
+}
+
+function Compare-ReleaseCore {
+    param([string]$Left, [string]$Right)
+    $leftParts = ($Left.Substring(1) -split '[-+]')[0].Split('.')
+    $rightParts = ($Right.Substring(1) -split '[-+]')[0].Split('.')
+    for ($i = 0; $i -lt 3; $i++) {
+        $comparison = Compare-ReleaseNumber $leftParts[$i] $rightParts[$i]
+        if ($comparison -ne 0) { return $comparison }
+    }
+    return 0
+}
+
 function Resolve-Version {
-    if (-not [string]::IsNullOrWhiteSpace($env:MSB_INSTALL_VERSION)) {
-        return $env:MSB_INSTALL_VERSION
+    if ($script:Channel -and $script:Version) { throw 'Choose Channel or Version, not both' }
+    if ($script:Channel -and $script:Channel -cnotin @('stable', 'rc')) {
+        throw 'Channel must be stable or rc'
+    }
+    if ($script:Version) { return ConvertTo-ReleaseTag $script:Version }
+    if ($script:Channel -cne 'rc') {
+        Write-Info 'Resolving latest stable release...'
+        $release = Invoke-RestMethod -Uri $LatestReleaseApiUrl -Headers @{ 'User-Agent' = 'microsandbox-installer' }
+        $tag = ConvertTo-ReleaseTag $release.tag_name
+        if (($tag -split '\+')[0].Contains('-')) { throw 'Latest release is not stable' }
+        return $tag
     }
 
-    Write-Info "Resolving latest release..."
-    $release = Invoke-RestMethod -Uri $LatestReleaseApiUrl -Headers @{ "User-Agent" = "microsandbox-installer" }
-    if ([string]::IsNullOrWhiteSpace($release.tag_name)) {
-        throw "could not determine latest release version"
+    Write-Info 'Resolving latest RC release...'
+    $best = $null
+    $stable = $null
+    $number = '(0|[1-9][0-9]*)'
+    for ($page = 1; $page -le 100; $page++) {
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$GitHubRepo/releases?per_page=100&page=$page" -Headers @{ 'User-Agent' = 'microsandbox-installer' }
+        if ($null -eq $releases -or $releases -isnot [array]) { throw 'Invalid release list from GitHub' }
+        foreach ($release in $releases) {
+            if ($release.draft -isnot [bool] -or $release.prerelease -isnot [bool] -or $release.tag_name -isnot [string]) {
+                throw 'Invalid release metadata from GitHub'
+            }
+            if ($release.draft) { continue }
+            $tag = $release.tag_name
+            if (-not $release.prerelease -and $tag -cmatch "^v$number\.$number\.$number(?:\+[0-9A-Za-z.-]+)?\z") {
+                if (-not $stable -or (Compare-ReleaseCore $tag $stable) -gt 0) { $stable = $tag }
+            } elseif ($release.prerelease -and $tag -cmatch "^v$number\.$number\.$number-rc\.$number\z") {
+                $comparison = if ($best) { Compare-ReleaseCore $tag $best } else { 1 }
+                if ($comparison -gt 0 -or ($comparison -eq 0 -and (Compare-ReleaseNumber ($tag -split '-rc\.')[1] ($best -split '-rc\.')[1]) -gt 0)) {
+                    $best = $tag
+                }
+            }
+        }
+        if ($releases.Count -lt 100) { break }
     }
-
-    return [string]$release.tag_name
+    if ($page -gt 100) { throw 'Release list exceeded pagination limit; use Version' }
+    if (-not $best -or ($stable -and (Compare-ReleaseCore $best $stable) -le 0)) {
+        throw 'No active RC release found; use Version to select an older candidate'
+    }
+    return $best
 }
 
 function Resolve-BaseUrl {
