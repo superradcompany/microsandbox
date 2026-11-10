@@ -44,7 +44,7 @@ function fixture(options = {}) {
 
 test('recovery resolves a version-matched unpublished tag in main', async () => {
   const input = fixture();
-  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true' });
+  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true', channel: 'stable', prerelease: 'false', npm_tag: 'latest' });
   assert.equal(input.calls.filter(call => call[0] === 'rev-parse').length, 1);
 });
 
@@ -87,7 +87,7 @@ test('recovery refuses missing, unrelated, mismatched, and already published tag
 test('normal tag pushes retain publication but reject a moved tag', async () => {
   const input = fixture({ context: { eventName: 'push', ref: `refs/tags/${tag}`, sha: sourceSha } });
   input.releaseTag = '';
-  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true' });
+  assert.deepEqual(await resolveReleaseContext(input), { source_sha: sourceSha, tag, publish: 'true', channel: 'stable', prerelease: 'false', npm_tag: 'latest' });
   assert.ok(!input.calls.some(call => call[0] === 'release' || call[0] === 'merge-base'));
   await assert.rejects(resolveReleaseContext({ ...input, context: { ...input.context, sha: workflowSha } }), /triggering commit/);
 });
@@ -153,4 +153,41 @@ test('all publishers retain the complete platform and production validation gate
   for (const line of metadata.with.tags.split('\n').filter(line => line.includes('type=semver'))) {
     assert.ok(line.includes('value=${{ needs.release-context.outputs.tag }}'));
   }
+});
+
+test('RC tag pushes and recovery share classification and version validation', async () => {
+  for (const recovery of [false, true]) {
+    const input = fixture();
+    const candidate = 'v0.8.0-rc.1';
+    input.releaseTag = recovery ? candidate : '';
+    input.context = { ...input.context, eventName: recovery ? 'workflow_dispatch' : 'push',
+      ref: recovery ? 'refs/heads/main' : `refs/tags/${candidate}`, sha: recovery ? workflowSha : sourceSha };
+    input.runGit = (...args) => {
+      if (args[0] === 'rev-parse') return sourceSha;
+      if (args[0] === 'merge-base') return '';
+      if (args[0] === 'show') return '[workspace.package]\nversion = "0.8.0-rc.1"\n';
+      assert.fail(`Unexpected git command: ${args}`);
+    };
+    assert.deepEqual(await resolveReleaseContext(input), {
+      source_sha: sourceSha, tag: candidate, publish: 'true', channel: 'rc', prerelease: 'true', npm_tag: 'rc',
+    });
+  }
+});
+
+test('stable maintenance and Docker aliases exclude every prerelease', () => {
+  const { jobs } = workflow('release.yml');
+  for (const name of ['sync-mintlify', 'update-homebrew', 'update-winget', 'refresh-lockfile']) {
+    assert.match(jobs[name].if, /needs\.release-context\.outputs\.channel == 'stable'/, name);
+  }
+  const metadata = jobs['docker-manifest'].steps.find(step => step.uses?.startsWith('docker/metadata-action@'));
+  assert.equal(metadata.with.flavor, 'latest=false');
+  for (const line of metadata.with.tags.trim().split('\n')) {
+    if (line.includes('value=latest') || line.includes('pattern={{major}}.{{minor}}')) {
+      assert.ok(line.includes("enable=${{ needs.release-context.outputs.channel == 'stable' }}"));
+    }
+    if (line.includes('value=rc')) assert.ok(line.includes("enable=${{ needs.release-context.outputs.channel == 'rc' }}"));
+  }
+  const assemble = jobs.assemble.steps.find(step => step.name === 'Create GitHub Release').run;
+  assert.ok(assemble.includes('needs.release-context.outputs.prerelease'));
+  assert.ok(assemble.includes('--prerelease --latest=false'));
 });

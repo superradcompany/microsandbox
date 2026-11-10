@@ -34,6 +34,7 @@
             "pages": [
               "getting-started/introduction",
               "getting-started/quickstart",
+              "getting-started/versions",
               "cloud/overview",
               "getting-started/agents"
             ]
@@ -496,6 +497,10 @@
     ]
   },
   "redirects": [
+    {
+      "source": "/getting-started/installation",
+      "destination": "/getting-started/versions"
+    },
     {
       "source": "/networking/security-model",
       "destination": "/security/network"
