@@ -1737,11 +1737,13 @@ jobs:
             runner: ubuntu-latest
             artifact: release-linux-x86_64
             msb_asset: msb-linux-x86_64
+            metrics_asset: msb-metrics-linux-x86_64
             libkrunfw_asset: libkrunfw-linux-x86_64.so
           - arch: arm64
             runner: ubuntu-24.04-arm
             artifact: release-linux-aarch64
             msb_asset: msb-linux-aarch64
+            metrics_asset: msb-metrics-linux-aarch64
             libkrunfw_asset: libkrunfw-linux-aarch64.so
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1758,8 +1760,9 @@ jobs:
         run: |
           mkdir -p packaging/docker/build/${{ matrix.arch }}
           cp release-artifacts/${{ matrix.msb_asset }} packaging/docker/build/${{ matrix.arch }}/msb
+          cp release-artifacts/${{ matrix.metrics_asset }} packaging/docker/build/${{ matrix.arch }}/msb-metrics
           cp release-artifacts/${{ matrix.libkrunfw_asset }} packaging/docker/build/${{ matrix.arch }}/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
-          chmod +x packaging/docker/build/${{ matrix.arch }}/msb
+          chmod +x packaging/docker/build/${{ matrix.arch }}/{msb,msb-metrics}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 

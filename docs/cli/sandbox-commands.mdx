@@ -18,7 +18,7 @@ Aliases include `ls`, `ps`, `rm`, `cp`, and `mod`. See [SSH](/cli/ssh-commands),
 
 <Tooltip tip="The core run workflow works on microsandbox cloud, but replace-on-create, published ports, custom DNS and interfaces, local rootfs forms, snapshots, and several host-integrated options are unavailable."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Create a sandbox and run its image command. Arguments after `--` replace CMD but preserve ENTRYPOINT. Unnamed sandboxes are removed when the command finishes; named sandboxes persist.
+Create a sandbox and run its image command. Arguments after `--` replace CMD but preserve ENTRYPOINT. Unnamed sandboxes are removed when the command finishes; named sandboxes persist. Piped input is forwarded to the command; use `--no-stdin` to leave it for the calling script.
 
 <Accordion title="Examples">
 
@@ -786,7 +786,7 @@ msb logs devbox --source all                # everything, chronologically merged
 | `--tail` | Show only the last N entries |
 | `--since` | Show entries at or after this time (RFC 3339 or relative `5m`/`2h`/`1d`) |
 | `--until` | Show entries strictly before this time (same formats) |
-| `-f`, `--follow` | Follow new entries |
+| `-f`, `--follow` | Follow new entries until the sandbox stops |
 | `--timestamps` | Prefix each line with the entry timestamp |
 | `--source` | Sources to include: `stdout`, `stderr`, `output`, `system`, `all`. Repeat or comma-separate. Default: `stdout,stderr,output` |
 | `--grep` | Client-side regex filter on the entry body |

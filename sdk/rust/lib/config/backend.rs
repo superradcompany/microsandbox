@@ -73,6 +73,24 @@ struct SelectionConfig {
 //--------------------------------------------------------------------------------------------------
 
 impl BackendSelection {
+    /// Resolve identity and configuration for inspection without probing cloud credentials.
+    #[cfg(feature = "local")]
+    pub(crate) fn inspect(
+        user_path: &Path,
+    ) -> MicrosandboxResult<(Self, BackendSelectionSource, BackendConfig)> {
+        let global = GlobalConfigPatch::load_from(user_path)?;
+        let managed = ManagedConfig::load(None)?.overrides;
+        let (selection, source) = Self::describe(
+            &global,
+            &managed,
+            std::env::var("MSB_BACKEND").ok(),
+            std::env::var("MSB_PROFILE").ok(),
+            std::env::var("MSB_API_KEY").ok().as_deref(),
+        )?;
+        let config = BackendConfig::new(global, managed).with_source_files(user_path, None)?;
+        Ok((selection, source, config))
+    }
+
     pub(crate) fn resolve(
         user_path: &Path,
         managed_path: Option<&Path>,

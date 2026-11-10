@@ -16,6 +16,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio_tar as tar;
 
+use super::pax::EmptyXattrFilter;
 use crate::tree::{
     DataSpool, DeviceNode, DirectoryNode, FileData, FileTree, FileTreeError, InodeMetadata,
     RegularFileId, RegularFileNode, ResourceLimits, SPOOL_THRESHOLD, SymlinkNode, TreeNode, Xattr,
@@ -192,7 +193,7 @@ pub async fn ingest_tar<R: AsyncRead + Unpin>(
     limits: &ResourceLimits,
     mut spool: Option<&mut DataSpool>,
 ) -> Result<FileTree, IngestError> {
-    let mut archive = tar::Archive::new(reader);
+    let mut archive = tar::Archive::new(EmptyXattrFilter::new(reader));
     let mut tree = FileTree::new();
     let mut entry_count: u64 = 0;
     let mut total_size: u64 = 0;

@@ -635,22 +635,36 @@ fn sync_directories_through(path: &Path, stop: &Path) -> ImageResult<()> {
 
 /// Compute a sparse-aware fixed-leaf Merkle root without reading unallocated holes.
 pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
+    sparse_file_integrity_handle(&File::open(path)?)
+}
+
+/// Compute the same content root on a pinned file, without resolving its pathname again.
+/// Uses a cloned descriptor; callers sharing its seek position must serialize reads.
+pub fn sparse_file_integrity_handle(file: &File) -> ImageResult<SparseFileIntegrity> {
     let started = std::time::Instant::now();
-    let mut file = File::open(path)?;
+    let mut reader = file.try_clone()?;
     let logical_size = file.metadata()?.len();
     let logical_leaves = logical_size.div_ceil(FILE_MERKLE_LEAF_SIZE as u64).max(1);
     let tree_leaves = logical_leaves.next_power_of_two();
     let tree_height = tree_leaves.trailing_zeros();
     let zero_roots = zero_subtree_roots(tree_height);
-    let allocation_map = microsandbox_utils::extent::ExtentMap::scan_file(&file)?;
-    let ranges = allocated_leaf_ranges(allocation_map.as_ref(), logical_size, logical_leaves);
     let mut accumulator = MerkleAccumulator::new(tree_height);
     let mut cursor = 0u64;
     let mut buffer = vec![0u8; FILE_MERKLE_LEAF_SIZE];
     let mut read_bytes = 0u64;
     let mut read_leaves = 0u64;
 
-    for (start, end) in ranges {
+    // A leaf can span several disjoint allocated extents. Read it exactly once, without
+    // retaining either the allocation map or a second range list proportional to fragmentation.
+    let mut hash_range = |offset: u64, length: u64| -> std::io::Result<()> {
+        let start = (offset / FILE_MERKLE_LEAF_SIZE as u64).max(cursor);
+        let end = offset
+            .saturating_add(length)
+            .div_ceil(FILE_MERKLE_LEAF_SIZE as u64)
+            .min(logical_leaves);
+        if start >= end {
+            return Ok(());
+        }
         push_zero_range(&mut accumulator, &zero_roots, cursor, start);
         for leaf in start..end {
             let offset = leaf * FILE_MERKLE_LEAF_SIZE as u64;
@@ -658,13 +672,17 @@ pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
                 .saturating_sub(offset)
                 .min(FILE_MERKLE_LEAF_SIZE as u64) as usize;
             buffer.fill(0);
-            file.seek(SeekFrom::Start(offset))?;
-            file.read_exact(&mut buffer[..readable])?;
+            reader.seek(SeekFrom::Start(offset))?;
+            reader.read_exact(&mut buffer[..readable])?;
             read_bytes += readable as u64;
             read_leaves += 1;
             accumulator.push_subtree(0, hash_leaf(&buffer));
         }
         cursor = end;
+        Ok(())
+    };
+    if !microsandbox_utils::extent::visit_allocated_ranges(file, &mut hash_range)? {
+        hash_range(0, logical_size)?;
     }
     push_zero_range(&mut accumulator, &zero_roots, cursor, tree_leaves);
 
@@ -679,37 +697,6 @@ pub fn sparse_file_integrity(path: &Path) -> ImageResult<SparseFileIntegrity> {
         root: format!("blake3:{}", root.finalize().to_hex()),
         logical_size,
     })
-}
-
-fn allocated_leaf_ranges(
-    map: Option<&microsandbox_utils::extent::ExtentMap>,
-    logical_size: u64,
-    logical_leaves: u64,
-) -> Vec<(u64, u64)> {
-    if logical_size == 0 {
-        return Vec::new();
-    }
-    let Some(map) = map else {
-        return vec![(0, logical_leaves)];
-    };
-    let mut ranges: Vec<(u64, u64)> = Vec::new();
-    for (offset, length) in &map.extents {
-        let start = offset / FILE_MERKLE_LEAF_SIZE as u64;
-        let end = offset
-            .saturating_add(*length)
-            .div_ceil(FILE_MERKLE_LEAF_SIZE as u64)
-            .min(logical_leaves);
-        if end <= start {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some((_, previous_end)) if start <= *previous_end => {
-                *previous_end = (*previous_end).max(end);
-            }
-            _ => ranges.push((start, end)),
-        }
-    }
-    ranges
 }
 
 fn zero_subtree_roots(height: u32) -> Vec<[u8; 32]> {
@@ -1105,6 +1092,46 @@ mod tests {
             .link_into(&first, &directory.path().join("checkpoint"))
             .unwrap();
         assert_eq!(std::fs::read(linked).unwrap(), b"same bytes");
+    }
+
+    #[test]
+    fn pinned_integrity_matches_dense_bytes_across_fragmented_partial_leaves() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fragmented.raw");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        microsandbox_utils::extent::mark_sparse(&file).unwrap();
+        let mut dense = vec![0; 5 * FILE_MERKLE_LEAF_SIZE + 17];
+        file.set_len(dense.len() as u64).unwrap();
+        // Multiple allocations inside one leaf, an all-hole leaf, and a non-aligned tail.
+        for (i, offset) in [
+            1,
+            16_384,
+            FILE_MERKLE_LEAF_SIZE - 1,
+            3 * FILE_MERKLE_LEAF_SIZE + 3,
+            dense.len() - 1,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            dense[offset] = (i + 1) as u8;
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            file.write_all(&dense[offset..=offset]).unwrap();
+        }
+        file.sync_all().unwrap();
+        let expected_path = directory.path().join("dense.raw");
+        std::fs::write(&expected_path, &dense).unwrap();
+        let expected = sparse_file_integrity(&expected_path).unwrap();
+        assert_eq!(sparse_file_integrity_handle(&file).unwrap(), expected);
+        // Replacing the namespace entry cannot redirect a hash over an already-pinned FD.
+        std::fs::rename(&path, directory.path().join("original.raw")).unwrap();
+        std::fs::write(&path, vec![9; dense.len()]).unwrap();
+        assert_ne!(sparse_file_integrity(&path).unwrap(), expected);
+        assert_eq!(sparse_file_integrity_handle(&file).unwrap(), expected);
     }
 
     #[test]

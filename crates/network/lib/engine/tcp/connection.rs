@@ -251,6 +251,11 @@ impl TcpConnectionTracker {
         }
     }
 
+    /// Cumulative connections refused because the active connection cap was full.
+    pub(crate) fn rejected_connections(&self) -> u64 {
+        self.rejected_connections
+    }
+
     /// Returns `true` if a tracked socket already exists for this exact
     /// connection (same source AND destination). O(1) via HashSet lookup.
     pub fn has_socket_for(&self, src: &SocketAddr, dst: &SocketAddr) -> bool {

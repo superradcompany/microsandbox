@@ -56,6 +56,9 @@ pub const BOOTSTRAP_ROOTFS_DIR: &str = ".bootstrap-rootfs";
 /// Capability response to `msb __launch-protocol`, including host nesting support.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LaunchCapabilities {
+    /// The runtime can validate its selected agent before opening recovery preview disks.
+    #[serde(default)]
+    pub storage_reader: bool,
     /// Host journals and checkpoint storage are excluded from the guest runtime share.
     /// Absence is unsafe for every launch, including restarts of legacy sandboxes.
     #[serde(default)]

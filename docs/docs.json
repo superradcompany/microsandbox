@@ -404,7 +404,9 @@
             "group": "Migration guides",
             "icon": "arrow-right-arrow-left",
             "pages": [
-              "migrations/v0.7"
+              "migrations/overview",
+              "migrations/v0.7",
+              "migrations/sandbox-storage"
             ]
           },
           {

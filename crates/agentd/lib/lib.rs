@@ -28,6 +28,7 @@ pub mod network;
 pub mod process;
 pub mod serial;
 pub mod session;
+pub mod storage_preview;
 pub mod tcp;
 pub mod teardown;
 pub mod tls;
