@@ -537,6 +537,7 @@ pub(crate) async fn remove_snapshot_expected(
     }
     let artifact_path = canonical_path(snapshot.path());
     let artifact_key = artifact_path.display().to_string();
+    let released_source = snapshot.manifest().capture.source_lineage.clone();
 
     // Check children unless --force.
     let row = snapshot_entity::Entity::find_by_id(artifact_key.clone())
@@ -574,6 +575,11 @@ pub(crate) async fn remove_snapshot_expected(
     drop(_deletion);
     if let Some(parent) = artifact_path.parent() {
         super::deletion::recover_parent(local, parent).await?;
+    }
+    if let Some(source) = released_source
+        && let Err(error) = super::deletion::release_store_objects(local, &source).await
+    {
+        tracing::warn!(%error, source, "checkpoint objects of removed snapshot were kept");
     }
     Ok(())
 }
@@ -831,6 +837,7 @@ fn handle_from_model(m: snapshot_entity::Model) -> SnapshotHandle {
 mod tests {
     use std::collections::BTreeMap;
 
+    use microsandbox_image::checkpoint::LocalObjectStore;
     use microsandbox_image::{
         snapshot::{
             CheckpointSnapshotState, ImageRef, SCHEMA, SnapshotCapture, SnapshotConsistency,
@@ -838,6 +845,7 @@ mod tests {
         },
         storage_lease::StorageLease,
     };
+    use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 
     use super::*;
 
@@ -870,6 +878,50 @@ mod tests {
         }
     }
 
+    async fn register_source(local: &LocalBackend, name: &str) -> PathBuf {
+        let model = crate::db::entity::sandbox::ActiveModel {
+            name: Set(name.into()),
+            config: Set("{}".into()),
+            status: Set(crate::sandbox::SandboxStatus::Stopped),
+            ephemeral: Set(false),
+            ..Default::default()
+        };
+        model
+            .insert(local.db().await.unwrap().write())
+            .await
+            .unwrap();
+
+        local.sandboxes_dir().join(name).join("checkpoint-store")
+    }
+
+    fn link_objects(store: &Path, artifact: &Path, objects: &[&[u8]]) -> Vec<PathBuf> {
+        let store = LocalObjectStore::open(store).unwrap();
+        let mut stored = Vec::new();
+        for bytes in objects {
+            let id = store.put_bytes(bytes).unwrap();
+            let path = store.object_path(&id);
+            let link = artifact
+                .join("checkpoint")
+                .join(path.strip_prefix(store_root(&path)).unwrap());
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::fs::hard_link(&path, link).unwrap();
+            stored.push(path);
+        }
+
+        stored
+    }
+
+    fn store_root(object: &Path) -> &Path {
+        object.ancestors().nth(4).unwrap()
+    }
+
+    fn source_manifest(id: u128, source: &str) -> Manifest {
+        let mut snapshot = manifest(id, None);
+        snapshot.capture.source_lineage = Some(source.into());
+
+        snapshot
+    }
+
     async fn install(
         local: &LocalBackend,
         group: &str,
@@ -897,6 +949,55 @@ mod tests {
         .await
         .unwrap();
         directory.join(manifest.snapshot_id.as_str())
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn removal_releases_store_objects_no_snapshot_uses() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let store = register_source(&local, "box").await;
+        let kept = install(&local, "kept", "base", &source_manifest(1, "box")).await;
+        let removed = install(&local, "removed", "base", &source_manifest(2, "box")).await;
+        let shared = link_objects(&store, &kept, &[b"shared", b"kept-only"]);
+        let own = link_objects(&store, &removed, &[b"shared", b"removed-only"]);
+        let leftover = LocalObjectStore::open(&store).unwrap();
+        let leftover = leftover.object_path(&leftover.put_bytes(b"earlier-leftover").unwrap());
+
+        remove_snapshot(&local, removed.to_str().unwrap(), false)
+            .await
+            .unwrap();
+
+        assert!(!removed.exists());
+        assert!(shared[0].exists());
+        assert!(shared[1].exists());
+        assert!(!own[1].exists());
+        assert!(!leftover.exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn removal_keeps_store_objects_while_the_source_runtime_is_alive() {
+        let home = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(home.path())
+            .build()
+            .await
+            .unwrap();
+        let store = register_source(&local, "box").await;
+        let removed = install(&local, "removed", "base", &source_manifest(3, "box")).await;
+        let objects = link_objects(&store, &removed, &[b"latest-capture"]);
+        let runtime = SandboxLifecycleGuard::try_acquire(&local.config().run_dir(), "box").unwrap();
+
+        remove_snapshot(&local, removed.to_str().unwrap(), false)
+            .await
+            .unwrap();
+
+        assert!(runtime.is_some());
+        assert!(!removed.exists());
+        assert!(objects[0].exists());
     }
 
     #[test]
