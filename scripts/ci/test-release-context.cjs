@@ -155,6 +155,37 @@ test('all publishers retain the complete platform and production validation gate
   }
 });
 
+test('recovery uses package installers from the workflow revision with tagged product sources', () => {
+  const release = workflow('release.yml');
+  const context = release.jobs['release-context'];
+  const checkout = context.steps.find(step => step.uses?.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.ref, undefined, 'CI tools must come from the workflow revision');
+  const upload = context.steps.find(step => step.with?.name === 'release-ci-tools');
+  assert.ok(upload.uses.startsWith('actions/upload-artifact@'));
+  assert.equal(upload.with['if-no-files-found'], 'error');
+  for (const filename of ['install-apt-packages.sh', 'prepare-apt-fallback.py']) {
+    assert.ok(upload.with.path.split('\n').includes(`scripts/ci/${filename}`));
+  }
+  let installers = 0;
+  for (const filename of ['release.yml', 'release-linux.yml', 'release-macos.yml']) {
+    for (const job of Object.values(workflow(filename).jobs)) {
+      if (job.if === '${{ false }}') continue;
+      for (const [index, step] of (job.steps || []).entries()) {
+        assert.ok(!step.run?.includes('sudo apt-get update'), 'active jobs must use the shared installer');
+        if (!step.run?.includes('install-apt-packages.sh')) continue;
+        installers++;
+        assert.ok(step.run.includes('$RUNNER_TEMP/release-ci-tools/install-apt-packages.sh'));
+        const download = job.steps.slice(0, index).find(item => item.with?.name === 'release-ci-tools');
+        assert.ok(download?.uses.startsWith('actions/download-artifact@'));
+        assert.equal(download.with.path, '${{ runner.temp }}/release-ci-tools');
+        assert.equal(download.with['run-id'], undefined, 'never use helpers from another run');
+        assert.equal(download.if, step.if);
+      }
+    }
+  }
+  assert.equal(installers, 9);
+});
+
 test('RC tag pushes and recovery share classification and version validation', async () => {
   for (const recovery of [false, true]) {
     const input = fixture();

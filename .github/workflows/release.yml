@@ -14,6 +14,10 @@ on:
       - .github/actions/cache-libkrunfw-kernel/action.yml
       - scripts/ci/release-channel.cjs
       - scripts/ci/test-release-channel.mjs
+      - scripts/ci/install-apt-packages.sh
+      - scripts/ci/prepare-apt-fallback.py
+      - scripts/ci/test_apt_fallback.py
+      - .github/workflows/apt-mirrors.yml
       - scripts/ci/release-context.cjs
       - scripts/ci/test-release-context.cjs
       - scripts/ci/publish-crates.py
@@ -86,6 +90,17 @@ jobs:
               ['Publishing enabled', release.publish],
             ]).write();
 
+      # Recovery builds retain the tagged source, but package installation must
+      # use the fix from this workflow revision, not the old helper in that tag.
+      - name: Upload release CI tools
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-ci-tools
+          path: |
+            scripts/ci/install-apt-packages.sh
+            scripts/ci/prepare-apt-fallback.py
+          if-no-files-found: error
+
   # Fetch and verify the large kernel archive once, then fan it out to both
   # firmware architectures over GitHub's artifact network.
   kernel-sources:
@@ -133,9 +148,16 @@ jobs:
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           key: release-firmware-aarch64-${{ hashFiles('vendor/libkrunfw/**') }}
 
+      - name: Download release CI tools
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ci-tools
+          path: ${{ runner.temp }}/release-ci-tools
+
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: bash "$RUNNER_TEMP/release-ci-tools/install-apt-packages.sh" libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
@@ -189,9 +211,16 @@ jobs:
             vendor/libkrunfw/libkrunfw.so.${{ env.LIBKRUNFW_VERSION }}
           key: release-${{ matrix.artifact }}-${{ hashFiles('vendor/libkrunfw/**') }}
 
+      - name: Download release CI tools
+        if: steps.cache-firmware.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ci-tools
+          path: ${{ runner.temp }}/release-ci-tools
+
       - name: Install firmware build dependencies
         if: steps.cache-firmware.outputs.cache-hit != 'true'
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
+        run: bash "$RUNNER_TEMP/release-ci-tools/install-apt-packages.sh" libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools
 
       - name: Download kernel source archive
         if: steps.cache-firmware.outputs.cache-hit != 'true'
@@ -235,8 +264,14 @@ jobs:
           cache-targets: true
           shared-key: release-agentd-aarch64
 
+      - name: Download release CI tools
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ci-tools
+          path: ${{ runner.temp }}/release-ci-tools
+
       - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: bash "$RUNNER_TEMP/release-ci-tools/install-apt-packages.sh" musl-tools
 
       - name: Build agentd
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target aarch64-unknown-linux-musl
@@ -267,8 +302,14 @@ jobs:
           cache-targets: true
           shared-key: release-agentd-x86_64
 
+      - name: Download release CI tools
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-ci-tools
+          path: ${{ runner.temp }}/release-ci-tools
+
       - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: bash "$RUNNER_TEMP/release-ci-tools/install-apt-packages.sh" musl-tools
 
       - name: Build agentd
         run: cargo build --release --manifest-path crates/agentd/Cargo.toml --target x86_64-unknown-linux-musl
