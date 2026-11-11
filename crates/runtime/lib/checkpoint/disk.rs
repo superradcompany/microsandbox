@@ -662,7 +662,8 @@ impl RootDiskCompaction {
 impl RetiredRootDisk {
     pub(super) fn cleanup(self) {
         // Moving the journal to the sandbox root must not broaden retirement to original
-        // host-configured disks. Only private compaction/growth staging owns removable links.
+        // host-configured disks. Only private compaction/growth staging and managed qcow2
+        // layers directly in the sandbox directory own removable links.
         for path in self.paths {
             let private_stage = path
                 .strip_prefix(&self.parent)
@@ -670,11 +671,22 @@ impl RetiredRootDisk {
                 .and_then(|relative| relative.components().next())
                 .and_then(|component| component.as_os_str().to_str())
                 .is_some_and(|name| name.starts_with(".compact-") || name.starts_with(".grow-"));
-            if private_stage {
+            let runtime_layer = path.parent() == Some(self.parent.as_path())
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(is_managed_layer_name);
+            if private_stage || runtime_layer {
                 let _ = std::fs::remove_file(path);
             }
         }
     }
+}
+
+/// Managed qcow2 layers are named `<upper|root>-*.qcow2`; the base `upper.ext4` and
+/// `rootfs.raw` never match.
+fn is_managed_layer_name(name: &str) -> bool {
+    (name.starts_with("upper-") || name.starts_with("root-")) && name.ends_with(".qcow2")
 }
 
 impl RootDiskState {
@@ -2453,6 +2465,78 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn compaction_removes_runtime_named_layers_but_keeps_base_and_snapshots() {
+        use super::*;
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("runtime");
+        std::fs::create_dir(&root).unwrap();
+        let base = sandbox.path().join("upper.ext4");
+        std::fs::write(&base, vec![71u8; 131072]).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut layers = vec![RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: base.clone(),
+            format: RootDiskFormat::Raw,
+            integrity_root: Some(sparse_file_integrity(&base).unwrap().root),
+        }];
+        let names = [
+            "upper-sealed-000.qcow2".to_string(),
+            "upper-sealed-001.qcow2".to_string(),
+            format!("upper-restore-{:016x}.qcow2", 7u64),
+            format!("root-{}.qcow2", "b".repeat(32)),
+            format!("upper-{}.qcow2", "a".repeat(32)),
+        ];
+        for (i, name) in names.iter().enumerate() {
+            let path = sandbox.path().join(name);
+            let prior = layers.last().unwrap();
+            rt.block_on(microsandbox_image::checkpoint::create_qcow2_overlay(
+                &path,
+                131072,
+                &prior.path,
+                prior.format.as_str(),
+            ))
+            .unwrap();
+            layers.push(RootDiskLayer {
+                layer_id: new_id("layer"),
+                format: RootDiskFormat::Qcow2,
+                integrity_root: (i + 1 < names.len())
+                    .then(|| sparse_file_integrity(&path).unwrap().root),
+                path,
+            });
+        }
+        let retained = sandbox.path().join("published-layer.qcow2");
+        std::fs::hard_link(&layers[1].path, &retained).unwrap();
+        let retained_bytes = std::fs::read(&retained).unwrap();
+        let journal = sandbox.path().join(ROOT_DISK_STATE_FILE);
+        write_state(
+            &journal,
+            &RootDiskState {
+                schema: ROOT_DISK_STATE_SCHEMA.into(),
+                volume_id: new_id("vol"),
+                device_id: RootDiskLayout::ManagedUpper.device_id().into(),
+                layout: RootDiskLayout::ManagedUpper,
+                published_generation: 4,
+                launch_base: None,
+                growth_target: None,
+                layers,
+            },
+        )
+        .unwrap();
+        compact_stopped_root(&root, None, false).unwrap();
+        for name in &names {
+            assert!(!sandbox.path().join(name).exists(), "{name} not removed");
+        }
+        for layer in read_state(&journal).unwrap().layers {
+            assert!(layer.path.exists());
+        }
+        assert!(base.exists());
+        assert_eq!(std::fs::read(&retained).unwrap(), retained_bytes);
     }
 
     use super::*;
