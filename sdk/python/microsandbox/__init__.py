@@ -51,6 +51,7 @@ from microsandbox._microsandbox import (
     Storage,
     StorageCategoryUsage,
     StorageItemUsage,
+    StorageRecovery,
     StorageUsage,
     Volume,
     VolumeHandle,
@@ -124,6 +125,14 @@ from microsandbox.setup import (
     install_runtime,
     is_runtime_installed,
     resolve_runtime,
+)
+from microsandbox.storage_diagnosis import (
+    StorageCandidate,
+    StorageDiagnosis,
+    StorageDiagnosticStatus,
+    StorageInspection,
+    StorageSandboxDiagnosis,
+    diagnose_storage,
 )
 from microsandbox.types import (
     Action,
@@ -385,6 +394,7 @@ __all__ = [
     "RegistryAuth",
     # Storage accounting and runtime-cache cleanup
     "Storage",
+    "StorageRecovery",
     "StorageUsage",
     "StorageCategoryUsage",
     "StorageItemUsage",
@@ -447,6 +457,12 @@ __all__ = [
     "UnsupportedOperationError",
     "UnsupportedError",
     # Setup
+    "diagnose_storage",
+    "StorageCandidate",
+    "StorageDiagnosis",
+    "StorageDiagnosticStatus",
+    "StorageInspection",
+    "StorageSandboxDiagnosis",
     "resolve_runtime",
     "is_runtime_installed",
     "install_runtime",

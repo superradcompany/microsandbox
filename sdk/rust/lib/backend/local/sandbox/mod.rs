@@ -46,6 +46,7 @@ use crate::db::entity::{
 };
 use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::runtime::SpawnMode;
+use crate::runtime::protected_state::StoragePreparation;
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{
     RootfsSource, Sandbox, SandboxConfig, SandboxHandle, SandboxListBuilder, SandboxPage,
@@ -105,6 +106,11 @@ impl LocalBackend {
                 model.status
             )));
         }
+
+        // Storage migration can capture legacy checkpoint aliases. Follow the same lock order
+        // as snapshot publication and removal before taking runtime ownership.
+        let _lineage_guard =
+            crate::snapshot::lineage::lock_source(&self.config().run_dir(), name).await?;
 
         // Unix transfers this lock into the child. Windows cannot transfer LockFileEx ownership,
         // so the parent proves the prior generation gone and releases its copy immediately before
@@ -251,7 +257,8 @@ impl LocalBackend {
 
         let started = async {
             let storage = CreationStorage::acquire(self, name)?;
-            self.prepare_sandbox_launch(&config, &storage).await?;
+            self.prepare_sandbox_launch(&config, &storage, StoragePreparation::Existing)
+                .await?;
             self.create_sandbox_inner(config, model.id, mode, lifecycle_guard)
                 .await
         }

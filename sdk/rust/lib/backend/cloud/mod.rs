@@ -16,6 +16,8 @@ mod modify;
 pub(in crate::backend) mod sandbox;
 mod service;
 mod snapshot;
+#[cfg(test)]
+mod stop_tests;
 mod volume;
 mod ws_io;
 

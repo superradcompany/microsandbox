@@ -183,3 +183,142 @@ fn test_getattr_via_handle_after_forget() {
     let (st, _) = sb.fs.getattr(sb.ctx(), entry.inode, Some(handle)).unwrap();
     assert_eq!(st.st_size, 6);
 }
+
+/// Trace the real handler sequence, including repeated guest closes on one
+/// handle. Run on Linux with strace installed; no mock descriptor layer needed.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_create_write_close_budget() {
+    const CHILD: &str = "MSB_TEST_CLOSE_BUDGET_CHILD";
+    const TEST_NAME: &str =
+        "backends::passthroughfs::unix::tests::test_file_ops::test_create_write_close_budget";
+
+    if std::env::var_os(CHILD).is_some() {
+        let sb = TestSandbox::new();
+        let (entry, handle) = sb.fuse_create_root("close-budget.txt").unwrap();
+        sb.fuse_write(entry.inode, handle, b"data", 0).unwrap();
+        let mut attr: crate::stat64 = unsafe { std::mem::zeroed() };
+        attr.st_size = 3;
+        sb.fs
+            .setattr(
+                sb.ctx(),
+                entry.inode,
+                attr,
+                Some(handle),
+                SetattrValid::SIZE,
+            )
+            .unwrap();
+        sb.fs
+            .setxattr(sb.ctx(), entry.inode, c"user.budget", b"value", 0)
+            .unwrap();
+        assert!(matches!(
+            sb.fs.getxattr(sb.ctx(), entry.inode, c"user.budget", 10).unwrap(),
+            GetxattrReply::Value(value) if value == b"value"
+        ));
+        sb.fs.listxattr(sb.ctx(), entry.inode, 0).unwrap();
+        sb.fs
+            .removexattr(sb.ctx(), entry.inode, c"user.budget")
+            .unwrap();
+        for _ in 0..4 {
+            sb.fs.flush(sb.ctx(), entry.inode, handle, 0).unwrap();
+        }
+        assert_eq!(sb.fuse_read(entry.inode, handle, 10, 0).unwrap(), b"dat");
+        sb.fs.fsync(sb.ctx(), entry.inode, false, handle).unwrap();
+        sb.fs.fsync(sb.ctx(), entry.inode, true, handle).unwrap();
+        sb.fs
+            .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+            .unwrap();
+        return;
+    }
+
+    assert!(
+        std::process::Command::new("strace")
+            .arg("--version")
+            .status()
+            .expect("Linux close-budget tests require strace (apt-get install strace)")
+            .success()
+    );
+    let trace = tempfile::NamedTempFile::new().unwrap();
+    let output = std::process::Command::new("strace")
+        .args(["-f", "-yy", "-e", "trace=close,dup,fsync,fdatasync", "-o"])
+        .arg(trace.path())
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(trace.path()).unwrap();
+    let file_calls: Vec<_> = calls
+        .lines()
+        .filter(|line| line.contains("/close-budget.txt>"))
+        .collect();
+    let closes = file_calls
+        .iter()
+        .filter(|line| line.contains("close("))
+        .count();
+    assert_eq!(closes, 5, "{calls}");
+    assert!(
+        file_calls.iter().any(|line| line.contains("fsync(")),
+        "{calls}"
+    );
+    assert!(
+        file_calls.iter().any(|line| line.contains("fdatasync(")),
+        "{calls}"
+    );
+}
+
+/// Inject a backing close error at the syscall boundary, without mocking the
+/// filesystem handler. strace path filtering leaves unrelated closes alone.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_flush_reports_backing_close_errors_by_default() {
+    const CHILD_ROOT: &str = "MSB_TEST_FLUSH_ERROR_ROOT";
+    const CHILD_ERRNO: &str = "MSB_TEST_FLUSH_ERROR_ERRNO";
+    const TEST_NAME: &str = "backends::passthroughfs::unix::tests::test_file_ops::test_flush_reports_backing_close_errors_by_default";
+
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let errno = std::env::var(CHILD_ERRNO).unwrap();
+        let sb = TestSandbox::with_config(|mut cfg| {
+            cfg.root_dir = root.into();
+            cfg
+        });
+        let (entry, handle) = sb.fuse_create_root("flush-error.txt").unwrap();
+        sb.fuse_write(entry.inode, handle, b"pending write", 0)
+            .unwrap();
+        let result = sb.fs.flush(sb.ctx(), entry.inode, handle, 0);
+        TestSandbox::assert_errno(result, errno.parse().unwrap());
+        return;
+    }
+
+    for (code, errno) in [("28", "ENOSPC"), ("5", "EIO")] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("flush-error.txt");
+        std::fs::write(&path, b"").unwrap();
+        let output = std::process::Command::new("strace")
+            .args(["-f", "-yy", "-P"])
+            .arg(&path)
+            .args(["-e", "trace=close", "-e"])
+            .arg(format!("inject=close:error={errno}:when=1"))
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ROOT, root.path())
+            .env(CHILD_ERRNO, code)
+            .output()
+            .expect("Linux flush error tests require strace (apt-get install strace)");
+        let trace = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{code}: {trace}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            trace.contains("INJECTED"),
+            "fault did not reach the backing close: {trace}"
+        );
+    }
+}

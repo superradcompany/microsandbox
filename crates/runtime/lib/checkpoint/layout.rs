@@ -182,6 +182,94 @@ pub fn reset_guest_files(runtime_dir: &Path) -> Result<PathBuf, String> {
     Ok(guest)
 }
 
+/// Decode only the old single-root preparation record. It was host-created before legacy
+/// guards could replace the original journal, so retain that exact admitted simple view.
+pub(crate) fn retained_legacy_root(
+    runtime_dir: &Path,
+    binding: Option<&LegacyRootBinding>,
+) -> Result<Option<Option<Vec<u8>>>, String> {
+    let Some(bytes) = read_optional(&host_root(runtime_dir)?.join(MARKER))? else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid protected layout record")?;
+    if value.get("schema").and_then(|v| v.as_str()) != Some(SCHEMA)
+        || value.get("phase").and_then(|v| v.as_str()) != Some("preparing")
+    {
+        return Ok(None);
+    }
+    let record: LayoutRecord =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid historical preparation record")?;
+    if record.binding.as_ref() != binding {
+        return Err("host disk configuration changed during historical preparation".into());
+    }
+    if let Some(root) = record.root {
+        let bytes = serde_json::to_vec(&root).map_err(|_| "invalid retained root record")?;
+        let journal = super::compat::v0_7_0::RootJournal::decode(&bytes)?;
+        let binding = binding.ok_or("historical preparation has no configured root")?;
+        if journal.layers.len() != 1
+            || journal.published_generation != 0
+            || journal.growth_target.is_some()
+            || journal.layers[0].path != binding.path
+            || journal.layers[0].format != binding.format
+            || (journal.layout == "flat-root") != binding.flat
+            || journal
+                .launch_base
+                .as_ref()
+                .is_some_and(|path| path != &binding.path)
+        {
+            return Err("historical preparation is not the admitted simple root format".into());
+        }
+        if let Some(current) = read_optional(&runtime_dir.join("root-disk.json"))?
+            && current.as_slice() != UPGRADE_GUARD
+        {
+            let current = super::compat::v0_7_0::RootJournal::decode(&current)?;
+            if current.layers.len() != 1
+                || current.published_generation != 0
+                || current.growth_target.is_some()
+                || current.layers[0].path != binding.path
+                || current.layers[0].format != binding.format
+                || (current.layout == "flat-root") != binding.flat
+                || current
+                    .launch_base
+                    .as_ref()
+                    .is_some_and(|path| path != &binding.path)
+            {
+                return Err("legacy selection changed after historical simple admission".into());
+            }
+        }
+        Ok(Some(Some(bytes)))
+    } else {
+        Ok(Some(None))
+    }
+}
+
+/// Finish an imported group only after every protected journal is durably published.
+pub(crate) fn publish_import_ready(runtime_dir: &Path) -> Result<(), String> {
+    finish(
+        runtime_dir,
+        LayoutRecord {
+            schema: SCHEMA.into(),
+            phase: Phase::Preparing,
+            binding: None,
+            root: None,
+        },
+    )
+}
+
+/// Establish both historical reader guards without publishing a ready marker.
+pub(crate) fn install_import_guards(runtime_dir: &Path) -> Result<(), String> {
+    atomic_write(&runtime_dir.join("root-disk.json"), UPGRADE_GUARD)?;
+    let heartbeat = runtime_dir.join("heartbeat.json");
+    if let Ok(metadata) = fs::symlink_metadata(&heartbeat)
+        && (!metadata.is_dir() || metadata_is_link(&metadata))
+    {
+        fs::remove_file(&heartbeat).map_err(|e| e.to_string())?;
+    }
+    real_directory(&heartbeat, true)?;
+    sync_directory(runtime_dir)
+}
+
 fn finish(runtime_dir: &Path, record: LayoutRecord) -> Result<(), String> {
     finish_with_checkpoint(runtime_dir, record, |_| Ok(()))
 }
@@ -424,8 +512,25 @@ fn atomic_write_inner(path: &Path, bytes: &[u8], public_certificate: bool) -> Re
 }
 
 pub(crate) fn real_directory(path: &Path, create: bool) -> Result<(), String> {
+    if create && fs::symlink_metadata(path).is_ok() {
+        return real_directory(path, false);
+    }
     if create {
-        match fs::create_dir(path) {
+        #[cfg(unix)]
+        let created = fs::create_dir(path);
+        #[cfg(windows)]
+        let created = (|| -> std::io::Result<()> {
+            // FlushFileBuffers is not a general directory fsync on Windows. Publish each
+            // new namespace entry with the same write-through move used for metadata files.
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("directory has no parent"))?;
+            let staging = tempfile::Builder::new()
+                .prefix(".layout-directory-")
+                .tempdir_in(parent)?;
+            super::replace_file(staging.path(), path)
+        })();
+        match created {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.to_string()),
@@ -456,8 +561,13 @@ fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| e.to_string())?;
-    #[cfg(not(unix))]
-    let _ = path;
+    #[cfg(windows)]
+    {
+        // Every caller publishes through atomic_write/real_directory, whose Windows moves
+        // request MOVEFILE_WRITE_THROUGH. Do not call FlushFileBuffers on read-only directory
+        // handles or ignore its unsupported-handle errors as if they proved durability.
+        let _ = path;
+    }
     Ok(())
 }
 

@@ -73,3 +73,17 @@ pub fn resolved_cli_msb_path() -> PyResult<String> {
         .map(|runtime| runtime.msb_path.to_string_lossy().into_owned())
         .map_err(to_py_err)
 }
+
+/// Inspect explicitly selected storage without initializing the normal backend.
+#[pyfunction]
+pub fn diagnose_storage<'py>(
+    py: Python<'py>,
+    config_json: String,
+    selection_json: String,
+) -> PyResult<Bound<'py, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        microsandbox::setup::binding_diagnose_storage(&config_json, &selection_json)
+            .await
+            .map_err(to_py_err)
+    })
+}

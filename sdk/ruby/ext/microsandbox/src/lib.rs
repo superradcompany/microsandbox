@@ -1,5 +1,6 @@
 mod jobs;
 mod services;
+mod storage;
 
 use std::{
     ffi::c_void,
@@ -2832,6 +2833,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let module = ruby.define_module("Microsandbox")?;
     module.define_error("Error", ruby.exception_standard_error())?;
     module.define_module_function("version", function!(version, 0))?;
+    storage::register(module)?;
     module.define_module_function("installed?", function!(installed, 0))?;
     module.define_module_function("install", function!(install, 0))?;
     module.define_module_function("set_runtime_msb_path", function!(set_runtime_msb_path, 1))?;

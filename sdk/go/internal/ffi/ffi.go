@@ -1325,6 +1325,10 @@ func ensureLoaded() error {
 // KindBufferTooSmall; streaming is a follow-up.
 const defaultBufSize = 1 << 20
 
+// storageDiagnosisMaxBufSize bounds a whole-home report, including its trailing NUL.
+// Larger inventories must be inspected as smaller named subsets.
+const storageDiagnosisMaxBufSize = 32 << 20
+
 // fsStreamBufSize is the output buffer used for fs read-stream Recv calls.
 // The protocol's FS_CHUNK_SIZE is 3 MiB; after base64 inflation (~33%) plus
 // the {"chunk_b64":"..."} JSON wrapper, each Recv response can reach ~4.1
@@ -6207,9 +6211,39 @@ func RuntimeSetup(ctx context.Context, operation, configJSON, optionsJSON string
 	defer C.free(unsafe.Pointer(op))
 	defer C.free(unsafe.Pointer(config))
 	defer C.free(unsafe.Pointer(options))
-	return call(ctx, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
-		return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+	return runtimeSetupOutput(ctx, operation, func(size int) (string, error) {
+		return callBuf(ctx, size, func(cancelID C.uint64_t, buf *C.uint8_t, bufLen C.size_t) *C.char {
+			return C.call_msb_runtime_setup(cancelID, op, config, options, buf, bufLen)
+		})
 	})
+}
+
+func runtimeSetupOutput(ctx context.Context, operation string, invoke func(int) (string, error)) (string, error) {
+	for size := defaultBufSize; ; {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		output, err := invoke(size)
+		// Only diagnosis is read-only. Retrying install, ensure or recovery after an
+		// undersized response could repeat an already-completed mutation.
+		var native *Error
+		if operation != "diagnose_storage" || !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			return output, err
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size || available != size {
+			return "", err
+		}
+		if needed > storageDiagnosisMaxBufSize || size == storageDiagnosisMaxBufSize {
+			return "", &Error{
+				Kind:    KindBufferTooSmall,
+				Message: "storage diagnosis exceeds the 32 MiB response limit; inspect smaller named subsets",
+			}
+		}
+		// Grow geometrically even if a concurrently changing inventory requests only
+		// one extra byte each time. The cap bounds both allocation and retry count.
+		size = min(storageDiagnosisMaxBufSize, max(needed, size*2))
+	}
 }
 
 // Jobs invokes the optional managed-job ABI without changing existing library requirements.

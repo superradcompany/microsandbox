@@ -174,7 +174,7 @@ enum Commands {
     /// Remove an installed sandbox command.
     Uninstall(uninstall::UninstallArgs),
 
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     Doctor(self_cmd::DoctorArgs),
 
     /// Update msb and libkrunfw to the latest release (alias for `self update`).
@@ -305,6 +305,7 @@ fn main() {
             println!(
                 "{}",
                 serde_json::to_string(&microsandbox_runtime::launch::LaunchCapabilities {
+                    storage_reader: microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
                     protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
@@ -341,7 +342,19 @@ fn main() {
             // runtime.log via setup_log_capture(), so disable ANSI —
             // color escapes have nowhere useful to render.
             log_args::init_tracing(sandbox_level, false);
-            if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload() {
+            if args.require_storage_reader {
+                // The capability belongs to the compiled host/guest pair. Never consult a
+                // configured agent override for a VM receiving private recovery captures.
+                if !microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER
+                    || microsandbox_filesystem::agentd::initialize_embedded_reader().is_err()
+                {
+                    eprintln!(
+                        "upgrade required: install a runtime with the embedded storage recovery reader"
+                    );
+                    std::process::exit(2);
+                }
+            } else if let Err(error) = microsandbox_filesystem::agentd::initialize_agentd_payload()
+            {
                 eprintln!("msb: failed to select agentd payload: {error}");
                 std::process::exit(1);
             }
@@ -516,6 +529,9 @@ fn format_command_help_line(
 /// `MicrosandboxError::ExecFailed`. Returns the appropriate exit
 /// code so callers don't conflate "rendered an error" with "1".
 fn render_anyhow_error(err: &anyhow::Error) -> i32 {
+    if let Some(diagnostic) = err.downcast_ref::<self_cmd::StorageDoctorExit>() {
+        return diagnostic.code;
+    }
     if err.chain().any(|cause| {
         cause
             .downcast_ref::<microsandbox_cli::ui::AlreadyRenderedError>()
@@ -740,7 +756,7 @@ fn run_async_command_anyhow(
             Commands::Service(args) => service::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
-            Commands::Doctor(args) => self_cmd::run_doctor(args),
+            Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
             Commands::Update(args) => self_cmd::run_update(args).await,
             Commands::Downgrade(args) => self_cmd::run_downgrade(args).await,
             Commands::Self_(args) => self_cmd::run(args).await,
@@ -801,6 +817,21 @@ mod command_tests {
     use super::*;
 
     #[test]
+    fn storage_reader_capability_matches_the_actual_embedded_protocol() {
+        let marker = microsandbox_protocol::storage_preview::HANDSHAKE.as_bytes();
+        let has_reader =
+            microsandbox_filesystem::agentd::embedded_agentd_payload().is_some_and(|agent| {
+                agent
+                    .as_bytes()
+                    .windows(marker.len())
+                    .any(|part| part == marker)
+            });
+        assert_eq!(
+            microsandbox_filesystem::agentd::EMBEDDED_STORAGE_READER,
+            has_reader
+        );
+    }
+    #[test]
     fn catalog_upgrade_leaves_stop_and_diagnostics_available() {
         for (arguments, expected) in [
             (vec!["msb", "sandbox", "create", "alpine"], true),
@@ -813,10 +844,40 @@ mod command_tests {
                 false,
             ),
             (vec!["msb", "doctor"], false),
+            (vec!["msb", "doctor", "app"], false),
+            (vec!["msb", "doctor", "--sandbox", "app"], false),
+            (vec!["msb", "self", "repair", "app"], false),
+            (vec!["msb", "self", "repair", "--sandbox", "app"], false),
             (vec!["msb", "context"], false),
         ] {
             let cli = Cli::try_parse_from(arguments).unwrap();
             assert_eq!(requires_current_catalog(&cli.command), expected);
+        }
+    }
+
+    #[test]
+    fn sandbox_repair_and_both_doctor_target_spellings_stay_backend_independent() {
+        for args in [
+            vec!["msb", "self", "repair"],
+            vec!["msb", "self", "repair", "app"],
+            vec!["msb", "self", "repair", "--sandbox", "app"],
+            vec!["msb", "doctor", "app"],
+            vec!["msb", "doctor", "--sandbox", "app"],
+            vec!["msb", "self", "doctor", "app"],
+            vec!["msb", "self", "doctor", "--sandbox", "app"],
+            vec!["msb", "doctor", "--all"],
+        ] {
+            let command = Cli::try_parse_from(args).unwrap().command;
+            assert!(is_backend_independent_command(&command));
+            assert!(!requires_current_catalog(&command));
+        }
+        for args in [
+            vec!["msb", "repair", "app"],
+            vec!["msb", "recover-storage", "app"],
+            vec!["msb", "sandbox", "recover-storage", "app"],
+            vec!["msb", "doctor", "--storage", "--sandbox", "app"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 

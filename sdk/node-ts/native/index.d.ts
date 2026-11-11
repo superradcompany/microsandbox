@@ -1096,6 +1096,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static get(name: string): Promise<JsSandboxHandle>
+  /** Import or recover stopped storage without starting a VM. */
+  static recoverStorage(name: string, optionsJson: string): Promise<string>
   /** List the first page of sandboxes. */
   static list(): Promise<JsSandboxPage>
   /** List a configured page of sandboxes. */
@@ -2104,6 +2106,9 @@ export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
+
+/** Inspect explicitly selected storage without initializing the normal backend. */
+export declare function diagnoseStorage(configJson: string, selectionJson: string): Promise<string>
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
