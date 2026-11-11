@@ -43,6 +43,8 @@ struct CapturedFullSnapshot {
     labels: BTreeMap<String, String>,
     fs_state_limit: usize,
     source_recovery: Option<SnapshotSourceRecoveryError>,
+    /// Removes the runtime's capture directory once publication has consumed it.
+    capture_cleanup: Option<ConsumedCapture>,
 }
 
 /// A complete operation-owned artifact, not yet a durable group member.
@@ -80,6 +82,10 @@ struct SnapshotDiskSource {
     sealed_layer_id: Option<DiskLayerId>,
 }
 
+/// A full capture directory owned by this operation. A source that failed to resume keeps its
+/// capture as the recovery locator, so it never gets one of these.
+struct ConsumedCapture(PathBuf);
+
 struct SnapshotDiskClosure {
     sources: Vec<SnapshotDiskSource>,
     virtual_size: u64,
@@ -105,6 +111,16 @@ impl SnapshotDiskSource {
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
+
+impl Drop for ConsumedCapture {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "failed to remove consumed full capture directory");
+        }
+    }
+}
 
 impl Drop for SnapshotDiskClosure {
     fn drop(&mut self) {
@@ -877,6 +893,16 @@ async fn publish_full_archive(
     })
 }
 
+/// Own the runtime's capture directory only when the source resumed and the runtime returned
+/// the path this operation expects.
+fn consumed_capture(
+    expected: PathBuf,
+    returned: &Path,
+    recovery_failed: bool,
+) -> Option<ConsumedCapture> {
+    (!recovery_failed && returned == expected).then(|| ConsumedCapture(expected))
+}
+
 /// Capture and validate runtime-owned checkpoint state without choosing its final representation.
 ///
 /// Installed snapshots and direct archives share this boundary so both publish byte-for-byte the
@@ -913,6 +939,15 @@ async fn capture_full_snapshot(
         .create_checkpoint(checkpoint_id.clone(), record_integrity, guest_flush)
         .await?;
     let checkpoint = outcome.checkpoint;
+    let capture_cleanup = consumed_capture(
+        local
+            .sandboxes_dir()
+            .join(source_sandbox)
+            .join("checkpoints")
+            .join(&checkpoint_id),
+        &checkpoint.path,
+        outcome.recovery_error.is_some(),
+    );
     let fs_state_limit = local.config().fs_state_limit();
     let validated = (|| {
         if checkpoint.checkpoint_id != checkpoint_id {
@@ -1019,6 +1054,7 @@ async fn capture_full_snapshot(
             manifest,
             labels: labels.into_iter().collect(),
             fs_state_limit,
+            capture_cleanup,
         })
     })();
     validated.map_err(|error| capture_validation_failure(error, outcome.recovery_error.as_deref()))
@@ -2515,6 +2551,7 @@ mod tests {
             manifest,
             labels: BTreeMap::new(),
             fs_state_limit: crate::test_support::DEFAULT_FS_STATE_LIMIT,
+            capture_cleanup: None,
         }
     }
 
@@ -2772,6 +2809,65 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(archive.path(), out);
+    }
+
+    #[test]
+    fn consumed_capture_requires_resumed_source_and_expected_path() {
+        let expected = PathBuf::from("/sandbox/checkpoints/checkpoint_1");
+        let owned = consumed_capture(expected.clone(), &expected, false).unwrap();
+        assert_eq!(owned.0, expected);
+        std::mem::forget(owned);
+        assert!(consumed_capture(expected.clone(), &expected, true).is_none());
+        assert!(consumed_capture(expected, Path::new("/elsewhere/checkpoint_1"), false).is_none());
+    }
+
+    #[tokio::test]
+    async fn published_full_snapshot_removes_its_capture_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let local = crate::test_support::local_backend_builder(temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        fixture_source(&local).await;
+        for archive in [false, true] {
+            let capture = temp
+                .path()
+                .join(if archive { "archive" } else { "installed" });
+            let mut captured = captured_fixture(&capture, None);
+            captured.capture_cleanup = Some(ConsumedCapture(capture.clone()));
+            let root = captured.checkpoint_root.clone();
+            let out = temp.path().join(if archive { "out.tar" } else { "out" });
+            let target = SnapshotDestination {
+                name: "snapshot",
+                path: &out,
+                force: false,
+            };
+            if archive {
+                let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+                publish_full_archive(target, "box", captured, lineage, true, Instant::now(), 0)
+                    .await
+                    .unwrap();
+                assert!(out.is_file());
+            } else {
+                stage_full_snapshot(
+                    target,
+                    "box",
+                    captured,
+                    temp.path().to_path_buf(),
+                    Instant::now(),
+                    0,
+                )
+                .await
+                .unwrap();
+                CheckpointClosure::open(
+                    out.join(CHECKPOINT_DIRECTORY),
+                    Some(&root),
+                    crate::test_support::DEFAULT_FS_STATE_LIMIT,
+                )
+                .unwrap();
+            }
+            assert!(!capture.exists());
+        }
     }
 
     #[test]
