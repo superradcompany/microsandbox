@@ -44,7 +44,7 @@ struct CapturedFullSnapshot {
     fs_state_limit: usize,
     source_recovery: Option<SnapshotSourceRecoveryError>,
     /// Removes the runtime's capture directory once publication has consumed it.
-    capture_cleanup: Option<ConsumedCapture>,
+    _capture_cleanup: Option<ConsumedCapture>,
 }
 
 /// A complete operation-owned artifact, not yet a durable group member.
@@ -1054,7 +1054,7 @@ async fn capture_full_snapshot(
             manifest,
             labels: labels.into_iter().collect(),
             fs_state_limit,
-            capture_cleanup,
+            _capture_cleanup: capture_cleanup,
         })
     })();
     validated.map_err(|error| capture_validation_failure(error, outcome.recovery_error.as_deref()))
@@ -2551,7 +2551,7 @@ mod tests {
             manifest,
             labels: BTreeMap::new(),
             fs_state_limit: crate::test_support::DEFAULT_FS_STATE_LIMIT,
-            capture_cleanup: None,
+            _capture_cleanup: None,
         }
     }
 
@@ -2822,7 +2822,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_full_snapshot_removes_its_capture_directory() {
+    async fn full_snapshot_publication_removes_its_capture_directory() {
         let temp = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(temp.path().join("home"))
             .build()
@@ -2834,7 +2834,7 @@ mod tests {
                 .path()
                 .join(if archive { "archive" } else { "installed" });
             let mut captured = captured_fixture(&capture, None);
-            captured.capture_cleanup = Some(ConsumedCapture(capture.clone()));
+            captured._capture_cleanup = Some(ConsumedCapture(capture.clone()));
             let root = captured.checkpoint_root.clone();
             let out = temp.path().join(if archive { "out.tar" } else { "out" });
             let target = SnapshotDestination {
@@ -2868,6 +2868,24 @@ mod tests {
             }
             assert!(!capture.exists());
         }
+
+        let capture = temp.path().join("failed");
+        let mut captured = captured_fixture(&capture, None);
+        captured._capture_cleanup = Some(ConsumedCapture(capture.clone()));
+        assert!(capture.exists());
+        let out = temp.path().join("out.tar");
+        let target = SnapshotDestination {
+            name: "snapshot",
+            path: &out,
+            force: false,
+        };
+        let lineage = super::super::lineage::begin(&local, "box").await.unwrap();
+
+        publish_full_archive(target, "box", captured, lineage, true, Instant::now(), 0)
+            .await
+            .unwrap_err();
+
+        assert!(!capture.exists());
     }
 
     #[test]
