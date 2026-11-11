@@ -671,22 +671,16 @@ impl RetiredRootDisk {
                 .and_then(|relative| relative.components().next())
                 .and_then(|component| component.as_os_str().to_str())
                 .is_some_and(|name| name.starts_with(".compact-") || name.starts_with(".grow-"));
-            let runtime_layer = path.parent() == Some(self.parent.as_path())
+            let managed_layer = path.parent() == Some(self.parent.as_path())
                 && path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(is_managed_layer_name);
-            if private_stage || runtime_layer {
+            if private_stage || managed_layer {
                 let _ = std::fs::remove_file(path);
             }
         }
     }
-}
-
-/// Managed qcow2 layers are named `<upper|root>-*.qcow2`; the base `upper.ext4` and
-/// `rootfs.raw` never match.
-fn is_managed_layer_name(name: &str) -> bool {
-    (name.starts_with("upper-") || name.starts_with("root-")) && name.ends_with(".qcow2")
 }
 
 impl RootDiskState {
@@ -1395,6 +1389,12 @@ fn next_overlay_path(previous: &Path, layout: RootDiskLayout) -> PathBuf {
         RootDiskLayout::FlatRoot => "root",
     };
     parent.join(format!("{prefix}-{}.qcow2", &new_id("head")[5..]))
+}
+
+/// Managed qcow2 layers are named `<upper|root>-*.qcow2`; the base `upper.ext4` and
+/// `rootfs.raw` never match.
+fn is_managed_layer_name(name: &str) -> bool {
+    (name.starts_with("upper-") || name.starts_with("root-")) && name.ends_with(".qcow2")
 }
 
 fn new_id(prefix: &str) -> String {
