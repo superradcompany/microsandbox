@@ -21,7 +21,6 @@ default = ["cloud", "download-binaries", "keyring", "local", "net"]
 # Exposes the archive walker to the fuzz harness (sdk/rust/fuzz). Never enabled in shipping builds.
 fuzzing = ["local"]
 local = [
-    "dep:astral-tokio-tar",
     "dep:async-compression",
     "dep:blake3",
     "dep:cap-primitives",
@@ -63,7 +62,6 @@ net = ["dep:microsandbox-network", "microsandbox-runtime?/net"]
 [dependencies]
 microsandbox-filesystem = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-astral-tokio-tar = { workspace = true, optional = true }
 async-compression = { workspace = true, features = ["tokio", "zstd", "gzip"], optional = true }
 base64.workspace = true
 blake3 = { workspace = true, optional = true }
