@@ -23,7 +23,8 @@ pub struct RestartArgs {
         value_name = "Sandbox",
         required = false,
         add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running,
-            SandboxStatus::Stopped, SandboxStatus::Created, SandboxStatus::Crashed, SandboxStatus::Paused]})
+            SandboxStatus::Stopped, SandboxStatus::Created, SandboxStatus::Crashed,
+            SandboxStatus::Draining, SandboxStatus::Paused]})
     )]
     pub names: Vec<String>,
 

@@ -20,7 +20,6 @@ use super::common;
 pub struct PsArgs {
     /// Sandbox to inspect. Omit to show running sandboxes.
     #[arg(
-        required_unless_present = "label",
         value_name = "Sandbox",
         required = false,
         add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[]})

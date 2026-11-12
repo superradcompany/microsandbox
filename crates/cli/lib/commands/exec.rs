@@ -35,7 +35,8 @@ pub struct ExecArgs {
     #[arg(
         value_name = "Sandbox",
         required = false,
-        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running,
+            SandboxStatus::Stopped]})
     )]
     pub name: String,
 

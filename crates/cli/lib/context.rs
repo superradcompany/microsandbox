@@ -1,12 +1,12 @@
 //! CLI completion functions
+use std::ffi::OsStr;
+use std::future::Future;
+use std::sync::OnceLock;
+
 use clap_complete::CompletionCandidate;
 use clap_complete::engine::ValueCompleter;
 use microsandbox::sandbox::{SandboxHandle, SandboxStatus};
 use microsandbox::{Image, ImageHandle};
-
-use std::ffi::OsStr;
-use std::future::Future;
-use std::sync::OnceLock;
 
 use crate::commands::common;
 
