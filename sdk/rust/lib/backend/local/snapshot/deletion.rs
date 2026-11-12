@@ -6,12 +6,14 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use microsandbox_image::storage_lease::StorageLease;
+use microsandbox_runtime::ipc::SandboxLifecycleGuard;
 use microsandbox_utils::process_lock;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
 use crate::backend::LocalBackend;
-use crate::db::entity::snapshot;
+use crate::db::entity::{sandbox, snapshot};
+use crate::sandbox::validate_sandbox_name;
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 //--------------------------------------------------------------------------------------------------
@@ -179,6 +181,60 @@ pub(super) async fn recover_parent(local: &LocalBackend, parent: &Path) -> Micro
     Ok(())
 }
 
+/// Delete objects from a stopped source sandbox's checkpoint store once no snapshot or capture
+/// directory links them. A running sandbox keeps its latest capture's objects in memory by path
+/// without a link, so only a sandbox that no runtime owns is touched, and the lifecycle lock
+/// keeps it stopped meanwhile. Anything skipped or failing stays in the store.
+pub(super) async fn release_store_objects(
+    local: &LocalBackend,
+    source: &str,
+) -> MicrosandboxResult<()> {
+    if validate_sandbox_name(source).is_err() {
+        return Ok(());
+    }
+    let registered = sandbox::Entity::find()
+        .filter(sandbox::Column::Name.eq(source))
+        .one(local.db().await?.read())
+        .await?;
+    if registered.is_none() {
+        return Ok(());
+    }
+
+    let run_dir = local.config().run_dir();
+    let store = local
+        .sandboxes_dir()
+        .join(source)
+        .join("checkpoint-store")
+        .join("objects")
+        .join("sha256");
+    let source = source.to_owned();
+    tokio::task::spawn_blocking(move || -> MicrosandboxResult<()> {
+        let Some(_lifecycle) = SandboxLifecycleGuard::try_acquire(&run_dir, &source)? else {
+            return Ok(());
+        };
+        let shards = match std::fs::read_dir(&store) {
+            Ok(shards) => shards,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for shard in shards {
+            let shard = shard?;
+            if !is_hex(&shard.file_name().to_string_lossy(), 2) || !shard.file_type()?.is_dir() {
+                continue;
+            }
+            for object in std::fs::read_dir(shard.path())? {
+                let object = object?;
+                if is_hex(&object.file_name().to_string_lossy(), 64) {
+                    release_unlinked(&object.path())?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| MicrosandboxError::Custom(format!("checkpoint object release: {error}")))?
+}
+
 /// Remember external parents before retiring the last indexed member. These small
 /// pointers are coordination records, not a recursive search through arbitrary host data.
 pub(super) fn register_parent(local: &LocalBackend, parent: &Path) -> std::io::Result<()> {
@@ -236,6 +292,33 @@ pub(crate) fn recovery_parents(local: &LocalBackend) -> std::io::Result<BTreeSet
         }
     }
     Ok(parents)
+}
+
+#[cfg(unix)]
+fn release_unlinked(object: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match std::fs::symlink_metadata(object) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Ok(());
+    }
+    match std::fs::remove_file(object) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+fn release_unlinked(_object: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn is_hex(name: &str, length: usize) -> bool {
+    name.len() == length && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn coordinate(root: &Path) -> std::io::Result<File> {

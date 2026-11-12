@@ -135,7 +135,7 @@ msb snap rm worker:ready
 
 If other group members remain, select another head before removing the current one. `--force` does not bypass this rule.
 
-Snapshots in active use cannot be removed, even with `--force`. Removal also checks that a retained handle still refers to the same artifact.
+Snapshots in active use cannot be removed, even with `--force`. Removal also checks that a retained handle still refers to the same artifact. Memory objects that no remaining snapshot uses are released from the source sandbox's checkpoint store when it is stopped.
 
 <Accordion title="Reader protection, stale entries, and interrupted cleanup">
 
