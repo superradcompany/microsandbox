@@ -1844,6 +1844,44 @@ mod tests {
     }
 
     #[test]
+    fn forked_root_with_layer_id_name_is_accepted() {
+        let (_temp, runtime, bindings) = fixture();
+        let nominal = &bindings.root.as_ref().unwrap().path;
+        let sealed = nominal
+            .parent()
+            .unwrap()
+            .join(format!("layer_{}.qcow2", "9e".repeat(16)));
+        let source = CompactLayer {
+            path: nominal.clone(),
+            qcow2: false,
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(microsandbox_image::checkpoint::materialize_compact_prefix(
+                &[source],
+                &sealed,
+            ))
+            .unwrap();
+        let head = nominal
+            .parent()
+            .unwrap()
+            .join("upper-restore-1234567890abcdef.qcow2");
+        overlay(&head, &sealed, "qcow2");
+        root_journal(&runtime, &bindings, &[(sealed, "qcow2"), (head, "qcow2")]);
+        execute(&runtime, &bindings);
+        assert_eq!(
+            load_runtime_owned_root_chain(&runtime)
+                .unwrap()
+                .unwrap()
+                .layers
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn root_and_owned_restored_chain_publish_together() {
         let (_temp, runtime, mut bindings) = fixture();
         let sandbox = layout::host_root(&runtime).unwrap();
