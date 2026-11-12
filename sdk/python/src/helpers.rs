@@ -1416,6 +1416,16 @@ fn parse_network_policy(net: &Bound<'_, PyDict>) -> PyResult<Option<NetworkPolic
             ));
         }
     }
+    if let Some(names) = extract_opt::<Vec<String>>(net, "deny_subdomains")? {
+        for s in names {
+            let name = s.parse().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("deny_subdomains[{s:?}]: {e}"))
+            })?;
+            bulk_deny_rules.push(microsandbox_network::policy::Rule::deny_egress(
+                microsandbox_network::policy::Destination::Subdomain(name),
+            ));
+        }
+    }
     if let Some(legacy) = net.get_item("policy")?
         && !legacy.is_none()
     {
@@ -2306,6 +2316,7 @@ fn parse_network_destination(
         Some("domain_suffix") | Some("domain-suffix") => {
             parse_domain_suffix_destination(required_destination(kind, raw)?)
         }
+        Some("subdomain") => parse_subdomain_destination(required_destination(kind, raw)?),
         Some("group") => parse_group_destination(required_destination(kind, raw)?),
         Some(other) => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown destination kind: {other}"
@@ -2329,6 +2340,9 @@ fn parse_shorthand_destination(
     }
     if let Some(rest) = raw.strip_prefix("suffix=") {
         return parse_domain_suffix_destination(rest);
+    }
+    if let Some(rest) = raw.strip_prefix("subdomain=") {
+        return parse_subdomain_destination(rest);
     }
     if let Some(destination) = maybe_group_destination(raw) {
         return Ok(destination);
@@ -2388,6 +2402,13 @@ fn parse_domain_suffix_destination(
     Ok(microsandbox_network::policy::Destination::DomainSuffix(
         name,
     ))
+}
+
+fn parse_subdomain_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
+    let name = raw.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid subdomain {raw:?}: {e}"))
+    })?;
+    Ok(microsandbox_network::policy::Destination::Subdomain(name))
 }
 
 fn parse_group_destination(raw: &str) -> PyResult<microsandbox_network::policy::Destination> {
@@ -2580,6 +2601,21 @@ pub(crate) mod tests {
                 assert!(parse_policy_port(value).is_err(), "{value}");
             }
         });
+    }
+
+    #[test]
+    fn subdomain_destination_parses_both_forms() {
+        use microsandbox_network::policy::Destination;
+        for (kind, raw) in [
+            (Some("subdomain"), "Example.com"),
+            (None, "subdomain=example.com"),
+        ] {
+            match parse_network_destination(kind, Some(raw)).unwrap() {
+                Destination::Subdomain(name) => assert_eq!(name.as_str(), "example.com"),
+                other => panic!("expected subdomain destination, got {other:?}"),
+            }
+        }
+        assert!(parse_network_destination(None, Some("subdomain=")).is_err());
     }
 
     #[test]

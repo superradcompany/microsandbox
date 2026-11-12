@@ -240,7 +240,8 @@ const filteredPolicy = NetworkPolicy.builder()
   .egress((egress) =>
     egress
       .denyDomain("blocked.example.com")
-      .denyDomainSuffix(".evil.com"),
+      .denyDomainSuffix(".evil.com")
+      .denySubdomain("tracker.example.com"),
   )
   .build();
 

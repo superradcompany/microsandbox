@@ -258,6 +258,7 @@ filtered, err := microsandbox.CreateSandbox(ctx, "go-readme-filtered",
     microsandbox.WithNetwork(&microsandbox.NetworkConfig{
         DenyDomains:        []string{"blocked.example.com"},
         DenyDomainSuffixes: []string{".evil.com"},
+        DenySubdomains:     []string{"tracker.example.com"},
         DNS: &microsandbox.DNSConfig{
             Nameservers: []string{"1.1.1.1:53"},
         },

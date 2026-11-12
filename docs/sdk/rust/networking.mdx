@@ -28,7 +28,7 @@ let policy = NetworkPolicy::builder()
 
 </Accordion>
 
-Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. [`build()`](#policy-build) validates string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`) and returns a [`BuildError`](#builderror) for invalid input.
+Create a [`NetworkPolicyBuilder`](#networkpolicybuilder) to configure rules and per-direction defaults. The first matching rule wins in each direction. [`build()`](#policy-build) validates string inputs (`.ip`, `.cidr`, `.domain`, `.domain_suffix`, `.subdomain`) and returns a [`BuildError`](#builderror) for invalid input.
 
 <p className="msb-label">Returns</p>
 
@@ -200,6 +200,44 @@ let policy = NetworkPolicy::allow_all()
 
 Prepend one deny-[`DomainSuffix`](#destination) egress rule per suffix.
 
+#### <span className="msb-recv">policy.</span><span className="msb-hn">allow_subdomain()</span>
+
+```rust
+fn allow_subdomain<S: AsRef<str>>(self, name: S) -> Result<NetworkPolicy, DomainNameError>
+```
+
+Prepend a single allow-[`Subdomain`](#destination) egress rule. Single-name sugar over [`allow_subdomains()`](#policy-allow_subdomains).
+
+#### <span className="msb-recv">policy.</span><span className="msb-hn">deny_subdomain()</span>
+
+```rust
+fn deny_subdomain<S: AsRef<str>>(self, name: S) -> Result<NetworkPolicy, DomainNameError>
+```
+
+Prepend a single deny-[`Subdomain`](#destination) egress rule. Single-name sugar over [`deny_subdomains()`](#policy-deny_subdomains).
+
+#### <span className="msb-recv">policy.</span><span className="msb-hn">allow_subdomains()</span>
+
+```rust
+fn allow_subdomains<I, S>(self, names: I) -> Result<NetworkPolicy, DomainNameError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+```
+
+Prepend one allow-[`Subdomain`](#destination) egress rule per name. Names match every subdomain (label-aligned), never the name itself.
+
+#### <span className="msb-recv">policy.</span><span className="msb-hn">deny_subdomains()</span>
+
+```rust
+fn deny_subdomains<I, S>(self, names: I) -> Result<NetworkPolicy, DomainNameError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+```
+
+Prepend one deny-[`Subdomain`](#destination) egress rule per name.
+
 ## NetworkPolicyBuilder
 
 Fluent builder for [`NetworkPolicy`](#networkpolicy).
@@ -321,7 +359,7 @@ Open a multi-rule batch closure. Direction must be set inside via [`.egress()`](
 fn build(self) -> Result<NetworkPolicy, BuildError>
 ```
 
-Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair, meaning a rule fully covered by an earlier one in the same direction. The shadow check covers only `Ip` / `Cidr` / `Group` destinations. Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
+Consume the builder and produce a [`NetworkPolicy`](#networkpolicy). Lazy-parses every `.ip()` / `.cidr()` / `.domain()` / `.domain_suffix()` / `.subdomain()` input and validates the direction-set and ICMP-egress-only invariants. It also emits a `tracing::warn!` for each shadowed rule pair, meaning a rule fully covered by an earlier one in the same direction. The shadow check covers only `Ip` / `Cidr` / `Group` destinations. Builds still succeed when a shadow is detected. Returns the first [`BuildError`](#builderror) encountered.
 
 <p className="msb-label">Returns</p>
 
@@ -585,6 +623,28 @@ where
 
 Add one deny-[`DomainSuffix`](#destination) rule per suffix.
 
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allow_subdomains()</span>
+
+```rust
+fn allow_subdomains<I, S>(&mut self, names: I) -> &mut Self
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>
+```
+
+Add one allow-[`Subdomain`](#destination) rule per name.
+
+#### <span className="msb-recv">rule.</span><span className="msb-hn">deny_subdomains()</span>
+
+```rust
+fn deny_subdomains<I, S>(&mut self, names: I) -> &mut Self
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>
+```
+
+Add one deny-[`Subdomain`](#destination) rule per name.
+
 #### <span className="msb-recv">rule.</span><span className="msb-hn">allow()</span>
 
 <a id="rb-allow"></a>
@@ -659,6 +719,16 @@ fn domain_suffix(self, suffix: impl Into<String>) -> &'a mut RuleBuilder
 ```
 
 Commit with [`Destination::DomainSuffix`](#destination). Matches the apex domain itself and any subdomain. A single-label suffix (e.g. `com`) is rejected at build as [`BuildError::InvalidDomain`](#builderror).
+
+#### <span className="msb-recv">destination.</span><span className="msb-hn">subdomain()</span>
+
+<a id="rd-subdomain"></a>
+
+```rust
+fn subdomain(self, name: impl Into<String>) -> &'a mut RuleBuilder
+```
+
+Commit with [`Destination::Subdomain`](#destination). Matches any subdomain, never the name itself. A single-label name (e.g. `com`) is rejected at build as [`BuildError::InvalidDomain`](#builderror).
 
 #### <span className="msb-recv">destination.</span><span className="msb-hn">group()</span>
 
@@ -1469,7 +1539,7 @@ Whether `port` falls within the range
 ## DomainName
 
 
-<p className="msb-backref">Held by <a href="#destination">Destination::Domain / DomainSuffix</a></p>
+<p className="msb-backref">Held by <a href="#destination">Destination::Domain / DomainSuffix / Subdomain</a></p>
 
 A validated, canonical DNS name.
 
@@ -1488,7 +1558,7 @@ Borrow the canonical string form
 try_into_suffix()
 ```
 
-Validate for use as a `DomainSuffix`; single-label names (e.g. `com`) are rejected
+Validate for use as a `DomainSuffix` or `Subdomain`; single-label names (e.g. `com`) are rejected
 
 ## Types
 
@@ -1531,6 +1601,7 @@ Composable high-level access category accepted by [`NetworkPolicy::from_profiles
 | `Cidr(IpNetwork)` | Match a CIDR range (e.g. `10.0.0.0/8`); single IPs are stored as `/32` or `/128` |
 | `Domain(`[`DomainName`](#domainname)`)` | Match an exact domain (e.g. `example.com`) when a cached hostname for the remote IP equals it |
 | `DomainSuffix(`[`DomainName`](#domainname)`)` | Match the apex domain and every subdomain (e.g. `example.com` and `api.example.com`) |
+| `Subdomain(`[`DomainName`](#domainname)`)` | Match every subdomain (e.g. `api.example.com`), never `example.com` itself |
 | `Group(`[`DestinationGroup`](#destinationgroup)`)` | Match a predefined address group |
 
 ### DestinationGroup
@@ -1643,7 +1714,7 @@ Errors surfaced by the builders' `build()` methods. The same enum covers [`Netwo
 | `InvalidTcpAcceptQueueSize { source }` | `tcp_accept_queue_size()` got a value outside `1..=i32::MAX` |
 | `InvalidNat64Prefix { raw }` | `nat64_prefix()` got a prefix that is not an IPv6 `/96` |
 | `InvalidOutboundProxy { reason }` | [`SandboxBuilder::proxy()`](/sdk/rust/proxies#proxy) got an invalid proxy configuration |
-| `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` got a value that failed `DomainName` parse |
+| `InvalidDomain { rule_index, raw, source }` | `.domain` / `.domain_suffix` / `.subdomain` got a value that failed `DomainName` parse |
 | `InvalidPortRange { rule_index, lo, hi }` | `.port_range(lo, hi)` had `lo > hi` |
 | `IngressDoesNotSupportIcmp { rule_index }` | ICMP protocol on a non-egress rule |
 | `InvalidSecretConfig { source }` | A secret entry failed validation |

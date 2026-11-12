@@ -35,7 +35,7 @@ pub struct JsRuleBuilder {
 
 /// Terminal builder returned by `RuleBuilder.allow(d => ...)` /
 /// `.deny(d => ...)`. Exactly one destination call (`.ip`, `.cidr`,
-/// `.domain`, `.domainSuffix`, `.group`, `.any`) commits the rule;
+/// `.domain`, `.domainSuffix`, `.subdomain`, `.group`, `.any`) commits the rule;
 /// dropping without a destination call silently does nothing.
 #[napi(js_name = "RuleDestinationBuilder")]
 pub struct JsRuleDestinationBuilder {
@@ -81,6 +81,8 @@ enum RuleOp {
     DenyDomains(Vec<String>),
     AllowDomainSuffixes(Vec<String>),
     DenyDomainSuffixes(Vec<String>),
+    AllowSubdomains(Vec<String>),
+    DenySubdomains(Vec<String>),
     Commit { action: RustAction, dest: DestKind },
 }
 
@@ -90,6 +92,7 @@ enum DestKind {
     Cidr(String),
     Domain(String),
     DomainSuffix(String),
+    Subdomain(String),
     Group(RustDestinationGroup),
     Any,
 }
@@ -177,8 +180,8 @@ impl JsNetworkPolicyBuilder {
 
     /// Materialize into a `NetworkPolicy` (camelCase JS object). Lazily
     /// parses every recorded `.ip()` / `.cidr()` / `.domain()` /
-    /// `.domainSuffix()` input, validates `direction`-set + ICMP-egress-
-    /// only invariants, and surfaces the first failure.
+    /// `.domainSuffix()` / `.subdomain()` input, validates `direction`-set +
+    /// ICMP-egress-only invariants, and surfaces the first failure.
     #[napi]
     pub fn build(&self) -> Result<NetworkPolicy> {
         let policy = self.build_rust_policy()?;
@@ -493,10 +496,40 @@ impl JsRuleBuilder {
         self
     }
 
+    /// Allow `Destination::Subdomain(name)`. Matches any subdomain, never
+    /// the name itself.
+    #[napi(js_name = "allowSubdomain")]
+    pub fn allow_subdomain(&mut self, name: String) -> &Self {
+        self.ops.push(RuleOp::AllowSubdomains(vec![name]));
+        self
+    }
+
+    /// Deny `Destination::Subdomain(name)`. Matches any subdomain, never
+    /// the name itself.
+    #[napi(js_name = "denySubdomain")]
+    pub fn deny_subdomain(&mut self, name: String) -> &Self {
+        self.ops.push(RuleOp::DenySubdomains(vec![name]));
+        self
+    }
+
+    /// Allow each name as a `Destination::Subdomain` rule.
+    #[napi(js_name = "allowSubdomains")]
+    pub fn allow_subdomains(&mut self, names: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::AllowSubdomains(names));
+        self
+    }
+
+    /// Deny each name as a `Destination::Subdomain` rule.
+    #[napi(js_name = "denySubdomains")]
+    pub fn deny_subdomains(&mut self, names: Vec<String>) -> &Self {
+        self.ops.push(RuleOp::DenySubdomains(names));
+        self
+    }
+
     /// Begin an explicit-destination rule with action `Allow`. The
     /// closure receives a `RuleDestinationBuilder` and must call exactly
     /// one of `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` /
-    /// `.group()` / `.any()` to commit the rule.
+    /// `.subdomain()` / `.group()` / `.any()` to commit the rule.
     #[napi]
     pub fn allow(
         &mut self,
@@ -579,6 +612,14 @@ impl JsRuleDestinationBuilder {
         self
     }
 
+    /// Commit the rule with destination `Subdomain(<name>)`. Matches any
+    /// subdomain, never the name itself.
+    #[napi]
+    pub fn subdomain(&mut self, name: String) -> &Self {
+        self.dest = Some(DestKind::Subdomain(name));
+        self
+    }
+
     /// Commit the rule with destination `Group(<group>)`. `group` is
     /// one of the `DestinationGroup` strings (`"public" | "private" |
     /// "loopback" | "link-local" | "metadata" | "multicast" | "host"`).
@@ -621,11 +662,12 @@ pub struct NetworkPolicyRule {
 #[derive(Clone)]
 #[napi(object)]
 pub struct NetworkPolicyDestination {
-    /// `"any" | "cidr" | "domain" | "domainSuffix" | "group"`.
+    /// `"any" | "cidr" | "domain" | "domainSuffix" | "subdomain" | "group"`.
     pub kind: String,
     pub cidr: Option<String>,
     pub domain: Option<String>,
     pub suffix: Option<String>,
+    pub subdomain: Option<String>,
     pub group: Option<String>,
 }
 
@@ -697,6 +739,12 @@ fn apply_rule_ops(rb: &mut RustRuleBuilder, ops: Vec<RuleOp>) -> &mut RustRuleBu
             RuleOp::DenyDomainSuffixes(suffixes) => {
                 rb.deny_domain_suffixes(suffixes);
             }
+            RuleOp::AllowSubdomains(names) => {
+                rb.allow_subdomains(names);
+            }
+            RuleOp::DenySubdomains(names) => {
+                rb.deny_subdomains(names);
+            }
             RuleOp::Commit { action, dest } => {
                 let dab = match action {
                     RustAction::Allow => rb.allow(),
@@ -714,6 +762,9 @@ fn apply_rule_ops(rb: &mut RustRuleBuilder, ops: Vec<RuleOp>) -> &mut RustRuleBu
                     }
                     DestKind::DomainSuffix(s) => {
                         dab.domain_suffix(s);
+                    }
+                    DestKind::Subdomain(s) => {
+                        dab.subdomain(s);
                     }
                     DestKind::Group(g) => {
                         dab.group(g);
@@ -840,6 +891,7 @@ fn rust_policy_to_js(p: RustNetworkPolicy) -> NetworkPolicy {
         cidr: None,
         domain: None,
         suffix: None,
+        subdomain: None,
         group: None,
     };
     let dest_to_js = |d: RustDestination| match d {
@@ -860,6 +912,11 @@ fn rust_policy_to_js(p: RustNetworkPolicy) -> NetworkPolicy {
         RustDestination::DomainSuffix(name) => NetworkPolicyDestination {
             kind: "domainSuffix".to_string(),
             suffix: Some(name.as_str().to_string()),
+            ..blank_dest()
+        },
+        RustDestination::Subdomain(name) => NetworkPolicyDestination {
+            kind: "subdomain".to_string(),
+            subdomain: Some(name.as_str().to_string()),
             ..blank_dest()
         },
         RustDestination::Group(g) => NetworkPolicyDestination {

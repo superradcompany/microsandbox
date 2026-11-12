@@ -32,7 +32,7 @@ const policy = NetworkPolicy.builder()
 
 </Accordion>
 
-Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`) are stored raw and parsed at [`build()`](#policy-build), so the chain stays clean and the first parse or validation failure surfaces there.
+Start the fluent [`NetworkPolicyBuilder`](#networkpolicybuilder). Equivalent to `new NetworkPolicyBuilder()`. String inputs (`.ip()`, `.cidr()`, `.domain()`, `.domainSuffix()`, `.subdomain()`) are stored raw and parsed at [`build()`](#policy-build), so the chain stays clean and the first parse or validation failure surfaces there.
 
 <p className="msb-label">Returns</p>
 
@@ -247,6 +247,7 @@ type Destination =
   | { kind: "cidr"; cidr: string }
   | { kind: "domain"; domain: string }
   | { kind: "domainSuffix"; suffix: string }
+  | { kind: "subdomain"; subdomain: string }
   | { kind: "group"; group: DestinationGroup };
 ```
 
@@ -306,6 +307,23 @@ Match the apex domain and every subdomain.
   <div className="msb-param">
     <div className="msb-param-key"><code>suffix</code><span className="msb-type">string</span></div>
     <div className="msb-param-desc">Domain suffix.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Destination.</span><span className="msb-hn">subdomain()</span>
+
+```typescript
+subdomain(name: string): Destination
+```
+
+Match every subdomain of a domain, never the domain itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Domain whose subdomains match.</div>
   </div>
 </div>
 
@@ -1012,7 +1030,7 @@ Open a multi-rule batch closure. Direction must be set inside via `.egress()`, `
 build(): NetworkPolicy
 ```
 
-Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy). Lazily parses every recorded `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` input, validates direction-set and ICMP-egress-only invariants, and emits a host-side warning for each shadowed rule pair.
+Materialize the accumulated state into a [`NetworkPolicy`](#networkpolicy). Lazily parses every recorded `.ip()` / `.cidr()` / `.domain()` / `.domainSuffix()` / `.subdomain()` input, validates direction-set and ICMP-egress-only invariants, and emits a host-side warning for each shadowed rule pair.
 
 <p className="msb-label">Returns</p>
 
@@ -1420,6 +1438,74 @@ Add one `Destination::DomainSuffix` deny rule per suffix.
   </div>
 </div>
 
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allowSubdomain()</span>
+
+```typescript
+allowSubdomain(name: string): this
+```
+
+Add one `Destination::Subdomain` allow rule. Matches any subdomain, never the name itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Domain.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">rule.</span><span className="msb-hn">denySubdomain()</span>
+
+```typescript
+denySubdomain(name: string): this
+```
+
+Add one `Destination::Subdomain` deny rule. Matches any subdomain, never the name itself.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Domain.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">rule.</span><span className="msb-hn">allowSubdomains()</span>
+
+```typescript
+allowSubdomains(names: string[]): this
+```
+
+Add one `Destination::Subdomain` allow rule per name.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>names</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Domains.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">rule.</span><span className="msb-hn">denySubdomains()</span>
+
+```typescript
+denySubdomains(names: string[]): this
+```
+
+Add one `Destination::Subdomain` deny rule per name.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>names</code><span className="msb-type">string[]</span></div>
+    <div className="msb-param-desc">Domains.</div>
+  </div>
+</div>
+
 ### Explicit-destination rule-adders
 
 `.allow()` / `.deny()` open a [`RuleDestinationBuilder`](#ruledestinationbuilder) callback. Exactly one destination call commits the rule.
@@ -1537,6 +1623,23 @@ Commit with `Destination::DomainSuffix`.
   <div className="msb-param">
     <div className="msb-param-key"><code>suffix</code><span className="msb-type">string</span></div>
     <div className="msb-param-desc">Domain suffix.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv" id="rd-subdomain">destination.</span><span className="msb-hn">subdomain()</span>
+
+```typescript
+subdomain(name: string): this
+```
+
+Commit with `Destination::Subdomain`.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Domain.</div>
   </div>
 </div>
 

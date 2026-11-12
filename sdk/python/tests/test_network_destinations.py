@@ -54,6 +54,26 @@ def test_typed_group_destination_serializes_with_kind() -> None:
     ]
 
 
+def test_typed_subdomain_destination_serializes_with_kind() -> None:
+    policy = NetworkPolicy(
+        rules=(Rule.allow(destination=Destination.subdomain("example.com")),),
+    )
+
+    assert policy._to_dict()["rules"] == [
+        {
+            "action": "allow",
+            "direction": "egress",
+            "destination_kind": "subdomain",
+            "destination": "example.com",
+        }
+    ]
+
+
+def test_network_serializes_deny_subdomains() -> None:
+    network = Network(deny_subdomains=("ads.example.com",))
+    assert network._to_dict()["deny_subdomains"] == ["ads.example.com"]
+
+
 def test_string_destination_remains_compatibility_shorthand() -> None:
     policy = NetworkPolicy(
         rules=(
