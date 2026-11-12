@@ -1,0 +1,362 @@
+---
+title: Services
+"og:title": Ruby SDK Services reference
+description: Manage public URLs for sandbox ports with the Ruby SDK.
+keywords: ["Ruby SDK", "Ruby services", "microsandbox services", "public URL"]
+---
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend raises UnsupportedError."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+See [Services](/sandboxes/services) for usage and limits.
+
+## Service
+
+Properties use the last response without making a request.
+
+#### <span className="msb-recv">Microsandbox::Service.</span><span className="msb-hn">builder()</span>
+
+```ruby
+Microsandbox::Service.builder(slug) # => ServiceBuilder
+```
+
+Start a builder for a Service.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Globally unique Service slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicebuilder">ServiceBuilder</a></div>
+    <div className="msb-param-desc">A builder to set the target on, then create.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Service.</span><span className="msb-hn">create()</span>
+
+```ruby
+Microsandbox::Service.create(slug, target:) # => Service
+```
+
+<Accordion title="Example">
+
+```ruby
+target = Microsandbox::ServiceTarget.new("my-sandbox", 8080)
+svc = Microsandbox::Service.create("my-app", target: target)
+```
+
+</Accordion>
+
+Create a Service without retrying. A `nil` target or port zero raises `InvalidConfigError` before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Globally unique Service slug.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>target</code><a className="msb-type" href="#servicetarget">ServiceTarget</a></div>
+    <div className="msb-param-desc">Running sandbox and port that receive requests.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Service.</span><span className="msb-hn">get()</span>
+
+```ruby
+Microsandbox::Service.get(slug) # => Service
+```
+
+Get a Service by slug.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Service slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Microsandbox::Service.</span><span className="msb-hn">list()</span>
+
+```ruby
+Microsandbox::Service.list(sandbox: nil, cursor: nil, limit: nil) # => Hash
+```
+
+List one page in slug order, including disabled and detached Services. A limit outside 1 through 100 raises `InvalidConfigError` before any request.
+
+<Accordion title="Example">
+
+```ruby
+page = Microsandbox::Service.list(sandbox: "my-sandbox", limit: 50)
+page.fetch("services").each { |svc| puts svc.slug }
+next_cursor = page.fetch("next_cursor")
+```
+
+</Accordion>
+
+<p className="msb-label">Keyword parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Only Services targeting this sandbox.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>cursor</code><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Opaque cursor returned by the previous page.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>limit</code><span className="msb-type">Integer | nil</span></div>
+    <div className="msb-param-desc">Page size from 1 through 100; defaults to 20.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"services"</code><a className="msb-type" href="#service">Array&lt;Service&gt;</a></div>
+    <div className="msb-param-desc">Services in this page, in slug order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>"next_cursor"</code><span className="msb-type">String | nil</span></div>
+    <div className="msb-param-desc">Cursor for the next page, or <code>nil</code> on the final page.</div>
+  </div>
+</div>
+
+<p className="msb-member-group">Instance properties</p>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">slug</span>
+
+`String` — The Service slug.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">url</span>
+
+`String` — The public URL as returned by the backend.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">status</span>
+
+`String` — `"enabled"`, `"disabled"`, `"detached"`, or `"unknown"`, as of the read that returned this value. `refresh` returns a current copy.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">target</span>
+
+[`ServiceTarget`](#servicetarget) ` | nil` — The target, or `nil` when detached.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">created_at</span>
+
+`String` — RFC 3339 creation timestamp.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">updated_at</span>
+
+`String` — RFC 3339 timestamp of the latest state change.
+
+<p className="msb-member-group">Instance methods</p>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">update()</span>
+
+```ruby
+svc.update(target:) # => Service
+```
+
+Change the target without retrying. `target:` is required; a `nil` target or port zero raises `InvalidConfigError` before any request. Setting a target also enables or reattaches the Service.
+
+<p className="msb-label">Keyword parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>target</code><a className="msb-type" href="#servicetarget">ServiceTarget</a></div>
+    <div className="msb-param-desc">Running target; also enables or reattaches the Service.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">Service</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">enable()</span>
+
+```ruby
+svc.enable # => Service
+```
+
+Enable the Service without retrying. Set a target instead when it is detached.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">disable()</span>
+
+```ruby
+svc.disable # => Service
+```
+
+Disable the Service without retrying while retaining its target.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">remove()</span>
+
+```ruby
+svc.remove # => nil
+```
+
+Remove the Service and release its slug without retrying.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">refresh()</span>
+
+```ruby
+svc.refresh # => Service
+```
+
+Get the Service again and return its current state. This object is not changed.
+
+## ServiceBuilder
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">target()</span>
+
+```ruby
+builder.target(sandbox, port) # => ServiceBuilder
+```
+
+Set the running sandbox and port that receive requests.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>sandbox</code><span className="msb-type">String</span></div>
+    <div className="msb-param-desc">Current name of a running sandbox.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>port</code><span className="msb-type">Integer</span></div>
+    <div className="msb-param-desc">Sandbox port from 1 through 65,535.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
+
+```ruby
+builder.create # => Service
+```
+
+<Accordion title="Example">
+
+```ruby
+svc = Microsandbox::Service.builder("my-app")
+  .target("my-sandbox", 8080)
+  .create
+```
+
+</Accordion>
+
+Create the Service without retrying; consumes the builder.
+
+## ServiceTarget
+
+```ruby
+Microsandbox::ServiceTarget.new(sandbox, port)
+```
+
+A `Data` value; targets compare by value.
+
+#### <span className="msb-recv">target.</span><span className="msb-hn">sandbox</span>
+
+`String` — Current name of the target sandbox.
+
+#### <span className="msb-recv">target.</span><span className="msb-hn">port</span>
+
+`Integer` — Sandbox port from 1 through 65,535.
+
+## ServiceError
+
+`Microsandbox::ServiceError` reports a refused Service change or an unknown outcome. A missing Service raises `ServiceNotFoundError`, an unavailable slug raises `ServiceAlreadyExistsError`, and a missing target sandbox raises `SandboxNotFoundError`.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">slug</span>
+
+`String` — Service slug.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">reason</span>
+
+`String` — One of the `Microsandbox::ServiceErrorReason` constants below.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">retry_after</span>
+
+`Float | nil` — Retry delay in seconds when the backend returns one.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">changed</span>
+
+`String` — `"unchanged"` or `"unknown"`. Unknown means the change may have been applied; get and check the Service.
+
+Every `Microsandbox::Error` raised by `create`, `update`, `enable`, `disable`, or `remove` exposes this property, not only `ServiceError`.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">raw_code</span>
+
+`String | nil` — Unrecognized refusal code when `reason` is `ServiceErrorReason::OTHER`.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">raw_status</span>
+
+`Integer | nil` — Raw HTTP status when `reason` is `ServiceErrorReason::OTHER`.
+
+#### <span className="msb-recv">error.</span><span className="msb-hn">raw_message</span>
+
+`String | nil` — Raw refusal message when `reason` is `ServiceErrorReason::OTHER`.
+
+## Service error reasons
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SERVICE_QUOTA_EXCEEDED</code></div>
+    <div className="msb-param-desc">The organization's Service limit was reached. Remove a Service or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SANDBOX_SERVICE_LIMIT_EXCEEDED</code></div>
+    <div className="msb-param-desc">The target sandbox's Service limit was reached. Remove or move a Service, or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SERVICE_CONFLICT</code></div>
+    <div className="msb-param-desc">Another change to the Service committed first. Get it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SERVICE_DETACHED</code></div>
+    <div className="msb-param-desc">The Service is detached. Set a target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::TARGET_UNREACHABLE</code></div>
+    <div className="msb-param-desc">The target sandbox cannot be reached right now. Retry later, after <code>retry_after</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SANDBOX_NOT_RUNNING</code></div>
+    <div className="msb-param-desc">The target sandbox is not running. Start it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::SERVICE_CHANGES_PAUSED</code></div>
+    <div className="msb-param-desc">Service changes are paused. Retry later, after <code>retry_after</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::OUTCOME_UNKNOWN</code></div>
+    <div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceErrorReason::OTHER</code></div>
+    <div className="msb-param-desc">A refusal this SDK does not recognize. <code>raw_code</code>, <code>raw_status</code>, and <code>raw_message</code> hold what was returned; <code>changed</code> still reports the outcome.</div>
+  </div>
+</div>

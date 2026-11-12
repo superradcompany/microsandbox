@@ -1,0 +1,99 @@
+---
+title: Service commands
+"og:title": Microsandbox CLI Service commands
+sidebarTitle: "Services"
+description: Manage public URLs for sandbox ports with the microsandbox CLI.
+icon: "globe"
+---
+
+<Tooltip tip="Available only on microsandbox cloud. On the local backend, each command fails; select cloud with MSB_BACKEND=cloud and MSB_API_KEY, or msb context use <name>."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+Add `--format json` to `create`, `update`, `enable`, `disable`, `inspect`, or `ls` for JSON output. Each Service prints as an object with `slug`, `url`, `status`, `target` (`sandbox` and `port`, or `null`), `created_at`, and `updated_at`.
+
+Commands that change a Service send the change once and never retry it. If a command says the change may have been applied, run `msb service inspect` before trying again.
+
+## msb service create
+
+```bash
+msb service create my-app --target my-sandbox:8080
+```
+
+The target sandbox must be running.
+
+If the slug already names one of your Services, the command directs you to `msb service update` to change its target. An unavailable slug that is not visible to you still asks you to choose another slug.
+
+| Flag | Description |
+|------|-------------|
+| `--target` | Running target as `SANDBOX:PORT` |
+| `--format` | Output format (`json`) |
+
+## msb service update
+
+```bash
+msb service update my-app --target new-sandbox:8080
+```
+
+Setting a target also enables or reattaches the Service.
+
+| Flag | Description |
+|------|-------------|
+| `--target` | Set a running target as `SANDBOX:PORT` |
+| `--format` | Output format (`json`) |
+
+## msb service enable
+
+```bash
+msb service enable my-app
+```
+
+Enables the Service. Set a target instead when the Service is detached.
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+
+## msb service disable
+
+```bash
+msb service disable my-app
+```
+
+Disables the Service while retaining its target. If the Service is detached, the command stops and directs you to set a target with `msb service update`.
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+
+## msb service inspect
+
+```bash
+msb service inspect my-app
+```
+
+Shows the Service's slug, URL, status, target, and created and updated times. A detached Service shows `detached` as its status, `-` as its target, and `null` as its JSON target.
+
+| Flag | Description |
+|------|-------------|
+| `--format` | Output format (`json`) |
+
+## msb service ls
+
+```bash
+msb service ls
+msb service ls --sandbox new-sandbox
+```
+
+Also available as `msb service list`. Lists every Service in slug order, including disabled and detached Services, as a table of slug, status, target, and URL. JSON output is an array.
+
+| Flag | Description |
+|------|-------------|
+| `--sandbox` | Only show Services for this sandbox |
+| `--format` | Output format (`json`) |
+
+## msb service remove
+
+```bash
+msb service remove my-app
+```
+
+Also available as `msb service rm`. Removes the Service and releases its slug.

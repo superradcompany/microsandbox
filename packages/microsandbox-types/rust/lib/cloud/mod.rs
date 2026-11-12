@@ -29,6 +29,7 @@ use crate::{TypesError, TypesResult};
 mod modify;
 mod modify_plan;
 mod secrets;
+mod services;
 mod snapshots;
 mod specs;
 
@@ -46,6 +47,10 @@ pub use modify_plan::{
 };
 pub use secrets::{
     CloudHostPattern, CloudSecretEntry, CloudSecretSource, CloudSecretsConfig, CloudViolationAction,
+};
+pub use services::{
+    CloudCreateServiceRequest, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 pub use snapshots::{
     CloudCreateSnapshotRequest, CloudSnapshot, CloudSnapshotDetails, CloudSnapshotKind,

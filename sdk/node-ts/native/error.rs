@@ -1,4 +1,6 @@
-use microsandbox::MicrosandboxError;
+use std::time::Duration;
+
+use microsandbox::{ChangeState, MicrosandboxError, ServiceError};
 use napi::Status;
 
 //--------------------------------------------------------------------------------------------------
@@ -8,10 +10,24 @@ use napi::Status;
 /// Convert a `MicrosandboxError` into a `napi::Error` with a typed code string.
 pub fn to_napi_error(err: MicrosandboxError) -> napi::Error {
     let code = error_type_str(&err);
-    if let Some(payload) = source_recovery_payload(&err) {
+    if let Some(payload) = source_recovery_payload(&err).or_else(|| service_payload(&err)) {
         return napi::Error::new(Status::GenericFailure, format!("[{code}] {payload}"));
     }
     napi::Error::new(Status::GenericFailure, format!("[{code}] {err}"))
+}
+
+/// Convert an error from a Service change while preserving whether the change may have applied.
+pub fn to_napi_service_change_error(err: MicrosandboxError) -> napi::Error {
+    let code = error_type_str(&err);
+    let payload = service_payload(&err).unwrap_or_else(|| {
+        serde_json::json!({
+            "message": err.to_string(),
+            "changed": change_state_str(err.changed()),
+        })
+        .to_string()
+    });
+
+    napi::Error::new(Status::GenericFailure, format!("[{code}] {payload}"))
 }
 
 fn source_recovery_payload(err: &MicrosandboxError) -> Option<String> {
@@ -21,6 +37,76 @@ fn source_recovery_payload(err: &MicrosandboxError) -> Option<String> {
     // Only this error carries recovery metadata; ordinary errors retain their existing wire form.
     let recovery = serde_json::to_value(recovery).ok()?;
     Some(serde_json::json!({ "message": err.to_string(), "recovery": recovery }).to_string())
+}
+
+/// Carry a Service change failure's reason, wait and change state as JSON after the tag.
+fn service_payload(err: &MicrosandboxError) -> Option<String> {
+    let MicrosandboxError::Service { slug, error } = err else {
+        return None;
+    };
+    let (reason, retry_after, raw_code, raw_status, raw_message) = service_reason(error);
+    let changed = change_state_str(err.changed());
+    let retry_after_ms = retry_after.map(|wait| wait.as_millis() as f64);
+    Some(
+        serde_json::json!({
+            "message": err.to_string(),
+            "slug": slug,
+            "reason": reason,
+            "retryAfterMs": retry_after_ms,
+            "changed": changed,
+            "rawCode": raw_code,
+            "rawStatus": raw_status,
+            "rawMessage": raw_message,
+        })
+        .to_string(),
+    )
+}
+
+fn service_reason(
+    error: &ServiceError,
+) -> (
+    &'static str,
+    Option<Duration>,
+    Option<&str>,
+    Option<u16>,
+    Option<&str>,
+) {
+    match error {
+        ServiceError::QuotaExceeded => ("serviceQuotaExceeded", None, None, None, None),
+        ServiceError::SandboxLimitExceeded => {
+            ("sandboxServiceLimitExceeded", None, None, None, None)
+        }
+        ServiceError::Conflict => ("serviceConflict", None, None, None, None),
+        ServiceError::Detached => ("serviceDetached", None, None, None, None),
+        ServiceError::TargetUnreachable { retry_after } => {
+            ("targetUnreachable", *retry_after, None, None, None)
+        }
+        ServiceError::TargetNotRunning => ("sandboxNotRunning", None, None, None, None),
+        ServiceError::ChangesPaused { retry_after } => {
+            ("serviceChangesPaused", *retry_after, None, None, None)
+        }
+        ServiceError::OutcomeUnknown => ("outcomeUnknown", None, None, None, None),
+        ServiceError::Other {
+            code,
+            status,
+            message,
+        } => (
+            "other",
+            None,
+            Some(code.as_str()),
+            Some(*status),
+            Some(message.as_str()),
+        ),
+        // `ServiceError` is non-exhaustive; `changed` still reports a newer reason correctly.
+        _ => ("other", None, None, None, None),
+    }
+}
+
+fn change_state_str(changed: ChangeState) -> &'static str {
+    match changed {
+        ChangeState::Unchanged => "unchanged",
+        ChangeState::Unknown => "unknown",
+    }
 }
 
 /// Return a string tag for the error variant, used as the JS error `code` field.
@@ -67,6 +153,9 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::ImageInUse(_) => "ImageInUse",
         MicrosandboxError::VolumeNotFound(_) => "VolumeNotFound",
         MicrosandboxError::VolumeAlreadyExists(_) => "VolumeAlreadyExists",
+        MicrosandboxError::ServiceNotFound(_) => "ServiceNotFound",
+        MicrosandboxError::ServiceAlreadyExists(_) => "ServiceAlreadyExists",
+        MicrosandboxError::Service { .. } => "Service",
         MicrosandboxError::Image(_) => "Image",
         MicrosandboxError::NetworkBuilder(_) => "NetworkBuilder",
         MicrosandboxError::PatchFailed(_) => "PatchFailed",
@@ -105,6 +194,85 @@ mod tests {
         };
 
         assert_eq!(error_type_str(&error), "InvalidConfig");
+    }
+
+    #[test]
+    fn service_errors_carry_reason_wait_and_change_state() {
+        let sandbox_limit = MicrosandboxError::Service {
+            slug: "my-app".into(),
+            error: ServiceError::SandboxLimitExceeded,
+        };
+        let refused = MicrosandboxError::Service {
+            slug: "my-app".into(),
+            error: ServiceError::TargetUnreachable {
+                retry_after: Some(Duration::from_secs(5)),
+            },
+        };
+        let unknown = MicrosandboxError::Service {
+            slug: "my-app".into(),
+            error: ServiceError::OutcomeUnknown,
+        };
+
+        let sandbox_limit_payload: serde_json::Value =
+            serde_json::from_str(&service_payload(&sandbox_limit).unwrap()).unwrap();
+        let refused_payload: serde_json::Value =
+            serde_json::from_str(&service_payload(&refused).unwrap()).unwrap();
+        let unknown_payload: serde_json::Value =
+            serde_json::from_str(&service_payload(&unknown).unwrap()).unwrap();
+
+        assert_eq!(error_type_str(&refused), "Service");
+        assert_eq!(
+            sandbox_limit_payload["reason"],
+            "sandboxServiceLimitExceeded"
+        );
+        assert_eq!(sandbox_limit_payload["changed"], "unchanged");
+        assert_eq!(refused_payload["message"], refused.to_string());
+        assert_eq!(refused_payload["slug"], "my-app");
+        assert_eq!(refused_payload["reason"], "targetUnreachable");
+        assert_eq!(refused_payload["retryAfterMs"], 5000.0);
+        assert_eq!(refused_payload["changed"], "unchanged");
+        assert!(refused_payload["rawCode"].is_null());
+        assert!(refused_payload["rawStatus"].is_null());
+        assert!(refused_payload["rawMessage"].is_null());
+        assert_eq!(unknown_payload["reason"], "outcomeUnknown");
+        assert!(unknown_payload["retryAfterMs"].is_null());
+        assert_eq!(unknown_payload["changed"], "unknown");
+        assert!(service_payload(&MicrosandboxError::ServiceNotFound("my-app".into())).is_none());
+    }
+
+    #[test]
+    fn other_service_errors_keep_the_raw_refusal() {
+        let error = MicrosandboxError::Service {
+            slug: "my-app".into(),
+            error: ServiceError::Other {
+                code: "new_service_refusal".into(),
+                status: 409,
+                message: "a newer refusal".into(),
+            },
+        };
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&service_payload(&error).unwrap()).unwrap();
+
+        assert_eq!(payload["reason"], "other");
+        assert_eq!(payload["rawCode"], "new_service_refusal");
+        assert_eq!(payload["rawStatus"], 409);
+        assert_eq!(payload["rawMessage"], "a newer refusal");
+        assert_eq!(payload["changed"], "unchanged");
+    }
+
+    #[test]
+    fn non_service_change_errors_carry_change_state() {
+        let error = MicrosandboxError::ServiceNotFound("my-app".into());
+        let napi_error = to_napi_service_change_error(error);
+        let payload = napi_error
+            .reason
+            .strip_prefix("[ServiceNotFound] ")
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(payload).unwrap();
+
+        assert_eq!(payload["message"], "service not found: my-app");
+        assert_eq!(payload["changed"], "unchanged");
     }
 
     #[test]

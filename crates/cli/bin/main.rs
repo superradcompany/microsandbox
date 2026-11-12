@@ -10,7 +10,7 @@ use microsandbox_cli::{
     commands::{
         completion, context, image, install, pull, registry,
         sandbox::{self, SandboxCommands},
-        self_cmd,
+        self_cmd, service,
         snapshot::{self, SnapshotCommands},
         storage, uninstall, volume,
     },
@@ -38,6 +38,10 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     CommandGroup {
         heading: "Storage",
         commands: &["df", "prune", "volume", "snapshot"],
+    },
+    CommandGroup {
+        heading: "Services",
+        commands: &["service"],
     },
     CommandGroup {
         heading: "Installation",
@@ -160,6 +164,9 @@ enum Commands {
     /// Capture, restore, and manage disk or full snapshots.
     #[command(visible_alias = "snap")]
     Snapshot(snapshot::SnapshotArgs),
+
+    /// Manage public URLs for sandbox ports.
+    Service(service::ServiceArgs),
 
     /// Install a sandbox as a system command.
     Install(install::InstallArgs),
@@ -746,6 +753,7 @@ fn run_async_command_anyhow(
             Commands::Prune(args) => storage::run_prune(args).await,
             Commands::Volume(args) => volume::run(args).await,
             Commands::Snapshot(args) => snapshot::run(args).await,
+            Commands::Service(args) => service::run(args).await,
             Commands::Install(args) => install::run(args).await,
             Commands::Uninstall(args) => uninstall::run(args).await,
             Commands::Doctor(args) => self_cmd::run_doctor_command(args).await,
@@ -967,6 +975,42 @@ mod command_tests {
             .unwrap();
         assert!(storage.commands.contains(&"df"));
         assert!(storage.commands.contains(&"prune"));
+    }
+
+    #[test]
+    fn service_commands_use_the_default_backend_without_the_catalog_gate() {
+        for arguments in [
+            vec![
+                "msb",
+                "service",
+                "create",
+                "my-app",
+                "--target",
+                "web-1:8080",
+            ],
+            vec![
+                "msb",
+                "service",
+                "update",
+                "my-app",
+                "--target",
+                "web-2:8080",
+            ],
+            vec!["msb", "service", "enable", "my-app"],
+            vec!["msb", "service", "disable", "my-app"],
+            vec!["msb", "service", "get", "my-app"],
+            vec!["msb", "service", "ls"],
+            vec!["msb", "service", "remove", "my-app"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(matches!(cli.command, Commands::Service(_)));
+            assert!(!is_backend_independent_command(&cli.command));
+            assert!(!requires_current_catalog(&cli.command));
+        }
+
+        let help = render_grouped_commands(&Cli::command(), &HelpStyles::detect());
+        let services = help.split("Services:").nth(1).unwrap();
+        assert!(services.lines().nth(1).unwrap().contains("service"));
     }
 
     #[test]

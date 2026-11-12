@@ -1,0 +1,442 @@
+---
+title: Services
+"og:title": Go SDK Services reference
+description: Manage public URLs for sandbox ports with the Go SDK.
+keywords: ["Go SDK", "Go services", "microsandbox services", "public URL"]
+---
+
+<Tooltip tip="Available only on microsandbox cloud; the local backend returns ErrCloudOnly."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+See [Services](/sandboxes/services) for usage and limits.
+
+## Functions
+
+#### <span className="msb-recv"></span><span className="msb-hn">CreateService()</span>
+
+```go
+func CreateService(ctx context.Context, slug string, target ServiceTarget) (*Service, error)
+```
+
+<Accordion title="Example">
+
+```go
+svc, err := m.CreateService(ctx, "my-app", m.ServiceTarget{Sandbox: "my-sandbox", Port: 8080})
+if err != nil {
+    return err
+}
+fmt.Println(svc.URL())
+```
+
+</Accordion>
+
+Create a Service for a running target without retrying. Port zero fails with <code>ErrInvalidConfig</code> before any request. Repeating a create with the same slug and target returns the existing Service while it is enabled. Get and check the Service if <code>ctx</code> ends after the request is sent.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Service slug, e.g. <code>"my-app"</code>.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>target</code><a className="msb-type" href="#servicetarget">ServiceTarget</a></div>
+<div className="msb-param-desc">The running sandbox and port that receive requests. The port is 1 through 65535.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">*Service</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">GetService()</span>
+
+```go
+func GetService(ctx context.Context, slug string) (*Service, error)
+```
+
+Get a Service by slug.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>slug</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Service slug.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">*Service</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">ListServices()</span>
+
+```go
+func ListServices(ctx context.Context) (*ServicePage, error)
+```
+
+List the first page in slug order, including disabled and detached Services.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">*ServicePage</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv"></span><span className="msb-hn">ListServicesWith()</span>
+
+```go
+func ListServicesWith(ctx context.Context, configure ...ServiceListOption) (*ServicePage, error)
+```
+
+<Accordion title="Example">
+
+```go
+page, err := m.ListServicesWith(ctx, m.WithServiceListSandbox("my-sandbox"), m.WithServiceListLimit(50))
+if err != nil {
+    return err
+}
+for _, svc := range page.Services {
+    fmt.Println(svc.URL(), svc.Target())
+}
+```
+
+</Accordion>
+
+List a configured page in slug order. A limit outside 1 through 100 fails with <code>ErrInvalidConfig</code> before any request.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>configure</code><a className="msb-type" href="#servicelistoption">...ServiceListOption</a></div>
+    <div className="msb-param-desc">List options.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#servicepage">*ServicePage</a></div>
+    <div className="msb-param-desc">One page of Services.</div>
+  </div>
+</div>
+
+## Service
+
+Accessors use the last response without making a request.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Slug()</span>
+
+```go
+func (s *Service) Slug() string
+```
+
+The Service slug.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">URL()</span>
+
+```go
+func (s *Service) URL() string
+```
+
+The public URL as returned by the backend.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Status()</span>
+
+```go
+func (s *Service) Status() ServiceStatus
+```
+
+Whether the Service routes requests, is disabled, or has no target, as of the read that returned it. <code>Refresh()</code> returns a current copy.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Target()</span>
+
+```go
+func (s *Service) Target() *ServiceTarget
+```
+
+The target, or <code>nil</code> when the Service is detached.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">CreatedAt()</span>
+
+```go
+func (s *Service) CreatedAt() time.Time
+```
+
+The creation time.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">UpdatedAt()</span>
+
+```go
+func (s *Service) UpdatedAt() time.Time
+```
+
+The last state-change time.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Update()</span>
+
+```go
+func (s *Service) Update(ctx context.Context, target ServiceTarget) (*Service, error)
+```
+
+<Accordion title="Example">
+
+```go
+svc, err := m.GetService(ctx, "my-app")
+if err != nil {
+    return err
+}
+if svc, err = svc.Update(ctx, m.ServiceTarget{Sandbox: "new-sandbox", Port: 8080}); err != nil {
+    return err
+}
+```
+
+</Accordion>
+
+Change the target without retrying. Port zero fails with <code>ErrInvalidConfig</code> before any request. Get and check the Service if <code>ctx</code> ends after the request is sent.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>target</code><a className="msb-type" href="#servicetarget">ServiceTarget</a></div>
+    <div className="msb-param-desc">Running target; also enables or reattaches the Service.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">*Service</a></div>
+    <div className="msb-param-desc">The Service as committed.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Enable()</span>
+
+```go
+func (s *Service) Enable(ctx context.Context) (*Service, error)
+```
+
+Enable the Service without retrying. To enable a detached Service, set a running target with <code>Update()</code> instead.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Disable()</span>
+
+```go
+func (s *Service) Disable(ctx context.Context) (*Service, error)
+```
+
+Disable the Service without retrying while retaining its target.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Remove()</span>
+
+```go
+func (s *Service) Remove(ctx context.Context) error
+```
+
+Remove the Service and release its slug without retrying.
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Refresh()</span>
+
+```go
+func (s *Service) Refresh(ctx context.Context) (*Service, error)
+```
+
+Get the Service again and return its current state. This value is not changed.
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><a className="msb-type" href="#service">*Service</a></div>
+    <div className="msb-param-desc">The Service's current state.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">svc.</span><span className="msb-hn">Close()</span>
+
+```go
+func (s *Service) Close() error
+```
+
+Release the native handle that this value and its copies share. It does not remove the Service. Later requests from any copy fail with <code>ErrInvalidHandle</code>; accessors still answer. Calling <code>Close</code> is optional: the handle is released once no copy is reachable. It is safe to call more than once.
+
+## ServiceListOption
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithServiceListSandbox()</span>
+
+```go
+func WithServiceListSandbox(name string) ServiceListOption
+```
+
+Filter by target sandbox. An unknown name returns an empty page.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithServiceListLimit()</span>
+
+```go
+func WithServiceListLimit(limit uint32) ServiceListOption
+```
+
+Set the page size from 1 to 100; the default is 20.
+
+#### <span className="msb-recv"></span><span className="msb-hn">WithServiceListCursor()</span>
+
+```go
+func WithServiceListCursor(cursor string) ServiceListOption
+```
+
+Continue from a previous <code>NextCursor</code>.
+
+## ServicePage
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Services</code><a className="msb-type" href="#service">[]*Service</a></div>
+    <div className="msb-param-desc">Services in this page, in slug order.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>NextCursor</code><span className="msb-type">*string</span></div>
+    <div className="msb-param-desc">Cursor for the next page, or <code>nil</code> on the final page.</div>
+  </div>
+</div>
+
+## ServiceStatus
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceStatusEnabled</code><span className="msb-type">"enabled"</span></div>
+    <div className="msb-param-desc">Routes requests to its target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceStatusDisabled</code><span className="msb-type">"disabled"</span></div>
+    <div className="msb-param-desc">Retains its target without routing requests.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceStatusDetached</code><span className="msb-type">"detached"</span></div>
+    <div className="msb-param-desc">Has no target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceStatusUnknown</code><span className="msb-type">"unknown"</span></div>
+    <div className="msb-param-desc">The backend returned an unrecognized status.</div>
+  </div>
+</div>
+
+## ServiceTarget
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Sandbox</code><span className="msb-type">string</span></div>
+    <div className="msb-param-desc">Current name of the target sandbox.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Port</code><span className="msb-type">uint16</span></div>
+    <div className="msb-param-desc">Sandbox port, 1 through 65535.</div>
+  </div>
+</div>
+
+## ServiceError
+
+A refused Service change or an unknown outcome. Use <code>errors.As</code> to inspect it; <code>IsKind(err, ErrService)</code> also matches it. Check for a missing Service with <code>IsKind(err, ErrServiceNotFound)</code>, an unavailable slug with <code>IsKind(err, ErrServiceAlreadyExists)</code>, and a missing target sandbox with <code>IsKind(err, ErrSandboxNotFound)</code>.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Slug</code><span className="msb-type">string</span></div>
+<div className="msb-param-desc">Service slug.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Reason</code><span className="msb-type">ServiceErrorReason</span></div>
+<div className="msb-param-desc">Reason for the failure.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>RetryAfter</code><span className="msb-type">time.Duration</span></div>
+    <div className="msb-param-desc">Retry delay returned with the refusal, or zero when none was returned.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>Changed</code><a className="msb-type" href="#changestate">ChangeState</a></div>
+<div className="msb-param-desc"><code>ChangeUnknown</code> means the change may have been applied; get and check the Service.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>RawCode</code><span className="msb-type">string</span></div>
+<div className="msb-param-desc">Raw error code returned with a <code>ServiceReasonOther</code> refusal; empty otherwise.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>RawStatus</code><span className="msb-type">int</span></div>
+<div className="msb-param-desc">HTTP status returned with a <code>ServiceReasonOther</code> refusal; zero otherwise.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>RawMessage</code><span className="msb-type">string</span></div>
+<div className="msb-param-desc">Raw message returned with a <code>ServiceReasonOther</code> refusal; empty otherwise.</div>
+  </div>
+</div>
+
+<p className="msb-label">Reasons</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonQuotaExceeded</code></div>
+<div className="msb-param-desc">The organization's Service limit was reached. Remove a Service or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonSandboxLimitExceeded</code></div>
+<div className="msb-param-desc">The target sandbox's Service limit was reached. Remove or move a Service, or request a higher limit.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonConflict</code></div>
+<div className="msb-param-desc">Another change to the Service committed first. Get it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonDetached</code></div>
+    <div className="msb-param-desc">The Service is detached. Set a target.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonTargetUnreachable</code></div>
+<div className="msb-param-desc">The target sandbox cannot be reached right now. Retry later, after <code>RetryAfter</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonTargetNotRunning</code></div>
+<div className="msb-param-desc">The target sandbox is not running. Start it, then retry.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonChangesPaused</code></div>
+<div className="msb-param-desc">Service changes are paused. Retry later, after <code>RetryAfter</code> when set.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonOutcomeUnknown</code></div>
+<div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ServiceReasonOther</code></div>
+<div className="msb-param-desc">A reason this SDK does not recognize; <code>RawCode</code>, <code>RawStatus</code>, and <code>RawMessage</code> preserve the refusal.</div>
+  </div>
+</div>
+
+## ChangeState
+
+Every error from <code>CreateService</code>, <code>Update</code>, <code>Enable</code>, <code>Disable</code>, or <code>Remove</code> carries <code>Changed</code> on the base <code>*Error</code>. Use <code>var e *m.Error</code> and <code>errors.As(err, &e)</code> to inspect it.
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ChangeUnchanged</code><span className="msb-type">"unchanged"</span></div>
+    <div className="msb-param-desc">Nothing changed.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>ChangeUnknown</code><span className="msb-type">"unknown"</span></div>
+    <div className="msb-param-desc">The change may have been applied. Get and check the Service before retrying.</div>
+  </div>
+</div>

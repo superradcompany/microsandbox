@@ -1,6 +1,19 @@
 # frozen_string_literal: true
 
 module Microsandbox
+  # The reasons a ServiceError reports.
+  module ServiceErrorReason
+    SERVICE_QUOTA_EXCEEDED = "service_quota_exceeded"
+    SANDBOX_SERVICE_LIMIT_EXCEEDED = "sandbox_service_limit_exceeded"
+    SERVICE_CONFLICT = "service_conflict"
+    SERVICE_DETACHED = "service_detached"
+    TARGET_UNREACHABLE = "target_unreachable"
+    SANDBOX_NOT_RUNNING = "sandbox_not_running"
+    SERVICE_CHANGES_PAUSED = "service_changes_paused"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    OTHER = "other"
+  end
+
   # Base class for every error reported by a sandbox, image, volume, snapshot,
   # or backend operation. Defined natively by the extension; reopened here to
   # attach the stable, machine-readable code. Argument validation is outside
@@ -24,6 +37,10 @@ module Microsandbox
     def code
       self.class.code
     end
+
+    # @return [String, nil] "unchanged" or "unknown" after a failed Service
+    #   create, update, enable, disable or remove; nil for other operations.
+    attr_reader :changed
   end
 
   # Defines +Microsandbox::<name>+ as a direct subclass of +Error+ carrying +code+.
@@ -77,6 +94,9 @@ module Microsandbox
   # Volume / image errors ---------------------------------------------------
   define_error(:VolumeNotFoundError, "volume-not-found")
   define_error(:VolumeAlreadyExistsError, "volume-already-exists")
+  define_error(:ServiceNotFoundError, "service-not-found")
+  define_error(:ServiceAlreadyExistsError, "service-already-exists")
+  define_error(:ServiceError, "service")
   define_error(:ImageNotFoundError, "image-not-found")
   define_error(:ImageInUseError, "image-in-use")
   # Reserved for parity with the Python SDK; no core variant maps here today.
@@ -128,6 +148,23 @@ module Microsandbox
     attr_reader :operation
     # @return [String, nil] why it was rejected or what to use instead
     attr_reader :hint
+  end
+
+  # A refused Service change or a change whose outcome is unknown.
+  class ServiceError
+    # @return [String, nil] the Service slug
+    attr_reader :slug
+    # @return [String, nil] why the change did not complete, one of the
+    #   ServiceErrorReason constants
+    attr_reader :reason
+    # @return [Float, nil] retry delay in seconds
+    attr_reader :retry_after
+    # @return [String, nil] the raw refusal code when reason is "other"
+    attr_reader :raw_code
+    # @return [Integer, nil] the raw HTTP status when reason is "other"
+    attr_reader :raw_status
+    # @return [String, nil] the raw refusal message when reason is "other"
+    attr_reader :raw_message
   end
 
   # The native layer attaches the recovery locator as attributes, mirroring
