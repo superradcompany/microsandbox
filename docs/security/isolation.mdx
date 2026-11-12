@@ -63,6 +63,8 @@ Inside the guest the default is permissive, and that is intentional, because the
 
 For defense-in-depth *inside* the guest, opt into the **restricted security profile**. It sets `no_new_privs`, drops the mount-admin capability from user commands, and forces `nosuid,nodev` on user mounts. It is incompatible with workloads that need those, such as `sudo` or Docker-in-Docker.
 
+Both profiles set existing guest `/dev/fuse` and `/dev/net/tun` nodes to mode `0666`, so non-root workloads can open them. Kernel capability checks still apply to device operations. This access does not remove the restricted profile’s capability or mount restrictions.
+
 <CodeGroup>
 ```typescript TypeScript
 await using sb = await Sandbox.builder("worker")
