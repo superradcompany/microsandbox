@@ -7,5 +7,5 @@ rustflags = [
 [target.'cfg(not(target_os = "macos"))']
 rustflags = [
     "-C",
-    "link-args=-Wl,-rpath,\\$$ORIGIN/../lib,-rpath,\\$$ORIGIN,-rpath,\\$$ORIGIN/../../../build",
+    "link-args=-Wl,-rpath,$ORIGIN/../lib,-rpath,$ORIGIN,-rpath,$ORIGIN/../../../build",
 ]
