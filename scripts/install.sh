@@ -531,6 +531,20 @@ get_latest_version() {
 }
 
 # ---------------------------------------------------------------------------
+# Cli completion
+# ---------------------------------------------------------------------------
+
+setup_cli_completions() {
+    case "${SHELL:-}" in
+        */bash|bash)    COMPLETE=bash msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/bash-completion/completions/msb ;;
+        */fish|fish)    COMPLETE=fish msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/fish/vendor_completions.d/msb.fish ;;
+        */zsh|zsh)      COMPLETE=zsh  msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/zsh/site-functions/_msb ;;
+        # elvish
+        # pwsh
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -615,6 +629,8 @@ main() {
     success "Installed libkrunfw to $LIB_DIR/"
 
     link_commands
+
+    setup_cli_completions
 
     success "Installation complete! Run '$COMMAND_HINT --help' to get started."
     printf "\n"
