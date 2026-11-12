@@ -1011,6 +1011,11 @@ pub fn grow_stopped_root(runtime_dir: &Path, target: u64) -> Result<bool, String
     // whichever durable journal won, without ever opening a partially rewritten filesystem.
     let _published = stage.keep();
     write_state(&state_path, &next)?;
+    RetiredRootDisk {
+        parent: super::layout::host_root(runtime_dir)?.to_path_buf(),
+        paths: state.layers.into_iter().map(|layer| layer.path).collect(),
+    }
+    .cleanup();
     Ok(true)
 }
 
@@ -2263,6 +2268,83 @@ mod tests {
         assert!(state.layers[1].integrity_root.is_none());
         assert!(state.layers[2].integrity_root.is_none());
         assert_eq!(std::fs::read(overlay).unwrap(), original_overlay);
+    }
+
+    #[test]
+    fn stopped_growth_retires_the_previous_staged_chain() {
+        use super::*;
+        use microsandbox_image::ext4::{Ext4FormatOptions, format_ext4};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("runtime");
+        std::fs::create_dir(&root).unwrap();
+        let mib = 1024 * 1024;
+        let base = dir.path().join("upper.ext4");
+        format_ext4(
+            &base,
+            &Ext4FormatOptions {
+                size_bytes: 256 * mib,
+                journal_blocks: 4096,
+            },
+        )
+        .unwrap();
+        let stage = dir.path().join(".compact-previous");
+        std::fs::create_dir(&stage).unwrap();
+        let ancestor = stage.join("upper-a.qcow2");
+        let head = stage.join("upper-b.qcow2");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            microsandbox_image::checkpoint::create_qcow2_overlay(
+                &ancestor,
+                256 * mib,
+                &base,
+                "raw",
+            )
+            .await
+            .unwrap();
+            microsandbox_image::checkpoint::create_qcow2_overlay(
+                &head,
+                256 * mib,
+                &ancestor,
+                "qcow2",
+            )
+            .await
+            .unwrap();
+        });
+        let snapshot = dir.path().join("snapshot-ancestor.qcow2");
+        std::fs::hard_link(&ancestor, &snapshot).unwrap();
+        let layer = |path: &Path, format| RootDiskLayer {
+            layer_id: new_id("layer"),
+            path: path.to_path_buf(),
+            format,
+            integrity_root: None,
+        };
+        let state = RootDiskState {
+            schema: ROOT_DISK_STATE_SCHEMA.into(),
+            volume_id: new_id("vol"),
+            device_id: RootDiskLayout::ManagedUpper.device_id().into(),
+            layout: RootDiskLayout::ManagedUpper,
+            published_generation: 1,
+            launch_base: None,
+            growth_target: None,
+            layers: vec![
+                layer(&base, RootDiskFormat::Raw),
+                layer(&ancestor, RootDiskFormat::Qcow2),
+                layer(&head, RootDiskFormat::Qcow2),
+            ],
+        };
+        let journal = dir.path().join(ROOT_DISK_STATE_FILE);
+        write_state(&journal, &state).unwrap();
+
+        assert!(grow_stopped_root(&root, 512 * mib).unwrap());
+
+        let grown = read_state(&journal).unwrap();
+        assert_eq!(grown.launch_base.as_deref(), Some(base.as_path()));
+        assert!(grown.layers.iter().skip(1).all(|layer| layer.path.exists()));
+        assert!(!ancestor.exists() && !head.exists());
+        assert!(base.exists() && snapshot.exists());
     }
 
     #[test]
