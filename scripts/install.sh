@@ -536,9 +536,9 @@ get_latest_version() {
 
 setup_cli_completions() {
     case "${SHELL:-}" in
-        */bash|bash)    COMPLETE=bash msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/bash-completion/completions/msb ;;
-        */fish|fish)    COMPLETE=fish msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/fish/vendor_completions.d/msb.fish ;;
-        */zsh|zsh)      COMPLETE=zsh  msb | install -D -m 0644 -T /dev/stdin  $HOME/.local/share/zsh/site-functions/_msb ;;
+        */bash|bash)    COMPLETE=bash msb | install -D -m 0644 -T /dev/stdin "$HOME/.local/share/bash-completion/completions/msb" ;;
+        */fish|fish)    COMPLETE=fish msb | install -D -m 0644 -T /dev/stdin "$HOME/.local/share/fish/vendor_completions.d/msb.fish" ;;
+        */zsh|zsh)      COMPLETE=zsh  msb | install -D -m 0644 -T /dev/stdin "$HOME/.local/share/zsh/site-functions/_msb" ;;
         # elvish
         # pwsh
     esac
