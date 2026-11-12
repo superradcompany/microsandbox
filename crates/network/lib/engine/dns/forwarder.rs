@@ -29,14 +29,22 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::StreamExt;
+#[cfg(not(windows))]
+use futures::future::BoxFuture;
 use hickory_net::proto::op::{DnsRequest, Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_net::proto::rr::rdata::{A, AAAA, CNAME};
 use hickory_net::proto::rr::{Name, RData, Record, RecordType};
 use hickory_net::proto::serialize::binary::{BinDecodable, BinEncodable};
 use hickory_net::xfer::DnsHandle;
+#[cfg(not(windows))]
+use parking_lot::RwLock;
+#[cfg(not(windows))]
+use tokio::sync::Mutex;
 use tokio::sync::{OnceCell, watch};
 
 use super::client::{Client, build_direct_client, build_tcp_client, build_udp_client};
@@ -71,6 +79,12 @@ const RESOLVED_HOSTNAME_MIN_TTL_SECS: u32 = 1;
 /// enough that the guest re-resolves often, long enough to avoid hammering
 /// the forwarder on each connection.
 const HOST_ALIAS_TTL_SECS: u32 = 60;
+
+/// Minimum time between re-reads of the host's DNS servers. A host that is
+/// really offline fails every query; this keeps each failure from paying for
+/// another read.
+#[cfg(not(windows))]
+const HOST_DNS_REREAD_INTERVAL: Duration = Duration::from_secs(5);
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -132,12 +146,40 @@ struct ConfiguredUpstream {
 
 /// Backend for queries addressed to the sandbox gateway.
 enum ConfiguredResolver {
-    /// Direct upstreams, tried in order. This covers operator-configured nameservers on every host
-    /// and host-discovered nameservers on Unix.
+    /// Operator-configured nameservers, tried in order.
     Direct(Vec<ConfiguredUpstream>),
+    /// Host-discovered nameservers on Unix, tried in order and re-read from the host when none of
+    /// them answers.
+    #[cfg(not(windows))]
+    Host(HostUpstreams),
     /// Native Windows DNS Client used only when no nameserver was explicitly configured.
     #[cfg(windows)]
     WindowsSystem(WindowsSystemResolver),
+}
+
+/// Reads the host's current DNS servers. Production uses `read_host_dns_servers`; tests
+/// substitute a fixed list.
+#[cfg(not(windows))]
+type HostDnsReader = Box<dyn Fn() -> BoxFuture<'static, io::Result<Vec<SocketAddr>>> + Send + Sync>;
+
+/// Upstreams discovered from the host's DNS settings.
+///
+/// The host can change its DNS servers while a sandbox runs, for example
+/// when a laptop joins another network. When every upstream stops answering,
+/// the host's servers are read again and swapped in if they changed.
+#[cfg(not(windows))]
+struct HostUpstreams {
+    /// Upstreams from the latest read of the host's DNS servers. Queries
+    /// clone the `Arc` and release the lock before sending.
+    current: RwLock<Arc<Vec<ConfiguredUpstream>>>,
+    /// When the host's servers were last re-read. Held for the whole
+    /// re-read, so a query that fails meanwhile waits and then uses the
+    /// servers that re-read installed.
+    last_reread: Mutex<Option<Instant>>,
+    /// Minimum time between re-reads.
+    reread_interval: Duration,
+    /// Reads the host's current DNS servers.
+    read_servers: HostDnsReader,
 }
 
 /// Outcome of upstream selection. The query may be forwarded through
@@ -169,6 +211,10 @@ enum UpstreamDecision {
     /// an NXDOMAIN denial.
     PolicyDenied,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
 
 impl DnsForwarder {
     /// Process a single raw DNS query: parse, apply block list, select
@@ -460,23 +506,25 @@ impl DnsForwarder {
     ) -> Option<Message> {
         match &self.configured {
             ConfiguredResolver::Direct(upstreams) => {
-                let total = upstreams.len();
-                for (index, upstream) in upstreams.iter().enumerate() {
-                    let Some(client) = self.client_for(upstream, transport).await else {
-                        continue;
-                    };
-                    if let Some(response) = self.send_query(&client, query_msg, domain).await {
-                        return Some(response);
-                    }
-                    if index + 1 < total {
-                        tracing::debug!(
-                            domain = %domain,
-                            upstream = %upstream.addr,
-                            "upstream DNS unusable, trying next configured nameserver",
-                        );
-                    }
+                self.query_upstreams(upstreams, query_msg, domain, transport)
+                    .await
+            }
+            #[cfg(not(windows))]
+            ConfiguredResolver::Host(host) => {
+                let upstreams = host.current();
+                if let Some(response) = self
+                    .query_upstreams(&upstreams, query_msg, domain, transport)
+                    .await
+                {
+                    return Some(response);
                 }
-                None
+
+                // The host may have moved to another network since these
+                // servers were read. Pick up its current servers and give
+                // the query one more try.
+                let refreshed = host.refresh(&upstreams, self.config.query_timeout).await?;
+                self.query_upstreams(&refreshed, query_msg, domain, transport)
+                    .await
             }
             #[cfg(windows)]
             ConfiguredResolver::WindowsSystem(resolver) => {
@@ -503,6 +551,34 @@ impl DnsForwarder {
                 }
             }
         }
+    }
+
+    /// Walk `upstreams` in order and return the first answer. `None`
+    /// when every upstream is unusable.
+    async fn query_upstreams(
+        &self,
+        upstreams: &[ConfiguredUpstream],
+        query_msg: &Message,
+        domain: &str,
+        transport: Transport,
+    ) -> Option<Message> {
+        let total = upstreams.len();
+        for (index, upstream) in upstreams.iter().enumerate() {
+            let Some(client) = self.client_for(upstream, transport).await else {
+                continue;
+            };
+            if let Some(response) = self.send_query(&client, query_msg, domain).await {
+                return Some(response);
+            }
+            if index + 1 < total {
+                tracing::debug!(
+                    domain = %domain,
+                    upstream = %upstream.addr,
+                    "upstream DNS unusable, trying next configured nameserver",
+                );
+            }
+        }
+        None
     }
 
     /// Send one query to one upstream. `None` means this upstream did
@@ -640,9 +716,14 @@ impl DnsForwarder {
         } else {
             #[cfg(not(windows))]
             match read_host_dns_servers().await {
-                Ok(upstreams) if !upstreams.is_empty() => ConfiguredResolver::Direct(
-                    Self::build_direct_upstreams(upstreams, config.query_timeout).await?,
-                ),
+                Ok(upstreams) if !upstreams.is_empty() => ConfiguredResolver::Host(HostUpstreams {
+                    current: RwLock::new(Arc::new(
+                        Self::build_direct_upstreams(upstreams, config.query_timeout).await?,
+                    )),
+                    last_reread: Mutex::new(None),
+                    reread_interval: HOST_DNS_REREAD_INTERVAL,
+                    read_servers: Box::new(|| Box::pin(read_host_dns_servers())),
+                }),
                 Ok(_) => {
                     tracing::error!("no upstream DNS servers discovered from host");
                     return None;
@@ -743,6 +824,63 @@ impl DnsForwarder {
             gateway,
             config,
         })
+    }
+}
+
+#[cfg(not(windows))]
+impl HostUpstreams {
+    /// Upstreams to use for the next query.
+    fn current(&self) -> Arc<Vec<ConfiguredUpstream>> {
+        Arc::clone(&self.current.read())
+    }
+
+    /// Called after every upstream in `failed` was unusable for a query.
+    /// Returns the upstreams to retry the query with, or `None` when there
+    /// is nothing new to try.
+    async fn refresh(
+        &self,
+        failed: &Arc<Vec<ConfiguredUpstream>>,
+        query_timeout: Duration,
+    ) -> Option<Arc<Vec<ConfiguredUpstream>>> {
+        let mut last_reread = self.last_reread.lock().await;
+
+        // Another query already replaced the list this one used.
+        let current = self.current();
+        if !Arc::ptr_eq(&current, failed) {
+            return Some(current);
+        }
+
+        let now = Instant::now();
+        if last_reread.is_some_and(|last| now.duration_since(last) < self.reread_interval) {
+            return None;
+        }
+        *last_reread = Some(now);
+
+        let servers = match (self.read_servers)().await {
+            Ok(servers) if !servers.is_empty() => servers,
+            Ok(_) => {
+                tracing::debug!("host reports no DNS servers; keeping current upstreams");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to re-read host DNS configuration");
+                return None;
+            }
+        };
+        if failed
+            .iter()
+            .map(|upstream| upstream.addr)
+            .eq(servers.iter().copied())
+        {
+            tracing::debug!("host DNS servers unchanged");
+            return None;
+        }
+
+        tracing::info!(servers = ?servers, "host DNS servers changed; switching upstreams");
+        let upstreams =
+            Arc::new(DnsForwarder::build_direct_upstreams(servers, query_timeout).await?);
+        *self.current.write() = Arc::clone(&upstreams);
+        Some(upstreams)
     }
 }
 
@@ -1018,11 +1156,17 @@ fn build_truncated_response(query: &Message) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dns::Nameserver;
     use crate::policy::{Action, Destination, NetworkProfile, Protocol, Rule};
     use hickory_net::proto::op::{Edns, MessageType, OpCode, Query};
     use hickory_net::proto::rr::{DNSClass, Name, RecordType};
     use std::net::Ipv4Addr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(not(windows))]
+    use tokio::sync::Notify;
+
+    /// Per-query timeout for test upstreams; short so dead servers fail fast.
+    const TEST_QUERY_TIMEOUT: Duration = Duration::from_millis(300);
 
     fn make_query(name: &str, qtype: RecordType) -> Message {
         let mut msg = Message::new(0x4242, MessageType::Query, OpCode::Query);
@@ -1091,24 +1235,34 @@ mod tests {
     /// Build a forwarder over `upstreams` with a short query timeout, as
     /// the gateway path uses it. No microVM or host resolver involved.
     async fn forwarder_over(upstreams: &[SocketAddr]) -> Arc<DnsForwarder> {
-        let config = Arc::new(NormalizedDnsConfig {
-            rebind_protection: false,
-            nameservers: Vec::new(),
-            query_timeout: Duration::from_millis(300),
-        });
+        forwarder_with(ConfiguredResolver::Direct(test_upstreams(upstreams).await))
+    }
+
+    /// Clients for `upstreams`, using the test query timeout.
+    async fn test_upstreams(upstreams: &[SocketAddr]) -> Vec<ConfiguredUpstream> {
         let mut configured = Vec::new();
         for addr in upstreams {
             configured.push(ConfiguredUpstream {
                 addr: *addr,
-                udp: build_udp_client(*addr, config.query_timeout)
+                udp: build_udp_client(*addr, TEST_QUERY_TIMEOUT)
                     .await
                     .expect("udp client"),
                 tcp: OnceCell::new(),
             });
         }
+        configured
+    }
+
+    /// Build a forwarder over an already-built resolver.
+    fn forwarder_with(configured: ConfiguredResolver) -> Arc<DnsForwarder> {
+        let config = Arc::new(NormalizedDnsConfig {
+            rebind_protection: false,
+            nameservers: Vec::new(),
+            query_timeout: TEST_QUERY_TIMEOUT,
+        });
         let gateway_ip: IpAddr = "10.0.0.1".parse().unwrap();
         Arc::new(DnsForwarder {
-            configured: ConfiguredResolver::Direct(configured),
+            configured,
             gateway_ips: Arc::new(HashSet::from([gateway_ip])),
             network_policy: Arc::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
             platform_policy: None,
@@ -1463,6 +1617,197 @@ mod tests {
         let msg = Message::from_bytes(&bytes).expect("parse response");
         assert_eq!(msg.metadata.response_code, ResponseCode::ServFail);
         assert_eq!(msg.metadata.id, 0x4242, "guest transaction id is preserved");
+    }
+
+    /// Build a forwarder over host-discovered `upstreams`. Re-reading the
+    /// host returns `host_servers`; the counter reports how many reads ran.
+    #[cfg(not(windows))]
+    async fn host_forwarder_over(
+        upstreams: &[SocketAddr],
+        host_servers: &[SocketAddr],
+        reread_interval: Duration,
+    ) -> (Arc<DnsForwarder>, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reads);
+        let host_servers = host_servers.to_vec();
+        let read_servers: HostDnsReader = Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let servers = host_servers.clone();
+            Box::pin(async move { Ok(servers) })
+        });
+
+        let host = HostUpstreams {
+            current: RwLock::new(Arc::new(test_upstreams(upstreams).await)),
+            last_reread: Mutex::new(None),
+            reread_interval,
+            read_servers,
+        };
+
+        (forwarder_with(ConfiguredResolver::Host(host)), reads)
+    }
+
+    /// The reported bug: after the host moved to another network, every
+    /// lookup went to the old network's resolver and timed out until the
+    /// sandbox was restarted.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn host_upstreams_are_reread_when_every_upstream_fails() {
+        let old = blackhole_udp().await;
+        let (new, new_hits) = responding_udp(Ipv4Addr::new(192, 0, 2, 10)).await;
+        let (forwarder, reads) =
+            host_forwarder_over(&[old], &[new], HOST_DNS_REREAD_INTERVAL).await;
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(192, 0, 2, 10)),
+            "the query must be retried against the host's new server"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(new_hits.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(192, 0, 2, 10)),
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "later queries must use the new server without reading the host again"
+        );
+        assert_eq!(new_hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// Working upstreams cost nothing extra: the host is not read again.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn host_upstreams_are_not_reread_while_one_answers() {
+        let (live, _) = responding_udp(Ipv4Addr::new(192, 0, 2, 20)).await;
+        let (forwarder, reads) =
+            host_forwarder_over(&[live], &[live], HOST_DNS_REREAD_INTERVAL).await;
+
+        assert_eq!(
+            resolve_via_gateway(&forwarder).await,
+            Some(Ipv4Addr::new(192, 0, 2, 20))
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    /// A host that is really offline keeps reporting the same dead server.
+    /// Each failed query must not trigger another read.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn host_rereads_are_throttled() {
+        let dead = blackhole_udp().await;
+        let (forwarder, reads) =
+            host_forwarder_over(&[dead], &[dead], Duration::from_secs(60)).await;
+
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// The throttle is what limits the reads: once the interval has passed,
+    /// the next failure reads the host again.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn host_rereads_resume_after_the_interval() {
+        let dead = blackhole_udp().await;
+        let (forwarder, reads) = host_forwarder_over(&[dead], &[dead], Duration::ZERO).await;
+
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    /// A query that fails while another query is re-reading the host must
+    /// retry with the servers that read installs, not give up.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn concurrent_failure_uses_the_servers_from_an_inflight_reread() {
+        let old = blackhole_udp().await;
+        let new = blackhole_udp().await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let read_servers: HostDnsReader = {
+            let reads = Arc::clone(&reads);
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::new(move || {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(vec![new])
+                })
+            })
+        };
+        let host = Arc::new(HostUpstreams {
+            current: RwLock::new(Arc::new(test_upstreams(&[old]).await)),
+            last_reread: Mutex::new(None),
+            reread_interval: HOST_DNS_REREAD_INTERVAL,
+            read_servers,
+        });
+        let failed = host.current();
+
+        let first = tokio::spawn({
+            let host = Arc::clone(&host);
+            let failed = Arc::clone(&failed);
+            async move { host.refresh(&failed, TEST_QUERY_TIMEOUT).await }
+        });
+        entered.notified().await;
+        let second = tokio::spawn({
+            let host = Arc::clone(&host);
+            let failed = Arc::clone(&failed);
+            async move { host.refresh(&failed, TEST_QUERY_TIMEOUT).await }
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        for refreshed in [first.await.unwrap(), second.await.unwrap()] {
+            let addrs: Vec<SocketAddr> = refreshed
+                .expect("both queries get the new servers")
+                .iter()
+                .map(|upstream| upstream.addr)
+                .collect();
+            assert_eq!(addrs, [new]);
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// Explicitly configured nameservers are the operator's choice and are
+    /// never replaced by whatever the host uses.
+    #[tokio::test]
+    async fn configured_nameservers_are_never_reread() {
+        let dead = blackhole_udp().await;
+        let config = Arc::new(NormalizedDnsConfig {
+            rebind_protection: false,
+            nameservers: vec![Nameserver::Addr(dead)],
+            query_timeout: TEST_QUERY_TIMEOUT,
+        });
+        let gateway = GatewayIps {
+            ipv4: Some("10.0.0.1".parse().unwrap()),
+            ipv6: None,
+        };
+
+        let forwarder = DnsForwarder::build(
+            config,
+            Arc::new(HashSet::from(["10.0.0.1".parse().unwrap()])),
+            Arc::new(NetworkPolicy::from_profiles([NetworkProfile::Public])),
+            None,
+            Arc::new(SharedState::new(4)),
+            gateway,
+        )
+        .await
+        .expect("forwarder over a configured nameserver");
+
+        assert!(matches!(
+            forwarder.configured,
+            ConfiguredResolver::Direct(_)
+        ));
+        assert_eq!(resolve_via_gateway(&forwarder).await, None);
     }
 
     fn make_response(query: &Message) -> Message {
