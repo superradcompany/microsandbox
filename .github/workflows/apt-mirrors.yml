@@ -1,0 +1,51 @@
+name: APT mirror checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/apt-mirrors.yml
+      - .github/workflows/release.yml
+      - .github/workflows/release-linux.yml
+      - .github/workflows/release-macos.yml
+      - scripts/ci/install-apt-packages.sh
+      - scripts/ci/prepare-apt-fallback.py
+      - scripts/ci/test_apt_fallback.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-mirrors-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fallback:
+    name: APT fallback (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check fallback contracts
+        run: |
+          bash -n scripts/ci/install-apt-packages.sh
+          shellcheck scripts/ci/install-apt-packages.sh
+          python3 -m unittest discover -s scripts/ci -p test_apt_fallback.py -v
+
+      - name: Install release dependencies with the primary hosts blocked
+        shell: bash
+        run: |
+          # Exercise real APT, Ubuntu signing keys and both mirror layouts.
+          # Restore the runner's hosts file even when the test fails.
+          sudo cp /etc/hosts "$RUNNER_TEMP/apt-test-hosts"
+          trap 'sudo cp "$RUNNER_TEMP/apt-test-hosts" /etc/hosts' EXIT
+          echo '127.0.0.1 azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com' | sudo tee -a /etc/hosts
+          bash scripts/ci/install-apt-packages.sh musl-tools libcap-ng-dev gcc make flex bison libelf-dev bc python3-pyelftools | tee "$RUNNER_TEMP/apt-fallback.log"
+          grep -F 'Using Ubuntu fallback mirror' "$RUNNER_TEMP/apt-fallback.log"
+          musl-gcc --version
+          dpkg-query -W musl-tools libcap-ng-dev libelf-dev python3-pyelftools

@@ -333,8 +333,14 @@ jobs:
           cache-targets: true
           shared-key: release-python-${{ inputs.target }}
 
+      - name: Download release CI tools
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-release-tools
+          path: ${{ runner.temp }}/ci-release-tools
+
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcap-ng-dev
+        run: bash "$RUNNER_TEMP/ci-release-tools/install-apt-packages.sh" libcap-ng-dev
 
       - name: Download runtime artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
