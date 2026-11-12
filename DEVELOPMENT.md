@@ -106,13 +106,22 @@ just build release && just install
 
 `microsandbox-filesystem` enables both `download-binaries` and `embed-binaries` by default. `download-binaries` permits Cargo build scripts to fetch missing official artifacts and implies `embed-binaries`; `embed-binaries` controls whether Agentd bytes are compiled into the host binary.
 
-Set `MSB_EMBED_ARTIFACTS_DIR` at build time to an unpacked directory containing `agentd`, `msb`, and the platform `libkrunfw` filename. The repository-local `build/` directory is the next source, followed by an official download when `download-binaries` is enabled. The Rust SDK also accepts `MSB_EMBED_RUNTIME_BUNDLE_PATH` as an exact compressed `msb` plus `libkrunfw` archive when its `embed-binaries` feature is enabled.
+Set `MSB_EMBED_ARTIFACTS_DIR` at build time to an unpacked directory containing `agentd`, `msb`, and the platform `libkrunfw` filename. The Rust SDK also accepts `MSB_EMBED_RUNTIME_BUNDLE_PATH` as an exact compressed `msb` plus `libkrunfw` archive when its `embed-binaries` feature is enabled.
 
 ```bash
 MSB_EMBED_ARTIFACTS_DIR=/path/to/artifacts cargo build
 ```
 
-At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of global `paths.agentd` or the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`.
+Agentd has its own resolution order, because its bytes are compiled into the host binary and the build script therefore decides which guest PID 1 payload a sandbox runs:
+
+1. `MSB_EMBED_ARTIFACTS_DIR`, when set, supplies `agentd` from that directory.
+2. `MSB_EMBED_AGENTD_PATH`, when set, supplies a single agentd file. It wins over `build/agentd`, and the build says so with a `cargo:warning`. The value is resolved against the package directory the build script runs in, so pass an absolute path.
+3. The repository-local `build/agentd`, if it is not older than `crates/agentd` or `crates/protocol`.
+4. The official `v<PREBUILT_VERSION>` release download, but only in a build with no guest agent sources, that is, a published crate with `download-binaries` enabled. The warning names the release the bytes come from.
+
+A checkout that has `crates/agentd` and `crates/protocol` is never allowed to use the released artifact: a stale or missing `build/agentd` fails the build with the remedies to rebuild it, instead of silently embedding a guest agent from a different revision of the tree. `scripts/ci/check-agentd-provenance.sh` pins that policy.
+
+At runtime, `MSB_AGENTD_PATH` selects an external Agentd executable instead of global `paths.agentd` or the embedded fallback. The file is eagerly read and validated before VM construction; it is never downloaded or copied into `MSB_HOME`. This is a separate variable from the build-time `MSB_EMBED_AGENTD_PATH`, and the two are deliberately not interchangeable: the runtime value is resolved against the process working directory, while the build value selects the payload compiled into the host binary.
 
 ## Project Structure
 
