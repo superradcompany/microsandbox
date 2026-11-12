@@ -52,17 +52,17 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
         embed_staged_agentd(&source, &destination, &target_arch);
         return;
     }
-    println!("cargo:rerun-if-env-changed=MSB_AGENTD_PATH");
-    if let Some(source) = std::env::var_os("MSB_AGENTD_PATH").map(PathBuf::from) {
+    println!("cargo:rerun-if-env-changed=MSB_EMBED_AGENTD_PATH");
+    if let Some(source) = std::env::var_os("MSB_EMBED_AGENTD_PATH").map(PathBuf::from) {
         if !source.is_file() {
             panic!(
-                "MSB_AGENTD_PATH does not point to an agentd file: {}",
+                "MSB_EMBED_AGENTD_PATH does not point to an agentd file: {}",
                 source.display()
             );
         }
         println!(
             "cargo:warning=microsandbox: embedding the guest agent from \
-             MSB_AGENTD_PATH={}, not from build/{AGENTD_BINARY}",
+             MSB_EMBED_AGENTD_PATH={}, not from build/{AGENTD_BINARY}",
             source.display()
         );
         embed_staged_agentd(&source, &destination, &target_arch);
@@ -91,7 +91,7 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
     // else failing. Refuse instead of downloading.
     if let Some((agentd, _protocol)) = guest_agentd_sources(workspace_root) {
         println!("cargo:rerun-if-changed={}", agentd.display());
-        panic!("{}", missing_local_agentd_message(&local));
+        panic!("{}", missing_local_agentd_message(&local, &target_arch));
     }
 
     #[cfg(feature = "download-binaries")]
@@ -107,7 +107,7 @@ fn stage_agentd(workspace_root: &Path, out_dir: &Path) {
     }
 
     #[cfg(not(feature = "download-binaries"))]
-    panic!("{}", missing_local_agentd_message(&local));
+    panic!("{}", missing_local_agentd_message(&local, &target_arch));
 }
 
 /// Copy and validate an artifact an explicit caller staged.
@@ -131,16 +131,24 @@ fn guest_agentd_sources(workspace_root: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// The refusal a checkout with no local `agentd` gets, naming every route back.
+///
+/// The guest agent is a static Linux binary for the guest architecture, so a host
+/// `cargo build` of `crates/agentd` produces a payload this build rejects. The
+/// direct route therefore spells out the musl target and its linker requirement.
 #[cfg(feature = "embed-binaries")]
-fn missing_local_agentd_message(local: &Path) -> String {
+fn missing_local_agentd_message(local: &Path, target_arch: &str) -> String {
+    let target = format!("{target_arch}-unknown-linux-musl");
     format!(
         "{} is missing, but this tree has the guest agent sources, so this build will not \
          embed a released {AGENTD_BINARY}. The guest agent is compiled into the host binary, \
          and a released artifact comes from a different revision of this tree.\n\
-         Build it first: `just build-agentd`, or directly `cargo build --release \
-         --manifest-path crates/agentd/Cargo.toml` and copy the result to {}.\n\
+         Build it first: `just build-agentd`.\n\
+         Without `just`, cross-build the guest target (needs the musl target and a musl \
+         linker, and `just build-agentd` uses Docker on macOS and Windows):\n\
+           cargo build --release --target {target} --manifest-path crates/agentd/Cargo.toml\n\
+           cp target/{target}/release/agentd {}\n\
          To embed an artifact built elsewhere, set MSB_EMBED_ARTIFACTS_DIR to its directory or \
-         MSB_AGENTD_PATH to the file.",
+         MSB_EMBED_AGENTD_PATH to the file.",
         local.display(),
         local.display(),
     )
