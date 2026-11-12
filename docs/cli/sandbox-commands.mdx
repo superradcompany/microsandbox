@@ -336,6 +336,10 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 | `--max-tcp-connections` | Concurrent TCP limit; zero explicitly means unlimited |
 | `--max-udp-connections` | Concurrent UDP session limit; zero explicitly means unlimited |
 | `--max-connections` | Deprecated TCP-only alias; cannot be combined with `--max-tcp-connections` |
+| `--secret` | Repeatable `ENV[:OPTIONS]@HOST[,HOST...]`, as in `msb create`; the value is read from the host environment |
+| `--secret-conf` | Load a secret-name map, as in `msb create` |
+| `--secret-violation-action` | `block`, `block-and-log`, or `block-and-terminate` |
+| `--tls-intercept-ca-cert`, `--tls-intercept-ca-key` | Interception CA certificate and key (PEM), given together. A full restore needs the source's CA |
 | `--max-duration` | Destination sandbox lifetime bound, e.g. `10m` |
 | `--idle-timeout` | Destination inactivity bound, e.g. `2m` |
 | `-q`, `--quiet` | Hide progress, but not unavailable-resource warnings |
@@ -343,6 +347,8 @@ msb snap restore ./saved.msb --name disk-copy --disk-only
 Progress is shown by default. Memory preparation has no fixed timeout and does not consume the activation timeout.
 
 Full restore must keep captured CPU and memory settings and cannot apply a guest security profile. Use `--disk-only` to change them.
+
+Snapshots never store secret values. A full snapshot of a sandbox started with secrets resumes a guest that already holds their placeholders and trusts the interception CA, so bind the same secrets again with `--secret` or `--secret-conf`. Interception uses the destination's CA; if the source used `--tls-intercept-ca-cert` or ran on a host with a different default CA, pass the source's CA with `--tls-intercept-ca-cert` and `--tls-intercept-ca-key`, or HTTPS fails certificate checks in the guest.
 
 Network flags replace the destination policy. `--net-rule` requires `--net-default` or `--no-net`; omitting all policy flags keeps configured defaults. Restore requires a new name and does not accept a startup command.
 

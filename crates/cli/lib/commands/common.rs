@@ -2617,32 +2617,8 @@ fn apply_network_opts(
     // Secrets. `create` persists a host-side source reference, not the raw
     // value: the plaintext is read from the host environment at spawn time so
     // the durable config never stores secret material at rest.
-    let secret_specs = merge_secrets(&opts.secret, "create")?;
-    for secret in secret_specs {
-        let env_var = secret.env_var;
-        let source = microsandbox::sandbox::SecretSource::Env {
-            var: env_var.clone(),
-        };
-        let rule = secret.substitution.unwrap_or_default();
-        builder = builder.secret(|mut s| {
-            s = s.env(&env_var).source(source);
-            // `substitute_in_header_fields` enables header substitution, so the
-            // explicit enabled/disabled switch must be applied after it.
-            if !rule.header_fields.is_empty() {
-                s = s.substitute_in_header_fields(rule.header_fields);
-            }
-            s = s
-                .substitute_in_headers(rule.headers)
-                .substitute_in_query(rule.query)
-                .substitute_in_body(rule.body);
-            for host in secret.allowed_hosts {
-                s = allow_secret_host(s, &host);
-            }
-            for host in secret.passthrough_hosts {
-                s = s.allow_placeholder_for(host);
-            }
-            s
-        });
+    for secret in merge_secrets(&opts.secret, "create")? {
+        builder = builder.secret(|s| secret_from_env(s, secret));
     }
 
     let proxy = opts.build_outbound_proxy()?;
@@ -3336,6 +3312,37 @@ fn extend_unique(target: &mut Vec<String>, values: impl IntoIterator<Item = Stri
             target.push(value);
         }
     }
+}
+
+/// Configure a secret whose value is read from the host environment when the sandbox starts,
+/// so durable configuration never holds the plaintext.
+#[cfg(feature = "net")]
+pub(crate) fn secret_from_env(
+    mut builder: microsandbox::sandbox::SecretBuilder,
+    secret: ParsedSecret,
+) -> microsandbox::sandbox::SecretBuilder {
+    let source = microsandbox::sandbox::SecretSource::Env {
+        var: secret.env_var.clone(),
+    };
+    let rule = secret.substitution.unwrap_or_default();
+
+    builder = builder.env(&secret.env_var).source(source);
+    // `substitute_in_header_fields` enables header substitution, so the
+    // explicit enabled/disabled switch must be applied after it.
+    if !rule.header_fields.is_empty() {
+        builder = builder.substitute_in_header_fields(rule.header_fields);
+    }
+    builder = builder
+        .substitute_in_headers(rule.headers)
+        .substitute_in_query(rule.query)
+        .substitute_in_body(rule.body);
+    for host in secret.allowed_hosts {
+        builder = allow_secret_host(builder, &host);
+    }
+    for host in secret.passthrough_hosts {
+        builder = builder.allow_placeholder_for(host);
+    }
+    builder
 }
 
 #[cfg(feature = "net")]
