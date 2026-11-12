@@ -21,7 +21,7 @@
 use std::{
     ffi::CStr,
     io,
-    os::fd::FromRawFd,
+    os::fd::{AsRawFd, FromRawFd},
     sync::{Arc, RwLock, atomic::Ordering},
 };
 
@@ -76,6 +76,14 @@ pub(crate) fn do_create(
     let mut open_flags = inode::translate_open_flags(flags as i32);
     open_flags |= libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW;
 
+    // Match OPEN's writeback descriptor policy before the first open.
+    if fs.writeback.load(Ordering::Relaxed) {
+        if open_flags & libc::O_ACCMODE == libc::O_WRONLY {
+            open_flags = (open_flags & !libc::O_ACCMODE) | libc::O_RDWR;
+        }
+        open_flags &= !libc::O_APPEND;
+    }
+
     // With overlay, default to conservative 0o600 and let `Mirror` widen via
     // `fchmod` after creation. Without overlay (`Off`), use the guest's request
     // OR'd with the owner-access floor so the host process can keep accessing
@@ -117,14 +125,9 @@ pub(crate) fn do_create(
         }
     }
 
-    // Close the fd we used for xattr, then do a proper lookup.
-    unsafe { libc::close(fd) };
-
-    let entry = inode::do_lookup(fs, parent, name)?;
-
-    // Reopen for the handle — strip O_CREAT since the file already exists.
-    // open_inode_fd adds O_CLOEXEC itself and rejects real host symlinks.
-    let open_fd = inode::open_inode_fd(fs, entry.inode, open_flags & !libc::O_CREAT)?;
+    // Retain the original descriptor through registration and handle publication.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let open_fd = file.as_raw_fd();
 
     // Clear SUID/SGID on create+truncate of existing file (HANDLE_KILLPRIV_V2).
     if kill_priv && (open_flags & libc::O_TRUNC != 0) {
@@ -143,7 +146,14 @@ pub(crate) fn do_create(
         }
     }
 
-    let file = unsafe { std::fs::File::from_raw_fd(open_fd) };
+    #[cfg(test)]
+    super::tests::BEFORE_CREATE_REGISTRATION.with(|hook| {
+        let callback = hook.borrow_mut().take();
+        if let Some(callback) = callback {
+            callback();
+        }
+    });
+    let entry = inode::register_created_fd(fs, parent, name, open_fd)?;
 
     let handle = fs.next_handle.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(HandleData {

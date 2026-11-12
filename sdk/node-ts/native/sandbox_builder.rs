@@ -203,6 +203,14 @@ impl JsSandboxBuilder {
         Ok(self)
     }
 
+    /// Enable or disable nested virtualization for local sandboxes.
+    #[napi(js_name = "nestedVirt")]
+    pub fn nested_virt(&mut self, enabled: bool) -> &Self {
+        let prev = self.take_inner();
+        self.inner = Some(prev.nested_virt(enabled));
+        self
+    }
+
     /// Guest transparent huge-page policy selected at boot.
     #[napi(ts_args_type = "policy: 'always' | 'madvise' | 'never'")]
     pub fn thp(&mut self, policy: String) -> Result<&Self> {

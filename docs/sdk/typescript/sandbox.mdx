@@ -15,7 +15,7 @@ See [Snapshots](/sdk/typescript/snapshots#forking) for live fork methods.
 
 #### <span className="msb-hn">allSandboxMetrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 allSandboxMetrics(): Promise<Record<string, SandboxMetrics>>
@@ -93,6 +93,43 @@ Get a live handle to an existing sandbox (running or stopped). The handle provid
   <div className="msb-param">
     <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Promise&lt;SandboxHandle&gt;</a></div>
     <div className="msb-param-desc">Live handle with status and lifecycle control.</div>
+  </div>
+</div>
+
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
+
+```typescript
+static recoverStorage(
+  name: string,
+  options?: StorageRecoveryOptions,
+): Promise<StorageRecovery>
+```
+
+Import or resume storage for a stopped local sandbox. Inspect it first with [storage diagnostics](/sdk/setup#inspect-legacy-storage). See [sandbox storage migration](/migrations/sandbox-storage) for maintenance requirements and recovery limits.
+
+<p className="msb-label">Options</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>selections</code><span className="msb-type">readonly StorageRecoverySelection[]</span></div>
+    <div className="msb-param-desc">Exact IDs from storage diagnosis, with <code>diskId</code> and <code>candidateId</code> strings. Omit or leave empty to import or resume the validated current view.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>acceptSelectedView</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. Required for explicit selections, which may omit writes from other disk branches.</div>
+  </div>
+  <div className="msb-param">
+    <div className="msb-param-key"><code>legacyWritersStopped</code><span className="msb-type">boolean</span></div>
+    <div className="msb-param-desc">Default <code>false</code>. On macOS, confirm that legacy VMs across all homes are stopped and new writers are prevented during recovery.</div>
+  </div>
+</div>
+
+<p className="msb-label">Returns</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>StorageRecovery</code></div>
+    <div className="msb-param-desc"><code>name</code> (string) identifies the sandbox. <code>ready</code> (boolean) confirms protected storage is ready, and <code>originalsRetained</code> (boolean) confirms the original disks were retained.</div>
   </div>
 </div>
 
@@ -261,7 +298,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
-A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle; local detached handles and all cloud handles do not, because the cloud worker owns the sandbox process.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes created with `Sandbox.builder(...).create()` or its progress variants also own scope cleanup unless `.detached(true)` is set. Connected cloud handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -377,7 +414,7 @@ Force-terminate the sandbox and wait up to `timeoutMs` for stopped-state observa
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><code>timeoutMs</code><span className="msb-type">number</span></div>
-    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed.</div>
+    <div className="msb-param-desc">Milliseconds to wait for the stopped state to be observed. Must be an integer from 0 to 4294967295, inclusive; other values reject with <code>RangeError</code> before calling native.</div>
   </div>
 </div>
 
@@ -540,7 +577,7 @@ Explicitly refresh the running sandbox's idle activity. This sends `core.touch`,
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?: ModifyOptions): Promise<SandboxModificationPlan>
@@ -614,7 +651,7 @@ A live CPU or memory resize can take a moment to settle. The new limits are enfo
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics(): Promise<SandboxMetrics>
@@ -642,7 +679,7 @@ Get a point-in-time snapshot of the sandbox's resource usage: CPU, memory, disk 
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">metricsStream()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsStream(intervalMs: number): Promise<MetricsStream>
@@ -1047,7 +1084,7 @@ Create in detached/background mode when `true`. A detached sandbox survives afte
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">disableMetricsSample()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 disableMetricsSample(): this
@@ -1443,7 +1480,7 @@ Select the guest transparent huge-page policy applied through the kernel command
 
 #### <span className="msb-recv">sandboxBuilder.</span><span className="msb-hn">metricsSampleIntervalMs()</span>
 
-<Tooltip tip="Not accepted on microsandbox cloud, where SDK and CLI resource metrics are unavailable."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="Not accepted on microsandbox cloud. SDK metrics methods are local-only; on cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metricsSampleIntervalMs(ms: number): this
@@ -2444,7 +2481,7 @@ Explicitly refresh idle activity; does not start stopped sandboxes
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
 
-<Tooltip tip="Modify is not available on microsandbox cloud; recreate the sandbox with the new configuration."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 modify(opts?)
@@ -2458,7 +2495,7 @@ Plan or apply a configuration change; same options as [`modify()`](#sandbox-modi
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
 
-<Tooltip tip="Resource metrics are not available on microsandbox cloud; use an external monitoring system."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
 metrics()
@@ -2538,7 +2575,7 @@ Connect to a running sandbox without taking ownership. Returns an error if it do
 connectWithTimeout(timeoutMs)
 ```
 
-Same as `connect()` with an explicit timeout in milliseconds
+Same as `connect()` with an explicit timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -2638,7 +2675,7 @@ Force terminate and wait until stopped state is observed
 killWithTimeout(timeoutMs)
 ```
 
-Same as `kill()` with an explicit observation timeout
+Same as `kill()` with an explicit observation timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
 
 <p className="msb-label">Returns</p>
 
@@ -3245,3 +3282,11 @@ Current lifecycle state of a sandbox. String literal type.
 | `"paused"` | VM is paused |
 | `"stopped"` | VM shut down; configuration persisted; can be restarted |
 | `"crashed"` | VM exited unexpectedly (kernel panic, OOM, etc.) |
+
+## Nested virtualization
+
+`nestedVirt(enabled: boolean)` controls nested virtualization for a local sandbox. Omit it to inherit configuration (off by default). See [nested VM snapshots](/sandboxes/snapshots#nested-vm-snapshots) for requirements.
+
+```typescript
+const sandbox = await Sandbox.builder("nested").image("alpine").nestedVirt(true).create();
+```

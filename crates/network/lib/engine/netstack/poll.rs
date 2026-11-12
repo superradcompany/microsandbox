@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort, TcpAcceptQueueSize};
+use crate::config::{ConnectionLimit, DnsConfig};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -31,7 +31,7 @@ use crate::engine::dns::{
 use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::ports::PortPublisher;
+use crate::ports::{BoundPublishedPorts, PortPublisher};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
@@ -226,12 +226,11 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
-/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
-///   connections on the host-bind address and forwards into the guest.
+/// * `published_ports` - Host sockets for host → guest port publishes; the publisher accepts
+///   inbound connections on them and forwards into the guest.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
 /// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
-/// * `tcp_accept_queue_size` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -242,11 +241,10 @@ pub fn smoltcp_poll_loop(
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
-    published_ports: Vec<PublishedPort>,
+    published_ports: BoundPublishedPorts,
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
-    tcp_accept_queue_size: TcpAcceptQueueSize,
     max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
@@ -290,13 +288,10 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
     );
     let mut port_publisher = PortPublisher::new(
-        &published_ports,
-        tcp_accept_queue_size,
+        published_ports,
         max_inbound_tcp_connections,
         config.guest_ipv4,
         config.guest_ipv6,
-        config.gateway.ipv4,
-        config.gateway.ipv6,
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
@@ -456,6 +451,7 @@ pub fn smoltcp_poll_loop(
                     conn_tracker.cleanup_closed(&mut sockets);
                     if !conn_tracker.has_socket_for(&src, &dst) {
                         conn_tracker.create_tcp_socket(src, dst, &mut sockets, accept_mode);
+                        shared.set_outbound_tcp_rejected(conn_tracker.rejected_connections());
                     }
 
                     // smoltcp validates the packet before any host-side dial.
@@ -731,7 +727,7 @@ pub fn smoltcp_poll_loop(
         let timeout_ms = poll_timeout_ms(
             stack_delay,
             conn_tracker.deferred_close_delay(),
-            port_publisher.deferred_close_delay(),
+            port_publisher.next_deadline_delay(),
             CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
         );
 
@@ -2063,11 +2059,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2212,11 +2207,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2728,10 +2722,17 @@ mod tests {
         );
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::Reject));
+        assert_eq!(
+            tracker.rejected_connections(),
+            0,
+            "policy denials are not cap rejections"
+        );
         assert!(
             !tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::AcceptImmediately),
             "the pending reset still owns its socket budget"
         );
+        assert_eq!(tracker.rejected_connections(), 1);
         loop {
             if matches!(
                 iface.poll_egress(now, &mut device, &mut sockets),
@@ -2749,6 +2750,11 @@ mod tests {
             &mut sockets,
             TcpAcceptMode::AcceptImmediately
         ));
+        assert_eq!(
+            tracker.rejected_connections(),
+            1,
+            "admitted retries do not increment it"
+        );
         assert!(!tracker.has_socket_for(
             &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000),
             &dst

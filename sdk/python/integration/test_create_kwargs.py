@@ -67,6 +67,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         memory=512,
         max_memory=2048,
         thp="always",
+        nested_virt=False,
         hostname="py-sdk-config-host",
         workdir="/var",
         shell="/bin/sh",
@@ -98,6 +99,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert config["resources"]["memory_mib"] == 512
         assert config["resources"]["max_memory_mib"] == 2048
         assert config["resources"]["thp"] == "always"
+        assert config["resources"]["nested_virt"] is False
         assert config["runtime"]["hostname"] == "py-sdk-config-host"
         assert config["runtime"]["workdir"] == "/var"
         assert config["runtime"]["shell"] == "/bin/sh"

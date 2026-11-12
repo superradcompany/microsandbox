@@ -96,11 +96,26 @@ class SandboxPage:
     @property
     def next_cursor(self) -> str | None: ...
 
+class StorageRecovery:
+    @property
+    def name(self) -> str: ...
+    @property
+    def ready(self) -> bool: ...
+    @property
+    def originals_retained(self) -> bool: ...
+
 class Sandbox:
     """Sandbox lifecycle API.
 
     Sandbox names are limited to 128 UTF-8 bytes.
     """
+
+    @staticmethod
+    async def recover_storage(
+        name: str, *, selections: Mapping[str, str] | None = None,
+        accept_selected_view: bool = False,
+        legacy_writers_stopped: bool = False,
+    ) -> StorageRecovery: ...
 
     async def get_job(self, id: str) -> Job: ...
     async def list_jobs(
@@ -179,6 +194,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -219,6 +235,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -274,6 +291,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -305,8 +323,10 @@ class Sandbox:
         secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> PullSession: ...
-    async def name(self) -> str: ...
-    async def id(self) -> str: ...
+    @property
+    def name(self) -> Awaitable[str]: ...
+    @property
+    def id(self) -> Awaitable[str]: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
@@ -1472,3 +1492,5 @@ class JobLogStream:
     async def close(self) -> None: ...
     def __aiter__(self) -> JobLogStream: ...
     async def __anext__(self) -> JobLogEntry: ...
+
+async def diagnose_storage(config_json: str, selection_json: str) -> str: ...

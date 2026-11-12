@@ -24,6 +24,10 @@
 mod cloud;
 mod dispatch;
 #[cfg(feature = "local")]
+mod inspection;
+#[cfg(feature = "local")]
+pub(crate) use inspection::initialized_backend_config;
+#[cfg(feature = "local")]
 pub(crate) mod local;
 
 #[cfg(feature = "local")]

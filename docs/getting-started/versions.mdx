@@ -1,0 +1,118 @@
+---
+title: Versions
+description: Choose a stable release, an exact version, or a release candidate.
+icon: "download"
+---
+
+Installers use the latest stable release by default. Follow the [Quickstart](/getting-started/quickstart) for your first sandbox, or choose a version below.
+
+## Install an exact version
+
+Use a published version number to install that release. For example, install `0.7.13`:
+
+<CodeGroup>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh -s -- --version 0.7.13
+```
+
+```powershell Windows
+$env:MSB_INSTALL_VERSION = "0.7.13"
+try { irm https://install.microsandbox.dev/windows | iex }
+finally { Remove-Item Env:MSB_INSTALL_VERSION }
+```
+</CodeGroup>
+
+Replace `0.7.13` with the version you want. The same commands accept an exact release candidate such as `0.8.0-rc.1`, once published. The release must include a bundle for your platform. Do not combine an exact version with a channel selection.
+
+A downloaded PowerShell script also accepts `./install.ps1 -Version 0.7.13` or `./install.ps1 -Channel rc`.
+
+## Install a release candidate
+
+To try the newest active release candidate, select the `rc` channel:
+
+<CodeGroup>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh -s -- --channel rc
+```
+
+```powershell Windows
+$env:MSB_INSTALL_CHANNEL = "rc"
+try { irm https://install.microsandbox.dev/windows | iex }
+finally { Remove-Item Env:MSB_INSTALL_CHANNEL }
+```
+</CodeGroup>
+
+## Selection behavior
+
+Both installers accept `MSB_INSTALL_CHANNEL` and `MSB_INSTALL_VERSION`. Flags override the corresponding environment variable. Do not combine a channel and an exact version. The RC channel selects the highest published `X.Y.Z-rc.N` version, ignores drafts and other prereleases, and excludes candidates at or below a published stable version. If no active candidate exists, or its platform bundle is missing, installation fails without falling back to stable. Exact version selection can still install an older candidate.
+
+For example, a channel flag overrides the channel environment variable. These commands select stable even though the environment variable says `rc`:
+
+<CodeGroup>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | MSB_INSTALL_CHANNEL=rc sh -s -- --channel stable
+```
+
+```powershell Windows
+Invoke-WebRequest https://install.microsandbox.dev/windows -OutFile install.ps1
+$env:MSB_INSTALL_CHANNEL = "rc"
+try { ./install.ps1 -Channel stable }
+finally { Remove-Item Env:MSB_INSTALL_CHANNEL }
+```
+</CodeGroup>
+
+This only overrides the corresponding setting: `--channel stable` does not clear `MSB_INSTALL_VERSION`. Remove an existing version override before selecting a channel.
+
+## Switching versions
+
+Selection applies to this invocation; it does not subscribe future installs to a channel. Installation uses the usual `MSB_HOME` and command links, so selecting an RC replaces the installed runtime there. Use a separate `MSB_HOME` for disposable testing and invoke its binary by full path when switching between installations. Returning to stable restores the binaries, not any catalog or snapshot changes made while running the candidate.
+
+To return to the latest stable release, run the installer with the stable channel:
+
+<CodeGroup>
+```bash macOS & Linux
+curl -fsSL https://install.microsandbox.dev | sh -s -- --channel stable
+```
+
+```powershell Windows
+$env:MSB_INSTALL_CHANNEL = "stable"
+try { irm https://install.microsandbox.dev/windows | iex }
+finally { Remove-Item Env:MSB_INSTALL_CHANNEL }
+```
+</CodeGroup>
+
+## Package channels
+
+Choose the RC channel or pin an exact published version:
+
+<CodeGroup>
+```bash npm
+# Install the current release candidate.
+npm install microsandbox@rc
+
+# Pin a specific published release instead.
+npm install --save-exact microsandbox@0.7.13
+```
+
+```bash Docker
+# Pull the current release candidate.
+docker pull ghcr.io/superradcompany/microsandbox:rc
+
+# Pull a specific published release instead.
+docker pull ghcr.io/superradcompany/microsandbox:0.7.13
+```
+</CodeGroup>
+
+The channel and exact-version commands are alternatives. Replace `0.7.13` with the version you want, including an exact RC version once published. To return to stable, use the `latest` tag:
+
+<CodeGroup>
+```bash npm
+npm install microsandbox@latest
+```
+
+```bash Docker
+docker pull ghcr.io/superradcompany/microsandbox:latest
+```
+</CodeGroup>
+
+Homebrew and Winget remain stable-only; use the installer to try an RC. SDK CLI shims may prefer an existing configured runtime over their bundled binary, so check the actual runtime version when testing.

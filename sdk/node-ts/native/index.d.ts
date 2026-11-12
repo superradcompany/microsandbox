@@ -355,29 +355,50 @@ export declare class InterfaceOverridesBuilder {
 }
 export type JsInterfaceOverridesBuilder = InterfaceOverridesBuilder
 
+/** Sandbox-scoped job handle; dropping it does not terminate the guest process. */
 export declare class Job {
+  /** Return the opaque job identity, scoped to its sandbox. */
   get id(): string
+  /** Return current lifecycle metadata as JSON, including capture or runtime errors. */
   inspect(): Promise<string>
+  /** Wait for a terminal state and return its exit result as JSON. */
   wait(): Promise<string>
+  /** Request delivery of a signal to this job; use `wait` to confirm its exit. */
   signal(signal: number): Promise<void>
+  /** Request SIGKILL without waiting for confirmed process termination. */
   kill(): Promise<void>
+  /** Permanently close pipe stdin after previously admitted input; PTY jobs reject EOF. */
   eof(): Promise<void>
+  /** Return retained log entries as JSON using JSON-encoded log options. */
   logs(options: string): Promise<string>
+  /** Replay retained logs and optionally follow output using JSON-encoded log options. */
   logStream(options: string): Promise<JobLogStream>
+  /**
+   * Attach with optional recent-byte or cursor replay; the replay selectors are exclusive.
+   * A writable attachment acquires the job's stdin lease; read-only observers do not.
+   */
   attach(readOnly: boolean, replayBytes?: number | undefined | null, cursor?: string | undefined | null): Promise<JobAttachment>
 }
 export type JsJob = Job
 
+/** Renewable output attachment with optional exclusive stdin ownership. */
 export declare class JobAttachment {
+  /** Receive the next JSON-encoded event, or `None` when the attachment ends. */
   recv(): Promise<string | null>
+  /** Admit bytes to guest stdin through this attachment's writable lease. */
   writeStdin(data: Buffer): Promise<void>
+  /** Resize a PTY job's terminal through this attachment's writable lease. */
   resize(rows: number, cols: number): Promise<void>
+  /** Release the attachment without closing guest stdin or terminating the job. */
   detach(): Promise<void>
 }
 export type JsJobAttachment = JobAttachment
 
+/** Cancellable iterator over retained output and optional live updates. */
 export declare class JobLogStream {
+  /** Read the next JSON-encoded log entry, or `None` after completion or closure. */
   next(): Promise<string | null>
+  /** Idempotently close this iterator and wake a pending read without stopping the job. */
   close(): Promise<void>
 }
 export type JsJobLogStream = JobLogStream
@@ -566,13 +587,13 @@ export declare class NetworkBuilder {
   maxTcpConnections(max: number): this
   /** Set the UDP session cap; zero selects unlimited. Defaults to unlimited for single-tenant and 1024 for multi-tenant. */
   maxUdpConnections(max: number): this
+  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
+  maxInboundTcpConnections(value: number): this
   /**
    * Set the accept-queue depth for published TCP port listeners, 1..=2147483647. Defaults to
    * 1024; the host kernel clamps it to its own somaxconn.
    */
   tcpAcceptQueueSize(size: number): this
-  /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
-  maxInboundTcpConnections(value: number): this
   /** Require hostname-based policy allows to use inspectable application authority. */
   strict(enabled: boolean): this
   /** Set the IPv4 pool used for per-sandbox /30 guest subnets. */
@@ -853,10 +874,10 @@ export declare class RestoreBuilder {
   portUdp(hostPort: number, guestPort: number): this
   /** Publish a UDP port from host -> guest on a specific host bind address. */
   portUdpBind(bind: string, hostPort: number, guestPort: number): this
-  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
-  tcpAcceptQueueSize(size: number): this
   /** Set the active inbound TCP cap; zero is unlimited. Omitted uses the runtime default. */
   maxInboundTcpConnections(value: number): this
+  /** Set the accept-queue depth for the child's published TCP listeners, 1..=2147483647. */
+  tcpAcceptQueueSize(size: number): this
   /** Expose a host Unix stream socket or local Windows named pipe on a guest-to-host vsock port. */
   vsock(hostPath: string, port: number): this
   /** Expose a host Unix datagram socket on a guest-to-host vsock port. */
@@ -1075,6 +1096,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static get(name: string): Promise<JsSandboxHandle>
+  /** Import or recover stopped storage without starting a VM. */
+  static recoverStorage(name: string, optionsJson: string): Promise<string>
   /** List the first page of sandboxes. */
   static list(): Promise<JsSandboxPage>
   /** List a configured page of sandboxes. */
@@ -1284,6 +1307,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
@@ -2055,6 +2080,9 @@ export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
+
+/** Inspect explicitly selected storage without initializing the normal backend. */
+export declare function diagnoseStorage(configJson: string, selectionJson: string): Promise<string>
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {

@@ -328,6 +328,83 @@ fn do_lookup_linux(
     })
 }
 
+/// Register CREATE from the descriptor returned by openat, never resolving
+/// the child name again to select the guest handle's identity.
+pub(crate) fn register_created_fd(
+    fs: &PassthroughFs,
+    parent: u64,
+    name: &CStr,
+    fd: i32,
+) -> io::Result<Entry> {
+    #[cfg(target_os = "macos")]
+    let st = platform::fstat(fd)?;
+    #[cfg(target_os = "linux")]
+    let (st, alt_key) = linux_stat_from_fd(fd)?;
+    let patched = crate::backends::shared::stat_override::patched_stat(
+        fd,
+        st,
+        fs.cfg.xattr_enabled(),
+        fs.cfg.strict_enabled(),
+        fs.cfg.bind_identity_map.as_ref(),
+    )?;
+    #[cfg(target_os = "linux")]
+    let mnt_id = alt_key.mnt_id;
+    #[cfg(target_os = "linux")]
+    let alias = NamespaceAlias::new(parent, name.to_bytes());
+    #[cfg(target_os = "macos")]
+    let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    #[cfg(target_os = "macos")]
+    let _ = (parent, name);
+    let mut inodes = fs.inodes.write().unwrap();
+    if let Some(data) = inodes.get_alt(&alt_key).cloned() {
+        data.refcount.fetch_add(1, Ordering::Acquire);
+        #[cfg(target_os = "linux")]
+        register_alias_locked(&mut inodes, &data, alias);
+        return Ok(Entry {
+            inode: data.inode,
+            generation: 0,
+            attr: patched,
+            attr_flags: 0,
+            attr_timeout: fs.cfg.attr_timeout,
+            entry_timeout: fs.cfg.entry_timeout,
+        });
+    }
+
+    let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
+    let data = Arc::new(InodeData {
+        inode: inode_num,
+        ino: platform::stat_ino(&st),
+        dev: platform::stat_dev(&st),
+        refcount: std::sync::atomic::AtomicU64::new(1),
+        #[cfg(target_os = "linux")]
+        mnt_id,
+        #[cfg(target_os = "linux")]
+        anchor_parent: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(target_os = "linux")]
+        anchor_name: std::sync::RwLock::new(Vec::new()),
+        #[cfg(target_os = "linux")]
+        aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+        #[cfg(target_os = "linux")]
+        anchor_children: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(target_os = "linux")]
+        retained_fd: std::sync::Mutex::new(None),
+        #[cfg(target_os = "macos")]
+        unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+    });
+    inodes.insert(inode_num, alt_key, data.clone());
+    #[cfg(target_os = "linux")]
+    register_alias_locked(&mut inodes, &data, alias);
+
+    Ok(Entry {
+        inode: inode_num,
+        generation: 0,
+        attr: patched,
+        attr_flags: 0,
+        attr_timeout: fs.cfg.attr_timeout,
+        entry_timeout: fs.cfg.entry_timeout,
+    })
+}
+
 /// macOS lookup: fstatat → check table → register.
 ///
 /// Opens a real fd via `/.vol/dev/ino` for xattr access since macOS
@@ -745,6 +822,11 @@ fn validate_identity_linux(fd: RawFd, expected: InodeAltKey) -> io::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn linux_alt_key_from_fd(fd: RawFd) -> io::Result<InodeAltKey> {
+    linux_stat_from_fd(fd).map(|(_, key)| key)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stat_from_fd(fd: RawFd) -> io::Result<(stat64, InodeAltKey)> {
     let mut stx: libc::statx = unsafe { std::mem::zeroed() };
     let ret = unsafe {
         libc::statx(
@@ -759,11 +841,8 @@ pub(crate) fn linux_alt_key_from_fd(fd: RawFd) -> io::Result<InodeAltKey> {
         return Err(platform::linux_error(io::Error::last_os_error()));
     }
 
-    Ok(InodeAltKey::new(
-        stx.stx_ino,
-        platform::statx_to_stat64(&stx).st_dev,
-        stx.stx_mnt_id,
-    ))
+    let st = platform::statx_to_stat64(&stx);
+    Ok((st, InodeAltKey::new(st.st_ino, st.st_dev, stx.stx_mnt_id)))
 }
 
 #[cfg(target_os = "linux")]

@@ -156,7 +156,7 @@ pub async fn connect_sandbox_with_timeout(
     }
 
     let mut last_error = None;
-    for sock_path in crate::runtime::sandbox_agent_socket_path_candidates(name) {
+    for sock_path in crate::runtime::default_agent_socket_paths(name) {
         if !agent_endpoint_may_exist(&sock_path) {
             continue;
         }

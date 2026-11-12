@@ -28,7 +28,7 @@ repos:
         files: \.(rs|toml)$
       - id: cargo-clippy-workspace
         name: cargo clippy (workspace)
-        entry: bash -lc 'CI=true cargo clippy --workspace -- -D warnings'
+        entry: bash -lc 'CI=true cargo clippy --workspace --all-targets -- -D warnings'
         language: system
         pass_filenames: false
         files: \.(rs|toml)$
@@ -40,7 +40,7 @@ repos:
         files: \.(rs|toml)$
       - id: cargo-clippy-agentd
         name: cargo clippy (agentd)
-        entry: cargo clippy --manifest-path crates/agentd/Cargo.toml -- -D warnings
+        entry: cargo clippy --manifest-path crates/agentd/Cargo.toml --all-targets -- -D warnings
         language: system
         pass_filenames: false
         files: \.(rs|toml)$

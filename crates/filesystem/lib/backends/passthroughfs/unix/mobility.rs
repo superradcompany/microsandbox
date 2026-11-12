@@ -316,7 +316,7 @@ pub(super) fn restore(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<()> {
     }
 
     *fs.inodes.write().unwrap() = prepared.inodes;
-    *fs.handles.write().unwrap() = prepared.files;
+    *fs.handles.write().unwrap() = prepared.files.into();
     *fs.dir_handles.write().unwrap() = prepared.dirs;
     fs.next_inode.store(prepared.next_inode, Ordering::Release);
     fs.next_handle

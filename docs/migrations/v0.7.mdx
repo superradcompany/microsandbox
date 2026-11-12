@@ -23,8 +23,6 @@ Use **v0.7.3 or a later compatible patch release**. Earlier v0.7 releases have c
 | Older SDK applications and CLI jobs sharing `MSB_HOME` | Stop and upgrade them together. Older processes can write incompatible records or fail to read the upgraded database. |
 | Running sandbox VMs | Can remain running during migration. They keep their runtime and guest code until restarted. |
 
-Supported older runtimes remain usable for existing operations; newer features may require an upgrade. Selecting an older runtime does not restore older SDK access to an upgraded database.
-
 Cloud users do not run this local migration. Cloud compatibility is handled by the service and requires server support, not just an updated SDK.
 
 ## Upgrade your installation
@@ -41,6 +39,10 @@ python -m pip install --upgrade 'microsandbox>=0.7.3,<0.8'
 ```
 
 Use your package manager for other SDKs. For an installed runtime, [`msb self update`](/cli/management#msb-self) installs the latest release; it cannot select a specific version.
+
+## Protected sandbox state
+
+For the storage change introduced in v0.7.12, including automatic migration and guided repair, see [sandbox storage migration](/migrations/sandbox-storage).
 
 ## Later v0.7 releases
 

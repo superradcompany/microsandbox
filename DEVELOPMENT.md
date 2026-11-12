@@ -239,7 +239,7 @@ See that repository's README for setup, workload descriptions, and usage.
 Pre-commit hooks are installed by `just setup`. They run automatically on every commit and check:
 
 - `cargo fmt --all --check` — formatting
-- `cargo clippy --workspace -- -D warnings` — lints
+- `cargo clippy --workspace --all-targets -- -D warnings` — lints
 - `cargo doc` — documentation builds without warnings
 - `cargo build -p microsandbox-cli` — CLI compiles
 - Standard checks (trailing whitespace, merge conflicts, TOML/YAML validity)
@@ -259,8 +259,72 @@ If pre-commit is not installed, install it with `pip install pre-commit` (or `br
 
 ```bash
 cargo fmt --all           # Format code
-cargo clippy --workspace  # Run lints
+cargo clippy --workspace --all-targets  # Run lints
 ```
+
+### Cross-target (Windows) Check
+
+`just check-windows-target` (or `./scripts/check-windows-target.sh`) compiles and
+lints the `msb` CLI and its test targets, and compiles the library test targets of
+the SDK, runtime, network, and filesystem crates, for `x86_64-pc-windows-gnu`
+from a macOS or Linux host. No other local gate compiles the `cfg(windows)` side,
+so a name that resolves on one platform but not the other, or an item gated to
+one platform and unused on the other, is otherwise first seen in the Windows CI
+job.
+
+The script installs the `x86_64-pc-windows-gnu` Rust target when it is missing,
+and needs [zig](https://ziglang.org/download/) (`brew install zig` on macOS) for
+the workspace's C dependencies. It mirrors the "Check msb" and "Clippy msb" steps
+and the `--lib` unit-test steps of the `windows-quality` job in
+`.github/workflows/check.yml`:
+
+```bash
+cargo check  --no-default-features --features net,ssh,keyring -p microsandbox-cli        --target x86_64-pc-windows-gnu
+cargo clippy --no-default-features --features net,ssh,keyring -p microsandbox-cli        --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+cargo check  --no-default-features --features local,net       -p microsandbox            --lib --profile test --target x86_64-pc-windows-gnu
+cargo check  --no-default-features --features net,runner      -p microsandbox-runtime    --lib --profile test --target x86_64-pc-windows-gnu
+cargo check                                                   -p microsandbox-network    --lib --profile test --target x86_64-pc-windows-gnu
+cargo check  --no-default-features                            -p microsandbox-filesystem --lib --profile test --target x86_64-pc-windows-gnu
+```
+
+The CLI steps mirror CI's `check` plus `clippy --all-targets -- -D warnings`. The
+SDK, runtime, network, and filesystem steps are `check` only, because the CI
+steps they stand in for compile those targets with `cargo test` and do not deny
+warnings. They still print the Windows-target dead-code and unused warnings for
+those packages, so read the output rather than only the exit status. `--lib`
+with `--profile test` compiles the library's unit-test target, so `#[cfg(test)]`
+modules are in scope, without linking a test binary.
+
+CI builds the MSVC targets, which need the Windows SDK; a macOS or Linux host
+does not have one without vendoring it. This check uses the `-gnu` target
+instead, which needs only a Windows C toolchain. No `build/agentd` is needed:
+none of the checks enables `embed-binaries`, so the guest-agent staging in the
+`crates/filesystem` build script stays off.
+
+What it does not cover:
+
+- **Linking.** `cargo check` and `cargo clippy` do not link, so linker, ABI,
+  `libkrunfw.dll` import-library, and MSVC environment problems stay out of
+  reach. The `windows-quality` and `windows-build` CI jobs remain the authority
+  for those.
+- **MSVC-only code.** The gnu target stands in for the x86_64 MSVC target CI
+  uses. It selects the same `cfg(windows)` code as long as nothing depends on
+  `target_env` or the MSVC ABI.
+- **Windows ARM64.** Only the x86_64 Windows target is checked, so
+  `cfg(target_arch = "aarch64")` code is left to the `windows-aarch64` runs of
+  the `windows-quality` job.
+- **Integration tests outside the CLI.** `--all-targets` covers the CLI's own
+  integration tests, and the `--lib --profile test` checks cover the SDK,
+  runtime, network, and filesystem library unit tests. Other packages' library
+  unit tests and the SDK's `tests/` integration tests are compiled for no
+  Windows target anywhere in CI.
+- **The Go FFI crate.** `windows-build` compiles `sdk/go/native` against real
+  runtime artifacts staged in `build/`. Nothing local mirrors that, so a
+  Windows-only break there is still first seen in CI.
+
+It is deliberately not part of the pre-commit hooks: it downloads an extra
+toolchain target and takes minutes, where the existing hooks are expected to
+stay quick.
 
 ### Self-hosted CI disk space
 
@@ -287,7 +351,7 @@ Dispatch the **Release version bump** workflow (`.github/workflows/release-bump.
 
 The workflow then regenerates `Cargo.lock`, the shared `packages/package-lock.json`, and the SDK npm lockfile and opens a PR titled `chore: release vX.Y.Z`.
 
-`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes whatever `microsandbox-mcp` version the submodule pointer holds.
+`microsandbox-mcp` is versioned in its own repository (the `mcp/` submodule). Bump it there and advance the `mcp/` (and, when changed, `skills/`) submodule pointers in the release PR — `release.yml` publishes the pinned `microsandbox-mcp` version and requires it to match the release tag.
 
 ### 2. Tag and Release
 
@@ -311,6 +375,29 @@ The release workflow (`.github/workflows/release.yml`) will:
 9. Build and publish Docker images to GHCR
 10. Update the Homebrew tap and winget manifests
 11. Sync docs to Mintlify and refresh the npm lockfile on `main`
+
+### Release candidates
+
+RC support is independent of GPU bundles. Use canonical versions such as `0.8.0-rc.1`, `0.8.0-rc.2`, then `0.8.0` for the final release. Follow the normal version-bump process to align package versions and exact internal dependencies before tagging the approved commit.
+
+```bash
+# After reviewing and merging the version bump, tag the approved commit.
+git tag -s v0.8.0-rc.1 <approved-commit> -m "microsandbox 0.8.0-rc.1"
+git push origin refs/tags/v0.8.0-rc.1
+```
+
+The existing `v*` trigger runs the same platform builds and release validation for candidates and finals. The release context validates the tag against the source workspace version and classifies SemVer prereleases centrally. npm also checks each package version against the release tag before publishing. Explicit recovery through the Release workflow uses the same classification and source validation.
+
+Candidates become GitHub prereleases and publish to npm `rc` and Docker exact-version/`rc` tags. Other prerelease names never use stable channels. Only stable releases update npm `latest`, Docker `latest` and major/minor aliases, the Homebrew formula, Winget, deployed docs, and the post-release lockfile PR against main. RC lockfile maintenance on a stabilization branch remains manual. PyPI and crates.io retain their normal prerelease-version handling; no new publishing credentials are required. Homebrew does not gain a separate RC formula in this change.
+
+To publish the final release, bump the accepted candidate source to the final version and create a new signed tag. Never move a published tag or replace candidate packages with final artifacts. Publishing across registries is not atomic, and the existing workflow recovery restrictions still apply. Local fixture tests do not replace a controlled RC publication: verify GitHub prerelease status, exact-version installs on supported platforms, npm and Docker channel tags, and unchanged stable distribution pointers before treating the first candidate pipeline run as validated.
+
+
+### Recovering an unpublished release
+
+If runner retirement or another workflow issue blocks a tagged release before publication, merge the workflow fix to `main`, cancel the blocked run, and dispatch **Release** on `main` with `release_tag` set to the existing tag (for example, `v0.7.12`). Leave this input empty for a build-only run. Do not move or recreate the tag.
+
+Recovery requires an unpublished tag whose commit is already in `main` and whose workspace version matches its name. The workflow resolves that commit once, records it in the run summary, and pins every build and publication checkout to it. All platform builds, artifact checks, and the production SDK smoke test still gate publication. A GitHub release that already exists is rejected; partial publication after that point needs a separate recovery assessment. Post-release lockfile maintenance continues to target current `main`.
 
 ### npm publishing and provenance
 

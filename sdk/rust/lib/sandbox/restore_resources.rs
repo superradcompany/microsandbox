@@ -33,6 +33,8 @@ pub(crate) struct RestoreResources {
     /// Immutable CPU and memory layout read from the checkpoint before config resolution.
     #[cfg(feature = "local")]
     pub geometry: Option<CheckpointGeometry>,
+    /// Immutable nesting mode read from the checkpoint.
+    pub nested_virt: Option<bool>,
     /// Captured agent advertisement; its policy remains authoritative on memory restore.
     pub agent_ready: Option<Ready>,
 }
@@ -51,6 +53,7 @@ impl RestoreResources {
             self.geometry = None;
         }
         self.agent_ready = None;
+        self.nested_virt = None;
     }
 
     /// Preserve the resumed guest's advertisement, without changing the captured
@@ -84,6 +87,18 @@ impl RestoreResources {
         &self,
         requested: &SandboxConfigPatch,
     ) -> MicrosandboxResult<()> {
+        if let Some(nested) = self.nested_virt
+            && requested
+                .spec
+                .resources
+                .nested_virt
+                .is_some_and(|value| value.unwrap_or(false) != nested)
+        {
+            return Err(crate::MicrosandboxError::InvalidConfig(
+                "a full snapshot must restore with its captured nested virtualization setting"
+                    .into(),
+            ));
+        }
         #[cfg(feature = "local")]
         if let Some(geometry) = self.geometry {
             let resources = &requested.spec.resources;

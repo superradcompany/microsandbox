@@ -31,6 +31,37 @@ fn test_setxattr_getxattr_roundtrip() {
 }
 
 #[test]
+fn test_xattr_after_releasing_one_of_multiple_handles() {
+    let sb = TestSandbox::new();
+    let (entry, first) = sb.fuse_create_root("xattr.txt").unwrap();
+    let second = sb.fuse_open(entry.inode, libc::O_RDWR as u32).unwrap();
+
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, first, false, false, None)
+        .unwrap();
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, c"user.test", b"remaining", 0)
+        .unwrap();
+    let reply = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, c"user.test", 64)
+        .unwrap();
+    assert!(matches!(reply, GetxattrReply::Value(value) if value == b"remaining"));
+
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, second, false, false, None)
+        .unwrap();
+    sb.fs
+        .setxattr(sb.ctx(), entry.inode, c"user.test", b"reopened", 0)
+        .unwrap();
+    let reply = sb
+        .fs
+        .getxattr(sb.ctx(), entry.inode, c"user.test", 64)
+        .unwrap();
+    assert!(matches!(reply, GetxattrReply::Value(value) if value == b"reopened"));
+}
+
+#[test]
 fn test_getxattr_size_query() {
     let sb = TestSandbox::new();
     let (entry, _handle) = sb.fuse_create_root("xattr.txt").unwrap();

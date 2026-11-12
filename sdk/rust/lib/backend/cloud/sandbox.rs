@@ -79,6 +79,36 @@ pub(in crate::backend) enum CloudRegistrySelection {
 //--------------------------------------------------------------------------------------------------
 
 impl CloudBackend {
+    /// Stop the captured cloud identity and observe completion, including ephemeral deletion.
+    pub(crate) async fn stop_complete(&self, id: &str) -> MicrosandboxResult<()> {
+        let current = self.get_sandbox_by_id(id).await?;
+        if matches!(
+            current.status,
+            CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
+        ) {
+            return Ok(());
+        }
+        self.stop_sandbox_by_id(id).await?;
+        loop {
+            match self.get_sandbox_by_id(id).await {
+                Ok(observed)
+                    if matches!(
+                        observed.status,
+                        CloudSandboxStatus::Stopped | CloudSandboxStatus::Failed
+                    ) =>
+                {
+                    return Ok(());
+                }
+                // Only disappearance after a successful stop of a confirmed ephemeral
+                // sandbox is completion. Missing persistent sandboxes and failed stop
+                // requests still surface their errors, and a reused name is never followed.
+                Err(MicrosandboxError::SandboxNotFound(_)) if current.ephemeral => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
     /// Apply captured device settings before validating or sending a cloud create request.
     pub(crate) async fn create_from_builder(
         &self,
@@ -552,6 +582,9 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         )
     };
 
+    if config.spec.resources.nested_virt == Some(true) {
+        return Err(unsupported("nested_virt (local-only)"));
+    }
     if config.spec.resources.max_cpus != config.spec.resources.cpus {
         return Err(unsupported("max_cpus"));
     }
@@ -1539,13 +1572,16 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 12] = [
+        let cases: [(&str, ConfigMutation); 13] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
             }),
             ("hostname", |config| {
                 config.spec.runtime.hostname = Some("worker".into())
+            }),
+            ("nested_virt (local-only)", |config| {
+                config.spec.resources.nested_virt = Some(true)
             }),
             ("guest_clock", |config| {
                 config.spec.runtime.guest_clock = Some(microsandbox_types::GuestClockPolicy::Off)
