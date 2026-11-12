@@ -176,6 +176,13 @@ $env:MSB_LIBKRUNFW_PATH = "C:\microsandbox\lib\libkrunfw.dll"
 ```
 </CodeGroup>
 
+The SDK does not look for `msb` on your `PATH`. Homebrew keeps the pair in the formula's `libexec` directory and puts a wrapper script on `PATH`, so point the SDK at `libexec` instead. The `opt` prefix keeps these paths valid after `brew upgrade`:
+
+```bash Homebrew (macOS)
+export MSB_PATH="$(brew --prefix microsandbox)/libexec/msb"
+export MSB_LIBKRUNFW_PATH="$(brew --prefix microsandbox)/libexec/libkrunfw.dylib"
+```
+
 Use the [resolve helper](#resolve-check-install-and-ensure) to check that the pair is available without installing anything. These environment variables also select the runtime for subsequent sandbox operations; see [path overrides](#override-runtime-paths) for precedence.
 
 <Accordion title="SDK packaging and build options">
@@ -258,6 +265,7 @@ Ensure reuses an existing runtime before extracting the archive. Resolve only fi
 | --- | --- |
 | Incomplete installation | Restore a matching executable and library. Setup does not repair a partial pair or fall back to bundled binaries. |
 | Invalid explicit path | Correct the override. Invalid paths do not fall through to another installation. |
+| `msb doctor` passes but the SDK finds no runtime | `msb doctor` checks the executable it runs from. For a Homebrew install, set the [Homebrew paths](#bring-your-own-runtime). |
 | Unexpected runtime version | Check explicit paths and the runtime home; both take precedence over bundled binaries. |
 | Feature unsupported by an older runtime | Upgrade the selected runtime. Updating the SDK alone may leave it unchanged. |
 | Embedded archive unavailable | Use a native SDK built with embedding, or choose a directory, archive, or download source. |
