@@ -62,6 +62,20 @@ fn service_wire_fixtures_round_trip() {
 }
 
 #[test]
+fn service_update_with_target_refuses_unknown_fields() {
+    let request = include_str!("fixtures/update-service-request-unknown-with-target.json");
+
+    assert!(serde_json::from_str::<CloudUpdateServiceRequest>(request).is_err());
+}
+
+#[test]
+fn service_update_refuses_only_unknown_fields() {
+    let request = include_str!("fixtures/update-service-request-unknown-only.json");
+
+    assert!(serde_json::from_str::<CloudUpdateServiceRequest>(request).is_err());
+}
+
+#[test]
 fn unknown_service_status_decodes_as_unknown() {
     let mut service: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/service.json")).unwrap();
@@ -70,6 +84,23 @@ fn unknown_service_status_decodes_as_unknown() {
     let service: CloudService = serde_json::from_value(service).unwrap();
 
     assert_eq!(service.status, CloudServiceStatus::Unknown);
+}
+
+#[test]
+fn service_response_target_ignores_unknown_fields() {
+    let mut service: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/service.json")).unwrap();
+    service["target"]["future_option"] = serde_json::json!(true);
+
+    let service: CloudService = serde_json::from_value(service).unwrap();
+
+    assert_eq!(
+        service.target,
+        Some(CloudServiceTarget {
+            sandbox: "web-1".into(),
+            port: 8080,
+        })
+    );
 }
 
 #[test]

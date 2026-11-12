@@ -69,9 +69,12 @@ pub struct CloudCreateServiceRequest {
 }
 
 /// Service update request body.
+///
+/// A modification request: unknown fields are refused, so a server never applies part of a change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
 pub struct CloudUpdateServiceRequest {
     /// New target when moving or reattaching the Service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
