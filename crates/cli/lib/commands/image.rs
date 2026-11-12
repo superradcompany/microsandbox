@@ -6,11 +6,13 @@ use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use clap::{Args, Subcommand, ValueEnum};
+use clap_complete::ArgValueCompleter;
 use console::style;
 use microsandbox::config::RegistryOptions;
 use microsandbox::image::Image;
 use microsandbox_image::{ImageArchiveFormat, ImageLoadOptions, Registry};
 
+use crate::context::ImageCompleter;
 use crate::ui::{self, OutputFormat};
 
 use super::pull;
@@ -70,6 +72,11 @@ pub struct ImageListArgs {
 #[derive(Debug, Args)]
 pub struct ImageInspectArgs {
     /// Image to inspect (e.g. python).
+    #[arg(
+        value_name = "Image",
+        required = false,
+        add = ArgValueCompleter::new(ImageCompleter)
+    )]
     pub reference: String,
 
     /// Output format (json).
@@ -126,7 +133,11 @@ pub enum ImageSaveFormat {
 #[derive(Debug, Args)]
 pub struct ImageRemoveArgs {
     /// Image(s) to remove.
-    #[arg(required = true)]
+    #[arg(
+        value_name = "Image",
+        required = true,
+        add = ArgValueCompleter::new(ImageCompleter)
+    )]
     pub references: Vec<String>,
 
     /// Remove even if the image is used by existing sandboxes.

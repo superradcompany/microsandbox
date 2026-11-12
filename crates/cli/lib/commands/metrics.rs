@@ -14,14 +14,16 @@ use std::time::Duration;
 use anyhow::{anyhow, bail};
 use chrono::Utc;
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use console::style;
 use microsandbox::backend::LocalBackend;
 use microsandbox::sandbox::{
-    SandboxMetricsReport, SandboxMetricsState, all_sandbox_metrics_reports_local,
+    SandboxMetricsReport, SandboxMetricsState, SandboxStatus, all_sandbox_metrics_reports_local,
     sandbox_metrics_report_local,
 };
 use microsandbox_utils::format::{format_bytes, format_duration};
 
+use crate::context::SandboxCompleter;
 use crate::ui::{self, OutputFormat};
 
 //--------------------------------------------------------------------------------------------------
@@ -42,6 +44,11 @@ const MIN_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Args)]
 pub struct MetricsArgs {
     /// Sandbox to inspect. Omit to show all running sandboxes.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Running]})
+    )]
     pub name: Option<String>,
 
     /// Output format (json).

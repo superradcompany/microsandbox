@@ -4,11 +4,13 @@ use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use futures::{FutureExt, StreamExt};
 use microsandbox::logs::{LogSource, LogStreamOptions, LogStreamStart};
 use microsandbox::sandbox::{ExecOptionsBuilder, ExecOutput, RlimitResource, Sandbox};
 
 use super::common::{self, SandboxOpts, apply_sandbox_opts, apply_sandbox_opts_after_config};
+use crate::context::ImageCompleter;
 use crate::{sandbox_config, ui};
 
 //--------------------------------------------------------------------------------------------------
@@ -21,6 +23,11 @@ pub struct RunArgs {
     /// Image to use (e.g. alpine, python, ./rootfs, ./disk.qcow2).
     ///
     /// May be omitted when a config file supplies `image`.
+    #[arg(
+        value_name = "Image",
+        required = false,
+        add = ArgValueCompleter::new(ImageCompleter)
+    )]
     pub image: Option<String>,
 
     /// Run the resolved image command in the background and print the sandbox name.

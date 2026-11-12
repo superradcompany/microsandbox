@@ -1,6 +1,7 @@
 //! `msb inspect` command — show detailed sandbox information.
 
 use clap::Args;
+use clap_complete::ArgValueCompleter;
 use console::style;
 use microsandbox::sandbox::{
     DeploymentProfile, HostPermissions, MountOptions, Sandbox, SandboxConfig, SandboxStatus,
@@ -8,7 +9,10 @@ use microsandbox::sandbox::{
 };
 use serde::Serialize;
 
-use crate::ui::{self, OutputFormat};
+use crate::{
+    context::SandboxCompleter,
+    ui::{self, OutputFormat},
+};
 
 /// Render a non-default mount policy suffix for `msb inspect` output.
 ///
@@ -62,6 +66,11 @@ fn mount_flags_suffix(options: MountOptions) -> String {
 #[derive(Debug, Args)]
 pub struct InspectArgs {
     /// Sandbox to inspect.
+    #[arg(
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[]})
+    )]
     pub name: String,
 
     /// Inspect a managed job instead of the sandbox.

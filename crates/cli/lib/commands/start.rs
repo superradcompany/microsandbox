@@ -1,9 +1,10 @@
 //! `msb start` command — start/resume an existing stopped sandbox.
 
 use clap::Args;
-use microsandbox::sandbox::Sandbox;
+use clap_complete::ArgValueCompleter;
+use microsandbox::sandbox::{Sandbox, SandboxStatus};
 
-use crate::ui;
+use crate::{context::SandboxCompleter, ui};
 
 use super::common;
 
@@ -15,7 +16,12 @@ use super::common;
 #[derive(Debug, Args)]
 pub struct StartArgs {
     /// Sandbox(es) to start. Required unless `--label` is given.
-    #[arg(required_unless_present = "label")]
+    #[arg(
+        required_unless_present = "label",
+        value_name = "Sandbox",
+        required = false,
+        add = ArgValueCompleter::new(SandboxCompleter { status_filters: &[SandboxStatus::Stopped]})
+    )]
     pub names: Vec<String>,
 
     /// Start every sandbox carrying this label (`KEY=VALUE`). Repeatable;
