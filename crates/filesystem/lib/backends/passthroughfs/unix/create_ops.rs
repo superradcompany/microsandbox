@@ -18,6 +18,8 @@
 //! xattr mode (file-backed symlinks), because Linux `user.*` xattrs cannot be set on symlinks.
 //! On macOS, real symlinks are used with `XATTR_NOFOLLOW` for xattr operations.
 
+#[cfg(target_os = "macos")]
+use std::os::fd::OwnedFd;
 use std::{
     ffi::CStr,
     io,
@@ -26,7 +28,11 @@ use std::{
 };
 
 use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchmod_mirror};
+#[cfg(target_os = "macos")]
+use super::metadata;
 use super::{PassthroughFs, inode};
+#[cfg(target_os = "macos")]
+use crate::backends::shared::inode_table::InodeAltKey;
 use crate::{
     Context, Entry, Extensions, OpenOptions,
     backends::shared::{handle_table::HandleData, name_validation, platform, stat_override},
@@ -560,7 +566,9 @@ pub(crate) fn do_link(
 /// reading arbitrary file content via readlink on a regular file.
 ///
 /// On macOS, verifies the inode is actually a symlink via `stat_inode` (which applies
-/// xattr patching) before calling readlinkat.
+/// xattr patching) before calling readlinkat. A share without volfs opens the link
+/// with `O_SYMLINK`, checks the descriptor's identity, and reads the target from
+/// that descriptor.
 pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Result<Vec<u8>> {
     if fs.is_virtual_init_inode(ino) {
         return Err(platform::einval());
@@ -604,74 +612,55 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
     #[cfg(target_os = "macos")]
     {
-        // On macOS we create real symlinks. In volfs mode the type is checked
-        // first because the identity path would otherwise open the target. In
-        // anchor mode the check is left to `readlinkat`, which answers EINVAL
-        // for anything that is not a symlink; a `stat_inode` pre-check there
-        // would only pay for a second anchor walk.
-        if !fs.anchor_mode() {
-            let st = inode::stat_inode(fs, ino)?;
-            if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
+        if fs.anchor_mode() {
+            // The stat that verified the anchored name also says what the
+            // entry is. Anything but a symlink is refused here, before any
+            // open: `readlinkat` answered EINVAL for those, and opening a
+            // FIFO to find that out would be a rendezvous with its writer.
+            let (dir, name, st) = inode::anchor_parent_name_stat_macos(fs, ino)?;
+            if st.st_mode & libc::S_IFMT != libc::S_IFLNK {
                 return Err(platform::einval());
             }
-        }
 
-        let mut buf = vec![0u8; libc::PATH_MAX as usize];
-        let len = if fs.anchor_mode() {
-            let expected = {
-                let inodes = fs.inodes.read().unwrap();
-                let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-                (data.dev, data.host_ino())
-            };
-            let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
+            // Open the link itself and read the target from that descriptor.
+            // The open names the entry again, so the descriptor's identity is
+            // checked against the stat above; from there on nothing is
+            // resolved by name, and a host that swaps the entry afterwards
+            // cannot change what is read.
+            let expected = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+            let fd = metadata::open_verified_symlink_fd(dir.raw(), &name, expected)?;
+            // SAFETY: the helper returns a newly owned descriptor.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
             #[cfg(test)]
             fs.run_name_bound_hook();
 
-            let ret = unsafe {
-                libc::readlinkat(
-                    dir.raw(),
-                    name.as_ptr(),
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            };
-            // Capture errno here, before `dir` drops (its Drop calls
-            // `close`, which can clobber the syscall's errno).
-            if ret < 0 {
-                let err = io::Error::last_os_error();
-                return Err(platform::linux_error(err));
-            }
+            return platform::readlink_fd(fd.as_raw_fd());
+        }
 
-            // macOS cannot read a link through a descriptor, so `readlinkat`
-            // resolves the name again after the anchor verified it. Checking
-            // the identity once more detects a substitution that is still in
-            // place when the check runs. It does not detect a swap that is put
-            // back: verify A, substitute B, read B's target, restore A, and
-            // the check passes on A while the answer came from B.
-            let st = platform::fstatat_nofollow(dir.raw(), &name)?;
-            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
-                return Err(platform::enoent());
-            }
-            ret
-        } else {
-            let inodes = fs.inodes.read().unwrap();
-            let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-            let path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
-            let ret = unsafe {
-                libc::readlinkat(
-                    libc::AT_FDCWD,
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
-            };
-            if ret < 0 {
-                return Err(platform::linux_error(io::Error::last_os_error()));
-            }
-            ret
+        // On macOS we create real symlinks, so verify it's actually a symlink first.
+        let st = inode::stat_inode(fs, ino)?;
+        if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
+            return Err(platform::einval());
+        }
+
+        let inodes = fs.inodes.read().unwrap();
+        let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
+        let path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
+
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        let ret = unsafe {
+            libc::readlinkat(
+                libc::AT_FDCWD,
+                path.as_ptr() as *const libc::c_char,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
         };
-        buf.truncate(len as usize);
+        if ret < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        buf.truncate(ret as usize);
         Ok(buf)
     }
 }

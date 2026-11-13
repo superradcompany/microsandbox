@@ -676,9 +676,39 @@ fn test_anchor_readlink_nested() {
     assert_eq!(sb.fs.readlink(sb.ctx(), l.inode).unwrap(), b"target-name");
 }
 
-/// `readlinkat` names the entry again, so a symlink replaced after the anchor
-/// was verified would otherwise have its target read and returned. The read
-/// must be refused instead.
+/// The target is read from the descriptor that passed the identity check, not
+/// from the name. A host that replaces the name once that descriptor is open
+/// changes nothing: the guest gets the target of the link it asked for,
+/// whether the original is moved aside or removed outright, and whether or not
+/// the name is put back afterwards.
+#[test]
+fn test_anchor_readlink_is_bound_to_the_opened_link() {
+    for keep_original in [true, false] {
+        let sb = TestSandbox::with_anchor_mode();
+        std::os::unix::fs::symlink("target-one", sb.root.join("s")).unwrap();
+        let s = sb.lookup_root("s").unwrap();
+
+        let root = sb.root.clone();
+        swap_before_name_bound_syscall(&sb, move || {
+            if keep_original {
+                std::fs::rename(root.join("s"), root.join("s.orig")).unwrap();
+            } else {
+                std::fs::remove_file(root.join("s")).unwrap();
+            }
+            std::os::unix::fs::symlink("target-two", root.join("s")).unwrap();
+        });
+
+        assert_eq!(sb.fs.readlink(sb.ctx(), s.inode).unwrap(), b"target-one");
+        // The swap did run: the name now holds the other link.
+        assert_eq!(
+            std::fs::read_link(sb.root.join("s")).unwrap(),
+            std::path::Path::new("target-two")
+        );
+    }
+}
+
+/// A symlink replaced before the read starts is refused: the name no longer
+/// holds the tracked link, so there is nothing to open.
 #[test]
 fn test_anchor_readlink_rejects_replaced_symlink() {
     let sb = TestSandbox::with_anchor_mode();
@@ -687,13 +717,84 @@ fn test_anchor_readlink_rejects_replaced_symlink() {
 
     // Keep the original link alive under another name so its inode number
     // cannot be reused by the replacement.
-    let root = sb.root.clone();
-    swap_before_name_bound_syscall(&sb, move || {
-        std::fs::rename(root.join("s"), root.join("s.orig")).unwrap();
-        std::os::unix::fs::symlink("target-two", root.join("s")).unwrap();
-    });
+    std::fs::rename(sb.root.join("s"), sb.root.join("s.orig")).unwrap();
+    std::os::unix::fs::symlink("target-two", sb.root.join("s")).unwrap();
 
     TestSandbox::assert_errno(sb.fs.readlink(sb.ctx(), s.inode), LINUX_ENOENT);
+}
+
+/// readlink on something that is not a symlink answers EINVAL, and it does so
+/// from the stat alone. A FIFO is never opened to find out: a read-open would
+/// complete the rendezvous with a writer that waits on it, so the writer in
+/// this test must still be waiting after the call.
+#[test]
+fn test_anchor_readlink_refuses_non_symlinks_without_opening_them() {
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("plain", b"x");
+    let fifo = TestSandbox::cstr(sb.root.join("fifo").to_str().unwrap());
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let plain = sb.lookup_root("plain").unwrap();
+    let pipe = sb.lookup_root("fifo").unwrap();
+
+    TestSandbox::assert_errno(sb.fs.readlink(sb.ctx(), plain.inode), LINUX_EINVAL);
+
+    // A writer that blocks in open(2) until some reader opens the FIFO.
+    let (started, has_started) = std::sync::mpsc::channel();
+    let (opened, has_opened) = std::sync::mpsc::channel();
+    let writer_path = fifo.clone();
+    let writer = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        let fd = unsafe { libc::open(writer_path.as_ptr(), libc::O_WRONLY) };
+        opened.send(()).unwrap();
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+        }
+    });
+    has_started.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    TestSandbox::assert_errno(sb.fs.readlink(sb.ctx(), pipe.inode), LINUX_EINVAL);
+    assert!(
+        has_opened
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "readlink opened the FIFO: the waiting writer's open completed"
+    );
+
+    // Release the writer with a real reader and collect the thread.
+    let reader = unsafe { libc::open(fifo.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    assert!(reader >= 0);
+    has_opened
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("writer did not complete once a reader appeared");
+    writer.join().unwrap();
+    unsafe { libc::close(reader) };
+}
+
+/// `platform::readlink_fd` reads the link its descriptor is on. Replacing the
+/// name, or removing the link, does not change the answer.
+#[test]
+fn test_readlink_fd_reads_the_descriptor_not_the_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink("target-one", &link).unwrap();
+    let path = TestSandbox::cstr(link.to_str().unwrap());
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_SYMLINK) };
+    assert!(fd >= 0);
+
+    let read = || crate::backends::shared::platform::readlink_fd(fd).unwrap();
+    assert_eq!(read(), b"target-one");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("target-two", &link).unwrap();
+    assert_eq!(read(), b"target-one");
+    std::fs::remove_file(&link).unwrap();
+    assert_eq!(read(), b"target-one");
+    unsafe { libc::close(fd) };
+
+    // A descriptor on anything else is refused, not read as a link.
+    let file = std::fs::File::create(tmp.path().join("plain")).unwrap();
+    let err = crate::backends::shared::platform::readlink_fd(file.as_raw_fd()).unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(LINUX_EINVAL));
 }
 
 /// setattr times on a symlink go through the anchor parent, and both atime

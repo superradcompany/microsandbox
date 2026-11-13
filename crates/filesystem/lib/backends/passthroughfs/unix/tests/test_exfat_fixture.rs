@@ -89,6 +89,10 @@ fn test_exfat_volume_read_path() {
     std::fs::create_dir_all(root.join("evidence/sub")).unwrap();
     std::fs::write(root.join("evidence/sub/file.bin"), b"exfat-bytes").unwrap();
     std::fs::write(root.join("top.txt"), b"top").unwrap();
+    // exFAT has no native symlinks; macOS stores one as a small file, and the
+    // read through a descriptor has to work on that form as well.
+    let has_symlink =
+        std::os::unix::fs::symlink("evidence/sub/file.bin", root.join("link")).is_ok();
 
     let fs = PassthroughFs::new(PassthroughConfig {
         root_dir: root.clone(),
@@ -140,6 +144,27 @@ fn test_exfat_volume_read_path() {
     let (st2, _) = fs.getattr(ctx, file.inode, None).unwrap();
     assert_eq!(st2.st_ino, st.st_ino);
     assert_eq!(st2.st_size, 11);
+
+    // Read a symlink by inode, and again after the host replaced the name.
+    if has_symlink {
+        let link = fs.lookup(ctx, ROOT_INODE, &c("link")).unwrap();
+        assert_eq!(
+            fs.readlink(ctx, link.inode).unwrap(),
+            b"evidence/sub/file.bin"
+        );
+        std::fs::remove_file(root.join("link")).unwrap();
+        std::os::unix::fs::symlink("top.txt", root.join("link")).unwrap();
+        let replaced = fs.readlink(ctx, link.inode);
+        eprintln!("exfat fixture: readlink after the host replaced the link: {replaced:?}");
+        assert!(
+            matches!(&replaced, Err(err) if err.raw_os_error() == Some(LINUX_ENOENT)),
+            "a replaced link must be refused, not read: {replaced:?}"
+        );
+        let fresh = fs.lookup(ctx, ROOT_INODE, &c("link")).unwrap();
+        assert_eq!(fs.readlink(ctx, fresh.inode).unwrap(), b"top.txt");
+    } else {
+        eprintln!("exfat fixture: volume refused a symlink, readlink not exercised");
+    }
 }
 
 /// Create, write, rename, unlink, rmdir, and link on a real exFAT volume, all

@@ -55,12 +55,11 @@
 //! the `do_lookup` that follows, is a retained destination-name race: the
 //! source swap-and-restore alone is detected, this is not.
 //!
-//! readlink is name-bound in the same way: Linux reads a real symlink with
-//! `readlinkat(fd, "")`, which is identity-bound, while macOS cannot read a
-//! link through a descriptor at all, so its identity is checked again after
-//! the call too. Nothing pins the answer there, so a swap that is put back
-//! inside the window is not detected: verify A, substitute B, read B's target,
-//! restore A, and the check passes on A while the answer came from B.
+//! readlink is not name-bound. The link is opened with `O_SYMLINK`, the
+//! descriptor's identity is checked, and the target is read from that same
+//! descriptor with `freadlink(2)`, as Linux does with `readlinkat(fd, "")`. A
+//! host that replaces the name at any point either fails the identity check
+//! or has no effect on what is read.
 //!
 //!
 //! ## Procfd Reopen
@@ -666,7 +665,7 @@ pub(crate) fn anchor_parent_and_name_macos(
 /// come from the stat that verified the identity — not from opening the entry
 /// to find out, which for a FIFO would already be a rendezvous.
 #[cfg(target_os = "macos")]
-fn anchor_parent_name_stat_macos(
+pub(crate) fn anchor_parent_name_stat_macos(
     fs: &PassthroughFs,
     inode: u64,
 ) -> io::Result<(InodeFd, std::ffi::CString, stat64)> {
