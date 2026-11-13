@@ -68,6 +68,7 @@ pub struct SnapshotSourceRecoveryError {
 
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MicrosandboxError {
     /// An I/O error occurred.
     #[error("io error: {0}")]

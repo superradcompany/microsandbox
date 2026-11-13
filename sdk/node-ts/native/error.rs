@@ -173,6 +173,7 @@ fn error_type_str(err: &MicrosandboxError) -> &'static str {
         MicrosandboxError::Unsupported { .. } => "Unsupported",
         MicrosandboxError::ModificationNotConfirmed { .. } => "ModificationNotConfirmed",
         MicrosandboxError::Custom(_) => "Custom",
+        _ => "Unknown",
     }
 }
 
