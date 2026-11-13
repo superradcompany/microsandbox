@@ -1,12 +1,12 @@
 //! Exec session management: spawning processes with PTY or pipe I/O.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::{iter, mem, ptr};
 
@@ -14,11 +14,11 @@ use nix::pty;
 use nix::sys::signal::Signal;
 use tokio::io::AsyncReadExt;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 
 use microsandbox_protocol::bulk::BulkRecord;
 use microsandbox_protocol::exec::{ExecFailed, ExecFailureKind, ExecLimits, ExecRequest};
-use microsandbox_protocol::transport::ClientIncarnation;
+use microsandbox_protocol::transport::{ClientIncarnation, relay_client_slot};
 
 use crate::config::SecurityProfile;
 use crate::error::{AgentdError, AgentdResult};
@@ -137,6 +137,9 @@ fn exec_failed_from_io_error(err: &std::io::Error, cmd: &str, stage: &str) -> Ex
 // Types
 //--------------------------------------------------------------------------------------------------
 
+/// Bulk flow identity: owning client incarnation and stream id.
+pub(crate) type BulkFlowKey = (ClientIncarnation, u32);
+
 /// An active exec session handle for sending input to a running process.
 ///
 /// Output reading is handled by a background task that sends events
@@ -225,7 +228,61 @@ pub struct SessionOutputEnvelope {
 
     /// Capacity follows the allocation and is released only after serial output consumes it.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+
+    /// Shared-state accounting released with the dedicated bulk record.
+    _pending_bulk: Option<BulkPendingOutput>,
 }
+
+/// Bulk-output ownership the main loop publishes and the scheduler enforces.
+#[derive(Default)]
+struct BulkOwnership {
+    /// Epoch advanced whenever scheduler-visible cleanup state changes.
+    changed: u64,
+
+    /// Range owners that may still have output written.
+    live: HashSet<ClientIncarnation>,
+
+    /// Owner whose complete record the scheduler is writing right now, if any.
+    in_flight: Option<ClientIncarnation>,
+
+    /// Disconnects waiting only for their own in-flight record.
+    awaiting_write: HashMap<ClientIncarnation, oneshot::Sender<()>>,
+
+    /// Cancelled keys that may still have queued or in-channel output.
+    cancelled: HashSet<BulkFlowKey>,
+
+    /// Record counts in the scheduler input channel or per-flow queues.
+    pending_output: HashMap<BulkFlowKey, usize>,
+
+    /// Whether the dedicated scheduler has exited.
+    closed: bool,
+}
+
+/// Shared cleanup state for dedicated bulk output.
+#[derive(Clone, Default)]
+pub(crate) struct BulkCleanup {
+    state: Arc<Mutex<BulkOwnership>>,
+    wake: Arc<Notify>,
+}
+
+/// Scheduler-visible cleanup state captured after its change epoch advances.
+pub(crate) struct BulkCleanupSnapshot {
+    /// Epoch represented by this snapshot.
+    pub(crate) changed: u64,
+    /// Flow keys cancelled since the preceding snapshot.
+    pub(crate) cancelled: HashSet<BulkFlowKey>,
+    /// Range owners that may still have output written.
+    pub(crate) live: HashSet<ClientIncarnation>,
+}
+
+/// One record counted in [`BulkOwnership::pending_output`].
+struct BulkPendingOutput {
+    cleanup: BulkCleanup,
+    key: BulkFlowKey,
+}
+
+/// Scheduler-lifetime guard that closes shared cleanup state on every exit path.
+pub(crate) struct BulkCleanupCloseGuard(BulkCleanup);
 
 /// Lifecycle commands processed ahead of queued dedicated-lane output.
 pub enum BulkOutputCommand {
@@ -246,23 +303,6 @@ pub enum BulkOutputCommand {
         /// Resolves after the scheduler has crossed the cut.
         completion: oneshot::Sender<()>,
     },
-    /// Release queued records for one cancelled operation.
-    DropFlow {
-        /// Range owner that opened the operation.
-        incarnation: ClientIncarnation,
-        /// Correlation being cancelled.
-        id: u32,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
-
-    /// Release every queued record owned by one disconnected SDK client.
-    DropIncarnation {
-        /// Range ownership period being removed.
-        incarnation: ClientIncarnation,
-        /// Resolves after matching queued records and their permits are dropped.
-        completion: oneshot::Sender<()>,
-    },
 }
 
 /// Capacity reserved before a producer reads or encodes a data-bearing event.
@@ -275,6 +315,7 @@ pub struct SessionOutputSender {
     control_tx: mpsc::Sender<SessionOutputEnvelope>,
     bulk_tx: Option<mpsc::Sender<SessionOutputEnvelope>>,
     bulk_command_tx: Option<mpsc::Sender<BulkOutputCommand>>,
+    bulk_cleanup: Option<BulkCleanup>,
     control_budget: Arc<Semaphore>,
     bulk_budget: Arc<Semaphore>,
     incarnation: Option<ClientIncarnation>,
@@ -399,6 +440,183 @@ impl BulkSessionOutput {
     }
 }
 
+impl BulkCleanup {
+    /// Lock ownership state, recovering from poison: the state is still needed to release
+    /// resources. Guest release builds abort on panic; tests need completion after an unwind.
+    fn lock(&self) -> MutexGuard<'_, BulkOwnership> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Clear ownership, advance the change epoch and fire every parked disconnect.
+    fn reset(&self, closed: bool) {
+        let completions = {
+            let mut state = self.lock();
+            let completions = mem::take(&mut state.awaiting_write)
+                .into_values()
+                .collect::<Vec<_>>();
+            let changed = state.changed.wrapping_add(1);
+            *state = BulkOwnership {
+                changed,
+                closed,
+                ..BulkOwnership::default()
+            };
+            completions
+        };
+
+        for completion in completions {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Close shared cleanup state when the scheduler leaves its task.
+    pub(crate) fn close_guard(&self) -> BulkCleanupCloseGuard {
+        BulkCleanupCloseGuard(self.clone())
+    }
+
+    /// Publish one range owner to the dedicated scheduler.
+    pub(crate) fn connect(&self, incarnation: ClientIncarnation) {
+        let mut state = self.lock();
+        if !state.closed && state.live.insert(incarnation) {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Mark one cancelled producer only when output can still be pending.
+    pub(crate) fn cancel_flow(
+        &self,
+        incarnation: ClientIncarnation,
+        id: u32,
+        producer_was_live: bool,
+    ) {
+        if relay_client_slot(id).is_none() {
+            return;
+        }
+
+        let key = (incarnation, id);
+        let mut state = self.lock();
+        if !state.closed
+            && (producer_was_live || state.pending_output.contains_key(&key))
+            && state.cancelled.insert(key)
+        {
+            state.changed = state.changed.wrapping_add(1);
+        }
+        drop(state);
+
+        self.wake.notify_one();
+    }
+
+    /// Remove one range owner and wait only for that owner's in-flight record.
+    pub(crate) fn drop_incarnation(&self, incarnation: ClientIncarnation) -> oneshot::Receiver<()> {
+        let (completion, completed) = oneshot::channel();
+        let mut immediate = None;
+        let mut state = self.lock();
+        state.live.remove(&incarnation);
+        state.changed = state.changed.wrapping_add(1);
+        if state.closed || state.in_flight != Some(incarnation) {
+            immediate = Some(completion);
+        } else {
+            state.awaiting_write.insert(incarnation, completion);
+        }
+        drop(state);
+
+        if let Some(completion) = immediate {
+            let _ = completion.send(());
+        }
+        self.wake.notify_one();
+        completed
+    }
+
+    /// Snapshot cleanup requests and owners only after scheduler-visible state changes.
+    pub(crate) fn snapshot_if_changed(&self, observed: Option<u64>) -> Option<BulkCleanupSnapshot> {
+        let mut state = self.lock();
+        if observed == Some(state.changed) {
+            return None;
+        }
+
+        Some(BulkCleanupSnapshot {
+            changed: state.changed,
+            cancelled: mem::take(&mut state.cancelled),
+            live: state.live.clone(),
+        })
+    }
+
+    /// Claim one complete record write if its owner is still live.
+    pub(crate) fn start_write(&self, incarnation: ClientIncarnation) -> bool {
+        let mut state = self.lock();
+        if state.closed || !state.live.contains(&incarnation) {
+            return false;
+        }
+        state.in_flight = Some(incarnation);
+        true
+    }
+
+    /// Complete one record write and release the matching disconnect, if any.
+    pub(crate) fn finish_write(&self, incarnation: ClientIncarnation) {
+        let mut completion = None;
+        let mut state = self.lock();
+        if state.in_flight == Some(incarnation) {
+            state.in_flight = None;
+            completion = state.awaiting_write.remove(&incarnation);
+        }
+        drop(state);
+
+        if let Some(completion) = completion {
+            let _ = completion.send(());
+        }
+    }
+
+    /// Fire parked disconnects and clear ownership at a restore cut.
+    pub(crate) fn restore(&self) {
+        self.reset(false);
+    }
+
+    /// Close the scheduler state and fire every parked disconnect.
+    pub(crate) fn close(&self) {
+        self.reset(true);
+        self.wake.notify_waiters();
+    }
+
+    /// Wait until ownership cleanup may have changed.
+    pub(crate) async fn notified(&self) {
+        self.wake.notified().await;
+    }
+
+    /// Count one record until the scheduler writes or discards it.
+    fn register_output(&self, key: BulkFlowKey) -> BulkPendingOutput {
+        let mut state = self.lock();
+        let count = state.pending_output.entry(key).or_default();
+        *count = count.saturating_add(1);
+        drop(state);
+
+        BulkPendingOutput {
+            cleanup: self.clone(),
+            key,
+        }
+    }
+
+    /// Release one record from shared pending-output accounting.
+    fn output_finished(&self, key: BulkFlowKey) {
+        let mut state = self.lock();
+        let Some(count) = state.pending_output.get_mut(&key) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            state.pending_output.remove(&key);
+        }
+    }
+
+    /// Return allocated cancellation and pending-output key counts.
+    #[cfg(test)]
+    pub(crate) fn pending_counts(&self) -> (usize, usize) {
+        let state = self.lock();
+        (state.cancelled.len(), state.pending_output.len())
+    }
+}
+
 impl SessionOutput {
     /// Bytes retained by this event that count against bulk output capacity.
     fn budget_bytes(&self) -> usize {
@@ -431,6 +649,7 @@ impl SessionOutputSender {
                 control_tx: tx,
                 bulk_tx: None,
                 bulk_command_tx: None,
+                bulk_cleanup: None,
                 control_budget: Arc::clone(&budget),
                 bulk_budget: budget,
                 incarnation: None,
@@ -449,12 +668,14 @@ impl SessionOutputSender {
         let (control_tx, control_rx) = mpsc::channel(SESSION_OUTPUT_ITEM_CAPACITY);
         let (bulk_tx, bulk_rx) = mpsc::channel(SESSION_BULK_OUTPUT_ITEM_CAPACITY);
         let (bulk_command_tx, bulk_command_rx) = mpsc::channel(SESSION_BULK_COMMAND_CAPACITY);
+        let bulk_cleanup = BulkCleanup::default();
         (
             Self {
                 generation: 0,
                 control_tx,
                 bulk_tx: Some(bulk_tx),
                 bulk_command_tx: Some(bulk_command_tx),
+                bulk_cleanup: Some(bulk_cleanup),
                 control_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 bulk_budget: Arc::new(Semaphore::new(SESSION_OUTPUT_BYTE_CAPACITY)),
                 incarnation: None,
@@ -472,6 +693,7 @@ impl SessionOutputSender {
             control_tx: self.control_tx.clone(),
             bulk_tx: self.bulk_tx.clone(),
             bulk_command_tx: self.bulk_command_tx.clone(),
+            bulk_cleanup: self.bulk_cleanup.clone(),
             control_budget: Arc::clone(&self.control_budget),
             bulk_budget: Arc::clone(&self.bulk_budget),
             incarnation,
@@ -481,6 +703,18 @@ impl SessionOutputSender {
     /// Current local attachment generation, independent of the wire protocol version.
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Shared cleanup state for the dedicated scheduler, when enabled.
+    pub(crate) fn bulk_cleanup(&self) -> Option<BulkCleanup> {
+        self.bulk_cleanup.clone()
+    }
+
+    /// Publish one relay range owner to the dedicated scheduler.
+    pub(crate) fn connect_bulk_incarnation(&self, incarnation: ClientIncarnation) {
+        if let Some(cleanup) = &self.bulk_cleanup {
+            cleanup.connect(incarnation);
+        }
     }
 
     pub(crate) async fn park_bulk_output(&self) -> Result<u64, &'static str> {
@@ -536,43 +770,32 @@ impl SessionOutputSender {
         // must therefore enter one FIFO before sharing the physical console stream.
         self.bulk_tx = None;
         self.bulk_command_tx = None;
+        self.bulk_cleanup = None;
     }
 
-    /// Queue a high-priority purge for one operation without awaiting bulk-port progress.
-    pub fn drop_bulk_flow(&self, id: u32) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
+    /// Publish a purge for one operation without awaiting bulk-port progress.
+    pub fn drop_bulk_flow(&self, id: u32, producer_was_live: bool) {
         let Some(incarnation) = self.incarnation else {
-            return Ok(None);
+            return;
         };
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropFlow {
-                incarnation,
-                id,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        cleanup.cancel_flow(incarnation, id, producer_was_live);
     }
 
-    /// Queue a high-priority purge for a disconnected range owner.
+    /// Publish a purge for a disconnected range owner.
+    ///
+    /// The receiver resolves once no record of that owner is being written. Combined mode has
+    /// no dedicated scheduler and returns `None`.
     pub fn drop_bulk_incarnation(
         &self,
         incarnation: ClientIncarnation,
-    ) -> Result<Option<oneshot::Receiver<()>>, &'static str> {
-        let Some(commands) = self.bulk_command_tx.as_ref() else {
-            return Ok(None);
+    ) -> Option<oneshot::Receiver<()>> {
+        let Some(cleanup) = &self.bulk_cleanup else {
+            return None;
         };
-        let (completion, completed) = oneshot::channel();
-        commands
-            .try_send(BulkOutputCommand::DropIncarnation {
-                incarnation,
-                completion,
-            })
-            .map_err(|_| "dedicated bulk scheduler command queue is unavailable")?;
-        Ok(Some(completed))
+        Some(cleanup.drop_incarnation(incarnation))
     }
 
     /// Queue an event after its retained allocation has acquired aggregate capacity.
@@ -636,10 +859,19 @@ impl SessionOutputSender {
             return false;
         }
 
-        let tx = if matches!(&output, SessionOutput::Bulk(_)) {
+        let is_bulk = matches!(&output, SessionOutput::Bulk(_));
+        let tx = if is_bulk {
             self.bulk_tx.as_ref().unwrap_or(&self.control_tx)
         } else {
             &self.control_tx
+        };
+        let pending_bulk = if is_bulk {
+            self.bulk_cleanup
+                .as_ref()
+                .zip(self.incarnation)
+                .map(|(cleanup, incarnation)| cleanup.register_output((incarnation, id)))
+        } else {
+            None
         };
         tx.send(SessionOutputEnvelope {
             generation: self.generation,
@@ -647,6 +879,7 @@ impl SessionOutputSender {
             incarnation: self.incarnation,
             output,
             _permit: (charged != 0).then_some(permit.0),
+            _pending_bulk: pending_bulk,
         })
         .await
         .is_ok()
@@ -1375,6 +1608,18 @@ impl ExecSession {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for BulkPendingOutput {
+    fn drop(&mut self) {
+        self.cleanup.output_finished(self.key);
+    }
+}
+
+impl Drop for BulkCleanupCloseGuard {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 impl Drop for ExecSession {
     fn drop(&mut self) {
         if let Some(flow) = &self.flow {
@@ -2078,6 +2323,7 @@ mod tests {
     use std::process::{Command as StdCommand, Stdio as StdStdio};
     use std::time::Duration;
 
+    use tokio::sync::mpsc::error::TryRecvError;
     use tokio::time;
 
     use microsandbox_protocol::exec::ExecRequest;
@@ -2131,10 +2377,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_output_queues_keep_bulk_lifecycle_commands_independent() {
+    async fn split_output_queues_keep_bulk_cleanup_independent() {
         let incarnation = [0x55; 16];
         let (tx, mut control_rx, mut bulk_rx, mut command_rx) =
             SessionOutputSender::split_channel();
+        tx.connect_bulk_incarnation(incarnation);
         let scoped = tx.with_incarnation(Some(incarnation));
         let record = BulkRecord {
             id: 9,
@@ -2152,7 +2399,7 @@ mod tests {
                 .await
         );
         assert!(scoped.send(10, SessionOutput::Exited(0)).await);
-        let mut completed = scoped.drop_bulk_flow(9).unwrap().unwrap();
+        scoped.drop_bulk_flow(9, true);
 
         assert!(matches!(
             bulk_rx.recv().await.unwrap().output,
@@ -2162,18 +2409,8 @@ mod tests {
             control_rx.recv().await.unwrap().output,
             SessionOutput::Exited(0)
         ));
-        let BulkOutputCommand::DropFlow {
-            incarnation: command_incarnation,
-            id,
-            completion,
-        } = command_rx.recv().await.unwrap()
-        else {
-            panic!("expected flow cleanup command");
-        };
-        assert_eq!(command_incarnation, incarnation);
-        assert_eq!(id, 9);
-        completion.send(()).unwrap();
-        assert_eq!(completed.try_recv(), Ok(()));
+        assert!(matches!(command_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(tx.bulk_cleanup().unwrap().pending_counts(), (1, 0));
     }
 
     #[tokio::test]
