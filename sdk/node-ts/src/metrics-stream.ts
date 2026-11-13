@@ -1,5 +1,4 @@
 import { withMappedErrors } from "./internal/error-mapping.js";
-import { mapAsyncIterable } from "./internal/async-iter.js";
 import { metricsFromNapi } from "./internal/metrics.js";
 import type { NapiMetricsStream } from "./internal/napi.js";
 import type { SandboxMetrics } from "./metrics.js";
@@ -25,11 +24,12 @@ export class MetricsStream
     return metricsFromNapi(raw);
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<SandboxMetrics> {
-    return mapAsyncIterable(
-      { recv: () => this.inner.recv() },
-      metricsFromNapi,
-    )[Symbol.asyncIterator]();
+  async *[Symbol.asyncIterator](): AsyncIterator<SandboxMetrics> {
+    for (;;) {
+      const metrics = await this.recv();
+      if (metrics === null) return;
+      yield metrics;
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
