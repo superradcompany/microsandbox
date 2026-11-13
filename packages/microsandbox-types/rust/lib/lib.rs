@@ -34,10 +34,10 @@ pub use microsandbox_types_macros::ConfigPatch;
 
 pub use cloud::{
     CLOUD_MODIFICATION_FAILED, CLOUD_MODIFICATION_IN_PROGRESS, CLOUD_MODIFICATION_REFUSED,
-    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudConfigPlannedChange,
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
-    CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody, CloudErrorDetails,
-    CloudHostPattern, CloudMessageResponse, CloudModificationConflict,
+    CLOUD_MODIFICATION_UNSUPPORTED, CloudChangeKind, CloudCompute, CloudComputeType,
+    CloudConfigPlannedChange, CloudCreateSandboxRequest, CloudCreateSandboxResponse,
+    CloudCreateServiceRequest, CloudCreateSnapshotRequest, CloudDiskImageFormat, CloudErrorBody,
+    CloudErrorDetails, CloudHostPattern, CloudMessageResponse, CloudModificationConflict,
     CloudModificationDisposition, CloudModificationRejection, CloudModificationWarning,
     CloudNetworkSpec, CloudPaginated, CloudPatch, CloudPlannedChange, CloudPullPolicy,
     CloudResourceConvergenceState, CloudResourceKind, CloudResourceResizeStatus, CloudRlimit,
