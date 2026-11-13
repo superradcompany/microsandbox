@@ -40,7 +40,7 @@ pub use agent::{
 #[cfg(feature = "local")]
 pub use config::set_sdk_libkrunfw_path as set_libkrunfw_path;
 pub use context::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudComputeType, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
     CloudVolumeKind, CloudVolumeStatus, Context, ContextInfo, ContextKind, ContextSelectionSource,
     Profile, ProfileKind, SandboxCloudState, SandboxInner, SandboxOps, SandboxRecordCloudState,

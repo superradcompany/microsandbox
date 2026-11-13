@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "local")]
 use microsandbox_image::ImageConfig;
 use microsandbox_protocol::{HANDOFF_INIT_AUTO, HANDOFF_INIT_IMAGE_ENTRYPOINT_CANDIDATES};
-use microsandbox_types::RegistryAuth;
+use microsandbox_types::{CloudComputeType, RegistryAuth};
 use typed_path::Utf8UnixPath;
 
 use crate::MicrosandboxResult;
@@ -194,6 +194,15 @@ pub struct SandboxConfig {
     #[serde(skip)]
     #[config_patch(nullable)]
     pub slug: Option<String>,
+
+    /// Requested kind of machine for the sandbox (cloud backends only).
+    ///
+    /// When unset, the cloud uses standard machines.
+    ///
+    /// This is a create-time option, not persisted sandbox state.
+    #[serde(skip)]
+    #[config_patch(nullable)]
+    pub compute: Option<CloudComputeType>,
 
     /// Manifest digest for the resolved OCI image.
     ///
@@ -1207,6 +1216,7 @@ impl Default for SandboxConfig {
             replace_existing: false,
             replace_with_timeout: DEFAULT_REPLACE_TIMEOUT,
             slug: None,
+            compute: None,
             manifest_digest: None,
             snapshot_reference: None,
             local_restore_paths_resolved: false,

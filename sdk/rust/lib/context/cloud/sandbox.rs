@@ -22,8 +22,8 @@ use crate::sandbox::{
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
-    RootDisk, SandboxRuntimeOptions, TlsConfig,
+    CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
+    NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -39,13 +39,12 @@ const DEFAULT_CLOUD_STOP_TIMEOUT: Duration = Duration::from_secs(360);
 // Types
 //--------------------------------------------------------------------------------------------------
 
-/// Wire body for the cloud's create route: the shared create envelope with
-/// the cloud-only fields that ride beside it.
+/// Wire body for the cloud's create route: the shared sandbox spec, nested
+/// under `spec`, with the cloud-only create options beside it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(in crate::context) struct CloudCreateBody {
-    /// The shared sandbox spec, flattened onto the body.
-    #[serde(flatten)]
-    pub envelope: CloudCreateSandboxRequest,
+    /// The shared sandbox spec.
+    pub spec: CloudCreateSandboxRequest,
     /// Requested globally-unique slug; the cloud assigns one when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
@@ -54,6 +53,9 @@ pub(in crate::context) struct CloudCreateBody {
     /// stored credential configured for the image's registry host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<CloudRegistrySelection>,
+    /// Requested kind of machine; the cloud uses standard when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute: Option<CloudCompute>,
 }
 
 /// Wire shape of the cloud's registry-credential selection.
@@ -479,7 +481,10 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             }
         };
 
-        let envelope = match config.snapshot_reference {
+        let compute = config
+            .compute
+            .map(|compute_type| CloudCompute { compute_type });
+        let spec = match config.snapshot_reference {
             None => {
                 validate_fresh_cloud_rootfs(&config.spec.image)?;
                 CloudCreateSandboxRequest::from(config.spec)
@@ -508,9 +513,10 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
         };
 
         Ok(Self {
+            spec,
             slug: config.slug,
             registry,
-            envelope,
+            compute,
         })
     }
 }
@@ -862,6 +868,7 @@ mod tests {
     use crate::context::{Context, SandboxOps};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
+    use microsandbox_types::CloudComputeType;
     use microsandbox_types::CloudSnapshotLocation;
     use microsandbox_types::HttpDenyResponseFormat;
 
@@ -1003,6 +1010,7 @@ mod tests {
                 2
             );
             let body = server.await.unwrap();
+            let body = &body["spec"];
             assert_eq!(body["resources"]["vcpus"], 2, "entry {entry}");
             assert_eq!(body["resources"]["memory_mib"], 1024, "entry {entry}");
             assert_eq!(body["runtime"]["workdir"], "/managed", "entry {entry}");
@@ -1201,7 +1209,7 @@ mod tests {
             reference,
             resources,
             ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1240,7 +1248,7 @@ mod tests {
 
         assert_eq!(
             request
-                .envelope
+                .spec
                 .sandbox_spec()
                 .mounts
                 .iter()
@@ -1282,7 +1290,7 @@ mod tests {
             .map(VolumeMount::guest)
             .collect::<Vec<_>>();
         let sent = request
-            .envelope
+            .spec
             .sandbox_spec()
             .mounts
             .iter()
@@ -1300,31 +1308,35 @@ mod tests {
     }
 
     #[test]
-    fn cloud_create_body_serializes_slug_and_registry_beside_spec() {
+    fn cloud_create_body_serializes_create_options_beside_spec() {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
         config.registry_auth = Some(RegistryAuth::Anonymous);
+        config.compute = Some(CloudComputeType::Shared);
 
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
 
-        // The envelope flattens onto the body; slug/registry ride beside it.
+        // The spec is nested under `spec`; the create options ride beside it.
         // An anonymous registry_auth converts to the anonymous selection.
-        assert_eq!(json["source"], "oci");
-        assert_eq!(json["name"], "agent-1");
-        assert_eq!(json["reference"], "python:3.12");
-        assert!(json.get("image").is_none());
+        assert_eq!(json["spec"]["source"], "oci");
+        assert_eq!(json["spec"]["name"], "agent-1");
+        assert_eq!(json["spec"]["reference"], "python:3.12");
+        assert!(json["spec"].get("image").is_none());
+        assert!(json.get("source").is_none());
         assert_eq!(json["slug"], "brave-otter");
         assert_eq!(json["registry"]["mode"], "anonymous");
+        assert_eq!(json["compute"], serde_json::json!({ "type": "shared" }));
     }
 
     #[test]
-    fn cloud_create_body_omits_unset_slug_and_registry() {
+    fn cloud_create_body_omits_unset_create_options() {
         let req = CloudCreateBody::try_from(base_cloud_config()).unwrap();
         let json = serde_json::to_value(&req).unwrap();
 
         assert!(json.get("slug").is_none());
         assert!(json.get("registry").is_none());
+        assert!(json.get("compute").is_none());
     }
 
     #[test]
@@ -1335,11 +1347,12 @@ mod tests {
 
         let req = CloudCreateBody::try_from(config).unwrap();
         assert!(matches!(
-            req.envelope.disk_snapshot_ref().unwrap(),
+            req.spec.disk_snapshot_ref().unwrap(),
             CloudSnapshotLocation::Managed { id }
                 if id == "00000000-0000-0000-0000-000000000003"
         ));
         let json = serde_json::to_value(req).unwrap();
+        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert!(json.get("image").is_none());
         assert!(json.get("patches").is_none());
@@ -1353,7 +1366,7 @@ mod tests {
 
             let req = CloudCreateBody::try_from(config).unwrap();
             assert!(matches!(
-                req.envelope.disk_snapshot_ref().unwrap(),
+                req.spec.disk_snapshot_ref().unwrap(),
                 CloudSnapshotLocation::HostVolume { path: actual } if actual == path
             ));
         }
@@ -1418,6 +1431,7 @@ mod tests {
 
         let request = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(request).unwrap();
+        let json = &json["spec"];
         assert_eq!(json["source"], "disk_snapshot");
         assert_eq!(json["resources"]["vcpus"], 2);
         assert_eq!(json["resources"]["memory_mib"], 1024);
@@ -1523,7 +1537,7 @@ mod tests {
             resources,
             pull_policy,
             ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1587,7 +1601,7 @@ mod tests {
             let expected = serde_json::to_value(&legacy.spec.network.secrets).unwrap();
             config.spec.network.secrets = legacy.spec.network.secrets;
             let request = CloudCreateBody::try_from(config).unwrap();
-            let secrets = &request.envelope.sandbox_spec().network.secrets;
+            let secrets = &request.spec.sandbox_spec().network.secrets;
             let wire = serde_json::to_value(secrets.as_ref().unwrap()).unwrap();
             let decoded: CloudSecretsConfig = serde_json::from_value(wire).unwrap();
             let domain = SecretsConfig::from(decoded);
@@ -1763,7 +1777,7 @@ mod tests {
 
         let CloudCreateSandboxRequest::Oci {
             sandbox, resources, ..
-        } = &req.envelope
+        } = &req.spec
         else {
             panic!("expected OCI create request");
         };
@@ -1785,7 +1799,7 @@ mod tests {
         let req = CloudCreateBody::try_from(config).unwrap();
 
         assert_eq!(
-            req.envelope
+            req.spec
                 .sandbox_spec()
                 .network
                 .secrets
