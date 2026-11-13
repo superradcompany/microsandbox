@@ -39,6 +39,7 @@ mod creation_progress;
 mod exec_adapter;
 mod jobs;
 mod restore;
+mod service;
 mod setup;
 mod storage;
 mod volume_fs;
@@ -60,7 +61,7 @@ use std::{
 use base64::Engine;
 use microsandbox::{
     AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
-    UpperVerifyStatus, default_backend,
+    UnsupportedReason, UpperVerifyStatus, default_backend,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile, all_sandbox_metrics_local,
@@ -485,14 +486,20 @@ mod error_kind {
     pub const METRICS_DISABLED: &str = "metrics_disabled";
     pub const METRICS_UNAVAILABLE: &str = "metrics_unavailable";
     pub const UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+    pub const CLOUD_ONLY: &str = "cloud_only";
     pub const MODIFICATION_NOT_CONFIRMED: &str = "modification_not_confirmed";
     pub const IO: &str = "io";
+    pub const SERVICE_NOT_FOUND: &str = "service_not_found";
+    pub const SERVICE_ALREADY_EXISTS: &str = "service_already_exists";
+    pub const SERVICE: &str = "service";
 }
 
 struct FfiError {
     kind: &'static str,
     message: String,
+    changed: Option<microsandbox::ChangeState>,
     recovery: Option<Box<microsandbox::SnapshotSourceRecoveryError>>,
+    service: Option<Box<service::ServiceErrorDetails>>,
     os_error: Option<i32>,
 }
 
@@ -511,7 +518,9 @@ impl FfiError {
         Self {
             kind,
             message: message.into(),
+            changed: None,
             recovery: None,
+            service: None,
             os_error: None,
         }
     }
@@ -531,25 +540,43 @@ impl FfiError {
         Self::new(error_kind::INTERNAL, message)
     }
 
+    fn with_change(mut self, changed: microsandbox::ChangeState) -> Self {
+        self.changed = Some(changed);
+        self
+    }
+
     /// Serialize to the JSON payload returned by the error C string.
     fn to_json(&self) -> String {
         // Message is escaped via serde_json so it's safe to embed arbitrary text.
         let msg = serde_json::to_string(&self.message).unwrap_or_else(|_| "\"\"".into());
+        let changed = match self.changed {
+            Some(microsandbox::ChangeState::Unchanged) => r#","changed":"unchanged""#,
+            Some(microsandbox::ChangeState::Unknown) => r#","changed":"unknown""#,
+            None => "",
+        };
         if let Some(os_error) = self.os_error {
             return format!(
-                r#"{{"kind":"{}","message":{},"os_error":{}}}"#,
-                self.kind, msg, os_error
+                r#"{{"kind":"{}","message":{}{},"os_error":{}}}"#,
+                self.kind, msg, changed, os_error
             );
         }
         if let Some(recovery) = &self.recovery
             && let Ok(recovery) = serde_json::to_string(recovery)
         {
             return format!(
-                r#"{{"kind":"{}","message":{},"recovery":{}}}"#,
-                self.kind, msg, recovery
+                r#"{{"kind":"{}","message":{}{},"recovery":{}}}"#,
+                self.kind, msg, changed, recovery
             );
         }
-        format!(r#"{{"kind":"{}","message":{}}}"#, self.kind, msg)
+        if let Some(service) = &self.service
+            && let Ok(service) = serde_json::to_string(service)
+        {
+            return format!(
+                r#"{{"kind":"{}","message":{}{},"service":{}}}"#,
+                self.kind, msg, changed, service
+            );
+        }
+        format!(r#"{{"kind":"{}","message":{}{}}}"#, self.kind, msg, changed)
     }
 }
 
@@ -564,6 +591,9 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::SandboxStopTimedOut { .. } => error_kind::SANDBOX_STOP_TIMED_OUT,
             MicrosandboxError::VolumeNotFound(_) => error_kind::VOLUME_NOT_FOUND,
             MicrosandboxError::VolumeAlreadyExists(_) => error_kind::VOLUME_ALREADY_EXISTS,
+            MicrosandboxError::ServiceNotFound(_) => error_kind::SERVICE_NOT_FOUND,
+            MicrosandboxError::ServiceAlreadyExists(_) => error_kind::SERVICE_ALREADY_EXISTS,
+            MicrosandboxError::Service { .. } => error_kind::SERVICE,
             MicrosandboxError::ExecTimeout(_) => error_kind::EXEC_TIMEOUT,
             MicrosandboxError::StopTimeout { .. } => error_kind::STOP_TIMEOUT,
             MicrosandboxError::NoDefaultCommand => error_kind::NO_DEFAULT_COMMAND,
@@ -582,6 +612,10 @@ impl From<MicrosandboxError> for FfiError {
             MicrosandboxError::PatchFailed(_) => error_kind::PATCH_FAILED,
             MicrosandboxError::MetricsDisabled(_) => error_kind::METRICS_DISABLED,
             MicrosandboxError::MetricsUnavailable(_) => error_kind::METRICS_UNAVAILABLE,
+            MicrosandboxError::Unsupported {
+                op,
+                reason: UnsupportedReason::CloudOnly,
+            } if service::is_service_operation(*op) => error_kind::CLOUD_ONLY,
             MicrosandboxError::Unsupported { .. } => error_kind::UNSUPPORTED_OPERATION,
             MicrosandboxError::ModificationNotConfirmed { .. } => {
                 error_kind::MODIFICATION_NOT_CONFIRMED
@@ -594,7 +628,9 @@ impl From<MicrosandboxError> for FfiError {
         Self {
             kind,
             message: e.to_string(),
+            changed: None,
             os_error: None,
+            service: service::error_details(&e),
             recovery: match e {
                 MicrosandboxError::SnapshotSourceRecovery(recovery) => Some(recovery),
                 _ => None,

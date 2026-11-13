@@ -1,0 +1,6 @@
+{
+  "targte": {
+    "sandbox": "web-2",
+    "port": 8080
+  }
+}

@@ -1,8 +1,16 @@
 //! Error types for microsandbox.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::Serialize;
+
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
+/// Cloud error code for Service changes paused before any change was made.
+pub(crate) const SERVICE_CHANGES_PAUSED_CODE: &str = "service_changes_paused";
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -60,6 +68,7 @@ pub struct SnapshotSourceRecoveryError {
 
 /// Errors that can occur in microsandbox operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MicrosandboxError {
     /// An I/O error occurred.
     #[error("io error: {0}")]
@@ -284,6 +293,25 @@ pub enum MicrosandboxError {
     #[error("volume already exists: {0}")]
     VolumeAlreadyExists(String),
 
+    /// No visible Service has this slug.
+    #[error("service not found: {0}")]
+    ServiceNotFound(String),
+
+    /// The slug is unavailable.
+    #[error("service slug unavailable: {0}; choose another slug")]
+    ServiceAlreadyExists(String),
+
+    /// A Service change was refused, or its outcome is unknown.
+    ///
+    /// Use [`MicrosandboxError::changed`] to learn whether the change may have been applied.
+    #[error("service {slug}: {error}")]
+    Service {
+        /// Slug of the Service the change addressed.
+        slug: String,
+        /// Why the change did not complete.
+        error: ServiceError,
+    },
+
     /// An OCI image operation failed.
     #[cfg(feature = "local")]
     #[error("image error: {0}")]
@@ -386,6 +414,63 @@ pub enum MicrosandboxError {
     /// A custom error message.
     #[error("{0}")]
     Custom(String),
+}
+
+/// Why a Service change did not complete.
+///
+/// Every reason except [`OutcomeUnknown`](Self::OutcomeUnknown) means nothing changed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServiceError {
+    /// The organization Service limit was reached.
+    #[error("organization service limit reached; remove a service or request a higher limit")]
+    QuotaExceeded,
+    /// The target sandbox Service limit was reached.
+    #[error("sandbox service limit reached; remove or move a service, or request a higher limit")]
+    SandboxLimitExceeded,
+    /// The Service changed; get it before retrying.
+    #[error("changed by another request; get it before retrying")]
+    Conflict,
+    /// The Service has no target; set a target.
+    #[error("detached; set a target")]
+    Detached,
+    /// The target cannot be reached; retry later.
+    #[error("target cannot be reached right now; retry later")]
+    TargetUnreachable {
+        /// Retry delay returned with the refusal, when available.
+        retry_after: Option<Duration>,
+    },
+    /// Service changes are paused; retry later.
+    #[error("service changes are paused; retry later")]
+    ChangesPaused {
+        /// Retry delay returned with the refusal, when available.
+        retry_after: Option<Duration>,
+    },
+    /// The target sandbox is not running; start it, then retry.
+    #[error("target sandbox is not running; start it, then retry")]
+    TargetNotRunning,
+    /// The change may have been applied; get and check the Service before retrying.
+    #[error("change may have been applied; get and check the service before retrying")]
+    OutcomeUnknown,
+    /// The server refused the change with an error code this SDK does not recognize.
+    #[error("HTTP {status} ({code}): {message}")]
+    Other {
+        /// Raw error code returned with the refusal.
+        code: String,
+        /// HTTP status returned with the refusal.
+        status: u16,
+        /// Human-readable message returned with the refusal.
+        message: String,
+    },
+}
+
+/// Whether a failed Service change may have been applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeState {
+    /// Nothing changed.
+    Unchanged,
+    /// The change may have been applied; get and check the Service before retrying.
+    Unknown,
 }
 
 /// Which restore operation reported missing destination bindings.
@@ -528,6 +613,20 @@ pub enum Operation {
     VolumeFsReadStream,
     /// `VolumeFs::write_stream`.
     VolumeFsWriteStream,
+    /// `Service::create`.
+    ServiceCreate,
+    /// `Service::get`.
+    ServiceGet,
+    /// `Service::list`.
+    ServiceList,
+    /// `Service::update`.
+    ServiceUpdate,
+    /// `Service::enable`.
+    ServiceEnable,
+    /// `Service::disable`.
+    ServiceDisable,
+    /// `Service::remove`.
+    ServiceRemove,
     /// `Image::get`.
     ImageGet,
     /// `Storage::usage` and per-object storage observations.
@@ -647,6 +746,13 @@ impl Operation {
             Operation::VolumeFsExists => "VolumeFs::exists",
             Operation::VolumeFsReadStream => "VolumeFs::read_stream",
             Operation::VolumeFsWriteStream => "VolumeFs::write_stream",
+            Operation::ServiceCreate => "Service::create",
+            Operation::ServiceGet => "Service::get",
+            Operation::ServiceList => "Service::list",
+            Operation::ServiceUpdate => "Service::update",
+            Operation::ServiceEnable => "Service::enable",
+            Operation::ServiceDisable => "Service::disable",
+            Operation::ServiceRemove => "Service::remove",
             Operation::ImageGet => "Image::get",
             Operation::StorageUsage => "Storage::usage",
             Operation::StoragePrune => "Storage::prune",
@@ -697,6 +803,58 @@ impl MicrosandboxError {
     /// [`Unsupported`](Self::Unsupported) for operations only a cloud backend honors.
     pub fn cloud_only(op: Operation) -> MicrosandboxError {
         Self::unsupported(op, UnsupportedReason::CloudOnly)
+    }
+
+    /// Whether the Service change that returned this error may have been applied.
+    ///
+    /// Call this on every [`MicrosandboxError`] returned by Service create, update, enable,
+    /// disable, or remove, including errors outside [`MicrosandboxError::Service`]. Bindings can
+    /// project the result onto their base error type so callers do not need to identify a specific
+    /// error variant first.
+    ///
+    /// Errors that are returned before a change can commit report [`ChangeState::Unchanged`]:
+    /// invalid arguments, refused requests, missing Services or sandboxes, unavailable slugs,
+    /// unsupported backends, and connections that failed before the request was sent. Every other
+    /// error reports [`ChangeState::Unknown`].
+    pub fn changed(&self) -> ChangeState {
+        match self {
+            MicrosandboxError::Service { error, .. } => error.changed(),
+            MicrosandboxError::InvalidConfig(_)
+            | MicrosandboxError::ServiceNotFound(_)
+            | MicrosandboxError::ServiceAlreadyExists(_)
+            | MicrosandboxError::SandboxNotFound(_)
+            | MicrosandboxError::Unsupported { .. } => ChangeState::Unchanged,
+            #[cfg(any(feature = "cloud", feature = "local"))]
+            MicrosandboxError::Http(error) if error.is_connect() => ChangeState::Unchanged,
+            MicrosandboxError::CloudHttp { status, code, .. } => {
+                if (400..500).contains(status)
+                    || code.as_deref() == Some(SERVICE_CHANGES_PAUSED_CODE)
+                {
+                    ChangeState::Unchanged
+                } else {
+                    ChangeState::Unknown
+                }
+            }
+            // The wildcard fails closed, so a new variant reports Unknown.
+            _ => ChangeState::Unknown,
+        }
+    }
+}
+
+impl ServiceError {
+    /// Whether the change that failed with this reason may have been applied.
+    pub fn changed(&self) -> ChangeState {
+        match self {
+            ServiceError::QuotaExceeded
+            | ServiceError::SandboxLimitExceeded
+            | ServiceError::Conflict
+            | ServiceError::Detached
+            | ServiceError::TargetUnreachable { .. }
+            | ServiceError::ChangesPaused { .. }
+            | ServiceError::TargetNotRunning
+            | ServiceError::Other { .. } => ChangeState::Unchanged,
+            ServiceError::OutcomeUnknown => ChangeState::Unknown,
+        }
     }
 }
 

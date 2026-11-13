@@ -7,8 +7,8 @@ use futures::future::BoxFuture;
 #[cfg(feature = "local")]
 use super::LocalBackend;
 use super::{
-    BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, SnapshotBackend,
-    VolumeBackend,
+    BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, ServiceBackend,
+    SnapshotBackend, VolumeBackend,
 };
 use crate::{
     MicrosandboxResult,
@@ -20,8 +20,8 @@ use crate::{
 //--------------------------------------------------------------------------------------------------
 
 /// Top-level routing trait for SDK dispatch. Implementations route to
-/// resource-specific sub-traits (sandboxes, volumes, snapshots) via accessor
-/// methods.
+/// resource-specific sub-traits (sandboxes, volumes, snapshots, services) via
+/// accessor methods.
 ///
 /// Object-safe — handles hold an `Arc<dyn Backend>`. Every implementation must
 /// explicitly provide each resource-specific backend so that missing
@@ -49,6 +49,9 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Return the snapshot lifecycle backend.
     fn snapshots(&self) -> &dyn SnapshotBackend;
+
+    /// Return the Service backend.
+    fn services(&self) -> &dyn ServiceBackend;
 
     /// Try downcast to a concrete `&LocalBackend` when in a local context.
     ///

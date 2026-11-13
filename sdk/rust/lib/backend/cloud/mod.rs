@@ -14,6 +14,7 @@ mod agent;
 mod http;
 mod modify;
 pub(in crate::backend) mod sandbox;
+mod service;
 mod snapshot;
 #[cfg(test)]
 mod stop_tests;
@@ -77,6 +78,8 @@ pub struct CloudBackend {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    /// Client for Service changes, which must never resend a request.
+    service_http: reqwest::Client,
     config: Arc<BackendConfig>,
     selection_source: BackendSelectionSource,
     profile: Option<String>,
@@ -279,6 +282,12 @@ impl CloudBackendBuilder {
     /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
     /// and `user_agent` builder options are ignored — the supplied client owns
     /// its own configuration.
+    ///
+    /// Service create, update, enable, disable and remove also use this client,
+    /// so its retry and redirect policies decide whether a change request can be
+    /// resent or redirected. Build it with `.retry(reqwest::retry::never())` and
+    /// `.redirect(reqwest::redirect::Policy::none())` to keep each change to the
+    /// requested endpoint at most once.
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.custom_client = Some(client);
         self
@@ -317,8 +326,8 @@ impl CloudBackendBuilder {
         let url = url.trim_end_matches('/').to_string();
         let api_key = api_key.to_string();
 
-        let http = if let Some(client) = self.custom_client {
-            client
+        let (http, service_http) = if let Some(client) = self.custom_client {
+            (client.clone(), client)
         } else {
             let mut headers = HeaderMap::new();
             let bearer = format!("Bearer {api_key}");
@@ -335,19 +344,28 @@ impl CloudBackendBuilder {
                 })?,
             );
 
-            reqwest::Client::builder()
-                .timeout(self.request_timeout)
-                .default_headers(headers)
-                .build()
-                .map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("failed to build HTTP client: {e}"))
-                })?
+            let build = |builder: reqwest::ClientBuilder| {
+                builder
+                    .timeout(self.request_timeout)
+                    .default_headers(headers.clone())
+                    .build()
+                    .map_err(|e| {
+                        MicrosandboxError::InvalidConfig(format!(
+                            "failed to build HTTP client: {e}"
+                        ))
+                    })
+            };
+            (
+                build(reqwest::Client::builder())?,
+                build(service::service_change_client_builder())?,
+            )
         };
 
         Ok(CloudBackend {
             url,
             api_key,
             http,
+            service_http,
             config,
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,

@@ -248,20 +248,20 @@ pub fn http_client() -> ureq::Agent {
 /// Returns true when a user-provided text value should be interpreted as a
 /// local filesystem path rather than a named resource or OCI reference.
 pub fn looks_like_local_path_text(s: &str) -> bool {
-    if s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../") {
-        return true;
-    }
+    let is_unix_path =
+        s == "." || s == ".." || s.starts_with('/') || s.starts_with("./") || s.starts_with("../");
 
     #[cfg(windows)]
     {
-        s.starts_with(".\\")
+        is_unix_path
+            || s.starts_with(".\\")
             || s.starts_with("..\\")
             || s.starts_with('\\')
             || is_windows_drive_path_text(s)
     }
     #[cfg(not(windows))]
     {
-        false
+        is_unix_path
     }
 }
 
