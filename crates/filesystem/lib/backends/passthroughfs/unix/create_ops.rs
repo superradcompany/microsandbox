@@ -490,7 +490,7 @@ pub(crate) fn do_link(
             let expected = {
                 let inodes = fs.inodes.read().unwrap();
                 let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-                (data.dev, data.ino)
+                (data.dev, data.host_ino())
             };
             let (src_dir, src_name) = inode::anchor_parent_and_name_macos(fs, inode)?;
 
@@ -533,7 +533,7 @@ pub(crate) fn do_link(
         } else {
             let inodes = fs.inodes.read().unwrap();
             let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-            let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let src_path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
             let ret = unsafe {
                 libc::linkat(
                     libc::AT_FDCWD,
@@ -621,7 +621,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
             let expected = {
                 let inodes = fs.inodes.read().unwrap();
                 let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-                (data.dev, data.ino)
+                (data.dev, data.host_ino())
             };
             let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
 
@@ -657,7 +657,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
         } else {
             let inodes = fs.inodes.read().unwrap();
             let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-            let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+            let path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
             let ret = unsafe {
                 libc::readlinkat(
                     libc::AT_FDCWD,

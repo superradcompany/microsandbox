@@ -1530,7 +1530,7 @@ fn test_open_verified_symlink_fd_rejects_post_open_replacement() {
     let expected = {
         let inodes = sb.fs.inodes.read().unwrap();
         let data = inodes.get(&link.inode).unwrap();
-        crate::backends::shared::inode_table::InodeAltKey::new(data.ino, data.dev)
+        crate::backends::shared::inode_table::InodeAltKey::new(data.host_ino(), data.dev)
     };
     let (dir, name) =
         super::super::inode::anchor_parent_and_name_macos(&sb.fs, link.inode).unwrap();
@@ -1605,4 +1605,127 @@ fn test_anchor_unlink_replacement_fd_not_retained() {
         b"original"
     );
     assert_eq!(std::fs::read(sb.root.join("f.orig")).unwrap(), b"original");
+}
+
+//--------------------------------------------------------------------------------------------------
+// Tests: host inode numbers that change
+//--------------------------------------------------------------------------------------------------
+
+/// The recorded host number of an inode, and whether it is marked unstable.
+fn recorded_identity(sb: &TestSandbox, inode: u64) -> (u64, bool) {
+    let inodes = sb.fs.inodes.read().unwrap();
+    let data = inodes.get(&inode).unwrap();
+    (
+        data.host_ino(),
+        data.ino_unstable.load(std::sync::atomic::Ordering::Acquire),
+    )
+}
+
+/// An APFS temp dir never renumbers a file, so a second file's descriptor
+/// stands in for "the same file under a new number". The inode takes the
+/// number the descriptor reports, and a lookup of that file then finds this
+/// inode instead of registering a second one.
+#[test]
+fn test_refresh_identity_follows_descriptor() {
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("tracked", b"x");
+    let other = std::fs::File::open(sb.host_create_file("other", b"y")).unwrap();
+    let tracked = sb.lookup_root("tracked").unwrap();
+    let other_ino = std::os::unix::fs::MetadataExt::ino(&other.metadata().unwrap());
+
+    super::super::inode::refresh_identity_macos(&sb.fs, tracked.inode, other.as_raw_fd());
+
+    assert_eq!(recorded_identity(&sb, tracked.inode).0, other_ino);
+    assert_eq!(sb.lookup_root("other").unwrap().inode, tracked.inode);
+    // The old number is free again: its file registers as a new inode.
+    assert_ne!(sb.lookup_root("tracked").unwrap().inode, tracked.inode);
+}
+
+/// A number that another tracked inode holds is never taken over.
+#[test]
+fn test_refresh_identity_leaves_number_held_by_another_inode() {
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("first", b"x");
+    let second_file = std::fs::File::open(sb.host_create_file("second", b"y")).unwrap();
+    let first = sb.lookup_root("first").unwrap();
+    let second = sb.lookup_root("second").unwrap();
+    let before = recorded_identity(&sb, first.inode).0;
+
+    super::super::inode::refresh_identity_macos(&sb.fs, first.inode, second_file.as_raw_fd());
+
+    assert_eq!(recorded_identity(&sb, first.inode).0, before);
+    assert_eq!(sb.lookup_root("first").unwrap().inode, first.inode);
+    assert_eq!(sb.lookup_root("second").unwrap().inode, second.inode);
+}
+
+/// A volfs share never reads an identity again.
+#[test]
+fn test_refresh_identity_is_anchor_mode_only() {
+    let sb = TestSandbox::new();
+    sb.host_create_file("tracked", b"x");
+    let other = std::fs::File::open(sb.host_create_file("other", b"y")).unwrap();
+    let tracked = sb.lookup_root("tracked").unwrap();
+    let before = recorded_identity(&sb, tracked.inode);
+
+    super::super::inode::refresh_identity_macos(&sb.fs, tracked.inode, other.as_raw_fd());
+
+    assert_eq!(recorded_identity(&sb, tracked.inode), before);
+    assert!(!before.1);
+}
+
+/// Only a regular file without data is marked, and the mark follows the file
+/// as it gains data and is truncated again, so a write to a file that already
+/// holds data never pays for the extra stat.
+#[test]
+fn test_ino_unstable_marks_only_data_less_files() {
+    let sb = TestSandbox::with_anchor_mode();
+    sb.host_create_file("full", b"data");
+    sb.host_create_dir("dir");
+    let full = sb.lookup_root("full").unwrap();
+    let dir = sb.lookup_root("dir").unwrap();
+    assert!(!recorded_identity(&sb, full.inode).1);
+    assert!(!recorded_identity(&sb, dir.inode).1);
+
+    let (created, handle) = sb.fuse_create_root("created").unwrap();
+    assert!(recorded_identity(&sb, created.inode).1);
+    sb.fuse_write(created.inode, handle, b"first", 0).unwrap();
+    assert!(!recorded_identity(&sb, created.inode).1);
+
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_size = 0;
+    sb.fs
+        .setattr(sb.ctx(), created.inode, attr, None, SetattrValid::SIZE)
+        .unwrap();
+    assert!(recorded_identity(&sb, created.inode).1);
+    sb.fuse_write(created.inode, handle, b"again", 0).unwrap();
+    assert!(!recorded_identity(&sb, created.inode).1);
+
+    let reopened = sb
+        .fuse_open(created.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert!(recorded_identity(&sb, created.inode).1);
+    sb.fuse_write(created.inode, reopened, b"x", 0).unwrap();
+    assert!(!recorded_identity(&sb, created.inode).1);
+
+    // An empty file keeps the mark across a rename.
+    sb.host_create_file("empty", b"");
+    let empty = sb.lookup_root("empty").unwrap();
+    sb.fs
+        .rename(sb.ctx(), ROOT_INODE, c"empty", ROOT_INODE, c"moved", 0)
+        .unwrap();
+    assert!(recorded_identity(&sb, empty.inode).1);
+    assert_eq!(sb.lookup_root("moved").unwrap().inode, empty.inode);
+}
+
+/// A volfs share marks nothing.
+#[test]
+fn test_ino_unstable_never_set_in_volfs_mode() {
+    let sb = TestSandbox::new();
+    let (created, handle) = sb.fuse_create_root("created").unwrap();
+    assert!(!recorded_identity(&sb, created.inode).1);
+    sb.fuse_write(created.inode, handle, b"first", 0).unwrap();
+    assert!(!recorded_identity(&sb, created.inode).1);
+    sb.host_create_file("empty", b"");
+    let empty = sb.lookup_root("empty").unwrap();
+    assert!(!recorded_identity(&sb, empty.inode).1);
 }

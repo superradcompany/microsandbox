@@ -136,6 +136,20 @@ pub(crate) fn do_setattr(
         .unwrap()
         .as_raw_fd();
 
+    // On a share without volfs, a change to the size, the metadata, or the
+    // override xattr can renumber the file, and the change can already be on
+    // the host when a later step fails. Read the number again however this
+    // function leaves, while `fd` is still open.
+    #[cfg(target_os = "macos")]
+    let refresh_identity = scopeguard::guard((), |()| {
+        let target = handle_data.as_ref().map_or(ino, |data| data.inode);
+        if valid.contains(SetattrValid::SIZE) {
+            inode::refresh_identity_macos(fs, target, fd);
+        } else {
+            inode::refresh_unstable_identity_macos(fs, target, fd);
+        }
+    });
+
     // FUSE expects setattr-triggered truncate/chown to clear suid/sgid when
     // requested. UID/GID changes always clear them; SIZE changes only do so
     // when the kernel sets KILL_SUIDGID.
@@ -265,6 +279,8 @@ pub(crate) fn do_setattr(
         }
     }
 
+    #[cfg(target_os = "macos")]
+    drop(refresh_identity);
     drop(borrowed_file);
     drop(file);
 
@@ -425,13 +441,13 @@ pub(crate) fn open_symlink_inode_fd_macos(fs: &PassthroughFs, ino: u64) -> io::R
             inodes.get(&ino).cloned().ok_or_else(platform::ebadf)?
         };
         let (dir, name) = inode::anchor_parent_and_name_macos(fs, ino)?;
-        let expected = InodeAltKey::new(data.ino, data.dev);
+        let expected = InodeAltKey::new(data.host_ino(), data.dev);
         return open_verified_symlink_fd(dir.raw(), &name, expected);
     }
 
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-    let path = inode::vol_path(data.dev, data.ino);
+    let path = inode::vol_path(data.dev, data.host_ino());
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
@@ -469,7 +485,7 @@ fn set_symlink_times_macos(
 
     let inodes = fs.inodes.read().unwrap();
     let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-    let path = inode::vol_path(data.dev, data.ino);
+    let path = inode::vol_path(data.dev, data.host_ino());
     let ret = unsafe {
         libc::utimensat(
             libc::AT_FDCWD,

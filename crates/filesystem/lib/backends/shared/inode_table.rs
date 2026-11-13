@@ -4,7 +4,7 @@
 //! for per-inode state, and [`InodeAltKey`] for host-identity-based deduplication.
 
 #[cfg(target_os = "macos")]
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::{
     borrow::Borrow,
     collections::{BTreeMap, BTreeSet},
@@ -61,7 +61,15 @@ pub(crate) struct InodeData {
     pub inode: u64,
 
     /// Host inode number.
+    #[cfg(target_os = "linux")]
     pub ino: u64,
+
+    /// Host inode number. Read it with [`InodeData::host_ino`].
+    ///
+    /// Atomic on macOS because it is not fixed there on every filesystem: see
+    /// `ino_unstable`.
+    #[cfg(target_os = "macos")]
+    pub ino: AtomicU64,
 
     /// Host device ID.
     pub dev: u64,
@@ -108,6 +116,16 @@ pub(crate) struct InodeData {
     /// the file has not been unlinked.
     #[cfg(target_os = "macos")]
     pub unlinked_fd: AtomicI64,
+
+    /// Whether the host may give this file a different inode number.
+    ///
+    /// Set only for a share in anchor mode, while `ino` was read from a
+    /// regular file that holds no data. FSKit exFAT numbers a regular file by
+    /// its first data cluster, and a file without data gets a placeholder that
+    /// is replaced by any change to the file. The backend reads the number
+    /// again after each operation that makes one.
+    #[cfg(target_os = "macos")]
+    pub ino_unstable: AtomicBool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -191,6 +209,20 @@ where
     /// Iterate primary keys and values in deterministic key order.
     pub fn iter(&self) -> impl Iterator<Item = (&K1, &V)> {
         self.main.iter().map(|(key, (_, value))| (key, value))
+    }
+}
+
+impl InodeData {
+    /// The host inode number currently recorded for this inode.
+    #[cfg(target_os = "linux")]
+    pub fn host_ino(&self) -> u64 {
+        self.ino
+    }
+
+    /// The host inode number currently recorded for this inode.
+    #[cfg(target_os = "macos")]
+    pub fn host_ino(&self) -> u64 {
+        self.ino.load(Ordering::Acquire)
     }
 }
 

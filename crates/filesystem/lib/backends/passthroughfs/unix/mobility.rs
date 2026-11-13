@@ -227,7 +227,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             let tracked = inodes
                 .get(&saved.inode)
                 .ok_or_else(|| invalid_state("captured inode disappeared"))?;
-            if (identity.device, identity.inode) != (tracked.dev, tracked.ino) {
+            if (identity.device, identity.inode) != (tracked.dev, tracked.host_ino()) {
                 return Err(invalid_state(
                     "external pathname no longer names the guest's captured object",
                 ));
@@ -958,7 +958,7 @@ fn inode_data_from_fd(
         InodeAltKey::new(ino, dev),
         Arc::new(InodeData {
             inode: saved.inode,
-            ino,
+            ino: ino.into(),
             dev,
             refcount: std::sync::atomic::AtomicU64::new(saved.refcount),
             anchor_parent: std::sync::atomic::AtomicU64::new(anchor_parent),
@@ -966,6 +966,7 @@ fn inode_data_from_fd(
             aliases: RwLock::new(aliases),
             anchor_children: std::sync::atomic::AtomicU64::new(anchor_children),
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+            ino_unstable: (anchor_mode && inode::has_unstable_ino_macos(&stat)).into(),
         }),
     ))
 }
@@ -1076,7 +1077,7 @@ fn open_macos_inode_for_path(fs: &PassthroughFs, inode_id: u64) -> io::Result<Ow
     let (dev, ino) = {
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode_id).ok_or_else(platform::ebadf)?;
-        (data.dev, data.ino)
+        (data.dev, data.host_ino())
     };
     let mut failures = Vec::new();
     for flags in [

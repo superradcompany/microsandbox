@@ -24,6 +24,18 @@
 //! renames an intermediate directory — that one exposure is shared with the
 //! Linux backend.
 //!
+//! A host inode number is not a fixed property of every file on such a volume.
+//! FSKit exFAT numbers a regular file by its first data cluster, so a file that
+//! holds no data gets a placeholder number. The placeholder is replaced when
+//! the file gains data, and by every other change to such a file: a rename, a
+//! change of mode or times, an extended attribute, even a truncate that leaves
+//! it empty. A file that is truncated back to nothing gets a placeholder again.
+//! Every guest operation that can do one of these is followed by
+//! `refresh_identity_macos`, which reads the new number from a descriptor that
+//! was on the file before the operation; the identity check itself is never
+//! relaxed. A change the host makes on its own is not followed: the inode then
+//! fails closed with `ENOENT` until the guest looks the name up again.
+//!
 //! The hard link source is name-bound in anchor mode, which is a macOS-only
 //! exposure: Linux links through `/proc/self/fd/N`, which is bound to the
 //! inode, while macOS has no fd-relative `linkat`. The source name is
@@ -342,10 +354,99 @@ pub(crate) fn secure_open_path_macos(
 #[cfg(target_os = "macos")]
 fn validate_identity_macos(fd: RawFd, data: &InodeData) -> io::Result<()> {
     let st = platform::fstat(fd)?;
-    if platform::stat_ino(&st) != data.ino || platform::stat_dev(&st) != data.dev {
+    if platform::stat_ino(&st) != data.host_ino() || platform::stat_dev(&st) != data.dev {
         return Err(platform::enoent());
     }
     Ok(())
+}
+
+/// Whether the host may renumber the file `st` describes.
+///
+/// FSKit exFAT numbers a regular file by its first data cluster. A file that
+/// holds no data has no cluster, so it gets a placeholder number instead, and
+/// the placeholder is replaced by any change to the file: its first data, a
+/// rename, new metadata. A file with data, and a directory, keep their number.
+#[cfg(target_os = "macos")]
+pub(crate) fn has_unstable_ino_macos(st: &stat64) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFREG && st.st_size == 0
+}
+
+/// Read the identity of a tracked inode again from `fd` in anchor mode.
+///
+/// `fd` must already refer to the inode: a guest handle on it, or a
+/// descriptor that passed the identity check before the operation that may
+/// have renumbered the file. Because the descriptor stays on the same file
+/// whatever its number becomes, the new number is known to be that file's
+/// own, and the identity check keeps refusing every other file.
+///
+/// Nothing changes when another tracked inode already holds the new number.
+/// That happens when a lookup saw the renumbered file before this call and
+/// registered it again; this inode then stays on its old number and goes
+/// stale, which is the outcome without this call.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_identity_macos(fs: &PassthroughFs, inode: u64, fd: RawFd) {
+    if !fs.anchor_mode() || inode == 1 {
+        return;
+    }
+
+    // The stat runs under the table lock, so two refreshes of one inode
+    // record their numbers in the order they read them.
+    let mut inodes = fs.inodes.write().unwrap();
+    let Ok(st) = platform::fstat(fd) else {
+        return;
+    };
+    let key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    let Some(data) = inodes.get(&inode).cloned() else {
+        return;
+    };
+    if key.dev != data.dev {
+        return;
+    }
+    if key.ino != data.host_ino() {
+        if inodes.get_alt(&key).is_some() {
+            return;
+        }
+        data.ino.store(key.ino, Ordering::Release);
+        // Inserting under the same inode number replaces the alternate key.
+        inodes.insert(inode, key, data.clone());
+    }
+    data.ino_unstable
+        .store(has_unstable_ino_macos(&st), Ordering::Release);
+}
+
+/// `refresh_identity_macos` for an inode whose number is marked unstable.
+///
+/// For an operation that adds data or changes metadata: that renumbers only a
+/// file without data, so a file that already holds data costs one table
+/// lookup and no syscall.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_unstable_identity_macos(fs: &PassthroughFs, inode: u64, fd: RawFd) {
+    if !fs.anchor_mode() {
+        return;
+    }
+    let unstable = fs
+        .inodes
+        .read()
+        .unwrap()
+        .get(&inode)
+        .is_some_and(|data| data.ino_unstable.load(Ordering::Acquire));
+    if unstable {
+        refresh_identity_macos(fs, inode, fd);
+    }
+}
+
+/// `refresh_unstable_identity_macos` after an operation through a guest
+/// handle, on the inode and the descriptor of that handle.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_identity_from_handle_macos(fs: &PassthroughFs, handle: u64) {
+    if !fs.anchor_mode() {
+        return;
+    }
+    let Some(handle_data) = fs.handles.read().unwrap().get(&handle).cloned() else {
+        return;
+    };
+    let file = handle_data.file.read().unwrap();
+    refresh_unstable_identity_macos(fs, handle_data.inode, file.as_raw_fd());
 }
 
 /// Reopen a tracked inode by anchor walk with `flags` on the final component.
@@ -606,7 +707,8 @@ fn anchor_parent_name_stat_macos(
         };
         match platform::fstatat_nofollow(parent_fd, &name) {
             Ok(st)
-                if platform::stat_ino(&st) == data.ino && platform::stat_dev(&st) == data.dev =>
+                if platform::stat_ino(&st) == data.host_ino()
+                    && platform::stat_dev(&st) == data.dev =>
             {
                 drop(inodes);
                 if current_anchor.as_ref() != Some(&alias) {
@@ -837,6 +939,8 @@ pub(crate) fn register_created_fd(
     let alias = fs
         .anchor_mode()
         .then(|| NamespaceAlias::new(parent, name.to_bytes()));
+    #[cfg(target_os = "macos")]
+    let ino_unstable = alias.is_some() && has_unstable_ino_macos(&st);
     let mut inodes = fs.inodes.write().unwrap();
     if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
@@ -844,6 +948,7 @@ pub(crate) fn register_created_fd(
         register_alias_locked(&mut inodes, &data, alias);
         #[cfg(target_os = "macos")]
         if let Some(alias) = alias {
+            data.ino_unstable.store(ino_unstable, Ordering::Release);
             register_alias_locked(&mut inodes, &data, alias);
         }
         return Ok(Entry {
@@ -859,7 +964,7 @@ pub(crate) fn register_created_fd(
     let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(InodeData {
         inode: inode_num,
-        ino: platform::stat_ino(&st),
+        ino: platform::stat_ino(&st).into(),
         dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
         #[cfg(target_os = "linux")]
@@ -872,6 +977,8 @@ pub(crate) fn register_created_fd(
         retained_fd: std::sync::Mutex::new(None),
         #[cfg(target_os = "macos")]
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+        #[cfg(target_os = "macos")]
+        ino_unstable: ino_unstable.into(),
     });
     inodes.insert(inode_num, alt_key, data.clone());
     #[cfg(target_os = "linux")]
@@ -959,6 +1066,7 @@ fn do_lookup_macos(
 
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
     let alias = anchor_mode.then(|| NamespaceAlias::new(parent, name.to_bytes()));
+    let ino_unstable = anchor_mode && has_unstable_ino_macos(&st);
 
     // Fast path (volfs mode only): most lookups hit an already-tracked inode
     // and only need a refcount bump. Anchor mode always takes the write lock
@@ -984,6 +1092,7 @@ fn do_lookup_macos(
     if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
         if let Some(alias) = alias {
+            data.ino_unstable.store(ino_unstable, Ordering::Release);
             register_alias_locked(&mut inodes, &data, alias);
         }
         return Ok(Entry {
@@ -999,7 +1108,7 @@ fn do_lookup_macos(
     let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(InodeData {
         inode: inode_num,
-        ino: platform::stat_ino(&st),
+        ino: platform::stat_ino(&st).into(),
         dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
         anchor_parent: std::sync::atomic::AtomicU64::new(0),
@@ -1007,6 +1116,7 @@ fn do_lookup_macos(
         aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
         anchor_children: std::sync::atomic::AtomicU64::new(0),
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+        ino_unstable: ino_unstable.into(),
     });
     inodes.insert(inode_num, alt_key, data.clone());
     if let Some(alias) = alias {
@@ -1181,7 +1291,7 @@ pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd
             let fd = open_anchor_reopen_macos(fs, inode)?;
             return Ok(InodeFd { fd, owned: true });
         }
-        let fd = open_vol_fd(data.dev, data.ino)?;
+        let fd = open_vol_fd(data.dev, data.host_ino())?;
         Ok(InodeFd { fd, owned: true })
     }
 }
@@ -1632,17 +1742,22 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
             }
             let walk_flags = flags & !(libc::O_NOFOLLOW | libc::O_TRUNC | libc::O_EXCL);
             let result = open_anchor_io_fd_macos(fs, inode, walk_flags).and_then(|fd| {
-                if flags & libc::O_TRUNC != 0 && unsafe { libc::ftruncate(fd, 0) } < 0 {
-                    let err = io::Error::last_os_error();
-                    unsafe { libc::close(fd) };
-                    return Err(platform::linux_error(err));
+                if flags & libc::O_TRUNC != 0 {
+                    if unsafe { libc::ftruncate(fd, 0) } < 0 {
+                        let err = io::Error::last_os_error();
+                        unsafe { libc::close(fd) };
+                        return Err(platform::linux_error(err));
+                    }
+                    // Truncating to nothing can renumber the file.
+                    refresh_identity_macos(fs, inode, fd);
                 }
                 Ok(fd)
             });
             // As with a vanished `/.vol/` path below, only an inode that no
             // tracked name resolves to any more may use the unlink pin. The
             // link count is not consulted: a surviving name the guest never
-            // looked up cannot be walked to, and the pin is that same inode.
+            // looked up cannot be walked to, FSKit exFAT keeps reporting one
+            // link for a removed file, and the pin is that same inode.
             if let Err(error) = &result
                 && error.raw_os_error() == platform::enoent().raw_os_error()
             {
@@ -1661,7 +1776,7 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
         // Linked inodes must reopen with the requested flags, not duplicate the
         // unlink pin. Trying /.vol/ first also covers a host removing
         // the last link between a link-count check and the open.
-        let path = vol_path(data.dev, data.ino);
+        let path = vol_path(data.dev, data.host_ino());
         let result = open_macos_inode_reopen(path.as_ptr(), flags);
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
         if let Err(error) = &result
@@ -1787,7 +1902,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             return result;
         }
 
-        if let Ok(fd) = open_vol_fd(data.dev, data.ino) {
+        if let Ok(fd) = open_vol_fd(data.dev, data.host_ino()) {
             let result = platform::fstat(fd).and_then(|st| {
                 crate::backends::shared::stat_override::patched_stat(
                     fd,
@@ -1801,7 +1916,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             return result;
         }
 
-        let path = vol_path(data.dev, data.ino);
+        let path = vol_path(data.dev, data.host_ino());
         let mut st = unsafe { std::mem::zeroed::<stat64>() };
         let ret = unsafe { libc::lstat(path.as_ptr(), &mut st) };
         if ret < 0 {
@@ -1809,7 +1924,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         }
         open_and_patch_stat_macos(
             data.dev,
-            data.ino,
+            data.host_ino(),
             st,
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),

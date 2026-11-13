@@ -11,6 +11,7 @@
 
 use std::{
     ffi::CString,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -318,4 +319,192 @@ fn test_exfat_volume_write_path() {
             assert!(!root.join("linked.txt").exists());
         }
     }
+}
+
+/// Files that the volume renumbers stay reachable through their guest inode.
+///
+/// FSKit exFAT on recent macOS numbers a regular file by its first data
+/// cluster. A file without data gets a placeholder number, which is replaced
+/// when the file gains data and by every other change to it: a rename, new
+/// metadata, a truncate that leaves it empty. Each step below is one of
+/// those, followed by an operation that has only the guest inode to work
+/// from. On a host that keeps the numbers fixed, every step is a plain pass.
+#[test]
+fn test_exfat_volume_renumbered_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(vol) = ExfatVolume::create(tmp.path()) else {
+        eprintln!("skipping: hdiutil exFAT fixture unavailable");
+        return;
+    };
+
+    let root = vol.mount.join("case");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("empty.txt"), b"").unwrap();
+    std::fs::write(root.join("full.txt"), b"0123456789").unwrap();
+
+    let fs = PassthroughFs::new(PassthroughConfig {
+        root_dir: root.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    fs.init(FsOptions::empty()).unwrap();
+    let sb = TestSandbox {
+        fs,
+        _tmp: tempfile::tempdir().unwrap(),
+        root: root.clone(),
+    };
+    let host_ino = |name: &str| std::fs::metadata(root.join(name)).unwrap().ino();
+    let size_of = |inode: u64| sb.fs.getattr(sb.ctx(), inode, None).unwrap().0.st_size;
+    let release = |inode: u64, handle: u64| {
+        sb.fs
+            .release(sb.ctx(), inode, 0, handle, false, false, None)
+            .unwrap()
+    };
+
+    // First data through a handle on a file that was created empty.
+    let (fresh, handle) = sb.fuse_create_root("fresh.txt").unwrap();
+    let before = host_ino("fresh.txt");
+    sb.fuse_write(fresh.inode, handle, b"first", 0).unwrap();
+    eprintln!(
+        "exfat renumber fixture: first write {before} -> {}",
+        host_ino("fresh.txt")
+    );
+    assert_eq!(size_of(fresh.inode), 5);
+    assert_eq!(sb.lookup_root("fresh.txt").unwrap().inode, fresh.inode);
+    release(fresh.inode, handle);
+    assert_eq!(size_of(fresh.inode), 5);
+
+    // Rename an empty file inside its directory and then across directories,
+    // then give it data.
+    let empty = sb.lookup_root("empty.txt").unwrap();
+    let sub = sb.lookup_root("sub").unwrap();
+    let before = host_ino("empty.txt");
+    sb.fs
+        .rename(sb.ctx(), ROOT_INODE, c"empty.txt", ROOT_INODE, c"e2.txt", 0)
+        .unwrap();
+    assert_eq!(size_of(empty.inode), 0);
+    sb.fs
+        .rename(sb.ctx(), ROOT_INODE, c"e2.txt", sub.inode, c"e3.txt", 0)
+        .unwrap();
+    eprintln!(
+        "exfat renumber fixture: empty rename {before} -> {}",
+        host_ino("sub/e3.txt")
+    );
+    assert_eq!(size_of(empty.inode), 0);
+    assert_eq!(sb.lookup(sub.inode, "e3.txt").unwrap().inode, empty.inode);
+    let handle = sb.fuse_open(empty.inode, LINUX_O_RDWR).unwrap();
+    sb.fuse_write(empty.inode, handle, b"data", 0).unwrap();
+    release(empty.inode, handle);
+    assert_eq!(size_of(empty.inode), 4);
+    assert_eq!(sb.lookup(sub.inode, "e3.txt").unwrap().inode, empty.inode);
+
+    // Truncate by inode, write again, then truncate with the open itself.
+    let full = sb.lookup_root("full.txt").unwrap();
+    let before = host_ino("full.txt");
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    sb.fs
+        .setattr(sb.ctx(), full.inode, attr, None, SetattrValid::SIZE)
+        .unwrap();
+    assert_eq!(size_of(full.inode), 0);
+    let handle = sb.fuse_open(full.inode, LINUX_O_RDWR).unwrap();
+    sb.fuse_write(full.inode, handle, b"again", 0).unwrap();
+    release(full.inode, handle);
+    eprintln!(
+        "exfat renumber fixture: truncate and rewrite {before} -> {}",
+        host_ino("full.txt")
+    );
+    assert_eq!(size_of(full.inode), 5);
+    assert_eq!(sb.lookup_root("full.txt").unwrap().inode, full.inode);
+    let handle = sb
+        .fuse_open(full.inode, LINUX_O_RDWR | LINUX_O_TRUNC)
+        .unwrap();
+    assert_eq!(size_of(full.inode), 0);
+    sb.fuse_write(full.inode, handle, b"x", 0).unwrap();
+    release(full.inode, handle);
+    assert_eq!(size_of(full.inode), 1);
+    assert_eq!(sb.lookup_root("full.txt").unwrap().inode, full.inode);
+
+    // Grow an empty file with a truncate through its handle.
+    let (grown, handle) = sb.fuse_create_root("grown.txt").unwrap();
+    attr.st_size = 4096;
+    sb.fs
+        .setattr(
+            sb.ctx(),
+            grown.inode,
+            attr,
+            Some(handle),
+            SetattrValid::SIZE,
+        )
+        .unwrap();
+    release(grown.inode, handle);
+    assert_eq!(size_of(grown.inode), 4096);
+    assert_eq!(sb.lookup_root("grown.txt").unwrap().inode, grown.inode);
+
+    // Metadata on a file without data renumbers it as well: mode, times, and
+    // extended attributes, by inode and through a handle. This is what `touch`
+    // and `chmod` do to an empty file, and what an archive tool does to each
+    // empty file it unpacks.
+    std::fs::write(root.join("meta.txt"), b"").unwrap();
+    let meta = sb.lookup_root("meta.txt").unwrap();
+    let before = host_ino("meta.txt");
+    let mut attr: stat64 = unsafe { std::mem::zeroed() };
+    attr.st_mode = 0o600;
+    sb.fs
+        .setattr(sb.ctx(), meta.inode, attr, None, SetattrValid::MODE)
+        .unwrap();
+    assert_eq!(size_of(meta.inode), 0);
+    attr.st_atime = 1_000_000;
+    attr.st_mtime = 1_000_000;
+    sb.fs
+        .setattr(
+            sb.ctx(),
+            meta.inode,
+            attr,
+            None,
+            SetattrValid::ATIME | SetattrValid::MTIME,
+        )
+        .unwrap();
+    assert_eq!(size_of(meta.inode), 0);
+    sb.fs
+        .setxattr(sb.ctx(), meta.inode, c"user.note", b"v", 0)
+        .unwrap();
+    assert_eq!(size_of(meta.inode), 0);
+    sb.fs
+        .removexattr(sb.ctx(), meta.inode, c"user.note")
+        .unwrap();
+    assert_eq!(size_of(meta.inode), 0);
+    eprintln!(
+        "exfat renumber fixture: metadata on empty file {before} -> {}",
+        host_ino("meta.txt")
+    );
+    assert_eq!(sb.lookup_root("meta.txt").unwrap().inode, meta.inode);
+
+    let (unpacked, handle) = sb.fuse_create_root("unpacked.txt").unwrap();
+    sb.fs
+        .setattr(
+            sb.ctx(),
+            unpacked.inode,
+            attr,
+            Some(handle),
+            SetattrValid::MODE | SetattrValid::ATIME | SetattrValid::MTIME,
+        )
+        .unwrap();
+    release(unpacked.inode, handle);
+    assert_eq!(size_of(unpacked.inode), 0);
+    assert_eq!(
+        sb.lookup_root("unpacked.txt").unwrap().inode,
+        unpacked.inode
+    );
+
+    // Unlink, then open the inode again. The volume keeps reporting one link
+    // for the removed file, so this reopen cannot depend on a zero link count.
+    let (gone, handle) = sb.fuse_create_root("gone.txt").unwrap();
+    sb.fuse_write(gone.inode, handle, b"kept", 0).unwrap();
+    release(gone.inode, handle);
+    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"gone.txt").unwrap();
+    assert!(!root.join("gone.txt").exists());
+    let handle = sb.fuse_open(gone.inode, LINUX_O_RDWR).unwrap();
+    assert_eq!(sb.fuse_read(gone.inode, handle, 16, 0).unwrap(), b"kept");
+    sb.fuse_write(gone.inode, handle, b"!", 4).unwrap();
+    assert_eq!(sb.fuse_read(gone.inode, handle, 16, 0).unwrap(), b"kept!");
 }

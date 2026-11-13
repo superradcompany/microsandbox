@@ -521,7 +521,7 @@ impl PassthroughFs {
 
         let data = Arc::new(InodeData {
             inode: 1, // ROOT_ID
-            ino: platform::stat_ino(&st),
+            ino: platform::stat_ino(&st).into(),
             dev: platform::stat_dev(&st),
             refcount: AtomicU64::new(2), // libfuse convention: root gets refcount 2
             #[cfg(target_os = "linux")]
@@ -534,6 +534,8 @@ impl PassthroughFs {
             retained_fd: Mutex::new(None),
             #[cfg(target_os = "macos")]
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+            #[cfg(target_os = "macos")]
+            ino_unstable: AtomicBool::new(false),
         });
 
         let mut inodes = self.inodes.write().unwrap();
@@ -846,7 +848,14 @@ impl DynFileSystem for PassthroughFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<u64>, OpenOptions)> {
-        file_ops::do_open(self, ctx, ino, kill_priv, flags)
+        let opened = file_ops::do_open(self, ctx, ino, kill_priv, flags)?;
+        // An open that truncates also clears the setuid bits, a metadata
+        // change that comes after the truncation was already followed.
+        #[cfg(target_os = "macos")]
+        if kill_priv && let Some(handle) = opened.0 {
+            inode::refresh_identity_from_handle_macos(self, handle);
+        }
+        Ok(opened)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -895,7 +904,12 @@ impl DynFileSystem for PassthroughFs {
         kill_priv: bool,
         _flags: u32,
     ) -> io::Result<usize> {
-        file_ops::do_write(self, ctx, ino, handle, r, size, offset, kill_priv)
+        let result = file_ops::do_write(self, ctx, ino, handle, r, size, offset, kill_priv);
+        // The first data written to a file renumbers it on a share without
+        // volfs, and a write that fails can already have put data there.
+        #[cfg(target_os = "macos")]
+        inode::refresh_identity_from_handle_macos(self, handle);
+        result
     }
 
     fn flush(&self, ctx: Context, ino: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
@@ -915,7 +929,10 @@ impl DynFileSystem for PassthroughFs {
         offset: u64,
         length: u64,
     ) -> io::Result<()> {
-        special::do_fallocate(self, ctx, ino, handle, mode, offset, length)
+        let result = special::do_fallocate(self, ctx, ino, handle, mode, offset, length);
+        #[cfg(target_os = "macos")]
+        inode::refresh_identity_from_handle_macos(self, handle);
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1056,10 +1073,13 @@ impl DynFileSystem for PassthroughFs {
         len: u64,
         flags: u64,
     ) -> io::Result<usize> {
-        special::do_copyfilerange(
+        let result = special::do_copyfilerange(
             self, ctx, inode_in, handle_in, offset_in, inode_out, handle_out, offset_out, len,
             flags,
-        )
+        );
+        #[cfg(target_os = "macos")]
+        inode::refresh_identity_from_handle_macos(self, handle_out);
+        result
     }
 
     #[cfg(target_os = "linux")]

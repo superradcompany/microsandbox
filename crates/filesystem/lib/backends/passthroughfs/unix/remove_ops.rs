@@ -4,6 +4,8 @@
 //! On Linux, `renameat2` is used for flag support (RENAME_NOREPLACE, RENAME_EXCHANGE).
 //! On macOS, `renameatx_np` is used with translated flag values.
 
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{ffi::CStr, io};
 
 use super::{PassthroughFs, inode};
@@ -491,14 +493,49 @@ pub(crate) fn do_rename(
     #[cfg(target_os = "macos")]
     {
         let anchor_mode = fs.anchor_mode();
-        let source_key = if anchor_mode {
-            let st = platform::fstatat_nofollow(old_fd.raw(), oldname)?;
-            Some(crate::backends::shared::inode_table::InodeAltKey::new(
-                platform::stat_ino(&st),
-                platform::stat_dev(&st),
-            ))
+        let source_stat = if anchor_mode {
+            Some(platform::fstatat_nofollow(old_fd.raw(), oldname)?)
         } else {
             None
+        };
+        let source_key = source_stat.as_ref().map(|st| {
+            crate::backends::shared::inode_table::InodeAltKey::new(
+                platform::stat_ino(st),
+                platform::stat_dev(st),
+            )
+        });
+        // A rename can renumber a regular file that holds no data. Hold a
+        // descriptor on such a source across the rename, so its new number
+        // can be read from the file itself afterwards and not from a name.
+        // The entry is a regular file, so `O_NONBLOCK` changes nothing unless
+        // a FIFO is swapped in under the name after the stat; that descriptor
+        // then fails the identity check and is dropped.
+        let source_pin = match (source_stat.as_ref(), source_key) {
+            (Some(st), Some(key)) if inode::has_unstable_ino_macos(st) => {
+                let fd = unsafe {
+                    libc::openat(
+                        old_fd.raw(),
+                        oldname.as_ptr(),
+                        libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+                    )
+                };
+                if fd >= 0 {
+                    // SAFETY: openat returned a newly owned descriptor.
+                    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                    match platform::fstat(fd.as_raw_fd()) {
+                        Ok(opened)
+                            if platform::stat_ino(&opened) == key.ino
+                                && platform::stat_dev(&opened) == key.dev =>
+                        {
+                            Some(fd)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
         // Keep the replaced target readable through open handles, as unlink does.
         // A FIFO target is never opened: a read-open would complete the
@@ -615,11 +652,13 @@ pub(crate) fn do_rename(
             }
         }
 
+        let mut renamed_inode = None;
         if let Some(source_key) = source_key {
             let old_alias = NamespaceAlias::new(olddir, oldname.to_bytes());
             let new_alias = NamespaceAlias::new(newdir, newname.to_bytes());
             let mut inodes = fs.inodes.write().unwrap();
             let source_data = inodes.get_alt(&source_key).cloned();
+            renamed_inode = source_data.as_ref().map(|data| data.inode);
 
             // Each move registers the new alias before removing the old one.
             // The reverse order can collect the new parent: if the guest has
@@ -706,6 +745,11 @@ pub(crate) fn do_rename(
                     }
                 }
             }
+        }
+
+        // The table guard above is released: the refresh takes it again.
+        if let (Some(fd), Some(inode)) = (source_pin, renamed_inode) {
+            inode::refresh_identity_macos(fs, inode, fd.as_raw_fd());
         }
     }
 
