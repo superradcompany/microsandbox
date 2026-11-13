@@ -21,8 +21,8 @@ use crate::sandbox::{
 };
 use crate::{MicrosandboxError, MicrosandboxResult};
 use microsandbox_types::{
-    CloudCompute, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus,
-    NetworkSpec, RootDisk, SandboxRuntimeOptions, TlsConfig,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudSandboxStatus, NetworkSpec,
+    RootDisk, SandboxRuntimeOptions, TlsConfig,
 };
 use microsandbox_types::{HttpDenyResponseFormat, RegistryAuth};
 
@@ -52,9 +52,6 @@ pub(in crate::backend) struct CloudCreateBody {
     /// stored credential configured for the image's registry host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<CloudRegistrySelection>,
-    /// Requested kind of machine; the cloud uses standard when omitted.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compute: Option<CloudCompute>,
 }
 
 /// Wire shape of the cloud's registry-credential selection.
@@ -480,9 +477,6 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             }
         };
 
-        let compute = config
-            .compute
-            .map(|compute_type| CloudCompute { compute_type });
         let spec = match config.snapshot_reference {
             None => {
                 validate_fresh_cloud_rootfs(&config.spec.image)?;
@@ -515,7 +509,6 @@ impl TryFrom<SandboxConfig> for CloudCreateBody {
             spec,
             slug: config.slug,
             registry,
-            compute,
         })
     }
 }
@@ -867,7 +860,6 @@ mod tests {
     use crate::backend::{Backend, SandboxBackend};
     use crate::sandbox::{EnvVar, OciRootfsSource, RootDisk, SandboxBuilder, SandboxSpec};
     use crate::snapshot::SnapshotReference;
-    use microsandbox_types::CloudComputeType;
     use microsandbox_types::CloudSnapshotLocation;
     use microsandbox_types::HttpDenyResponseFormat;
 
@@ -1287,7 +1279,6 @@ mod tests {
         let mut config = base_cloud_config();
         config.slug = Some("brave-otter".into());
         config.registry_auth = Some(RegistryAuth::Anonymous);
-        config.compute = Some(CloudComputeType::Shared);
 
         let req = CloudCreateBody::try_from(config).unwrap();
         let json = serde_json::to_value(&req).unwrap();
@@ -1301,7 +1292,6 @@ mod tests {
         assert!(json.get("source").is_none());
         assert_eq!(json["slug"], "brave-otter");
         assert_eq!(json["registry"]["mode"], "anonymous");
-        assert_eq!(json["compute"], serde_json::json!({ "type": "shared" }));
     }
 
     #[test]
@@ -1311,7 +1301,6 @@ mod tests {
 
         assert!(json.get("slug").is_none());
         assert!(json.get("registry").is_none());
-        assert!(json.get("compute").is_none());
     }
 
     #[test]
