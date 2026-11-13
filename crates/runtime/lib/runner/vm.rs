@@ -1660,7 +1660,7 @@ fn run(
     // Enter the VM (never returns).
     tracing::info!(sandbox = %config.sandbox_name, "entering VM");
     match vm.enter() {
-        Ok(infallible) => Ok(infallible),
+        Ok(infallible) => match infallible {},
         Err(e) => {
             if let Err(error) = cleanup_rt_handle.block_on(writeback_guard.release(&db)) {
                 tracing::warn!(%error, "release writeback pressure membership after VM enter failure");

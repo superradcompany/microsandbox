@@ -196,16 +196,14 @@ pub fn verify_symbolic_link_authority(path: &Path) -> io::Result<()> {
 #[cfg(unix)]
 pub fn is_private_directory_boundary(file: &File) -> io::Result<bool> {
     let metadata = file.metadata()?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o077 != 0
-    {
-        return Ok(false);
-    }
+    let owner_only = metadata.is_dir()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.mode() & 0o077 == 0;
     #[cfg(target_os = "macos")]
-    return super::macos_acl::is_private_directory_boundary(file);
-    #[cfg(not(target_os = "macos"))]
-    Ok(true)
+    if owner_only {
+        return super::macos_acl::is_private_directory_boundary(file);
+    }
+    Ok(owner_only)
 }
 
 /// Validate a digest-keyed host cache artifact before using it as an immutable guest lower.
