@@ -6,8 +6,61 @@
 //! yielding 3 syscalls instead of the naive 4 (fstatat + statx + open + getxattr). The stat
 //! is taken on the *opened* fd, eliminating TOCTOU between stat and open.
 //!
-//! macOS lookup uses fstatat → inode table check → register, with a separate fd open
-//! via `/.vol/dev/ino` for xattr access (since macOS doesn't store per-inode O_PATH fds).
+//! macOS lookup uses fstatat → inode table check → register, and reopens tracked
+//! inodes in one of two modes, chosen once per share by the volfs probe:
+//!
+//! - Volfs mode, used when the share root's filesystem answers `/.vol/<dev>/<ino>`
+//!   lookups: an inode is reopened by its identity path, which stays valid across
+//!   host-side renames.
+//! - Anchor mode, used when it does not (FSKit-backed volumes such as exFAT on
+//!   macOS 15 reject every volfs lookup): an inode is reopened by an
+//!   `openat(O_NOFOLLOW)` walk from the retained root fd along a recorded
+//!   (parent inode, name) alias, followed by an `(st_dev, st_ino)` check on the
+//!   opened fd.
+//!
+//! Residual guarantees in anchor mode: identity is always verified after the open,
+//! so a host-side replacement of an anchored name is refused rather than served;
+//! and path-based resolution can still go stale while the walk runs if the host
+//! renames an intermediate directory — that one exposure is shared with the
+//! Linux backend.
+//!
+//! A host inode number is not a fixed property of every file on such a volume.
+//! FSKit exFAT numbers a regular file by its first data cluster, so a file that
+//! holds no data gets a placeholder number. The placeholder is replaced when
+//! the file gains data, and by every other change to such a file: a rename, a
+//! change of mode or times, an extended attribute, even a truncate that leaves
+//! it empty. A file that is truncated back to nothing gets a placeholder again.
+//! Every guest operation that can do one of these is followed by
+//! `refresh_identity_macos`, which reads the new number from a descriptor that
+//! was on the file before the operation; the identity check itself is never
+//! relaxed. A change the host makes on its own is not followed: the inode then
+//! fails closed with `ENOENT` until the guest looks the name up again.
+//!
+//! The hard link source is name-bound in anchor mode, which is a macOS-only
+//! exposure: Linux links through `/proc/self/fd/N`, which is bound to the
+//! inode, while macOS has no fd-relative `linkat`. The source name is
+//! therefore resolved twice — once by the anchor verification, once by the
+//! syscall — and the created entry's identity is checked afterwards, reporting
+//! `ENOENT` when it does not hold the tracked inode.
+//!
+//! A source swapped before the `linkat` is detected even if the host puts the
+//! original name back afterwards: the created entry pins whichever inode the
+//! syscall captured, so the check still sees the replacement. That entry is
+//! left in place — it is the outcome an unchecked `linkat` would have had, and
+//! removing it by name would be a second name-based race — so the guest is
+//! refused while the host keeps the link.
+//!
+//! The check assumes `newname` still names the entry `linkat` created. A host
+//! that replaces the destination name before the `fstatat`, or between it and
+//! the `do_lookup` that follows, is a retained destination-name race: the
+//! source swap-and-restore alone is detected, this is not.
+//!
+//! readlink is not name-bound. The link is opened with `O_SYMLINK`, the
+//! descriptor's identity is checked, and the target is read from that same
+//! descriptor with `freadlink(2)`, as Linux does with `readlinkat(fd, "")`. A
+//! host that replaces the name at any point either fails the identity check
+//! or has no effect on what is read.
+//!
 //!
 //! ## Procfd Reopen
 //!
@@ -17,18 +70,18 @@
 //! inode is `fstat`'d first and real host symlinks are rejected before reopen.
 
 #[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, RawFd};
+use std::fs::File;
 #[cfg(target_os = "linux")]
-use std::{collections::HashSet, fs::File};
+use std::os::fd::FromRawFd;
 use std::{
+    collections::HashSet,
     ffi::CStr,
     io,
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, RawFd},
     sync::{Arc, atomic::Ordering},
 };
 
 use super::PassthroughFs;
-#[cfg(target_os = "linux")]
 use crate::backends::shared::inode_table::NamespaceAlias;
 use crate::{
     Entry,
@@ -164,6 +217,21 @@ pub(crate) fn store_unlinked_fd(data: &InodeData, fd: i32) {
     }
 }
 
+/// Whether a walk failure means "this alias no longer names the inode".
+///
+/// A final component that is missing, or an intermediate component that is no
+/// longer a directory, is the stale-alias signal: the caller tries the next
+/// alias. Every other error is a host-side condition and must be preserved.
+#[cfg(target_os = "macos")]
+fn is_stale_walk_error(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(code)
+            if Some(code) == platform::enoent().raw_os_error()
+                || Some(code) == platform::enotdir().raw_os_error()
+    )
+}
+
 #[cfg(target_os = "macos")]
 fn is_unsupported_macos_reopen_flag(err: &io::Error) -> bool {
     matches!(
@@ -204,6 +272,518 @@ fn open_macos_inode_reopen(path: *const libc::c_char, flags: i32) -> io::Result<
     ))
 }
 
+/// Walk `components` from the share root with `openat(O_NOFOLLOW)` per step.
+///
+/// Intermediate components open with `O_DIRECTORY`; the last component opens
+/// with `flags`. A symlink swapped in for an intermediate directory fails
+/// closed as `ENOTDIR` — the same "stale alias" signal as a renamed-away
+/// directory. A symlink at the final component fails as `ELOOP`, unless
+/// `final_symlink` is set, in which case the link itself is opened via
+/// `O_SYMLINK` so its own identity and metadata can still be read. `..`,
+/// empty, or slash-bearing components are refused before any syscall. The
+/// caller owns the returned fd.
+#[cfg(target_os = "macos")]
+pub(crate) fn secure_open_path_macos(
+    fs: &PassthroughFs,
+    components: &[Vec<u8>],
+    flags: i32,
+    final_symlink: bool,
+) -> io::Result<RawFd> {
+    let root_fd = unsafe { libc::fcntl(fs.root_fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if root_fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    if components.is_empty() {
+        return Ok(root_fd);
+    }
+
+    let mut current_fd = root_fd;
+    for (index, component) in components.iter().enumerate() {
+        if let Err(err) = validate_component(component) {
+            unsafe { libc::close(current_fd) };
+            return Err(err);
+        }
+        let name = match std::ffi::CString::new(component.as_slice()) {
+            Ok(name) => name,
+            Err(_) => {
+                unsafe { libc::close(current_fd) };
+                return Err(platform::einval());
+            }
+        };
+        let is_last = index + 1 == components.len();
+        let open_flags = if is_last {
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        } else {
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC
+        };
+        let next_fd = unsafe { libc::openat(current_fd, name.as_ptr(), open_flags) };
+        if next_fd >= 0 {
+            unsafe { libc::close(current_fd) };
+            current_fd = next_fd;
+            continue;
+        }
+
+        // Capture errno immediately: any intervening syscall (including the
+        // close below) can clobber it before we get to inspect it.
+        let open_err = io::Error::last_os_error();
+
+        if is_last && final_symlink && open_err.raw_os_error() == Some(libc::ELOOP) {
+            let symlink_flags = (flags & !libc::O_NOFOLLOW) | libc::O_SYMLINK | libc::O_CLOEXEC;
+            let symlink_fd = unsafe { libc::openat(current_fd, name.as_ptr(), symlink_flags) };
+            if symlink_fd >= 0 {
+                unsafe { libc::close(current_fd) };
+                return Ok(symlink_fd);
+            }
+            let symlink_err = io::Error::last_os_error();
+            unsafe { libc::close(current_fd) };
+            return Err(platform::linux_error(symlink_err));
+        }
+
+        unsafe { libc::close(current_fd) };
+        if !is_last && open_err.raw_os_error() == Some(libc::ELOOP) {
+            return Err(platform::enotdir());
+        }
+        return Err(platform::linux_error(open_err));
+    }
+
+    Ok(current_fd)
+}
+
+/// Confirm an anchor-walked fd is the inode we admitted at lookup time.
+#[cfg(target_os = "macos")]
+fn validate_identity_macos(fd: RawFd, data: &InodeData) -> io::Result<()> {
+    let st = platform::fstat(fd)?;
+    if platform::stat_ino(&st) != data.host_ino() || platform::stat_dev(&st) != data.dev {
+        return Err(platform::enoent());
+    }
+    Ok(())
+}
+
+/// Whether the host may renumber the file `st` describes.
+///
+/// FSKit exFAT numbers a regular file by its first data cluster. A file that
+/// holds no data has no cluster, so it gets a placeholder number instead, and
+/// the placeholder is replaced by any change to the file: its first data, a
+/// rename, new metadata. A file with data, and a directory, keep their number.
+#[cfg(target_os = "macos")]
+pub(crate) fn has_unstable_ino_macos(st: &stat64) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFREG && st.st_size == 0
+}
+
+/// Read the identity of a tracked inode again from `fd` in anchor mode.
+///
+/// `fd` must already refer to the inode: a guest handle on it, or a
+/// descriptor that passed the identity check before the operation that may
+/// have renumbered the file. Because the descriptor stays on the same file
+/// whatever its number becomes, the new number is known to be that file's
+/// own, and the identity check keeps refusing every other file.
+///
+/// Nothing changes when another tracked inode already holds the new number.
+/// That happens when a lookup saw the renumbered file before this call and
+/// registered it again; this inode then stays on its old number and goes
+/// stale, which is the outcome without this call.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_identity_macos(fs: &PassthroughFs, inode: u64, fd: RawFd) {
+    if !fs.anchor_mode() || inode == 1 {
+        return;
+    }
+
+    // The stat runs under the table lock, so two refreshes of one inode
+    // record their numbers in the order they read them.
+    let mut inodes = fs.inodes.write().unwrap();
+    let Ok(st) = platform::fstat(fd) else {
+        return;
+    };
+    let key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    let Some(data) = inodes.get(&inode).cloned() else {
+        return;
+    };
+    if key.dev != data.dev {
+        return;
+    }
+    if key.ino != data.host_ino() {
+        if inodes.get_alt(&key).is_some() {
+            return;
+        }
+        data.ino.store(key.ino, Ordering::Release);
+        // Inserting under the same inode number replaces the alternate key.
+        inodes.insert(inode, key, data.clone());
+    }
+    data.ino_unstable
+        .store(has_unstable_ino_macos(&st), Ordering::Release);
+}
+
+/// `refresh_identity_macos` for an inode whose number is marked unstable.
+///
+/// For an operation that adds data or changes metadata: that renumbers only a
+/// file without data, so a file that already holds data costs one table
+/// lookup and no syscall.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_unstable_identity_macos(fs: &PassthroughFs, inode: u64, fd: RawFd) {
+    if !fs.anchor_mode() {
+        return;
+    }
+    let unstable = fs
+        .inodes
+        .read()
+        .unwrap()
+        .get(&inode)
+        .is_some_and(|data| data.ino_unstable.load(Ordering::Acquire));
+    if unstable {
+        refresh_identity_macos(fs, inode, fd);
+    }
+}
+
+/// `refresh_unstable_identity_macos` after an operation through a guest
+/// handle, on the inode and the descriptor of that handle.
+#[cfg(target_os = "macos")]
+pub(crate) fn refresh_identity_from_handle_macos(fs: &PassthroughFs, handle: u64) {
+    if !fs.anchor_mode() {
+        return;
+    }
+    let Some(handle_data) = fs.handles.read().unwrap().get(&handle).cloned() else {
+        return;
+    };
+    let file = handle_data.file.read().unwrap();
+    refresh_unstable_identity_macos(fs, handle_data.inode, file.as_raw_fd());
+}
+
+/// Reopen a tracked inode by anchor walk with `flags` on the final component.
+///
+/// The root inode has no alias and resolves by opening `"."` relative to
+/// `root_fd`. That is a fresh file description, not a dup: a dup would share
+/// `root_fd`'s seek offset, so two concurrent root directory handles would
+/// corrupt each other's `readdir`, and a write-intent reopen of the root would
+/// hand back a readable fd instead of failing `EISDIR`.
+/// For every other inode, tries the current anchor first, then every other
+/// known alias. A stale alias — the final component failing `ENOENT` or
+/// `ENOTDIR`, or an identity mismatch on open — means "try the next alias";
+/// any other error (fd exhaustion, permissions, I/O, or `ELOOP` when
+/// `final_symlink` is false and the target really is a symlink) is a
+/// host-side problem and is preserved so it is not misreported as a missing
+/// file. When a non-current alias succeeds the anchor is repaired to it.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_anchor_fd_macos(
+    fs: &PassthroughFs,
+    inode: u64,
+    flags: i32,
+    final_symlink: bool,
+) -> io::Result<RawFd> {
+    if inode == 1 {
+        // `.` is never a symlink, so dropping O_NOFOLLOW here is safe.
+        let open_flags = (flags & !libc::O_NOFOLLOW) | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        let fd = unsafe { libc::openat(fs.root_fd.as_raw_fd(), c".".as_ptr(), open_flags) };
+        if fd < 0 {
+            return Err(platform::linux_error(io::Error::last_os_error()));
+        }
+        return Ok(fd);
+    }
+
+    let inodes = fs.inodes.read().unwrap();
+    let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
+
+    let current_anchor = current_anchor_alias(&data);
+    let candidates = candidate_aliases(&data, current_anchor.clone());
+    let mut host_err: Option<io::Error> = None;
+    for alias in candidates {
+        let mut seen = HashSet::new();
+        let components = match build_alias_components_locked(&inodes, &alias, &mut seen) {
+            Ok(components) => components,
+            Err(_) => continue,
+        };
+        let fd = match secure_open_path_macos(fs, &components, flags, final_symlink) {
+            Ok(fd) => fd,
+            Err(err) => {
+                if !is_stale_walk_error(&err) {
+                    host_err = Some(err);
+                }
+                continue;
+            }
+        };
+        match validate_identity_macos(fd, &data) {
+            Ok(()) => {
+                drop(inodes);
+                if current_anchor.as_ref() != Some(&alias) {
+                    repair_anchor(fs, inode, &alias);
+                }
+                return Ok(fd);
+            }
+            Err(err) => {
+                unsafe { libc::close(fd) };
+                if err.raw_os_error() != platform::enoent().raw_os_error() {
+                    host_err = Some(err);
+                }
+            }
+        }
+    }
+
+    Err(host_err.unwrap_or_else(platform::enoent))
+}
+
+/// Clear `O_NONBLOCK` on a descriptor that was opened non-blocking only so the
+/// open itself could not park the caller.
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_nonblock_macos(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Open the final component of an I/O reopen, counting FIFO endpoint opens.
+///
+/// Every endpoint open this path makes goes through here, so a test can see
+/// exactly how many times the reopen touched a FIFO — an endpoint that is
+/// opened and thrown away is otherwise invisible from outside the process.
+/// The count is taken before the syscall: the attempt is what completes a
+/// rendezvous, whether or not it succeeds.
+#[cfg(target_os = "macos")]
+fn open_endpoint_macos(
+    fs: &PassthroughFs,
+    parent_fd: RawFd,
+    name: &CStr,
+    flags: i32,
+    is_fifo: bool,
+) -> RawFd {
+    #[cfg(test)]
+    if is_fifo {
+        fs.fifo_endpoint_opens.fetch_add(1, Ordering::AcqRel);
+    }
+    #[cfg(not(test))]
+    let _ = is_fifo;
+    let _ = fs;
+    unsafe { libc::openat(parent_fd, name.as_ptr(), flags) }
+}
+
+/// Reopen a tracked inode for guest I/O.
+///
+/// No file is ever opened here "just to look at it". A non-blocking read-open
+/// of a FIFO completes the rendezvous with a waiting writer, so a probe fd
+/// that is opened, inspected and thrown away can take a writer's bytes with
+/// it. The entry is therefore identified by `fstatat` on the verified parent,
+/// and exactly one open follows:
+///
+/// - A FIFO is opened blocking, the way the guest asked. The inode-table guard
+///   is already released by then, so only this worker waits, never the table.
+/// - Everything else is opened non-blocking and has the flag cleared once its
+///   identity is confirmed. The entry is not a FIFO, so the flag changes
+///   nothing except that a FIFO swapped in under the name between the
+///   `fstatat` and the open cannot park this worker; such a replacement is
+///   refused by the identity check that follows.
+///
+/// A guest that asked for `O_NONBLOCK` gets a single non-blocking open with no
+/// parent stat at all: nothing here waits, and a peerless write-open answers
+/// `ENXIO`, as POSIX says it should. The root inode takes the same path — it
+/// has no parent entry to stat, and a directory can never be a FIFO.
+#[cfg(target_os = "macos")]
+fn open_anchor_io_fd_macos(fs: &PassthroughFs, inode: u64, flags: i32) -> io::Result<RawFd> {
+    if flags & libc::O_NONBLOCK != 0 || inode == 1 {
+        return open_anchor_fd_macos(fs, inode, flags, false);
+    }
+
+    let data = {
+        let inodes = fs.inodes.read().unwrap();
+        inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?
+    };
+    let (dir, name, st) = anchor_parent_name_stat_macos(fs, inode)?;
+    let is_fifo = st.st_mode & libc::S_IFMT == libc::S_IFIFO;
+    let open_flags = if is_fifo {
+        flags | libc::O_NOFOLLOW | libc::O_CLOEXEC
+    } else {
+        flags | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC
+    };
+
+    // The blocking open is the only place an anchor reopen waits on another
+    // process, so tests take their timing from here instead of guessing.
+    #[cfg(test)]
+    if is_fifo {
+        let hook = fs.before_blocking_fifo_open.read().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    let fd = open_endpoint_macos(fs, dir.raw(), &name, open_flags, is_fifo);
+    if fd < 0 {
+        // Capture errno before `dir` drops: its Drop closes the fd, and
+        // close(2) can clobber errno.
+        let err = io::Error::last_os_error();
+        return Err(platform::linux_error(err));
+    }
+    // The name was verified before the open, so a mismatch here means the
+    // entry was replaced in between: refuse it rather than serve it.
+    if let Err(err) = validate_identity_macos(fd, &data) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+    if !is_fifo && let Err(err) = clear_nonblock_macos(fd) {
+        unsafe { libc::close(fd) };
+        return Err(err);
+    }
+    Ok(fd)
+}
+
+/// Reopen a tracked inode for `*at()`/getattr use via a single anchor walk.
+///
+/// `O_RDONLY` opens cleanly for both files and directories on macOS, so one
+/// walk covers both cases (no need for a directory-first, file-second retry
+/// pair). `final_symlink` is set so a symlink target can still be opened —
+/// via `O_SYMLINK` — and stat'ed instead of failing `ELOOP`.
+///
+/// `O_NONBLOCK` keeps a tracked FIFO from parking the FUSE worker until a
+/// writer appears; the fd is used only for `fstat` and `fgetxattr`, never
+/// handed to the guest, so the flag cannot leak into a guest handle. It also
+/// carries into the `O_SYMLINK` retry inside the walk.
+#[cfg(target_os = "macos")]
+fn open_anchor_reopen_macos(fs: &PassthroughFs, inode: u64) -> io::Result<RawFd> {
+    open_anchor_fd_macos(fs, inode, libc::O_RDONLY | libc::O_NONBLOCK, true)
+}
+
+/// Open the anchor's parent directory and return it with the entry name.
+///
+/// Used by operations that need a `(dirfd, name)` pair on macOS instead of an
+/// fd on the inode itself: readlink, symlink times, symlink-fd opens, and hard
+/// link sources. The name is verified to still refer to the tracked identity.
+///
+/// The root inode is refused: it is inode 1 by FUSE convention and has no
+/// parent entry inside the share, so there is no `(dirfd, name)` pair for it.
+#[cfg(target_os = "macos")]
+pub(crate) fn anchor_parent_and_name_macos(
+    fs: &PassthroughFs,
+    inode: u64,
+) -> io::Result<(InodeFd, std::ffi::CString)> {
+    anchor_parent_name_stat_macos(fs, inode).map(|(dir, name, _)| (dir, name))
+}
+
+/// `anchor_parent_and_name_macos` plus the `fstatat` the verification used.
+///
+/// The entry's type decides how the caller may open it, and that answer has to
+/// come from the stat that verified the identity — not from opening the entry
+/// to find out, which for a FIFO would already be a rendezvous.
+#[cfg(target_os = "macos")]
+pub(crate) fn anchor_parent_name_stat_macos(
+    fs: &PassthroughFs,
+    inode: u64,
+) -> io::Result<(InodeFd, std::ffi::CString, stat64)> {
+    if inode == 1 {
+        return Err(platform::einval());
+    }
+
+    let inodes = fs.inodes.read().unwrap();
+    let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
+    let current_anchor = current_anchor_alias(&data);
+    let candidates = candidate_aliases(&data, current_anchor.clone());
+    let mut host_err: Option<io::Error> = None;
+    for alias in candidates {
+        let mut seen = HashSet::new();
+        let components = match build_alias_components_locked(&inodes, &alias, &mut seen) {
+            Ok(components) => components,
+            Err(_) => continue,
+        };
+        let Some((name, parents)) = components.split_last() else {
+            continue;
+        };
+        let parent_fd =
+            match secure_open_path_macos(fs, parents, libc::O_RDONLY | libc::O_DIRECTORY, false) {
+                Ok(fd) => fd,
+                Err(err) => {
+                    if !is_stale_walk_error(&err) {
+                        host_err = Some(err);
+                    }
+                    continue;
+                }
+            };
+        let name = match std::ffi::CString::new(name.as_slice()) {
+            Ok(name) => name,
+            Err(_) => {
+                unsafe { libc::close(parent_fd) };
+                continue;
+            }
+        };
+        match platform::fstatat_nofollow(parent_fd, &name) {
+            Ok(st)
+                if platform::stat_ino(&st) == data.host_ino()
+                    && platform::stat_dev(&st) == data.dev =>
+            {
+                drop(inodes);
+                if current_anchor.as_ref() != Some(&alias) {
+                    repair_anchor(fs, inode, &alias);
+                }
+                return Ok((
+                    InodeFd {
+                        fd: parent_fd,
+                        owned: true,
+                    },
+                    name,
+                    st,
+                ));
+            }
+            Ok(_) => {
+                // Name resolves, but to a different identity: stale alias.
+                unsafe { libc::close(parent_fd) };
+            }
+            Err(err) => {
+                unsafe { libc::close(parent_fd) };
+                if !is_stale_walk_error(&err) {
+                    host_err = Some(err);
+                }
+            }
+        }
+    }
+    Err(host_err.unwrap_or_else(platform::enoent))
+}
+
+/// Open a just-stat'ed child of `parent_fd` for stat patching in anchor mode.
+///
+/// Mirrors `open_macos_path_for_stat`, but relative to the parent directory
+/// instead of a volfs identity path.
+///
+/// `O_NONBLOCK` keeps a FIFO child from parking the FUSE worker until a writer
+/// appears. The fd never reaches the guest: the caller uses it for `fstat` and
+/// `fgetxattr` and then closes it.
+#[cfg(target_os = "macos")]
+pub(crate) fn open_child_for_stat_macos(parent_fd: i32, name: &CStr) -> io::Result<i32> {
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd >= 0 {
+        return Ok(fd);
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ELOOP) {
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_SYMLINK | libc::O_NONBLOCK,
+            )
+        };
+        if fd >= 0 {
+            return Ok(fd);
+        }
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+        )
+    };
+    if fd < 0 {
+        return Err(platform::linux_error(io::Error::last_os_error()));
+    }
+    Ok(fd)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn vol_path(dev: u64, ino: u64) -> std::ffi::CString {
     use std::ffi::CString;
@@ -226,7 +806,7 @@ pub(crate) fn do_lookup(fs: &PassthroughFs, parent: u64, name: &CStr) -> io::Res
     return do_lookup_linux(fs, parent, parent_fd.raw(), name);
 
     #[cfg(target_os = "macos")]
-    return do_lookup_macos(fs, parent_fd.raw(), name);
+    return do_lookup_macos(fs, parent, parent_fd.raw(), name);
 }
 
 /// Linux lookup: open → statx(AT_EMPTY_PATH) → patched_stat (3 syscalls).
@@ -353,13 +933,23 @@ pub(crate) fn register_created_fd(
     let alias = NamespaceAlias::new(parent, name.to_bytes());
     #[cfg(target_os = "macos")]
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    // macOS tracks `(parent, name)` anchors only for a share without volfs.
     #[cfg(target_os = "macos")]
-    let _ = (parent, name);
+    let alias = fs
+        .anchor_mode()
+        .then(|| NamespaceAlias::new(parent, name.to_bytes()));
+    #[cfg(target_os = "macos")]
+    let ino_unstable = alias.is_some() && has_unstable_ino_macos(&st);
     let mut inodes = fs.inodes.write().unwrap();
     if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
         #[cfg(target_os = "linux")]
         register_alias_locked(&mut inodes, &data, alias);
+        #[cfg(target_os = "macos")]
+        if let Some(alias) = alias {
+            data.ino_unstable.store(ino_unstable, Ordering::Release);
+            register_alias_locked(&mut inodes, &data, alias);
+        }
         return Ok(Entry {
             inode: data.inode,
             generation: 0,
@@ -373,27 +963,29 @@ pub(crate) fn register_created_fd(
     let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(InodeData {
         inode: inode_num,
-        ino: platform::stat_ino(&st),
+        ino: platform::stat_ino(&st).into(),
         dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
         #[cfg(target_os = "linux")]
         mnt_id,
-        #[cfg(target_os = "linux")]
         anchor_parent: std::sync::atomic::AtomicU64::new(0),
-        #[cfg(target_os = "linux")]
         anchor_name: std::sync::RwLock::new(Vec::new()),
-        #[cfg(target_os = "linux")]
         aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
-        #[cfg(target_os = "linux")]
         anchor_children: std::sync::atomic::AtomicU64::new(0),
         #[cfg(target_os = "linux")]
         retained_fd: std::sync::Mutex::new(None),
         #[cfg(target_os = "macos")]
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+        #[cfg(target_os = "macos")]
+        ino_unstable: ino_unstable.into(),
     });
     inodes.insert(inode_num, alt_key, data.clone());
     #[cfg(target_os = "linux")]
     register_alias_locked(&mut inodes, &data, alias);
+    #[cfg(target_os = "macos")]
+    if let Some(alias) = alias {
+        register_alias_locked(&mut inodes, &data, alias);
+    }
 
     Ok(Entry {
         inode: inode_num,
@@ -412,24 +1004,73 @@ pub(crate) fn register_created_fd(
 /// path scheme references files by device+inode identity, making it
 /// stable across renames — similar to Linux's `/proc/self/fd/N`.
 #[cfg(target_os = "macos")]
-fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Result<Entry> {
-    let st = platform::fstatat_nofollow(parent_fd, name)?;
+fn do_lookup_macos(
+    fs: &PassthroughFs,
+    parent: u64,
+    parent_fd: i32,
+    name: &CStr,
+) -> io::Result<Entry> {
+    let anchor_mode = fs.anchor_mode();
+
+    // In anchor mode, open first and take both identity and metadata from
+    // that one fd, so a host-side replacement between the stat and the open
+    // cannot patch one inode's attributes with another inode's xattr data.
+    // Falls back to fstatat + unpatched stat whenever the entry cannot be
+    // opened at all — a denied permission, a socket, a device node the host
+    // refuses to open — because volfs mode reports those entries too. Only an
+    // fstatat failure fails the lookup.
+    let (st, patched) = if anchor_mode {
+        match open_child_for_stat_macos(parent_fd, name) {
+            Ok(fd) => {
+                let st = match platform::fstat(fd) {
+                    Ok(st) => st,
+                    Err(err) => {
+                        unsafe { libc::close(fd) };
+                        return Err(err);
+                    }
+                };
+                let patched = patch_stat_with_open_macos(
+                    Ok(fd),
+                    st,
+                    fs.cfg.xattr_enabled(),
+                    fs.cfg.strict_enabled(),
+                    fs.cfg.bind_identity_map.as_ref(),
+                )?;
+                (st, patched)
+            }
+            Err(err) => {
+                let st = platform::fstatat_nofollow(parent_fd, name)?;
+                let patched = patch_stat_with_open_macos(
+                    Err(err),
+                    st,
+                    fs.cfg.xattr_enabled(),
+                    fs.cfg.strict_enabled(),
+                    fs.cfg.bind_identity_map.as_ref(),
+                )?;
+                (st, patched)
+            }
+        }
+    } else {
+        let st = platform::fstatat_nofollow(parent_fd, name)?;
+        let patched = open_and_patch_stat_macos(
+            platform::stat_dev(&st),
+            platform::stat_ino(&st),
+            st,
+            fs.cfg.xattr_enabled(),
+            fs.cfg.strict_enabled(),
+            fs.cfg.bind_identity_map.as_ref(),
+        )?;
+        (st, patched)
+    };
+
     let alt_key = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+    let alias = anchor_mode.then(|| NamespaceAlias::new(parent, name.to_bytes()));
+    let ino_unstable = anchor_mode && has_unstable_ino_macos(&st);
 
-    // Open a real fd for xattr access via /.vol/dev/ino.
-    let patched = open_and_patch_stat_macos(
-        platform::stat_dev(&st),
-        platform::stat_ino(&st),
-        st,
-        fs.cfg.xattr_enabled(),
-        fs.cfg.strict_enabled(),
-        fs.cfg.bind_identity_map.as_ref(),
-    )?;
-
-    // Fast path: most lookups hit an already-tracked inode and only need a
-    // refcount bump. We still recheck under the write lock below before
-    // inserting to close the concurrent registration race.
-    {
+    // Fast path (volfs mode only): most lookups hit an already-tracked inode
+    // and only need a refcount bump. Anchor mode always takes the write lock
+    // because it must record the alias.
+    if !anchor_mode {
         let inodes = fs.inodes.read().unwrap();
         if let Some(data) = inodes.get_alt(&alt_key) {
             data.refcount.fetch_add(1, Ordering::Acquire);
@@ -447,8 +1088,12 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     // Recheck under the write lock so concurrent lookups cannot register two
     // synthetic inode numbers for the same host identity.
     let mut inodes = fs.inodes.write().unwrap();
-    if let Some(data) = inodes.get_alt(&alt_key) {
+    if let Some(data) = inodes.get_alt(&alt_key).cloned() {
         data.refcount.fetch_add(1, Ordering::Acquire);
+        if let Some(alias) = alias {
+            data.ino_unstable.store(ino_unstable, Ordering::Release);
+            register_alias_locked(&mut inodes, &data, alias);
+        }
         return Ok(Entry {
             inode: data.inode,
             generation: 0,
@@ -462,13 +1107,20 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
     let inode_num = fs.next_inode.fetch_add(1, Ordering::Relaxed);
     let data = Arc::new(InodeData {
         inode: inode_num,
-        ino: platform::stat_ino(&st),
+        ino: platform::stat_ino(&st).into(),
         dev: platform::stat_dev(&st),
         refcount: std::sync::atomic::AtomicU64::new(1),
-        #[cfg(target_os = "macos")]
+        anchor_parent: std::sync::atomic::AtomicU64::new(0),
+        anchor_name: std::sync::RwLock::new(Vec::new()),
+        aliases: std::sync::RwLock::new(std::collections::BTreeSet::new()),
+        anchor_children: std::sync::atomic::AtomicU64::new(0),
         unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+        ino_unstable: ino_unstable.into(),
     });
-    inodes.insert(inode_num, alt_key, data);
+    inodes.insert(inode_num, alt_key, data.clone());
+    if let Some(alias) = alias {
+        register_alias_locked(&mut inodes, &data, alias);
+    }
 
     Ok(Entry {
         inode: inode_num,
@@ -478,6 +1130,38 @@ fn do_lookup_macos(fs: &PassthroughFs, parent_fd: i32, name: &CStr) -> io::Resul
         attr_timeout: fs.cfg.attr_timeout,
         entry_timeout: fs.cfg.entry_timeout,
     })
+}
+
+/// Apply stat patching using an already-attempted fd open.
+///
+/// Falls back to the unpatched (identity-mapped) stat when the open failed,
+/// which keeps lookups working on hosts where neither volfs nor a relative
+/// reopen is possible for this entry.
+#[cfg(target_os = "macos")]
+fn patch_stat_with_open_macos(
+    opened: io::Result<i32>,
+    st: stat64,
+    xattr_enabled: bool,
+    strict: bool,
+    bind_identity_map: Option<&crate::backends::shared::stat_override::BindIdentityMapHandle>,
+) -> io::Result<stat64> {
+    if let Ok(fd) = opened {
+        let result = crate::backends::shared::stat_override::patched_stat(
+            fd,
+            st,
+            xattr_enabled,
+            strict,
+            bind_identity_map,
+        );
+        unsafe { libc::close(fd) };
+        return result;
+    }
+
+    let mut st = st;
+    if xattr_enabled {
+        crate::backends::shared::stat_override::apply_bind_identity_map(&mut st, bind_identity_map);
+    }
+    Ok(st)
 }
 
 /// Open a real fd via `/.vol/dev/ino` for xattr access and apply stat patching.
@@ -496,28 +1180,13 @@ fn open_and_patch_stat_macos(
     bind_identity_map: Option<&crate::backends::shared::stat_override::BindIdentityMapHandle>,
 ) -> io::Result<stat64> {
     let path = vol_path(dev, ino);
-
-    // Try regular file open first. If the inode is a symlink, fall back to
-    // O_SYMLINK so we can read override metadata from the link itself without
-    // following it.
-    if let Ok(fd) = open_macos_path_for_stat(path.as_ptr()) {
-        let result = crate::backends::shared::stat_override::patched_stat(
-            fd,
-            st,
-            xattr_enabled,
-            strict,
-            bind_identity_map,
-        );
-        unsafe { libc::close(fd) };
-        return result;
-    }
-
-    // Can't open — return the safe mapped fallback when stat virtualization is on.
-    let mut st = st;
-    if xattr_enabled {
-        crate::backends::shared::stat_override::apply_bind_identity_map(&mut st, bind_identity_map);
-    }
-    Ok(st)
+    patch_stat_with_open_macos(
+        open_macos_path_for_stat(path.as_ptr()),
+        st,
+        xattr_enabled,
+        strict,
+        bind_identity_map,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -568,17 +1237,7 @@ pub(crate) fn forget_one_locked(
                 .is_ok()
             {
                 if new == 0 {
-                    #[cfg(target_os = "linux")]
                     maybe_remove_inode_locked(inodes, inode);
-
-                    #[cfg(target_os = "macos")]
-                    {
-                        let ufd = data.unlinked_fd.swap(-1, Ordering::AcqRel);
-                        if ufd >= 0 {
-                            unsafe { libc::close(ufd as i32) };
-                        }
-                        inodes.remove(&inode);
-                    }
                 }
                 break;
             }
@@ -615,7 +1274,7 @@ pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd
     #[cfg(target_os = "macos")]
     {
         let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+        let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
 
         // Try unlinked_fd first — /.vol/ path is invalid after unlink.
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
@@ -626,7 +1285,12 @@ pub(crate) fn get_inode_fd(fs: &PassthroughFs, inode: u64) -> io::Result<InodeFd
             }
         }
 
-        let fd = open_vol_fd(data.dev, data.ino)?;
+        if fs.anchor_mode() {
+            drop(inodes);
+            let fd = open_anchor_reopen_macos(fs, inode)?;
+            return Ok(InodeFd { fd, owned: true });
+        }
+        let fd = open_vol_fd(data.dev, data.host_ino())?;
         Ok(InodeFd { fd, owned: true })
     }
 }
@@ -679,7 +1343,6 @@ fn inode_alt_key(data: &InodeData) -> InodeAltKey {
     InodeAltKey::new(data.ino, data.dev, data.mnt_id)
 }
 
-#[cfg(target_os = "linux")]
 fn current_anchor_alias(data: &InodeData) -> Option<NamespaceAlias> {
     let parent = data.anchor_parent.load(Ordering::Acquire);
     if parent == 0 {
@@ -692,7 +1355,6 @@ fn current_anchor_alias(data: &InodeData) -> Option<NamespaceAlias> {
     })
 }
 
-#[cfg(target_os = "linux")]
 fn candidate_aliases(
     data: &InodeData,
     current_anchor: Option<NamespaceAlias>,
@@ -713,7 +1375,6 @@ fn candidate_aliases(
     result
 }
 
-#[cfg(target_os = "linux")]
 fn build_alias_components_locked(
     inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     alias: &NamespaceAlias,
@@ -729,7 +1390,6 @@ fn build_alias_components_locked(
     Ok(components)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn build_anchor_components_locked(
     inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -747,7 +1407,6 @@ pub(crate) fn build_anchor_components_locked(
     build_alias_components_locked(inodes, &alias, seen)
 }
 
-#[cfg(target_os = "linux")]
 fn validate_component(component: &[u8]) -> io::Result<()> {
     if component.is_empty() || component == b"." {
         return Err(platform::einval());
@@ -858,7 +1517,6 @@ fn dup_retained_fd_linux(data: &InodeData) -> io::Result<Option<RawFd>> {
     Ok(Some(fd))
 }
 
-#[cfg(target_os = "linux")]
 fn repair_anchor(fs: &PassthroughFs, inode: u64, alias: &NamespaceAlias) {
     let mut inodes = fs.inodes.write().unwrap();
     let Some(data) = inodes.get(&inode).cloned() else {
@@ -870,7 +1528,6 @@ fn repair_anchor(fs: &PassthroughFs, inode: u64, alias: &NamespaceAlias) {
     set_anchor_locked(&mut inodes, &data, Some(alias));
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn register_alias_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -882,7 +1539,6 @@ pub(crate) fn register_alias_locked(
     }
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn remove_alias_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -901,7 +1557,37 @@ pub(crate) fn remove_alias_locked(
     data.aliases.read().unwrap().is_empty()
 }
 
-#[cfg(target_os = "linux")]
+/// Hold a parent inode in the table while a caller reshuffles anchors.
+///
+/// A forgotten directory survives only through the children anchored to it,
+/// so it is collected as soon as its last anchored child moves away. An
+/// exchange across directories moves two children one after the other, and
+/// the parent the second move is about to re-anchor to can disappear in
+/// between — leaving the second child pointing at a parent that is no longer
+/// in the table, and so unresolvable. Pinning both parents for the length of
+/// the exchange closes that window. Returns whether a pin was taken.
+#[cfg(target_os = "macos")]
+pub(crate) fn pin_anchor_parent_locked(
+    inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    inode: u64,
+) -> bool {
+    let Some(data) = inodes.get(&inode) else {
+        return false;
+    };
+    data.anchor_children.fetch_add(1, Ordering::AcqRel);
+    true
+}
+
+/// Release a pin taken by `pin_anchor_parent_locked`, collecting the inode if
+/// nothing else holds it any more.
+#[cfg(target_os = "macos")]
+pub(crate) fn unpin_anchor_parent_locked(
+    inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
+    inode: u64,
+) {
+    decrement_anchor_children_locked(inodes, inode);
+}
+
 fn set_anchor_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     data: &Arc<InodeData>,
@@ -928,7 +1614,6 @@ fn set_anchor_locked(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn decrement_anchor_children_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -954,7 +1639,6 @@ fn decrement_anchor_children_locked(
     maybe_remove_inode_locked(inodes, inode);
 }
 
-#[cfg(target_os = "linux")]
 fn maybe_remove_inode_locked(
     inodes: &mut MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     inode: u64,
@@ -975,7 +1659,17 @@ fn maybe_remove_inode_locked(
 
     let anchor_parent = data.anchor_parent.load(Ordering::Acquire);
     if let Some(removed) = inodes.remove(&inode) {
-        let _ = removed.retained_fd.lock().unwrap().take();
+        #[cfg(target_os = "linux")]
+        {
+            let _ = removed.retained_fd.lock().unwrap().take();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let ufd = removed.unlinked_fd.swap(-1, Ordering::AcqRel);
+            if ufd >= 0 {
+                unsafe { libc::close(ufd as i32) };
+            }
+        }
     }
 
     if anchor_parent != 0 {
@@ -1031,12 +1725,57 @@ pub(crate) fn open_inode_fd(fs: &PassthroughFs, inode: u64, flags: i32) -> io::R
     #[cfg(target_os = "macos")]
     {
         let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+        let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
+
+        if fs.anchor_mode() {
+            drop(inodes);
+            // A reopen targets an already-admitted inode by identity, not a
+            // fresh path lookup, so O_CREAT is rejected. O_TRUNC must not
+            // reach the walk's final openat, or a host-side replacement at
+            // the anchored name would be truncated before
+            // validate_identity_macos gets a chance to reject it: truncate
+            // only after the identity check passes. O_EXCL is meaningless
+            // without O_CREAT and is dropped.
+            if flags & libc::O_CREAT != 0 {
+                return Err(platform::einval());
+            }
+            let walk_flags = flags & !(libc::O_NOFOLLOW | libc::O_TRUNC | libc::O_EXCL);
+            let result = open_anchor_io_fd_macos(fs, inode, walk_flags).and_then(|fd| {
+                if flags & libc::O_TRUNC != 0 {
+                    if unsafe { libc::ftruncate(fd, 0) } < 0 {
+                        let err = io::Error::last_os_error();
+                        unsafe { libc::close(fd) };
+                        return Err(platform::linux_error(err));
+                    }
+                    // Truncating to nothing can renumber the file.
+                    refresh_identity_macos(fs, inode, fd);
+                }
+                Ok(fd)
+            });
+            // As with a vanished `/.vol/` path below, only an inode that no
+            // tracked name resolves to any more may use the unlink pin. The
+            // link count is not consulted: a surviving name the guest never
+            // looked up cannot be walked to, FSKit exFAT keeps reporting one
+            // link for a removed file, and the pin is that same inode.
+            if let Err(error) = &result
+                && error.raw_os_error() == platform::enoent().raw_os_error()
+            {
+                // Read the pin under the table lock: FORGET closes it there.
+                let inodes = fs.inodes.read().unwrap();
+                if let Some(data) = inodes.get(&inode) {
+                    let ufd = data.unlinked_fd.load(Ordering::Acquire);
+                    if ufd >= 0 {
+                        return open_unlinked_fd_macos(ufd as i32, flags);
+                    }
+                }
+            }
+            return result;
+        }
 
         // Linked inodes must reopen with the requested flags, not duplicate the
         // unlink pin. Trying /.vol/ first also covers a host removing
         // the last link between a link-count check and the open.
-        let path = vol_path(data.dev, data.ino);
+        let path = vol_path(data.dev, data.host_ino());
         let result = open_macos_inode_reopen(path.as_ptr(), flags);
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
         if let Err(error) = &result
@@ -1131,7 +1870,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
     #[cfg(target_os = "macos")]
     {
         let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+        let data = inodes.get(&inode).cloned().ok_or_else(platform::ebadf)?;
 
         // Try unlinked_fd first — /.vol/ path is invalid after unlink.
         let ufd = data.unlinked_fd.load(Ordering::Acquire);
@@ -1146,7 +1885,9 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             );
         }
 
-        if let Ok(fd) = open_vol_fd(data.dev, data.ino) {
+        if fs.anchor_mode() {
+            drop(inodes);
+            let fd = open_anchor_reopen_macos(fs, inode)?;
             let result = platform::fstat(fd).and_then(|st| {
                 crate::backends::shared::stat_override::patched_stat(
                     fd,
@@ -1160,7 +1901,21 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
             return result;
         }
 
-        let path = vol_path(data.dev, data.ino);
+        if let Ok(fd) = open_vol_fd(data.dev, data.host_ino()) {
+            let result = platform::fstat(fd).and_then(|st| {
+                crate::backends::shared::stat_override::patched_stat(
+                    fd,
+                    st,
+                    fs.cfg.xattr_enabled(),
+                    fs.cfg.strict_enabled(),
+                    fs.cfg.bind_identity_map.as_ref(),
+                )
+            });
+            unsafe { libc::close(fd) };
+            return result;
+        }
+
+        let path = vol_path(data.dev, data.host_ino());
         let mut st = unsafe { std::mem::zeroed::<stat64>() };
         let ret = unsafe { libc::lstat(path.as_ptr(), &mut st) };
         if ret < 0 {
@@ -1168,7 +1923,7 @@ pub(crate) fn stat_inode(fs: &PassthroughFs, inode: u64) -> io::Result<stat64> {
         }
         open_and_patch_stat_macos(
             data.dev,
-            data.ino,
+            data.host_ino(),
             st,
             fs.cfg.xattr_enabled(),
             fs.cfg.strict_enabled(),

@@ -4,14 +4,14 @@
 //! for per-inode state, and [`InodeAltKey`] for host-identity-based deduplication.
 
 #[cfg(target_os = "macos")]
-use std::sync::atomic::AtomicI64;
-use std::{borrow::Borrow, collections::BTreeMap, sync::atomic::AtomicU64};
-#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::{
-    collections::BTreeSet,
-    fs::File,
-    sync::{Mutex, RwLock},
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet},
+    sync::{RwLock, atomic::AtomicU64},
 };
+#[cfg(target_os = "linux")]
+use std::{fs::File, sync::Mutex};
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -48,7 +48,6 @@ pub(crate) struct InodeAltKey {
 }
 
 /// One namespace alias for a tracked passthrough inode.
-#[cfg(target_os = "linux")]
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Debug)]
 pub(crate) struct NamespaceAlias {
     pub parent: u64,
@@ -62,7 +61,15 @@ pub(crate) struct InodeData {
     pub inode: u64,
 
     /// Host inode number.
+    #[cfg(target_os = "linux")]
     pub ino: u64,
+
+    /// Host inode number. Read it with [`InodeData::host_ino`].
+    ///
+    /// Atomic on macOS because it is not fixed there on every filesystem: see
+    /// `ino_unstable`.
+    #[cfg(target_os = "macos")]
+    pub ino: AtomicU64,
 
     /// Host device ID.
     pub dev: u64,
@@ -75,19 +82,27 @@ pub(crate) struct InodeData {
     pub mnt_id: u64,
 
     /// Current anchor parent inode for secure reopen-from-root.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_parent: AtomicU64,
 
     /// Current anchor name under `anchor_parent`.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_name: RwLock<Vec<u8>>,
 
     /// All known live aliases for this inode within the exported namespace.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub aliases: RwLock<BTreeSet<NamespaceAlias>>,
 
     /// Number of descendant anchors that currently depend on this inode.
-    #[cfg(target_os = "linux")]
+    ///
+    /// Tracked on both platforms; on macOS populated only for shares in
+    /// anchor mode.
     pub anchor_children: AtomicU64,
 
     /// Retained fd for detached objects that lost their last visible alias.
@@ -101,6 +116,16 @@ pub(crate) struct InodeData {
     /// the file has not been unlinked.
     #[cfg(target_os = "macos")]
     pub unlinked_fd: AtomicI64,
+
+    /// Whether the host may give this file a different inode number.
+    ///
+    /// Set only for a share in anchor mode, while `ino` was read from a
+    /// regular file that holds no data. FSKit exFAT numbers a regular file by
+    /// its first data cluster, and a file without data gets a placeholder that
+    /// is replaced by any change to the file. The backend reads the number
+    /// again after each operation that makes one.
+    #[cfg(target_os = "macos")]
+    pub ino_unstable: AtomicBool,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -187,6 +212,20 @@ where
     }
 }
 
+impl InodeData {
+    /// The host inode number currently recorded for this inode.
+    #[cfg(target_os = "linux")]
+    pub fn host_ino(&self) -> u64 {
+        self.ino
+    }
+
+    /// The host inode number currently recorded for this inode.
+    #[cfg(target_os = "macos")]
+    pub fn host_ino(&self) -> u64 {
+        self.ino.load(Ordering::Acquire)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
@@ -219,7 +258,6 @@ impl InodeAltKey {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl NamespaceAlias {
     pub fn new(parent: u64, name: &[u8]) -> Self {
         Self {
