@@ -421,6 +421,43 @@ fn test_anchor_unlink_keeps_open_handle() {
     assert!(data.unlinked_fd.load(std::sync::atomic::Ordering::Acquire) >= 0);
 }
 
+/// Unlink keeps the descriptor even while another tracked name remains, as
+/// volfs mode does. While that name exists a reopen walks to it and honours
+/// the requested flags. When the host then removes it without a FUSE unlink,
+/// the inode still reopens read-write through the kept descriptor.
+#[test]
+fn test_anchor_reopen_after_host_removes_remaining_hard_link() {
+    let sb = TestSandbox::with_anchor_mode();
+    let (entry, handle) = sb.fuse_create_root("original").unwrap();
+    sb.fuse_write(entry.inode, handle, b"still here", 0)
+        .unwrap();
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+    sb.fs
+        .link(sb.ctx(), entry.inode, ROOT_INODE, c"alias")
+        .unwrap();
+    sb.fs.unlink(sb.ctx(), ROOT_INODE, c"original").unwrap();
+
+    let handle = sb.fuse_open(entry.inode, LINUX_O_RDWR).unwrap();
+    sb.fuse_write(entry.inode, handle, b"!", 10).unwrap();
+    sb.fs
+        .release(sb.ctx(), entry.inode, 0, handle, false, false, None)
+        .unwrap();
+
+    std::fs::remove_file(sb.root.join("alias")).unwrap();
+    let handle = sb.fuse_open(entry.inode, LINUX_O_RDWR).unwrap();
+    assert_eq!(
+        sb.fuse_read(entry.inode, handle, 32, 0).unwrap(),
+        b"still here!"
+    );
+    sb.fuse_write(entry.inode, handle, b"?", 11).unwrap();
+    assert_eq!(
+        sb.fuse_read(entry.inode, handle, 32, 0).unwrap(),
+        b"still here!?"
+    );
+}
+
 /// rmdir removes the directory's alias.
 #[test]
 fn test_anchor_rmdir_drops_alias() {

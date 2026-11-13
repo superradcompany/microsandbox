@@ -161,13 +161,13 @@ pub(crate) fn do_unlink(
         }
     }
 
-    // Volfs mode keeps a fallback even if a hard link remains: the host can
-    // remove that name without another FUSE unlink, and open_inode_fd still
-    // reopens linked inodes through /.vol/ with the requested access flags.
-    // Anchor mode keeps the fd only for an inode that lost its last tracked
-    // name, as Linux does, and drops the alias so no reopen tries the removed
-    // name — that part runs off the pre-unlink directory-entry identity, so it
-    // works for entries the pre-unlink open could not obtain an fd for.
+    // Keep a fallback even if a hard link remains: the host can remove that
+    // name without another FUSE unlink. open_inode_fd still reopens linked
+    // inodes with the requested access flags, through /.vol/ or through a
+    // remaining alias. Anchor mode also drops the alias so no reopen tries the
+    // removed name — that part runs off the pre-unlink directory-entry
+    // identity, so it works for entries the pre-unlink open could not obtain
+    // an fd for.
     #[cfg(target_os = "macos")]
     if fs.anchor_mode() {
         // The key and the fd come from two syscalls, so the host can replace
@@ -207,8 +207,8 @@ pub(crate) fn do_unlink(
             let alias = NamespaceAlias::new(parent, name.to_bytes());
             let mut inodes = fs.inodes.write().unwrap();
             if let Some(data) = inodes.get_alt(&alt_key).cloned() {
-                let detached = inode::remove_alias_locked(&mut inodes, &data, &alias);
-                if detached && let Some(fd) = verified_fd {
+                inode::remove_alias_locked(&mut inodes, &data, &alias);
+                if let Some(fd) = verified_fd {
                     inode::store_unlinked_fd(&data, fd);
                     kept_fd = true;
                 }
