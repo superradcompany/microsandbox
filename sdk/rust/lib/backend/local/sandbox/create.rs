@@ -135,7 +135,6 @@ impl LocalBackend {
         self.warn_cloud_only(
             options.spec.name.as_deref().unwrap_or_default(),
             options.slug.as_ref().and_then(Option::as_deref),
-            options.compute.flatten(),
         );
         validate_sandbox_name(options.spec.name.as_deref().unwrap_or_default())?;
 

@@ -47,7 +47,7 @@ use std::{
 use microsandbox_db::pool::DbPools;
 use microsandbox_migration::schema_metadata;
 use microsandbox_migration::{Migrator, MigratorTrait};
-use microsandbox_types::{CloudComputeType, DeploymentProfile};
+use microsandbox_types::DeploymentProfile;
 use microsandbox_utils::process_lock::{lock_exclusive, open_lock_file, unlock};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, Statement};
 use tokio::sync::OnceCell;
@@ -259,22 +259,11 @@ impl LocalBackend {
 
     /// Warn about create-time options only a cloud backend can honor.
     /// These are inert locally, so the create proceeds without them.
-    pub(super) fn warn_cloud_only(
-        &self,
-        name: &str,
-        slug: Option<&str>,
-        compute: Option<CloudComputeType>,
-    ) {
+    pub(super) fn warn_cloud_only(&self, name: &str, slug: Option<&str>) {
         if slug.is_some() {
             tracing::warn!(
                 sandbox = %name,
                 "SandboxBuilder::slug is only honored by cloud backends; ignoring"
-            );
-        }
-        if compute.is_some() {
-            tracing::warn!(
-                sandbox = %name,
-                "SandboxBuilder::compute is only honored by cloud backends; ignoring"
             );
         }
     }
