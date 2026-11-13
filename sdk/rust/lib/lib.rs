@@ -39,10 +39,10 @@ pub use agent::{
     RawFrame, StreamHandle,
 };
 pub use backend::{
-    Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudCreateSandboxRequest,
-    CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails, CloudMessageResponse,
-    CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason, CloudVolumeKind,
-    CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
+    Backend, BackendInfo, BackendKind, BackendSelectionSource, CloudComputeType,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
+    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudVolumeKind, CloudVolumeStatus, Profile, ProfileBackend, SandboxBackend, SandboxCloudState,
     SandboxHandleCloudState, SandboxHandleInner, SandboxInner, VolumeBackend, VolumeCloudState,
     VolumeHandleCloudState, VolumeHandleInner, VolumeInner, default_backend, default_backend_info,
     resolve_default_backend, set_default_backend, swap_default_backend, with_backend,

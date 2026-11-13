@@ -896,6 +896,25 @@ Request a globally unique cloud slug. When omitted, microsandbox cloud assigns o
   </div>
 </div>
 
+#### <span className="msb-recv">sandbox.</span><span className="msb-hn">compute()</span>
+
+<Tooltip tip="The kind of machine is chosen by microsandbox cloud; the local backend ignores this setting."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```rust
+fn compute(self, compute_type: CloudComputeType) -> Self
+```
+
+Choose the kind of machine the sandbox runs on. When omitted, standard machines are used.
+
+<p className="msb-label">Parameters</p>
+
+<div className="msb-params">
+  <div className="msb-param">
+    <div className="msb-param-key"><code>compute_type</code><span className="msb-type">CloudComputeType</span></div>
+    <div className="msb-param-desc"><code>Standard</code> or <code>Shared</code>.</div>
+  </div>
+</div>
+
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">build()</span>
 
 ```rust
@@ -929,7 +948,7 @@ Reusing a concrete config supplies its populated CPU and memory values explicitl
 
 Local snapshot archives are decoded before settings are merged and validated. The built config retains temporary restore files until it is used or dropped.
 
-`SandboxConfigPatch` patches the SDK configuration. Its `spec` field is a `SandboxSpecPatch` for shared settings such as image, resources, and networking. Create-time options, including registry credentials, replacement settings, and the requested slug, live alongside `spec`.
+`SandboxConfigPatch` patches the SDK configuration. Its `spec` field is a `SandboxSpecPatch` for shared settings such as image, resources, and networking. Create-time options, including registry credentials, replacement settings, the requested slug, and the compute type, live alongside `spec`.
 
 <Accordion title="Example">
 

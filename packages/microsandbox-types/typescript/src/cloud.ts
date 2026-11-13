@@ -302,6 +302,15 @@ export type CloudSandboxComputeResources = {
   memory_mib: number;
 };
 
+export type CloudCompute = {
+  /**
+   * The kind of machine the sandbox runs on.
+   */
+  type: CloudComputeType;
+};
+
+export type CloudComputeType = "standard" | "shared";
+
 export type CloudRootfsSource = {
   "type": "bind";
   /**

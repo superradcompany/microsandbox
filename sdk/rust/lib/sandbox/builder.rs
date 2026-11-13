@@ -15,8 +15,8 @@ use microsandbox_network::policy::Rule;
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
 use microsandbox_types::{
-    CpuPlacement, EnvVar, PullPolicy, RegistryAuth, SandboxSpecPatch, VsockRouteSpec,
-    VsockSocketType,
+    CloudComputeType, CpuPlacement, EnvVar, PullPolicy, RegistryAuth, SandboxSpecPatch,
+    VsockRouteSpec, VsockSocketType,
 };
 #[cfg(feature = "net")]
 use microsandbox_types::{PortProtocol, PublishedPortSpec};
@@ -529,6 +529,15 @@ impl SandboxBuilder {
     /// backend has no slugs and ignores this with a warning.
     pub fn slug(mut self, slug: impl Into<String>) -> Self {
         self.config.slug = Some(Some(slug.into()));
+        self
+    }
+
+    /// Choose the kind of machine the sandbox runs on (cloud backends only).
+    ///
+    /// When unset, the cloud uses standard machines. The local backend runs
+    /// on this host and ignores this with a warning.
+    pub fn compute(mut self, compute_type: CloudComputeType) -> Self {
+        self.config.compute = Some(Some(compute_type));
         self
     }
 
@@ -3416,6 +3425,7 @@ mod tests {
         let config = build()
             .registry(|registry| registry.auth(auth()))
             .slug("final")
+            .compute(microsandbox_types::CloudComputeType::Shared)
             .replace()
             .finish(
                 Some(&BackendConfig::new(Default::default(), Default::default())),
@@ -3426,6 +3436,10 @@ mod tests {
             matches!(config.registry_auth, Some(microsandbox_image::RegistryAuth::Basic { ref username, .. }) if username == "builder")
         );
         assert_eq!(config.slug.as_deref(), Some("final"));
+        assert_eq!(
+            config.compute,
+            Some(microsandbox_types::CloudComputeType::Shared)
+        );
         assert!(config.replace_existing);
         assert!(!config.insecure);
         assert!(config.ca_certs.is_empty());
@@ -3435,6 +3449,7 @@ mod tests {
         for field in [
             "registry_auth",
             "slug",
+            "compute",
             "replace_existing",
             "replace_with_timeout",
             "insecure",

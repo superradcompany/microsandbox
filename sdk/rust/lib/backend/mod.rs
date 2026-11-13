@@ -50,8 +50,9 @@ pub use local::snapshot_downgrade as local_snapshot_downgrade;
 #[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudComputeType, CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody,
+    CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason,
 };
 pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
