@@ -6,6 +6,8 @@
 
 mod api;
 mod copy;
+#[cfg(feature = "local")]
+pub(crate) mod import_budget;
 mod types;
 
 //--------------------------------------------------------------------------------------------------

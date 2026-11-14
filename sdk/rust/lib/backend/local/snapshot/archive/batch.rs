@@ -45,6 +45,21 @@ pub(super) async fn load(
     for archive in archives {
         staged.push(unpack(archive, &snapshots_dir, &cache_tmp).await?);
     }
+    if crate::snapshot::import_budget::active() {
+        for item in &staged {
+            if item.unpacked.manifest_dirs.len() != 1
+                || item.unpacked.inventory.as_ref().is_some_and(|inventory| {
+                    inventory.completeness != "boot-complete"
+                        || inventory.members.len() != 1
+                        || inventory.entries.iter().any(|entry| !entry.included)
+                })
+            {
+                return Err(MicrosandboxError::InvalidConfig(
+                    "bounded import requires one complete snapshot without dependencies".into(),
+                ));
+            }
+        }
+    }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
         Ok::<_, MicrosandboxError>(
@@ -67,8 +82,14 @@ pub(super) async fn load(
             )
             .await?;
             for snapshot in verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await? {
+                crate::snapshot::import_budget::verify_manifest(snapshot.manifest())?;
                 super::super::metadata::write(snapshot.path(), snapshot.labels()).await?;
                 normalize_imported_descriptor(&snapshot).await?;
+            }
+        }
+        if crate::snapshot::import_budget::active() && item.unpacked.inventory.is_some() {
+            for directory in &item.unpacked.manifest_dirs {
+                crate::snapshot::import_budget::verify_manifest(&read_manifest(directory).await?)?;
             }
         }
         if has_dependencies {
@@ -162,6 +183,9 @@ pub(super) async fn load(
             materialize_inventory_layers(inventory, item.snapshots.path()).await?;
         }
         let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
+        for snapshot in &snapshots {
+            crate::snapshot::import_budget::verify_manifest(snapshot.manifest())?;
+        }
         if let Some(inventory) = &item.unpacked.inventory {
             validate_inventory_snapshot_bindings(
                 inventory,

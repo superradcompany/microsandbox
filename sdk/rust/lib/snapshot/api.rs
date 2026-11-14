@@ -11,6 +11,8 @@ use super::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
     SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
+#[cfg(feature = "local")]
+use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
 use crate::backend::Backend;
 
@@ -688,6 +690,32 @@ impl Snapshot {
     ) -> MicrosandboxResult<SnapshotHandle> {
         let mut handles = Self::load_many(&[path.to_path_buf()], opts).await?;
         Ok(handles.remove(0))
+    }
+
+    /// Import a disk-only raw archive with an aggregate write budget. The
+    /// limit covers extraction and simultaneous normalization/publication
+    /// copies. Bundled images, memory and owned volumes are refused before
+    /// their payloads are written. Existing unbounded imports are unchanged.
+    #[cfg(feature = "local")]
+    pub async fn load_bounded(
+        path: &Path,
+        opts: LoadOpts,
+        write_budget_bytes: u64,
+        maximum_disk_bytes: u64,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        if backend.as_local().is_none() || opts.base.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "bounded snapshot import requires local storage without external dependencies"
+                    .into(),
+            ));
+        }
+        super::import_budget::scope(
+            write_budget_bytes,
+            maximum_disk_bytes,
+            Self::load_with_options(path, opts),
+        )
+        .await
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(
