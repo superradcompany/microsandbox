@@ -4479,7 +4479,6 @@ pub async fn fuzz_unpack_local_snapshot_archive(data: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::Snapshot as PublicSnapshot;
     use microsandbox_image::checkpoint::{
         CaptureIntent, CheckpointManifest, ContentRef, DeviceStateRef, DiskGenerationManifest,
         DiskLayerRef, LocalObjectStore, MemoryCaptureMode, MemoryExtent, MemoryExtentContent,
@@ -4492,6 +4491,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::Snapshot as PublicSnapshot;
 
     #[tokio::test]
     async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
