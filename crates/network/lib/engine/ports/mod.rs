@@ -6,4 +6,4 @@ pub mod publisher;
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use publisher::PortPublisher;
+pub use publisher::{BoundPublishedPorts, PortPublisher, PublishedPortBindError};

@@ -19,6 +19,7 @@ pub mod connection;
 pub mod entity;
 pub mod pool;
 pub mod private_storage;
+pub mod protected_state;
 pub mod retry;
 
 pub use connection::{DbReadConnection, DbWriteConnection};

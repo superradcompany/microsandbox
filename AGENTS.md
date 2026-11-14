@@ -12,25 +12,29 @@ Do not apply them to other repositories or to general agent behavior outside thi
 
 ## Project Map
 
-- `sdk/rust` is the public Rust SDK crate.
-- `crates/cli` contains the `msb` CLI.
-- `crates/runtime` contains VM runtime integration.
-- `crates/filesystem`, `crates/image`, `crates/network`, `crates/db`, `crates/migration`, `crates/metrics`, `crates/metrics-collector`, `crates/protocol`, and `crates/utils` are shared internal crates.
-- `packages/agent-client` and `packages/microsandbox-types` are the shared agent-protocol client and wire-contract type packages, each with Rust and TypeScript implementations.
+- `sdk/rust` is the public Rust SDK crate; `sdk/python`, `sdk/node-ts`, `sdk/go`, and `sdk/ruby` contain the language SDKs and native bindings.
+- `crates/cli` contains the `msb` CLI, and `crates/runtime` contains VM runtime integration.
+- `crates/filesystem`, `crates/image`, `crates/network`, `crates/db`, `crates/migration`, `crates/metrics`, `crates/metrics-collector`, `crates/protocol`, `crates/utils`, and `crates/vsock` are shared internal crates.
+- `crates/testing` contains shared test initialization, macros, and utilities.
+- `packages/agent-client` and `packages/control-client` provide agent and host-control clients; `packages/protocol-client` supplies shared framing/transport primitives, and `packages/microsandbox-types` supplies shared types and contracts. These packages have Rust and TypeScript implementations. `packages/protocol-fixtures` contains cross-language protocol fixtures and checks.
 - `crates/agentd` is the in-guest agent. It is a workspace member; the musl guest binary that ships in releases is built separately.
-- `sdk/python`, `sdk/node-ts`, and `sdk/go` contain the language SDKs and native bindings.
-- `docs/` contains the documentation site. Keep docs in sync with user-facing behavior.
+- `docs/` contains the documentation site, including usage guides in `docs/how-to/`, migration guides in `docs/migrations/`, and CLI/SDK references. Keep docs in sync with user-facing behavior.
 - `examples/` contains runnable examples. Add new example projects only when requested or clearly required by the contribution.
-- `mcp/` and `skills/` are submodules related to agent integrations.
-- `vendor/libkrunfw` is a submodule for the kernel firmware library.
+- `.agents/skills/` contains repository-specific agent skills. `.github/`, `scripts/ci/`, and `scripts/smoke/` contain CI workflows, automation, and validation tooling.
+- `packaging/` contains Docker and Windows package assets.
+- `mcp/` and `skills/` are submodules related to agent integrations; `vendor/libkrunfw` is the kernel firmware submodule.
 
-Repository layout:
+High-level repository layout (not exhaustive). Confirm paths against the checked-out revision before editing; submodule contents have their own layouts.
 
 ```text
 .
+|-- .agents/skills/
+|-- .github/
+|   |-- actions/
+|   `-- workflows/
 |-- AGENTS.md
-|-- Cargo.lock
 |-- Cargo.toml
+|-- Cargo.lock
 |-- COMPATIBILITY.md
 |-- DEVELOPMENT.md
 |-- Dockerfile.agentd
@@ -53,40 +57,49 @@ Repository layout:
 |   |   |-- init/
 |   |   |-- macros/
 |   |   `-- utils/
-|   `-- utils/
+|   |-- utils/
+|   `-- vsock/
 |-- docs/
+|   |-- api-reference/
 |   |-- changelog/
 |   |-- cli/
+|   |-- cloud/
+|   |-- enterprise/
 |   |-- getting-started/
+|   |-- how-to/
 |   |-- images/
+|   |-- migrations/
 |   |-- networking/
 |   |-- observability/
-|   |-- recipes/
+|   |-- operations/
 |   |-- sandboxes/
 |   |-- sdk/
-|   `-- security/
+|   |-- security/
+|   `-- troubleshooting/
 |-- examples/
 |   |-- python/
 |   |-- rust/
 |   `-- typescript/
 |-- mcp/
-|   |-- bin/
-|   |-- src/
-|   `-- package.json
 |-- packages/
 |   |-- agent-client/
-|   `-- microsandbox-types/
+|   |-- control-client/
+|   |-- microsandbox-types/
+|   |-- protocol-client/
+|   `-- protocol-fixtures/
 |-- packaging/
-|   `-- docker/
+|   |-- docker/
+|   `-- winget/
 |-- scripts/
+|   |-- ci/
 |   `-- smoke/
 |-- sdk/
 |   |-- go/
 |   |-- node-ts/
-|   |-- rust/
-|   `-- python/
+|   |-- python/
+|   |-- ruby/
+|   `-- rust/
 |-- skills/
-|   `-- microsandbox/
 `-- vendor/
     `-- libkrunfw/
 ```
@@ -104,6 +117,8 @@ Repository layout:
 Only `sbx/guest-state/` is exported as `/.msb`. Keep host journals, checkpoint stores, disk staging, and launch credentials outside that subtree. Guest-state contents remain untrusted: host readers must be bounded and reject symlinks/reparse points; host writers must not reuse guest-controlled links. Never add a compatibility alias that exposes host authority to the guest.
 
 The protected-layout security exception requires patched SDKs/CLIs and a runtime advertising `protected_guest_state`. Preserve catalog admission, lifecycle ownership, migration recovery records, and downgrade refusal; do not restore insecure legacy fallback behavior.
+
+Keep legacy migration gates off new and already-ready storage paths. Never infer macOS maintenance safety from one home's catalog or automatically set the operator's legacy-writer confirmation.
 
 ## Host Path Handling
 
@@ -168,6 +183,9 @@ Check each applicable compatibility direction:
 Treat stable strings, numeric constants, paths, hashes, serialized field details, ordering guarantees, timing, and error interpretations as compatibility-sensitive even when they are not part of the public API.
 
 For changes affecting persisted data or cross-version communication, read [COMPATIBILITY.md](COMPATIBILITY.md) before implementation. Follow its contract-version naming, module ownership, migration, and validation guidelines.
+
+- Follow [compatibility code organization](COMPATIBILITY.md#compatibility-code-organization): keep previous-format adapters under the owning component’s `compat/v<major>_<minor>_<patch>/`, named for the release that introduced the format. Keep storage formats with storage, saved-config conversion with the DB, and launch contracts with the runtime.
+- Keep current types and shared migration validation, locking, capture, publication, and recovery outside versioned adapters. Decoding legacy metadata never authorizes its file references or bypasses security capability checks.
 
 ## Path Handling
 
@@ -236,14 +254,15 @@ path = "bin/main.rs"
 //--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
-// Tests
+// Re-Exports
 //--------------------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------
-// Re-Exports
+// Tests
 //--------------------------------------------------------------------------------------------------
 ```
 
+- Re-Exports comes before Tests: `clippy::items_after_test_module` (warn by default) rejects any item after the test module, so a file that both re-exports and has tests cannot put the re-exports last.
 - Aggregator files that only expose modules and public items may use `Exports` instead of `Re-Exports` when matching existing files.
 - Use qualified section labels only to split large sections into obvious groups, for example `Types: Identifiers`, `Functions: Handlers`, or `Functions: Helpers`.
 - Do not create a qualified section for one or two items unless the surrounding file already uses that pattern.
@@ -291,7 +310,7 @@ Common Rust checks:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p microsandbox-cli
 ```
@@ -379,6 +398,8 @@ git diff origin/main..HEAD --name-status
 
 - For changes under `docs/`, read [the Microsandbox docs skill](.agents/skills/microsandbox-docs/SKILL.md) for page structure, examples, version labels, and validation.
 - Update docs when behavior, configuration, CLI flags, SDK APIs, or examples change.
+- For persisted-format or cross-version changes, update `COMPATIBILITY.md`. For user-visible upgrade, recovery, or downgrade changes, update the applicable existing `docs/migrations/` guide with affected versions, safe actions, and data-preservation limits.
+- Document command and API additions in their owning references and link to the migration guide instead of repeating it. Keep additions minimal and use maintained release-note sources; do not hand-edit generated changelogs.
 - Keep SDK reference introductions to a short purpose statement and a link to the relevant usage guide, then go straight into API entries. Follow the concise structure of the execution and networking reference pages across all SDK languages.
 - Start reference type sections directly with their members when the type heading is sufficient. Avoid redundant “Built by” / “Used by” rows and introductory text that repeats the member descriptions.
 - Do not prepend feature walkthroughs, lifecycle summaries, implementation details, or long examples to reference pages or type sections. Put API-specific details beside the relevant member and broader explanations in the usage guides; avoid duplicating those guides in the reference.

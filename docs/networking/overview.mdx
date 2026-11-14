@@ -408,7 +408,7 @@ Strict hostname policy mode is enabled by default: hostname allowlists fail clos
 
 ## Port mapping
 
-Publish a guest port to your host machine. This example forwards host port `8080` to guest port `80`, listening on `127.0.0.1` by default. Port publishing is local-only.
+Publish a guest port to your host machine. This example forwards host port `8080` to guest port `80`, listening on `127.0.0.1` by default. Startup fails if a host port is already in use. Port publishing is local-only.
 
 <CodeGroup>
 ```typescript TypeScript

@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort, TcpAcceptQueueSize};
+use crate::config::{ConnectionLimit, DnsConfig};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -31,7 +31,7 @@ use crate::engine::dns::{
 use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::ports::PortPublisher;
+use crate::ports::{BoundPublishedPorts, PortPublisher};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
@@ -226,12 +226,11 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
-/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
-///   connections on the host-bind address and forwards into the guest.
+/// * `published_ports` - Host sockets for host → guest port publishes; the publisher accepts
+///   inbound connections on them and forwards into the guest.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
 /// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
-/// * `tcp_accept_queue_size` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -242,11 +241,10 @@ pub fn smoltcp_poll_loop(
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
-    published_ports: Vec<PublishedPort>,
+    published_ports: BoundPublishedPorts,
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
-    tcp_accept_queue_size: TcpAcceptQueueSize,
     max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
@@ -290,13 +288,10 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
     );
     let mut port_publisher = PortPublisher::new(
-        &published_ports,
-        tcp_accept_queue_size,
+        published_ports,
         max_inbound_tcp_connections,
         config.guest_ipv4,
         config.guest_ipv6,
-        config.gateway.ipv4,
-        config.gateway.ipv6,
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
@@ -2064,11 +2059,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2213,11 +2207,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),

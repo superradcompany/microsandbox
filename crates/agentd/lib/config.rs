@@ -295,6 +295,7 @@ impl BootParams {
         validate_guest_bootstrap(&bootstrap)?;
 
         let GuestBootstrap {
+            storage_preview_oci: _,
             init_failure_ack: _,
             block_root,
             dir_mounts,

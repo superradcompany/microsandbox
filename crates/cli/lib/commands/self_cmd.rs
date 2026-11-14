@@ -36,6 +36,11 @@ use windows_sys::Win32::System::IO::OVERLAPPED;
 use super::install::is_generated_alias;
 use crate::ui;
 
+mod repair;
+mod storage_doctor;
+pub use repair::RepairArgs;
+pub use storage_doctor::{StorageDoctorExit, run_doctor_command};
+
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
@@ -65,9 +70,12 @@ pub struct SelfArgs {
 /// `msb self` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SelfCommand {
-    /// Check local runtime and host virtualization prerequisites.
+    /// Check host setup, or inspect a named sandbox.
     #[command(visible_alias = "check")]
     Doctor(DoctorArgs),
+
+    /// Repair local sandboxes without starting them.
+    Repair(RepairArgs),
 
     /// Update msb and libkrunfw to the latest release.
     #[command(visible_alias = "upgrade")]
@@ -129,15 +137,31 @@ pub struct WindowsSelfSwapArgs {
 }
 
 /// Arguments for `msb doctor` and `msb self doctor`.
-#[derive(Debug, Args, Clone, Copy)]
+#[derive(Debug, Args, Clone)]
 pub struct DoctorArgs {
+    /// Inspect this sandbox's storage. Omit to check the host.
+    #[arg(long = "sandbox", value_name = "SANDBOX", group = "storage_scope", conflicts_with_all = ["sandbox", "fix", "yes"])]
+    pub sandbox_flag: Option<String>,
+
+    /// Positional sandbox name retained for existing scripts.
+    #[arg(value_name = "SANDBOX", hide = true, group = "storage_scope", conflicts_with_all = ["sandbox_flag", "fix", "yes"])]
+    pub sandbox: Option<String>,
+
     /// Attempt supported host virtualization setup fixes.
     #[arg(long)]
     pub fix: bool,
 
-    /// Apply fixes without prompting for confirmation.
+    /// Apply host fixes without prompting for confirmation.
     #[arg(long, short = 'y')]
     pub yes: bool,
+
+    /// Inspect every sandbox in the configured local home.
+    #[arg(short = 'a', long, group = "storage_scope", conflicts_with_all = ["sandbox", "sandbox_flag", "fix", "yes"])]
+    pub all: bool,
+
+    /// Structured sandbox diagnosis (exit 0: ready or eligible, 2: action needed, 3: incomplete).
+    #[arg(long, requires = "storage_scope", value_enum)]
+    pub format: Option<crate::ui::OutputFormat>,
 }
 
 /// Arguments for `msb self uninstall`.
@@ -448,7 +472,8 @@ fn parse_version(input: &str) -> anyhow::Result<Version> {
 /// Run a `msb self` subcommand.
 pub async fn run(args: SelfArgs) -> anyhow::Result<()> {
     match args.command {
-        SelfCommand::Doctor(args) => run_doctor(args),
+        SelfCommand::Doctor(args) => run_doctor_command(args).await,
+        SelfCommand::Repair(args) => repair::run(args).await,
         SelfCommand::Update(args) => run_update(args).await,
         SelfCommand::Downgrade(args) => run_downgrade(args).await,
         SelfCommand::Uninstall(args) => run_uninstall(args).await,

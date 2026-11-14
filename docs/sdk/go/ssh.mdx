@@ -245,7 +245,7 @@ Bridge the local terminal to an interactive SSH shell. Requests a PTY sized to t
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">int</span></div>
-    <div className="msb-param-desc">Shell exit code (128 if terminated by signal).</div>
+    <div className="msb-param-desc">Shell exit code. Known SSH signals return <code>128 +</code> the Linux signal number (for example, <code>143</code> for <code>TERM</code>); unknown signal names return <code>128</code>.</div>
   </div>
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">error</span></div>
