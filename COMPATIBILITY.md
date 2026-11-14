@@ -590,8 +590,11 @@ change adds no runtime/guest protocol requirement or catalog migration. Older
 SDKs keep their previous restore footprint; updating only the runtime binary
 does not change that SDK behavior. Snapshot source files remain immutable.
 
-The Rust SDK adds `Snapshot::load_bounded` for local callers that need an
-aggregate write budget and a maximum virtual disk size. It accepts one complete
+The Rust SDK adds `Snapshot::load_bounded` for local callers with a known
+maximum virtual disk size. It derives its aggregate write allowance from that
+size and the supported import steps; callers do not configure a separate byte
+limit. `Snapshot::bounded_import_peak_bytes` exposes that same calculation so
+embedding workers can reserve the complete import allowance before writing. It accepts one complete
 raw-disk snapshot without bundled image-cache, owned-volume, memory or dependency
 payloads. Tar members are charged before extraction, including the logical size
 of sparse entries, and the descriptor is checked before layer placement or

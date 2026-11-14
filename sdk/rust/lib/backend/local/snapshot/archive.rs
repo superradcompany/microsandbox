@@ -4522,7 +4522,6 @@ mod tests {
                     group: Some("bounded".into()),
                     ..Default::default()
                 },
-                4 * 1024 * 1024,
                 4096,
             )
             .await
@@ -4532,14 +4531,14 @@ mod tests {
                 data.snapshot_id
             );
 
-            for (budget, disk_limit, expected) in [
-                (1, 4096, "aggregate byte budget"),
-                (4 * 1024 * 1024, 2048, "maximum disk size"),
+            for (disk_limit, expected) in [
+                (0, "must be positive"),
+                (u64::MAX, "overflow"),
+                (2048, "maximum disk size"),
             ] {
-                let error =
-                    PublicSnapshot::load_bounded(&archive, LoadOpts::default(), budget, disk_limit)
-                        .await
-                        .unwrap_err();
+                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), disk_limit)
+                    .await
+                    .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
             }
             let local = default_backend();
@@ -4598,25 +4597,46 @@ mod tests {
                 header.set_mode(0o600);
                 header.set_entry_type(EntryType::GNUSparse);
                 header.set_size(0);
-                header
-                    .as_gnu_mut()
-                    .unwrap()
-                    .realsize
-                    .copy_from_slice(b"00400000000\0");
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
                 header.set_cksum();
                 let mut bytes = header.as_bytes().to_vec();
                 bytes.resize(bytes.len() + 1024, 0);
                 std::fs::write(&archive, bytes).unwrap();
-                let error = PublicSnapshot::load_bounded(
-                    &archive,
-                    LoadOpts::default(),
-                    128 * 1024 * 1024,
-                    4096,
-                )
-                .await
-                .unwrap_err();
+                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 4096)
+                    .await
+                    .unwrap_err();
                 assert!(error.to_string().contains(expected), "{error}");
             }
+            let archive = root.path().join("aggregate.tar");
+            let mut bytes = Vec::new();
+            for index in 0..2 {
+                let mut header = tokio_tar::Header::new_gnu();
+                header
+                    .set_path(format!("files/{}/upper-{index}.ext4", "a".repeat(64)))
+                    .unwrap();
+                header.set_mode(0o600);
+                header.set_entry_type(EntryType::GNUSparse);
+                header.set_size(0);
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
+                header.set_cksum();
+                bytes.extend_from_slice(header.as_bytes());
+            }
+            bytes.resize(bytes.len() + 1024, 0);
+            std::fs::write(&archive, bytes).unwrap();
+            let error =
+                PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("aggregate byte budget"),
+                "{error}"
+            );
         })
         .await;
     }

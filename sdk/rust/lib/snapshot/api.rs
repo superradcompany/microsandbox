@@ -692,15 +692,22 @@ impl Snapshot {
         Ok(handles.remove(0))
     }
 
-    /// Import a disk-only raw archive with an aggregate write budget. The
-    /// limit covers extraction and simultaneous normalization/publication
-    /// copies. Bundled images, memory and owned volumes are refused before
-    /// their payloads are written. Existing unbounded imports are unchanged.
+    /// Maximum local writes for a bounded raw-disk import, including temporary
+    /// copies and metadata. Embedding workers reserve this amount before calling
+    /// `load_bounded`; both use the same calculation from the maximum disk size.
+    #[cfg(feature = "local")]
+    pub fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64> {
+        super::import_budget::peak_bytes(maximum_disk_bytes)
+    }
+
+    /// Import a disk-only raw archive within its known maximum disk size.
+    /// Temporary-copy and metadata allowances are derived internally. Bundled
+    /// images, memory and owned volumes are refused before their payloads are
+    /// written. Existing unbounded imports are unchanged.
     #[cfg(feature = "local")]
     pub async fn load_bounded(
         path: &Path,
         opts: LoadOpts,
-        write_budget_bytes: u64,
         maximum_disk_bytes: u64,
     ) -> MicrosandboxResult<SnapshotHandle> {
         let backend = crate::backend::default_backend();
@@ -710,12 +717,7 @@ impl Snapshot {
                     .into(),
             ));
         }
-        super::import_budget::scope(
-            write_budget_bytes,
-            maximum_disk_bytes,
-            Self::load_with_options(path, opts),
-        )
-        .await
+        super::import_budget::scope(maximum_disk_bytes, Self::load_with_options(path, opts)).await
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(
