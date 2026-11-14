@@ -10,20 +10,28 @@ use microsandbox_types::snapshot::SnapshotFormat;
 
 use crate::{MicrosandboxError, MicrosandboxResult};
 
+//--------------------------------------------------------------------------------------------------
+// Constants
+//--------------------------------------------------------------------------------------------------
+
 const MAX_ENTRIES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const ENTRY_HEADROOM: u64 = 64 * 1024;
 
-tokio::task_local! {
-    static BUDGET: Arc<Mutex<ImportBudget>>;
-}
+//--------------------------------------------------------------------------------------------------
+// Types
+//--------------------------------------------------------------------------------------------------
 
 struct ImportBudget {
     remaining: u64,
     maximum_disk: u64,
     entries: usize,
 }
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
 
 impl ImportBudget {
     fn charge(&mut self, path: &Path, header: &tokio_tar::Header) -> MicrosandboxResult<()> {
@@ -104,6 +112,10 @@ impl ImportBudget {
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------------------
+
 pub(crate) fn active() -> bool {
     BUDGET.try_with(|_| ()).is_ok()
 }
@@ -155,4 +167,12 @@ pub(crate) fn verify_manifest(manifest: &SnapshotManifest) -> MicrosandboxResult
 
 fn invalid(message: &str) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(message.into())
+}
+
+//--------------------------------------------------------------------------------------------------
+// Macros
+//--------------------------------------------------------------------------------------------------
+
+tokio::task_local! {
+    static BUDGET: Arc<Mutex<ImportBudget>>;
 }
