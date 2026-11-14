@@ -11,7 +11,7 @@
 use std::{
     ops::Deref,
     sync::{
-        Weak,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -55,7 +55,9 @@ pub(crate) struct AgentConnection {
 #[cfg_attr(not(any(test, feature = "cloud")), allow(dead_code))]
 pub(crate) trait Reclaim: Send + Sync {
     /// Offer a finished connection for reuse. The implementation keeps it or drops it.
-    fn reclaim(&self, sandbox_id: &str, client: AgentClient, opened: Instant);
+    ///
+    /// The pool arrives as an `Arc` so that it can set a timer that refers back to itself.
+    fn reclaim(self: Arc<Self>, sandbox_id: &str, client: AgentClient, opened: Instant);
 }
 
 /// The pool a connection was taken from.

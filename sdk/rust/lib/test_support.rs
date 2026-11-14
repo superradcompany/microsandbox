@@ -54,7 +54,7 @@ impl ReclaimedAgents {
 //--------------------------------------------------------------------------------------------------
 
 impl Reclaim for ReclaimedAgents {
-    fn reclaim(&self, _sandbox_id: &str, client: AgentClient, _opened: Instant) {
+    fn reclaim(self: Arc<Self>, _sandbox_id: &str, client: AgentClient, _opened: Instant) {
         // Holding the client keeps the connection open, as a real pool would.
         self.0.lock().unwrap().push(client);
     }

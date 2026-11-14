@@ -16,7 +16,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use tokio::time::Instant;
+use tokio::{runtime::Handle, task::AbortHandle, time::Instant};
 
 use crate::{
     MicrosandboxResult,
@@ -39,7 +39,8 @@ pub(super) const AGENT_REUSE_ENV: &str = "MSB_CLOUD_AGENT_REUSE";
 /// draw on too, so the number stays small.
 const MAX_WAITING: usize = 2;
 
-/// Longest a connection may wait unused.
+/// Longest a connection may wait unused. A timer closes it when the time is up, whether or not
+/// another operation ever asks for one.
 ///
 /// Nothing probes a waiting connection. One that the far end closed is noticed and skipped, but
 /// one that the network dropped without notice is only found by the operation that gets it,
@@ -100,7 +101,17 @@ struct WaitingAgent {
 
     /// The same moment on the wall clock, which keeps going while the machine sleeps.
     waiting_since_wall: SystemTime,
+
+    /// Closes the connection once it has waited too long. Held only to be dropped.
+    _expiry: Expiry,
 }
+
+/// The timer of one waiting connection.
+///
+/// Without it a connection would only be let go when a later operation looked for one. A
+/// caller that went quiet would keep its connections, and the relay slots they hold, for as
+/// long as the backend lived. Dropping this stops the timer.
+struct Expiry(Option<AbortHandle>);
 
 //--------------------------------------------------------------------------------------------------
 // Methods
@@ -159,34 +170,13 @@ impl AgentPool {
     /// Remove and return the sandbox's most recently used waiting connection.
     ///
     /// First closes every waiting connection, for any sandbox, that has died or that the policy
-    /// no longer accepts. Sandboxes that are gone or quiet would otherwise hold a socket for
-    /// the backend's life.
+    /// no longer accepts, in case a timer could not.
     fn take_waiting(&self, sandbox_id: &str) -> Option<WaitingAgent> {
-        let now = Instant::now();
-        let wall_now = SystemTime::now();
         let mut retired = Vec::new();
 
         let taken = {
             let mut waiting = self.waiting.lock().unwrap();
-
-            for (id, connections) in waiting.iter_mut() {
-                let mut index = 0;
-                while index < connections.len() {
-                    let connection = &connections[index];
-                    let candidate = Candidate {
-                        age: now.duration_since(connection.opened),
-                        idle_for: connection.idle_for(now, wall_now),
-                        idle_peers: connections.len() - 1,
-                    };
-
-                    if !connection.client.is_closed() && self.decide(id, candidate) {
-                        index += 1;
-                    } else {
-                        retired.push(connections.remove(index));
-                    }
-                }
-            }
-            waiting.retain(|_, connections| !connections.is_empty());
+            self.retire(&mut waiting, &mut retired);
 
             waiting.get_mut(sandbox_id).and_then(Vec::pop)
         };
@@ -195,6 +185,46 @@ impl AgentPool {
         drop(retired);
 
         taken
+    }
+
+    /// Close every waiting connection, for any sandbox, that has died or that the policy no
+    /// longer accepts. A waiting connection's timer calls this when its time is up.
+    fn retire_expired(&self) {
+        let mut retired = Vec::new();
+        self.retire(&mut self.waiting.lock().unwrap(), &mut retired);
+
+        // Closing a socket is not work to do while holding the lock.
+        drop(retired);
+    }
+
+    /// Move every waiting connection that has died or that the policy no longer accepts out
+    /// of `waiting` and into `retired`, for the caller to drop once the lock is released.
+    fn retire(
+        &self,
+        waiting: &mut HashMap<String, Vec<WaitingAgent>>,
+        retired: &mut Vec<WaitingAgent>,
+    ) {
+        let now = Instant::now();
+        let wall_now = SystemTime::now();
+
+        for (id, connections) in waiting.iter_mut() {
+            let mut index = 0;
+            while index < connections.len() {
+                let connection = &connections[index];
+                let candidate = Candidate {
+                    age: now.duration_since(connection.opened),
+                    idle_for: connection.idle_for(now, wall_now),
+                    idle_peers: connections.len() - 1,
+                };
+
+                if !connection.client.is_closed() && self.decide(id, candidate) {
+                    index += 1;
+                } else {
+                    retired.push(connections.remove(index));
+                }
+            }
+        }
+        waiting.retain(|_, connections| !connections.is_empty());
     }
 
     /// Ask the policy about one connection and record the answer.
@@ -211,6 +241,28 @@ impl AgentPool {
         );
 
         kept
+    }
+}
+
+impl Expiry {
+    /// Start a timer that has `pool` close whatever has waited too long, once `after` has
+    /// passed.
+    ///
+    /// A connection can be handed back on a thread that has no runtime, where no timer can
+    /// run. It is then closed by the next checkout, or when the pool goes.
+    fn start(pool: &Arc<AgentPool>, after: Duration) -> Self {
+        let Ok(runtime) = Handle::try_current() else {
+            return Self(None);
+        };
+        let pool = Arc::downgrade(pool);
+        let timer = runtime.spawn(async move {
+            tokio::time::sleep(after).await;
+            if let Some(pool) = pool.upgrade() {
+                pool.retire_expired();
+            }
+        });
+
+        Self(Some(timer.abort_handle()))
     }
 }
 
@@ -234,8 +286,16 @@ impl WaitingAgent {
 // Trait Implementations
 //--------------------------------------------------------------------------------------------------
 
+impl Drop for Expiry {
+    fn drop(&mut self) {
+        if let Some(timer) = self.0.take() {
+            timer.abort();
+        }
+    }
+}
+
 impl Reclaim for AgentPool {
-    fn reclaim(&self, sandbox_id: &str, client: AgentClient, opened: Instant) {
+    fn reclaim(self: Arc<Self>, sandbox_id: &str, client: AgentClient, opened: Instant) {
         if client.is_closed() {
             return;
         }
@@ -258,6 +318,7 @@ impl Reclaim for AgentPool {
                         opened,
                         waiting_since: now,
                         waiting_since_wall: SystemTime::now(),
+                        _expiry: Expiry::start(&self, MAX_IDLE),
                     });
 
                 None
@@ -578,6 +639,68 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn waiting_connection_is_closed_at_its_idle_limit_without_another_checkout() {
+        let pool = Arc::new(AgentPool::new());
+        let dialer = Dialer::default();
+
+        let only = pool.checkout("sandbox", || dialer.dial()).await.unwrap();
+        only.connection.finish();
+        drop(only);
+
+        tokio::time::sleep(MAX_IDLE - Duration::from_secs(1)).await;
+        assert_eq!(
+            pool.waiting.lock().unwrap().len(),
+            1,
+            "kept until the limit"
+        );
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(pool.waiting.lock().unwrap().is_empty());
+        dialer.expect_closed(0).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_that_waits_again_gets_its_full_idle_time_again() {
+        let pool = Arc::new(AgentPool::new());
+        let dialer = Dialer::default();
+
+        let first = pool.checkout("sandbox", || dialer.dial()).await.unwrap();
+        first.connection.finish();
+        drop(first);
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let second = pool.checkout("sandbox", || dialer.dial()).await.unwrap();
+        assert!(second.reused);
+        second.connection.finish();
+        drop(second);
+
+        // 35 s after the first wait began, which is 15 s into the second.
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        assert_eq!(
+            pool.waiting.lock().unwrap().len(),
+            1,
+            "the first timer was stopped"
+        );
+
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        assert!(pool.waiting.lock().unwrap().is_empty());
+        dialer.expect_closed(0).await;
+    }
+
+    #[tokio::test]
+    async fn connection_handed_back_outside_a_runtime_waits_without_a_timer() {
+        let pool = Arc::new(AgentPool::new());
+        let dialer = Dialer::default();
+
+        let first = pool.checkout("sandbox", || dialer.dial()).await.unwrap();
+        first.connection.finish();
+        std::thread::spawn(move || drop(first)).join().unwrap();
+        let second = pool.checkout("sandbox", || dialer.dial()).await.unwrap();
+
+        assert!(second.reused);
+        assert_eq!(dialer.dials().await, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn checkout_retires_waiting_connections_of_other_sandboxes() {
         let pool = Arc::new(AgentPool::with_policy(keep_while_idle_under_30s));
         let dialer = Dialer::default();
@@ -624,6 +747,7 @@ mod tests {
             opened: now,
             waiting_since: now,
             waiting_since_wall: wall_now - hour,
+            _expiry: Expiry(None),
         };
 
         // No monotonic time has passed, as after a sleep, but the wall clock moved on.

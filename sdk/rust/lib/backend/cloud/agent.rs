@@ -1,6 +1,7 @@
 //! Identity-bound agent connections for cloud sandbox objects.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tokio_tungstenite::{
@@ -14,9 +15,54 @@ use tokio_tungstenite::{
     },
 };
 
+#[cfg(test)]
+use super::agent_reuse::{AgentPool, Policy};
 use super::{CloudBackend, cloud_agent_tls_connector, default_user_agent};
+use crate::agent::AgentConnection;
 use crate::backend::{Backend, BackendInfo, BackendKind, SandboxBackend, VolumeBackend};
 use crate::{MicrosandboxError, MicrosandboxResult, timing};
+
+//--------------------------------------------------------------------------------------------------
+// Methods
+//--------------------------------------------------------------------------------------------------
+
+impl CloudBackend {
+    /// Take a connection for one operation on the named sandbox from this backend's pool.
+    ///
+    /// Returns `None` when reuse is off or when this backend is not bound to the sandbox's
+    /// identity. Only bound backends pool: connections are kept by sandbox ID, and resolving a
+    /// name first would cost a request and could hand the operation a connection to a
+    /// replacement sandbox.
+    pub(crate) async fn pooled_agent(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> MicrosandboxResult<Option<AgentConnection>> {
+        let Some(pool) = &self.agent_pool else {
+            return Ok(None);
+        };
+        let Some((bound_name, sandbox_id)) = &self.agent_identity else {
+            return Ok(None);
+        };
+        if bound_name != name {
+            return Ok(None);
+        }
+
+        let checkout = pool
+            .checkout(sandbox_id, || self.dial_agent(name, timeout))
+            .await?;
+        tracing::trace!(target: timing::TARGET, %sandbox_id, reused = checkout.reused, "cloud agent connection selected");
+
+        Ok(Some(checkout.connection))
+    }
+
+    /// Turn on agent connection reuse with an explicit keep policy.
+    #[cfg(test)]
+    pub(crate) fn with_agent_pool(mut self, policy: Policy) -> Self {
+        self.agent_pool = Some(Arc::new(AgentPool::with_policy(policy)));
+        self
+    }
+}
 
 //--------------------------------------------------------------------------------------------------
 // Trait Implementations
