@@ -8,7 +8,9 @@ pub(crate) use owned::materialize_owned_volumes;
 
 use std::path::{Path, PathBuf};
 
-use microsandbox_image::checkpoint::{CheckpointClosure, ObjectId};
+use microsandbox_image::checkpoint::{
+    CheckpointClosure, CompactLayer, ObjectId, materialize_raw_prefix,
+};
 use microsandbox_image::snapshot::SnapshotRootDisk;
 use microsandbox_runtime::checkpoint;
 use microsandbox_runtime::launch::{CheckpointRestoreConfig, RootfsUpperLayerConfig};
@@ -160,7 +162,9 @@ pub(crate) async fn materialize_checkpoint_child_state(
     })
 }
 
-/// Materialize installed file-snapshot layers into child-owned storage and add a writable head.
+/// Materialize installed file-snapshot layers into one child-private writable raw disk.
+/// A restored guest must not retain a sealed copy plus another disk's worth of
+/// writable qcow2 state. Existing raw launch/config formats need no new protocol.
 pub(crate) async fn materialize_file_snapshot_for_child(
     sources: &[RootfsUpperLayerConfig],
     virtual_size: u64,
@@ -172,38 +176,64 @@ pub(crate) async fn materialize_file_snapshot_for_child(
             "file snapshot has no restorable disk closure".into(),
         ));
     }
-    let mut layers = Vec::with_capacity(sources.len() + 1);
-    for (index, source) in sources.iter().enumerate() {
-        let target = checkpoint_layer_target(child_stage, root_disk, index, &source.format)?;
-        let source_path = source.path.clone();
-        let target_for_copy = target.clone();
-        let predecessor = layers
-            .last()
-            .map(|layer: &RootfsUpperLayerConfig| layer.path.clone());
-        let pin = super::lease::pin_source(&source_path)?;
-        {
-            let worker_storage = child_stage.clone();
-            tokio::task::spawn_blocking(move || {
-                let _storage = worker_storage;
-
-                let _lease = pin;
-                std::fs::create_dir_all(target_for_copy.parent().expect("child staging"))?;
-                copy_child_disk_layer(&source_path, &target_for_copy, predecessor.as_deref())
-            })
+    if virtual_size == 0 || !virtual_size.is_multiple_of(512) {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "invalid restored disk size".into(),
+        ));
+    }
+    let target = checkpoint_layer_target(child_stage, root_disk, 0, "raw")?;
+    let mut pins = Vec::with_capacity(sources.len());
+    let mut layers = Vec::with_capacity(sources.len());
+    for source in sources {
+        if !matches!(source.format.as_str(), "raw" | "qcow2") {
+            return Err(MicrosandboxError::SnapshotIntegrity(
+                "unsupported restored disk layer".into(),
+            ));
         }
-        .await
-        .map_err(|error| {
-            MicrosandboxError::Custom(format!("snapshot layer copy task: {error}"))
-        })??;
-
-        layers.push(RootfsUpperLayerConfig {
-            path: target,
-            format: source.format.clone(),
+        pins.push(super::lease::pin_source(&source.path)?);
+        layers.push(CompactLayer {
+            path: source.path.clone(),
+            qcow2: source.format == "qcow2",
         });
     }
-    append_private_writable_head(&mut layers, virtual_size, child_stage, root_disk).await?;
+    let worker_storage = child_stage.clone();
+    let destination = target.clone();
+    tokio::task::spawn_blocking(move || {
+        let _storage = worker_storage;
+        let _pins = pins;
+        std::fs::create_dir_all(destination.parent().expect("child staging"))?;
+        if layers.len() == 1 && !layers[0].qcow2 {
+            let metadata = std::fs::symlink_metadata(&layers[0].path)?;
+            if !metadata.is_file() || metadata.len() != virtual_size {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "raw source size differs from restored disk size".into(),
+                ));
+            }
+            // fast_copy creates a distinct inode using reflink or sparse copy.
+            // A hard link here would let child writes mutate the snapshot.
+            microsandbox_utils::copy::fast_copy(&layers[0].path, &destination)?;
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let materialized = runtime.block_on(materialize_raw_prefix(&layers, &destination))?;
+            if materialized.virtual_size != virtual_size {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "resolved chain size differs from restored disk size".into(),
+                ));
+            }
+        }
+        Ok::<_, MicrosandboxError>(())
+    })
+    .await
+    .map_err(|error| {
+        MicrosandboxError::Custom(format!("snapshot disk materialization task: {error}"))
+    })??;
     Ok(CheckpointDiskMaterialization {
-        upper_layers: layers,
+        upper_layers: vec![RootfsUpperLayerConfig {
+            path: target,
+            format: "raw".into(),
+        }],
         disk_mounts: Vec::new(),
     })
 }
@@ -679,6 +709,76 @@ mod tests {
             checkpoint_layer_target(child, &SnapshotRootDisk::Flat, 1, "qcow2").unwrap(),
             child.join("root-sealed-001.qcow2")
         );
+    }
+
+    #[tokio::test]
+    async fn file_restore_owns_one_writable_disk_and_never_mutates_its_source() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.raw");
+        let size = 4 * 1024 * 1024;
+        let mut file = std::fs::File::create(&source).unwrap();
+        file.set_len(size).unwrap();
+        file.seek(SeekFrom::Start(1024 * 1024)).unwrap();
+        file.write_all(b"source-state").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let sources = vec![RootfsUpperLayerConfig {
+            path: source.clone(),
+            format: "raw".into(),
+        }];
+        for root in [SnapshotRootDisk::Managed, SnapshotRootDisk::Flat] {
+            let child = directory
+                .path()
+                .join(if matches!(root, SnapshotRootDisk::Managed) {
+                    "managed"
+                } else {
+                    "flat"
+                });
+            std::fs::create_dir_all(&child).unwrap();
+            let restored = materialize_file_snapshot_for_child(
+                &sources,
+                size,
+                &CreationStorage::for_test(&child),
+                &root,
+            )
+            .await
+            .unwrap();
+            assert_eq!(restored.upper_layers.len(), 1);
+            let disk = &restored.upper_layers[0];
+            assert_eq!(disk.format, "raw");
+            assert_eq!(std::fs::metadata(&disk.path).unwrap().len(), size);
+            assert_eq!(
+                std::fs::read(&disk.path).unwrap(),
+                std::fs::read(&source).unwrap()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_ne!(
+                    std::fs::metadata(&disk.path).unwrap().ino(),
+                    std::fs::metadata(&source).unwrap().ino()
+                );
+            }
+            let mut writable = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&disk.path)
+                .unwrap();
+            writable.seek(SeekFrom::Start(1024 * 1024)).unwrap();
+            writable.write_all(b"child-writes").unwrap();
+            writable.sync_all().unwrap();
+            drop(writable);
+            assert_eq!(
+                &std::fs::read(&source).unwrap()[1024 * 1024..1024 * 1024 + 12],
+                b"source-state"
+            );
+            assert_eq!(
+                std::fs::read_dir(&child).unwrap().count(),
+                1,
+                "the live disk has no retained sealed predecessor"
+            );
+        }
     }
 
     #[tokio::test]

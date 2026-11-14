@@ -7,6 +7,8 @@
 mod api;
 mod copy;
 mod metadata;
+#[cfg(feature = "local")]
+pub(crate) mod import_budget;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
