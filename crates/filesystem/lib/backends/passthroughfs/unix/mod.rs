@@ -10,6 +10,7 @@ mod create_ops;
 mod dax;
 mod dir_ops;
 mod file_ops;
+mod handle_table;
 mod host_mode;
 pub(crate) mod inode;
 mod metadata;
@@ -37,7 +38,6 @@ use crate::{
     AddDirEntry, AddDirEntryPlus, Context, DirEntry, DynFileSystem, Entry, Extensions, FsOptions,
     GetxattrReply, ListxattrReply, OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
     backends::shared::{
-        handle_table::HandleData,
         init_binary,
         inode_table::{InodeAltKey, InodeData, MultikeyBTreeMap},
         platform, stat_override,
@@ -209,7 +209,7 @@ pub struct PassthroughFs {
     pub(crate) next_inode: AtomicU64,
 
     /// Open file handle table.
-    pub(crate) handles: RwLock<BTreeMap<u64, Arc<HandleData>>>,
+    pub(crate) handles: RwLock<handle_table::FileHandles>,
 
     /// Open directory handle table.
     pub(crate) dir_handles: RwLock<BTreeMap<u64, Arc<PassthroughDirHandle>>>,
@@ -400,7 +400,7 @@ impl PassthroughFs {
             root_fd,
             inodes: RwLock::new(MultikeyBTreeMap::new()),
             next_inode: AtomicU64::new(3), // 1=root, 2=init
-            handles: RwLock::new(BTreeMap::new()),
+            handles: RwLock::new(Default::default()),
             dir_handles: RwLock::new(BTreeMap::new()),
             next_handle: AtomicU64::new(1), // 0=init handle
             writeback: AtomicBool::new(false),

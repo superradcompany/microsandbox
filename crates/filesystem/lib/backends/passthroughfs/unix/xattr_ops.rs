@@ -5,11 +5,6 @@
 //! FUSE protocol guarantees ALL guest xattr operations go through these handlers — there is
 //! no direct path from the guest to the host filesystem.
 //!
-//! ## Errno Safety
-//!
-//! All error paths capture `io::Error::last_os_error()` *before* calling `libc::close(fd)`,
-//! since `close()` may clobber errno on some systems. The captured error is then returned.
-//!
 //! ## listxattr size=0
 //!
 //! When `size=0` (query byte count), the response is computed by doing a full listxattr,
@@ -17,7 +12,12 @@
 //! kernel count would leak the hidden xattr's existence (the guest could compare the
 //! unfiltered count with the filtered list to infer the xattr exists).
 
-use std::{ffi::CStr, io};
+use std::{
+    ffi::CStr,
+    fs::File,
+    io,
+    os::fd::{AsRawFd, FromRawFd},
+};
 
 #[cfg(target_os = "macos")]
 use super::metadata;
@@ -52,49 +52,45 @@ pub(crate) fn do_setxattr(
         return Err(platform::eacces());
     }
 
-    let fd = open_xattr_fd(fs, ino)?;
-
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/self/fd/{fd}\0");
-        let ret = unsafe {
-            libc::setxattr(
-                path.as_ptr() as *const libc::c_char,
-                name.as_ptr(),
-                value.as_ptr() as *const libc::c_void,
-                value.len(),
-                flags as i32,
-            )
-        };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+    with_xattr_fd(fs, ino, |fd| {
+        #[cfg(target_os = "linux")]
+        {
+            let path = format!("/proc/self/fd/{fd}\0");
+            let ret = unsafe {
+                libc::setxattr(
+                    path.as_ptr() as *const libc::c_char,
+                    name.as_ptr(),
+                    value.as_ptr() as *const libc::c_void,
+                    value.len(),
+                    flags as i32,
+                )
+            };
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
         }
-        unsafe { libc::close(fd) };
-    }
 
-    #[cfg(target_os = "macos")]
-    {
-        let ret = unsafe {
-            libc::fsetxattr(
-                fd,
-                name.as_ptr(),
-                value.as_ptr() as *const libc::c_void,
-                value.len(),
-                0,
-                flags as i32,
-            )
-        };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+        #[cfg(target_os = "macos")]
+        {
+            let ret = unsafe {
+                libc::fsetxattr(
+                    fd,
+                    name.as_ptr(),
+                    value.as_ptr() as *const libc::c_void,
+                    value.len(),
+                    0,
+                    flags as i32,
+                )
+            };
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
         }
-        unsafe { libc::close(fd) };
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Get an extended attribute.
@@ -114,70 +110,66 @@ pub(crate) fn do_getxattr(
         return Err(platform::eacces());
     }
 
-    let fd = open_xattr_fd(fs, ino)?;
+    with_xattr_fd(fs, ino, |fd| {
+        if size == 0 {
+            // Query size.
+            #[cfg(target_os = "linux")]
+            let ret = {
+                let path = format!("/proc/self/fd/{fd}\0");
+                unsafe {
+                    libc::getxattr(
+                        path.as_ptr() as *const libc::c_char,
+                        name.as_ptr(),
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                }
+            };
 
-    if size == 0 {
-        // Query size.
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::getxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    name.as_ptr(),
-                    std::ptr::null_mut(),
-                    0,
-                )
+            #[cfg(target_os = "macos")]
+            let ret = unsafe { libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
             }
-        };
+            Ok(GetxattrReply::Count(ret as u32))
+        } else {
+            let mut buf = vec![0u8; size as usize];
 
-        #[cfg(target_os = "macos")]
-        let ret = unsafe { libc::fgetxattr(fd, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0) };
+            #[cfg(target_os = "linux")]
+            let ret = {
+                let path = format!("/proc/self/fd/{fd}\0");
+                unsafe {
+                    libc::getxattr(
+                        path.as_ptr() as *const libc::c_char,
+                        name.as_ptr(),
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                    )
+                }
+            };
 
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-        unsafe { libc::close(fd) };
-        Ok(GetxattrReply::Count(ret as u32))
-    } else {
-        let mut buf = vec![0u8; size as usize];
-
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::getxattr(
-                    path.as_ptr() as *const libc::c_char,
+            #[cfg(target_os = "macos")]
+            let ret = unsafe {
+                libc::fgetxattr(
+                    fd,
                     name.as_ptr(),
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
+                    0,
+                    0,
                 )
+            };
+
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
             }
-        };
-
-        #[cfg(target_os = "macos")]
-        let ret = unsafe {
-            libc::fgetxattr(
-                fd,
-                name.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-                0,
-            )
-        };
-
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+            buf.truncate(ret as usize);
+            Ok(GetxattrReply::Value(buf))
         }
-        unsafe { libc::close(fd) };
-        buf.truncate(ret as usize);
-        Ok(GetxattrReply::Value(buf))
-    }
+    })
 }
 
 /// List extended attribute names.
@@ -196,100 +188,96 @@ pub(crate) fn do_listxattr(
         return Ok(ListxattrReply::Names(Vec::new()));
     }
 
-    let fd = open_xattr_fd(fs, ino)?;
+    with_xattr_fd(fs, ino, |fd| {
+        if size == 0 {
+            // Do a full listxattr, filter, and return the filtered byte count.
+            // Returning the raw kernel count would leak the hidden xattr's existence.
+            #[cfg(target_os = "linux")]
+            let raw_size = {
+                let path = format!("/proc/self/fd/{fd}\0");
+                unsafe {
+                    libc::listxattr(
+                        path.as_ptr() as *const libc::c_char,
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                }
+            };
 
-    if size == 0 {
-        // Do a full listxattr, filter, and return the filtered byte count.
-        // Returning the raw kernel count would leak the hidden xattr's existence.
-        #[cfg(target_os = "linux")]
-        let raw_size = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    std::ptr::null_mut(),
-                    0,
-                )
+            #[cfg(target_os = "macos")]
+            let raw_size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
+
+            if raw_size < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
             }
-        };
 
-        #[cfg(target_os = "macos")]
-        let raw_size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0, 0) };
-
-        if raw_size < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-
-        if raw_size == 0 {
-            unsafe { libc::close(fd) };
-            return Ok(ListxattrReply::Count(0));
-        }
-
-        // Read the full list to compute filtered size.
-        let mut buf = vec![0u8; raw_size as usize];
-
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
+            if raw_size == 0 {
+                return Ok(ListxattrReply::Count(0));
             }
-        };
 
-        #[cfg(target_os = "macos")]
-        let ret =
-            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
+            // Read the full list to compute filtered size.
+            let mut buf = vec![0u8; raw_size as usize];
 
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
-        }
-        unsafe { libc::close(fd) };
-        buf.truncate(ret as usize);
+            #[cfg(target_os = "linux")]
+            let ret = {
+                let path = format!("/proc/self/fd/{fd}\0");
+                unsafe {
+                    libc::listxattr(
+                        path.as_ptr() as *const libc::c_char,
+                        buf.as_mut_ptr() as *mut libc::c_char,
+                        buf.len(),
+                    )
+                }
+            };
 
-        let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
-        let filtered = filter_xattr_names(&buf, hidden_key);
-        Ok(ListxattrReply::Count(filtered.len() as u32))
-    } else {
-        let mut buf = vec![0u8; size as usize];
+            #[cfg(target_os = "macos")]
+            let ret = unsafe {
+                libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
+            };
 
-        #[cfg(target_os = "linux")]
-        let ret = {
-            let path = format!("/proc/self/fd/{fd}\0");
-            unsafe {
-                libc::listxattr(
-                    path.as_ptr() as *const libc::c_char,
-                    buf.as_mut_ptr() as *mut libc::c_char,
-                    buf.len(),
-                )
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
             }
-        };
+            buf.truncate(ret as usize);
 
-        #[cfg(target_os = "macos")]
-        let ret =
-            unsafe { libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0) };
+            let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
+            let filtered = filter_xattr_names(&buf, hidden_key);
+            Ok(ListxattrReply::Count(filtered.len() as u32))
+        } else {
+            let mut buf = vec![0u8; size as usize];
 
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+            #[cfg(target_os = "linux")]
+            let ret = {
+                let path = format!("/proc/self/fd/{fd}\0");
+                unsafe {
+                    libc::listxattr(
+                        path.as_ptr() as *const libc::c_char,
+                        buf.as_mut_ptr() as *mut libc::c_char,
+                        buf.len(),
+                    )
+                }
+            };
+
+            #[cfg(target_os = "macos")]
+            let ret = unsafe {
+                libc::flistxattr(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len(), 0)
+            };
+
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+            buf.truncate(ret as usize);
+
+            // Filter out the override xattr key from the list.
+            let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
+            let filtered = filter_xattr_names(&buf, hidden_key);
+
+            Ok(ListxattrReply::Names(filtered))
         }
-        unsafe { libc::close(fd) };
-        buf.truncate(ret as usize);
-
-        // Filter out the override xattr key from the list.
-        let hidden_key = stat_override::OVERRIDE_XATTR_KEY.to_bytes_with_nul();
-        let filtered = filter_xattr_names(&buf, hidden_key);
-
-        Ok(ListxattrReply::Names(filtered))
-    }
+    })
 }
 
 /// Remove an extended attribute.
@@ -311,32 +299,29 @@ pub(crate) fn do_removexattr(
         return Err(platform::eacces());
     }
 
-    let fd = open_xattr_fd(fs, ino)?;
-
-    #[cfg(target_os = "linux")]
-    {
-        let path = format!("/proc/self/fd/{fd}\0");
-        let ret = unsafe { libc::removexattr(path.as_ptr() as *const libc::c_char, name.as_ptr()) };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+    with_xattr_fd(fs, ino, |fd| {
+        #[cfg(target_os = "linux")]
+        {
+            let path = format!("/proc/self/fd/{fd}\0");
+            let ret =
+                unsafe { libc::removexattr(path.as_ptr() as *const libc::c_char, name.as_ptr()) };
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
         }
-        unsafe { libc::close(fd) };
-    }
 
-    #[cfg(target_os = "macos")]
-    {
-        let ret = unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) };
-        if ret < 0 {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(platform::linux_error(err));
+        #[cfg(target_os = "macos")]
+        {
+            let ret = unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) };
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
         }
-        unsafe { libc::close(fd) };
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -372,4 +357,21 @@ fn open_xattr_fd(fs: &PassthroughFs, ino: u64) -> io::Result<i32> {
     }
 
     inode::open_inode_fd(fs, ino, libc::O_RDONLY)
+}
+
+/// Borrow a pinned guest handle when available; otherwise open read-only.
+/// Holding the file lock keeps checkpoint handle replacement from closing it.
+fn with_xattr_fd<T>(
+    fs: &PassthroughFs,
+    ino: u64,
+    operation: impl FnOnce(i32) -> io::Result<T>,
+) -> io::Result<T> {
+    let data = fs.handles.read().unwrap().for_inode(ino).cloned();
+    if let Some(data) = data {
+        let file = data.file.read().unwrap();
+        return operation(file.as_raw_fd());
+    }
+
+    let file = unsafe { File::from_raw_fd(open_xattr_fd(fs, ino)?) };
+    operation(file.as_raw_fd())
 }
