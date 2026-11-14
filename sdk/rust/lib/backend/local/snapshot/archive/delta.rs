@@ -1582,7 +1582,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.upper_layers.len(), 3);
+        assert_eq!(result.upper_layers.len(), 1);
+        assert_eq!(result.upper_layers[0].format, "raw");
+        assert_eq!(
+            std::fs::read(&result.upper_layers[0].path).unwrap(),
+            vec![91; 65536]
+        );
         let base_archive = temp.path().join("base.tar");
         save_snapshot(
             &local,

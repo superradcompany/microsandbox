@@ -3417,12 +3417,13 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    assert_eq!(child.upper_layers.len(), 3);
+                    assert_eq!(child.upper_layers.len(), 1);
+                    assert_eq!(child.upper_layers[0].format, "raw");
                     assert_eq!(
                         std::fs::read(&child.upper_layers[0].path).unwrap(),
                         source_bytes[0]
                     );
-                    // Child rebasing is private; published archive members remain byte-identical.
+                    // Child flattening is private; published archive members remain byte-identical.
                     for (source, expected) in sources.iter().zip(&source_bytes) {
                         assert_eq!(&std::fs::read(&source.path).unwrap(), expected);
                     }

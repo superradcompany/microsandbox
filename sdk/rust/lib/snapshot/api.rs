@@ -11,6 +11,8 @@ use super::{
     HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotConfig, SnapshotCopyBuilder, SnapshotFormat,
     SnapshotId, SnapshotScope, SnapshotState, SnapshotVerifyReport,
 };
+#[cfg(feature = "local")]
+use crate::MicrosandboxError;
 use crate::MicrosandboxResult;
 use crate::backend::Backend;
 
@@ -688,6 +690,34 @@ impl Snapshot {
     ) -> MicrosandboxResult<SnapshotHandle> {
         let mut handles = Self::load_many(&[path.to_path_buf()], opts).await?;
         Ok(handles.remove(0))
+    }
+
+    /// Maximum local writes for a bounded raw-disk import, including temporary
+    /// copies and metadata. Embedding workers reserve this amount before calling
+    /// `load_bounded`; both use the same calculation from the maximum disk size.
+    #[cfg(feature = "local")]
+    pub fn bounded_import_peak_bytes(maximum_disk_bytes: u64) -> MicrosandboxResult<u64> {
+        super::import_budget::peak_bytes(maximum_disk_bytes)
+    }
+
+    /// Import a disk-only raw archive within its known maximum disk size.
+    /// Temporary-copy and metadata allowances are derived internally. Bundled
+    /// images, memory and owned volumes are refused before their payloads are
+    /// written. Existing unbounded imports are unchanged.
+    #[cfg(feature = "local")]
+    pub async fn load_bounded(
+        path: &Path,
+        opts: LoadOpts,
+        maximum_disk_bytes: u64,
+    ) -> MicrosandboxResult<SnapshotHandle> {
+        let backend = crate::backend::default_backend();
+        if backend.as_local().is_none() || opts.base.is_some() {
+            return Err(MicrosandboxError::InvalidConfig(
+                "bounded snapshot import requires local storage without external dependencies"
+                    .into(),
+            ));
+        }
+        super::import_budget::scope(maximum_disk_bytes, Self::load_with_options(path, opts)).await
     }
     /// Validate all inputs before publication and return their heads in input order.
     pub async fn load_many(

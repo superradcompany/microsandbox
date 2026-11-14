@@ -2493,6 +2493,7 @@ where
     let mut extraction_targets = HashSet::new();
     let mut inventory_path = None;
     while let Some((header, path_in_archive)) = read_entry_header(&mut reader).await? {
+        crate::snapshot::import_budget::charge(&path_in_archive, &header)?;
         let entry_type = header.entry_type();
         let components = normal_utf8_components(&path_in_archive)?;
         if entry_type == EntryType::Directory {
@@ -4490,6 +4491,155 @@ mod tests {
     };
 
     use super::*;
+    use crate::Snapshot as PublicSnapshot;
+
+    #[tokio::test]
+    async fn bounded_import_limits_expansion_and_keeps_unbounded_import_compatible() {
+        use crate::backend::{default_backend, with_backend};
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let data = grouped_archive_manifest(990, None);
+        let artifact = root.path().join("artifact");
+        write_grouped_archive_fixture(&artifact, &data);
+        let archive = root.path().join("archive.msb");
+        save_snapshot(
+            &backend,
+            artifact.to_str().unwrap(),
+            &archive,
+            SaveOpts::default(),
+        )
+        .await
+        .unwrap();
+
+        with_backend(backend, async {
+            let loaded = PublicSnapshot::load_bounded(
+                &archive,
+                LoadOpts {
+                    group: Some("bounded".into()),
+                    ..Default::default()
+                },
+                4096,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                loaded.open().await.unwrap().manifest().snapshot_id,
+                data.snapshot_id
+            );
+
+            for (disk_limit, expected) in [
+                (0, "must be positive"),
+                (u64::MAX, "overflow"),
+                (2048, "maximum disk size"),
+            ] {
+                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), disk_limit)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+            let local = default_backend();
+            let local = local.as_local().unwrap();
+            for entry in std::fs::read_dir(local.snapshots_dir()).unwrap() {
+                let entry = entry.unwrap();
+                assert!(
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".msb-snapshot-")
+                );
+            }
+            PublicSnapshot::load_with_options(
+                &archive,
+                LoadOpts {
+                    group: Some("unbounded".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bounded_import_refuses_sparse_and_non_disk_payloads_before_creating_them() {
+        use crate::backend::with_backend;
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = crate::test_support::local_backend_builder(root.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        let names = [
+            ("cache/blobs/payload", "disk-only payloads"),
+            (
+                "snapshots/snap_00000000000000000000000000000001/owned/data/directory.bin",
+                "disk-only payloads",
+            ),
+            (
+                "checkpoints/snap_00000000000000000000000000000001/checkpoint.json",
+                "disk-only payloads",
+            ),
+            (
+                "files/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/upper.ext4",
+                "maximum disk size",
+            ),
+        ];
+        with_backend(backend, async {
+            for (index, (name, expected)) in names.into_iter().enumerate() {
+                let archive = root.path().join(format!("bad-{index}.tar"));
+                let mut header = tokio_tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_mode(0o600);
+                header.set_entry_type(EntryType::GNUSparse);
+                header.set_size(0);
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
+                header.set_cksum();
+                let mut bytes = header.as_bytes().to_vec();
+                bytes.resize(bytes.len() + 1024, 0);
+                std::fs::write(&archive, bytes).unwrap();
+                let error = PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 4096)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+            let archive = root.path().join("aggregate.tar");
+            let mut bytes = Vec::new();
+            for index in 0..2 {
+                let mut header = tokio_tar::Header::new_gnu();
+                header
+                    .set_path(format!("files/{}/upper-{index}.ext4", "a".repeat(64)))
+                    .unwrap();
+                header.set_mode(0o600);
+                header.set_entry_type(EntryType::GNUSparse);
+                header.set_size(0);
+                let gnu = header.as_gnu_mut().unwrap();
+                gnu.realsize.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].offset.copy_from_slice(b"00400000000\0");
+                gnu.sparse[0].numbytes.copy_from_slice(b"00000000000\0");
+                header.set_cksum();
+                bytes.extend_from_slice(header.as_bytes());
+            }
+            bytes.resize(bytes.len() + 1024, 0);
+            std::fs::write(&archive, bytes).unwrap();
+            let error =
+                PublicSnapshot::load_bounded(&archive, LoadOpts::default(), 64 * 1024 * 1024)
+                    .await
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("aggregate byte budget"),
+                "{error}"
+            );
+        })
+        .await;
+    }
 
     #[tokio::test]
     async fn import_requires_durable_ownership_and_recovers_failed_completion() {
@@ -5717,7 +5867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_archive_preserves_a_complete_raw_qcow_chain() {
+    async fn direct_archive_flattens_a_complete_raw_qcow_chain_into_one_private_disk() {
         let directory = tempfile::tempdir().unwrap();
         let home = directory.path().join("home");
         let raw = directory.path().join("root.raw");
@@ -5728,6 +5878,15 @@ mod tests {
             .unwrap()
             .set_len(16 * 1024 * 1024)
             .unwrap();
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&raw)
+                .unwrap()
+                .write_all(b"source-marker")
+                .unwrap();
+        }
         microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 16 * 1024 * 1024, &raw, "raw")
             .await
             .unwrap();
@@ -5792,7 +5951,7 @@ mod tests {
             &manifest,
             &BTreeMap::new(),
             "chained-snapshot",
-            &[raw, qcow],
+            &[raw.clone(), qcow],
             None,
             &archive,
             false,
@@ -5805,10 +5964,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(restored.manifest.snapshot_id, snapshot_id);
-        assert_eq!(restored.upper_layers.len(), 3);
+        assert_eq!(restored.upper_layers.len(), 1);
         assert_eq!(restored.upper_layers[0].format, "raw");
-        assert_eq!(restored.upper_layers[1].format, "qcow2");
-        assert_eq!(restored.upper_layers[2].format, "qcow2");
+        assert_eq!(
+            std::fs::read(&restored.upper_layers[0].path).unwrap(),
+            std::fs::read(&raw).unwrap()
+        );
+        std::fs::remove_file(&raw).unwrap();
+        assert_eq!(
+            &std::fs::read(&restored.upper_layers[0].path).unwrap()[..13],
+            b"source-marker"
+        );
         assert!(!child_stage.join(".archive-layers").exists());
         assert!(!home.join("snapshots").join(snapshot_id.as_str()).exists());
     }

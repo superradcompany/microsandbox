@@ -577,3 +577,31 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+## Disk-only restore footprint and bounded local imports
+
+Installed and direct-archive file snapshots now restore into one private raw
+writable disk. Restoring a layered raw/qcow2 archive resolves its complete disk
+contents into that file; it does not keep sealed source copies beside another
+writable overlay. Archive descriptors, saved layer identities, incremental
+exports, checkpoint/full-memory restores and local branch handoffs keep their
+existing formats. The child uses the existing single-raw launch path, so this
+change adds no runtime/guest protocol requirement or catalog migration. Older
+SDKs keep their previous restore footprint; updating only the runtime binary
+does not change that SDK behavior. Snapshot source files remain immutable.
+
+The Rust SDK adds `Snapshot::load_bounded` for local callers with a known
+maximum virtual disk size. It derives its aggregate write allowance from that
+size and the supported import steps; callers do not configure a separate byte
+limit. `Snapshot::bounded_import_peak_bytes` exposes that same calculation so
+embedding workers can reserve the complete import allowance before writing. It accepts one complete
+raw-disk snapshot without bundled image-cache, owned-volume, memory or dependency
+payloads. Tar members are charged before extraction, including the logical size
+of sparse entries, and the descriptor is checked before layer placement or
+external dependency resolution. Existing `load`, `load_with_options`, and
+`LoadOpts` callers retain their accepted formats and signatures. This is an
+opt-in embedding API; no CLI or other language SDK workflow selects it.
+
+The SDK snapshot suite exercises ordinary imports, current and legacy archives,
+delta exports/restores and private child disks. Real older-runtime launch
+validation and full-disk rewrite qualification remain separate release checks.
