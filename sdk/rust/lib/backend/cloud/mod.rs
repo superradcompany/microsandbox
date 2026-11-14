@@ -11,6 +11,7 @@
 //! issues today. No OAuth or session credentials are honored here.
 
 mod agent;
+mod agent_reuse;
 mod http;
 mod modify;
 pub(in crate::backend) mod sandbox;
@@ -27,6 +28,7 @@ use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_tungstenite::Connector;
 
+use self::agent_reuse::AgentPool;
 use self::http::urlencoding;
 use super::{Backend, BackendSelectionSource};
 use crate::config::layers::BackendConfig;
@@ -81,6 +83,9 @@ pub struct CloudBackend {
     selection_source: BackendSelectionSource,
     profile: Option<String>,
     agent_identity: Option<(String, String)>,
+    /// Agent connections kept between operations, shared by every clone of this backend. Absent
+    /// unless the experimental reuse flag is on.
+    agent_pool: Option<Arc<AgentPool>>,
 }
 
 /// Fluent builder for `CloudBackend`. Use for tuned construction.
@@ -98,6 +103,8 @@ pub struct CloudBackendBuilder {
     user_agent: Option<String>,
     custom_client: Option<reqwest::Client>,
     config: Option<Arc<BackendConfig>>,
+    /// Explicit choice for agent connection reuse; the environment decides when absent.
+    agent_reuse: Option<bool>,
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -284,6 +291,14 @@ impl CloudBackendBuilder {
         self
     }
 
+    /// Decide agent connection reuse here instead of from the environment, so unit tests do not
+    /// depend on the developer's shell.
+    #[cfg(test)]
+    pub(crate) fn agent_reuse(mut self, enabled: bool) -> Self {
+        self.agent_reuse = Some(enabled);
+        self
+    }
+
     /// Build the `CloudBackend`. Uses [`DEFAULT_CLOUD_API_URL`] when `.url(...)`
     /// was not called. Errors when the API key is missing or invalid, an
     /// explicitly supplied URL is empty, the HTTP client fails to construct,
@@ -344,6 +359,11 @@ impl CloudBackendBuilder {
                 })?
         };
 
+        let agent_pool = self
+            .agent_reuse
+            .unwrap_or_else(agent_reuse::enabled_by_env)
+            .then(|| Arc::new(AgentPool::new()));
+
         Ok(CloudBackend {
             url,
             api_key,
@@ -352,6 +372,7 @@ impl CloudBackendBuilder {
             selection_source: BackendSelectionSource::Programmatic,
             profile: None,
             agent_identity: None,
+            agent_pool,
         })
     }
 }
@@ -369,6 +390,7 @@ impl Default for CloudBackendBuilder {
             user_agent: None,
             custom_client: None,
             config: None,
+            agent_reuse: None,
         }
     }
 }

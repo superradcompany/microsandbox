@@ -1100,6 +1100,10 @@ pub(crate) mod agent {
     //! [`DialAgent`] impl (a relay socket locally, the agent WebSocket route
     //! on cloud). The per-call overhead is small relative to the cross-VM
     //! I/O these calls drive and keeps the trait dispatch path stateless.
+    //!
+    //! A request answered by a single response goes through [`request_once`]
+    //! instead. It still has a connection to itself, but the backend may hand
+    //! it one kept open after an earlier call and keep it again afterwards.
 
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1111,11 +1115,15 @@ pub(crate) mod agent {
             BulkOffer, BulkReceiveState, BulkSendState,
         },
         fs::{FS_CHUNK_SIZE, FsOp, FsOpenOptions, FsRequest, FsResponseData, FsSetAttrs},
-        message::MessageType,
+        message::{Message, MessageType},
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::{MicrosandboxError, MicrosandboxResult, agent::AgentClient, backend::Backend};
+    use crate::{
+        MicrosandboxError, MicrosandboxResult,
+        agent::{AgentClient, connect_for},
+        backend::Backend,
+    };
 
     use super::{
         FsEntry, FsHandle, FsMetadata, FsReadStream, FsWriteSink, check_response,
@@ -1137,6 +1145,23 @@ pub(crate) mod agent {
         timeout: std::time::Duration,
     ) -> MicrosandboxResult<AgentClient> {
         backend.dial_agent(name, timeout).await
+    }
+
+    /// Send one request on a connection of its own and return its single response.
+    ///
+    /// An answered request leaves nothing on the connection, so the backend may keep it for the
+    /// next operation. A request that fails or is cancelled first leaves it unfinished, and it
+    /// is closed.
+    async fn request_once(
+        backend: &dyn Backend,
+        name: &str,
+        request: &FsRequest,
+    ) -> MicrosandboxResult<Message> {
+        let connection = connect_for(backend, name).await?;
+        let response = connection.request(MessageType::FsRequest, request).await?;
+        connection.finish();
+
+        Ok(response)
     }
 
     pub(crate) async fn open_file(
@@ -1453,14 +1478,13 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<Vec<FsEntry>> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::List {
                 path: path.to_string(),
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -1482,7 +1506,6 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Mkdir {
                 path: path.to_string(),
@@ -1491,7 +1514,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1505,14 +1528,13 @@ pub(crate) mod agent {
             return remove_dir(backend, name, path, true).await;
         }
 
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Remove {
                 path: path.to_string(),
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1522,7 +1544,6 @@ pub(crate) mod agent {
         path: &str,
         recursive: bool,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::RemoveDir {
                 path: path.to_string(),
@@ -1530,7 +1551,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1540,7 +1561,6 @@ pub(crate) mod agent {
         from: &str,
         to: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Copy {
                 src: from.to_string(),
@@ -1548,7 +1568,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1558,7 +1578,6 @@ pub(crate) mod agent {
         from: &str,
         to: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Rename {
                 src: from.to_string(),
@@ -1566,7 +1585,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1584,7 +1603,6 @@ pub(crate) mod agent {
         path: &str,
         follow_symlink: bool,
     ) -> MicrosandboxResult<FsMetadata> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Stat {
                 path: path.to_string(),
@@ -1592,7 +1610,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -1616,7 +1634,6 @@ pub(crate) mod agent {
         follow_symlink: bool,
         attrs: FsSetAttrs,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::SetStat {
                 path: path.to_string(),
@@ -1625,7 +1642,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1634,14 +1651,13 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<String> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::ReadLink {
                 path: path.to_string(),
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
@@ -1664,7 +1680,6 @@ pub(crate) mod agent {
         target: &str,
         link_path: &str,
     ) -> MicrosandboxResult<()> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::Symlink {
                 target: target.to_string(),
@@ -1673,7 +1688,7 @@ pub(crate) mod agent {
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         check_response(resp_msg)
     }
 
@@ -1682,14 +1697,13 @@ pub(crate) mod agent {
         name: &str,
         path: &str,
     ) -> MicrosandboxResult<String> {
-        let client = connect_agent(backend, name).await?;
         let req = FsRequest {
             op: FsOp::RealPath {
                 path: path.to_string(),
             },
             bulk: None,
         };
-        let resp_msg = client.request(MessageType::FsRequest, &req).await?;
+        let resp_msg = request_once(backend, name, &req).await?;
         let resp = filesystem_response(resp_msg)?;
 
         if !resp.ok {
