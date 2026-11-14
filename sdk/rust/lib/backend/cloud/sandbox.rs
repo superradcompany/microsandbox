@@ -615,6 +615,10 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
     if config.spec.runtime.disable_metrics_sample {
         return Err(unsupported("disable_metrics_sample"));
     }
+    // Cloud owns where output goes; accepting the flag would promise nothing reaches disk.
+    if config.spec.runtime.disable_exec_log {
+        return Err(unsupported("disable_exec_log"));
+    }
 
     if config
         .spec
@@ -1572,7 +1576,7 @@ mod tests {
 
     #[test]
     fn cloud_create_request_rejects_fields_missing_from_the_wire() {
-        let cases: [(&str, ConfigMutation); 13] = [
+        let cases: [(&str, ConfigMutation); 14] = [
             ("max_cpus", |config| config.spec.resources.max_cpus = 2),
             ("max_memory", |config| {
                 config.spec.resources.max_memory_mib = 1024
@@ -1591,6 +1595,9 @@ mod tests {
             }),
             ("disable_metrics_sample", |config| {
                 config.spec.runtime.disable_metrics_sample = true
+            }),
+            ("disable_exec_log", |config| {
+                config.spec.runtime.disable_exec_log = true
             }),
             ("network.interface", |config| {
                 config.spec.network.interface = Some(microsandbox_types::InterfaceOverrides {

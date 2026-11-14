@@ -10,6 +10,7 @@ use std::{
 
 use bytes::Bytes;
 use microsandbox_protocol::{
+    core::Ready,
     exec::{ExecFailed, ExecResize, ExecSignal, ExecStdin},
     message::MessageType,
 };
@@ -50,6 +51,12 @@ pub struct ExecOptions {
 
     /// Resource limits applied before exec via `setrlimit()`.
     pub rlimits: Vec<Rlimit>,
+
+    /// Record this session's output to the sandbox's `exec.log`, where
+    /// [`Sandbox::logs`](crate::sandbox::Sandbox::logs) reads it. `None` (the default)
+    /// means not recorded; unlike an explicit `Some(false)`, it is not refused
+    /// by a sandbox whose older runtime records every session.
+    pub capture: Option<bool>,
 }
 
 /// Builder for [`ExecOptions`].
@@ -263,6 +270,19 @@ impl ExecOptionsBuilder {
         self
     }
 
+    /// Record this command's output to the sandbox's `exec.log` (default:
+    /// false). The sandbox's workload is recorded without asking; an ad-hoc
+    /// exec is not, because its output — a shell's above all — can carry
+    /// anything typed or printed, and would otherwise reach the host's disk.
+    /// Has no effect on a sandbox created with `disable_exec_log`.
+    ///
+    /// An explicit `capture(false)` fails on a sandbox whose runtime predates
+    /// opt-in capture, since that runtime would record the session anyway.
+    pub fn capture(mut self, enabled: bool) -> Self {
+        self.options.capture = Some(enabled);
+        self
+    }
+
     /// Set a resource limit (soft = hard).
     pub fn rlimit(mut self, resource: RlimitResource, limit: u64) -> Self {
         self.options.rlimits.push(Rlimit {
@@ -290,6 +310,26 @@ impl ExecOptionsBuilder {
         validate_rlimits(&self.options.rlimits)?;
         Ok(self.options)
     }
+}
+
+/// Refuse an explicit capture opt-out that the sandbox's relay would ignore.
+///
+/// A relay that predates opt-in capture records every exec session and does not
+/// advertise `exec_capture_opt_in`. Against it, `None` keeps that runtime's
+/// behaviour, since nothing was asked, and `Some(true)` is honoured anyway; only
+/// `Some(false)` would be silently lost, so it fails instead.
+pub(crate) fn require_capture_honoured(
+    ready: Option<&Ready>,
+    capture: Option<bool>,
+) -> MicrosandboxResult<()> {
+    if capture == Some(false) && !ready.is_some_and(|ready| ready.exec_capture_opt_in) {
+        return Err(crate::MicrosandboxError::Runtime(
+            "this sandbox's msb runtime records every exec session, so it cannot honour \
+             capture(false); restart the sandbox with a newer msb, or leave capture unset"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates that every rlimit has `soft <= hard`.
@@ -686,6 +726,7 @@ pub(crate) mod agent {
             tty,
             stdin: stdin_mode,
             timeout,
+            capture,
         } = opts;
 
         // Validate before dispatch. Count execution time from request dispatch, but never
@@ -716,8 +757,9 @@ pub(crate) mod agent {
             "exec_stream"
         );
 
+        super::require_capture_honoured(client.ready().ok().as_ref(), capture)?;
         let req = build_exec_request(
-            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols,
+            config, cmd, args, cwd, user, &env, &rlimits, tty, rows, cols, capture,
         );
         let input_window = policy.filter(|_| controlled).map(|policy| {
             io::InputWindow::new(policy.input_limit, policy.stdin_chunk_size as usize)
@@ -1025,6 +1067,27 @@ pub(crate) mod agent {
         use microsandbox_protocol::{codec, core::Ready, message::PROTOCOL_VERSION};
 
         const TEST_INPUT_LIMIT: u32 = 64 * 1024;
+
+        /// An older relay records every session: an explicit opt-out must fail there
+        /// rather than be ignored, while an unset or `true` capture keeps working.
+        #[test]
+        fn an_explicit_capture_opt_out_is_refused_by_a_relay_that_records_everything() {
+            use super::super::require_capture_honoured;
+
+            let older = Ready::default();
+            let current = Ready {
+                exec_capture_opt_in: true,
+                ..Ready::default()
+            };
+            for ready in [None, Some(&older)] {
+                assert!(require_capture_honoured(ready, Some(false)).is_err());
+                assert!(require_capture_honoured(ready, None).is_ok());
+                assert!(require_capture_honoured(ready, Some(true)).is_ok());
+            }
+            for capture in [None, Some(false), Some(true)] {
+                assert!(require_capture_honoured(Some(&current), capture).is_ok());
+            }
+        }
 
         async fn flow_test_client() -> (Arc<AgentClient>, tokio::io::DuplexStream) {
             flow_test_client_with_version(PROTOCOL_VERSION).await

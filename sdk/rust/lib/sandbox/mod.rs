@@ -1185,7 +1185,9 @@ impl Sandbox {
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecHandle> {
         let command = self.resolve_default_command()?;
-        let opts = f(ExecOptionsBuilder::default())
+        // The sandbox's workload: recorded to `exec.log` unless the caller
+        // opts out with `.capture(false)`.
+        let opts = f(ExecOptionsBuilder::default().capture(true))
             .prepend_args(command.args)
             .build()?;
         self.backend
@@ -1214,7 +1216,9 @@ impl Sandbox {
         f: impl FnOnce(ExecOptionsBuilder) -> ExecOptionsBuilder,
     ) -> MicrosandboxResult<ExecOutput> {
         let command = self.resolve_default_command()?;
-        let opts = f(ExecOptionsBuilder::default())
+        // The sandbox's workload: recorded to `exec.log` unless the caller
+        // opts out with `.capture(false)`.
+        let opts = f(ExecOptionsBuilder::default().capture(true))
             .prepend_args(command.args)
             .build()?;
         self.backend
@@ -1440,7 +1444,9 @@ impl Sandbox {
         f: impl FnOnce(AttachOptionsBuilder) -> AttachOptionsBuilder,
     ) -> MicrosandboxResult<i32> {
         let command = self.resolve_default_command()?;
-        let builder = f(AttachOptionsBuilder::default()).prepend_args(command.args);
+        // The sandbox's workload: recorded to `exec.log` unless the caller
+        // opts out with `.capture(false)`.
+        let builder = f(AttachOptionsBuilder::default().capture(true)).prepend_args(command.args);
         self.backend
             .sandboxes()
             .attach(
@@ -1558,6 +1564,7 @@ pub(crate) fn build_exec_request(
     tty: bool,
     rows: u16,
     cols: u16,
+    capture: Option<bool>,
 ) -> ExecRequest {
     let merged = config::merge_env_pairs(&config.spec.env, env);
     let mut env: Vec<String> = merged
@@ -1591,6 +1598,7 @@ pub(crate) fn build_exec_request(
         rows,
         cols,
         rlimits,
+        capture: capture.unwrap_or(false),
     }
 }
 

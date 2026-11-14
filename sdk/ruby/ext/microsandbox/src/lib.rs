@@ -802,6 +802,7 @@ fn apply_builder_options(
         "proxy",
         "secrets",
         "quiet_logs",
+        "disable_exec_log",
         "entrypoint",
         "init",
         "pull_policy",
@@ -931,6 +932,9 @@ fn apply_builder_options(
     if keyword::<bool>(kwargs, "quiet_logs")?.unwrap_or(false) {
         builder = builder.quiet_logs();
     }
+    if keyword::<bool>(kwargs, "disable_exec_log")?.unwrap_or(false) {
+        builder = builder.disable_exec_log();
+    }
     if let Some(v) = kwargs.get(symbol("entrypoint")) {
         let parts = string_array(v, "entrypoint")?;
         builder = builder.entrypoint(parts);
@@ -966,7 +970,9 @@ fn apply_exec_options(
     mut builder: ExecOptionsBuilder,
     kwargs: RHash,
 ) -> Result<ExecOptionsBuilder, Error> {
-    const ALLOWED: &[&str] = &["cwd", "user", "env", "timeout", "stdin", "tty", "rlimits"];
+    const ALLOWED: &[&str] = &[
+        "cwd", "user", "env", "timeout", "stdin", "tty", "rlimits", "capture",
+    ];
     reject_unknown_keywords(ruby, kwargs, ALLOWED)?;
 
     if let Some(v) = keyword::<String>(kwargs, "cwd")? {
@@ -983,6 +989,11 @@ fn apply_exec_options(
     }
     if let Some(v) = keyword::<bool>(kwargs, "tty")? {
         builder = builder.tty(v);
+    }
+    // Record this session's output to the sandbox's `exec.log`. Omitted or
+    // nil keeps the SDK default (not recorded for an ad-hoc exec or shell).
+    if let Some(v) = keyword::<bool>(kwargs, "capture")? {
+        builder = builder.capture(v);
     }
     if let Some(v) = kwargs.get(symbol("stdin")) {
         if let Some(sym) = Symbol::from_value(v) {
@@ -1243,6 +1254,9 @@ impl RubySandboxBuilder {
     }
     fn quiet_logs(this: typed_data::Obj<Self>) -> Result<(), Error> {
         put_builder(&this, SandboxBuilder::quiet_logs)
+    }
+    fn disable_exec_log(this: typed_data::Obj<Self>) -> Result<(), Error> {
+        put_builder(&this, SandboxBuilder::disable_exec_log)
     }
     fn entrypoint(this: typed_data::Obj<Self>, cmd: RArray) -> Result<(), Error> {
         let parts = cmd.to_vec::<String>().map_err(|_| {
@@ -2896,6 +2910,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     builder.define_method("http!", method!(RubySandboxBuilder::http, 2))?;
     builder.define_method("http_config!", method!(RubySandboxBuilder::http_config, 5))?;
     builder.define_method("quiet_logs!", method!(RubySandboxBuilder::quiet_logs, 0))?;
+    builder.define_method(
+        "disable_exec_log!",
+        method!(RubySandboxBuilder::disable_exec_log, 0),
+    )?;
     builder.define_method("entrypoint!", method!(RubySandboxBuilder::entrypoint, 1))?;
     builder.define_method("init!", method!(RubySandboxBuilder::init, 1))?;
     builder.define_method("proxy!", method!(RubySandboxBuilder::proxy, 1))?;

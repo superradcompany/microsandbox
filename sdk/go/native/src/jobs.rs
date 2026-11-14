@@ -47,6 +47,8 @@ struct Launch {
     timeout_ms: Option<u64>,
     #[serde(default)]
     no_stdin: bool,
+    #[serde(default)]
+    capture: Option<bool>,
     input_base64: Option<String>,
     #[serde(default)]
     tty: bool,
@@ -158,6 +160,9 @@ async fn dispatch(sandbox_handle: u64, value: Value) -> Result<Value, FfiError> 
                 }
                 if let Some(ms) = launch.timeout_ms {
                     b = b.timeout(Duration::from_millis(ms));
+                }
+                if let Some(capture) = launch.capture {
+                    b = b.capture(capture);
                 }
                 if launch.no_stdin {
                     b = b.stdin_null();

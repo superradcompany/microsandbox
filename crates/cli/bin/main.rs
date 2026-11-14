@@ -302,6 +302,7 @@ fn main() {
                     protected_guest_state: true,
                     protocols: vec![2, 1],
                     required_restore_backing: true,
+                    disable_exec_log: true,
                     tcp_accept_queue_size: true,
                     max_inbound_tcp_connections: cfg!(feature = "net"),
                     http_deny_message: cfg!(feature = "net"),
