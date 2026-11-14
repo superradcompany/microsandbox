@@ -16,7 +16,7 @@ use microsandbox_protocol::{
 
 use microsandbox_types::EnvVar;
 
-use crate::{MicrosandboxResult, agent::AgentClient};
+use crate::{MicrosandboxResult, agent::AgentConnection};
 
 use super::io::{self, EventReceiver, InputWindow};
 
@@ -110,8 +110,9 @@ pub struct ExecHandle {
     /// Stdin sink (only if `StdinMode::Pipe` was used).
     stdin: Option<ExecSink>,
 
-    /// Bridge reference for sending signals/stdin.
-    client: Arc<AgentClient>,
+    /// Bridge reference for sending signals/stdin. The session's owners hold the connection
+    /// between them: the last to let go closes it, or hands it back if the session finished.
+    client: Arc<AgentConnection>,
 
     /// Client-owned deadline state, shared with the independent event pump.
     timeout: Option<Arc<StreamTimeout>>,
@@ -133,7 +134,7 @@ pub struct ExecControl {
     id: u32,
 
     /// Bridge reference for sending control messages.
-    client: Arc<AgentClient>,
+    client: Arc<AgentConnection>,
 }
 
 /// Events emitted by a streaming exec session.
@@ -171,7 +172,7 @@ pub enum ExecEvent {
 /// Sink for writing to a running process's stdin.
 pub struct ExecSink {
     id: u32,
-    client: Arc<AgentClient>,
+    client: Arc<AgentConnection>,
     /// Guest-advertised stdin allowance; absent for legacy buffering.
     window: Option<Arc<io::InputWindow>>,
     /// Serializes writes and EOF; true once EOF is committed to the transport queue.
@@ -340,7 +341,7 @@ impl ExecHandle {
         id: u32,
         events: EventReceiver,
         stdin: Option<ExecSink>,
-        client: Arc<AgentClient>,
+        client: Arc<AgentConnection>,
         timeout: Option<Arc<StreamTimeout>>,
     ) -> Self {
         Self {
@@ -529,7 +530,7 @@ impl ExecControl {
 
 impl ExecSink {
     /// Create a new stdin sink.
-    fn new(id: u32, client: Arc<AgentClient>, window: Option<Arc<InputWindow>>) -> Self {
+    fn new(id: u32, client: Arc<AgentConnection>, window: Option<Arc<InputWindow>>) -> Self {
         Self {
             id,
             client,
@@ -609,6 +610,9 @@ pub(crate) mod agent {
     //! Local exec dispatch keyed by `(sandbox_name, cmd, opts)`.
     //!
     //! Opens a fresh agent UDS each call (option A in the parity plan).
+    //!
+    //! One experimental exception: a backend may give a call a connection it kept open after an
+    //! earlier call finished. The call still has that connection to itself.
 
     use std::{
         sync::{Arc, Weak},
@@ -625,13 +629,14 @@ pub(crate) mod agent {
     };
     use tokio::{
         sync::{mpsc, watch},
+        task::JoinHandle,
         time::Instant,
     };
 
     use crate::{
         MicrosandboxError, MicrosandboxResult,
-        agent::AgentClient,
-        sandbox::{SandboxConfig, build_exec_request, fs::agent::connect_agent},
+        agent::{AgentConnection, connect_for},
+        sandbox::{SandboxConfig, build_exec_request},
     };
 
     use super::{
@@ -659,7 +664,22 @@ pub(crate) mod agent {
         rows: u16,
         cols: u16,
     ) -> MicrosandboxResult<ExecHandle> {
-        let client = Arc::new(connect_agent(backend, name).await?);
+        let connection = connect_for(backend, name).await?;
+
+        start_session(connection, name, config, cmd, opts, rows, cols).await
+    }
+
+    /// Start a session on a connection this call has to itself.
+    async fn start_session(
+        connection: AgentConnection,
+        name: &str,
+        config: &SandboxConfig,
+        cmd: String,
+        opts: ExecOptions,
+        rows: u16,
+        cols: u16,
+    ) -> MicrosandboxResult<ExecHandle> {
+        let client = Arc::new(connection);
         let policy = client.ready()?.exec_limits;
 
         if let Some(policy) = policy {
@@ -736,15 +756,16 @@ pub(crate) mod agent {
             StdinMode::Bytes(data) => Some(data),
             _ => None,
         };
-        if let Some(data) = finite_input {
+        let feeder = finite_input.map(|data| {
             let sink = ExecSink::new(id, Arc::clone(&client), input_window.clone());
+
             tokio::spawn(async move {
                 if !data.is_empty() {
                     let _ = sink.write(data).await;
                 }
                 let _ = sink.close().await;
-            });
-        }
+            })
+        });
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (event_rx, acknowledgements) = EventReceiver::new(event_rx, controlled);
@@ -756,6 +777,7 @@ pub(crate) mod agent {
             id,
             acknowledgements,
             input_window,
+            feeder,
         ));
 
         Ok(ExecHandle::new(id, event_rx, stdin, client, timeout))
@@ -789,14 +811,20 @@ pub(crate) mod agent {
     }
 
     /// Background task that converts raw protocol messages into [`ExecEvent`]s.
+    ///
+    /// `feeder` is the task writing input the caller supplied up front, when there was any. It
+    /// holds the session's connection, so on a connection that goes back to a pool the pump
+    /// stops it once the guest ends the session.
+    #[allow(clippy::too_many_arguments)]
     async fn event_mapper_task(
         mut rx: mpsc::Receiver<Message>,
         tx: mpsc::UnboundedSender<ExecEvent>,
         timeout: Option<(Instant, Arc<StreamTimeout>)>,
-        client: Weak<AgentClient>,
+        client: Weak<AgentConnection>,
         id: u32,
         acknowledgements: Option<io::OutputAcknowledgements>,
         input_window: Option<Arc<io::InputWindow>>,
+        feeder: Option<JoinHandle<()>>,
     ) {
         let policy = client
             .upgrade()
@@ -829,6 +857,7 @@ pub(crate) mod agent {
         };
 
         let worker = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(acknowledgement));
+        let acknowledging = worker.abort_handle();
         let acknowledgement = async move { worker.await.map_err(|error| error.to_string())? };
         tokio::pin!(acknowledgement);
 
@@ -850,6 +879,7 @@ pub(crate) mod agent {
         };
         let mut monitor = Some(Box::pin(monitor));
         let mut reader_closed = false;
+        let mut ended = None;
         loop {
             let msg = tokio::select! {
                 // Preserve completion while a retained stdin/control handle owns the connection.
@@ -921,15 +951,14 @@ pub(crate) mod agent {
                     Err(_) => continue,
                 },
                 MessageType::ExecExited => {
-                    if let Ok(exited) = msg.payload::<ExecExited>() {
-                        let _ = tx.send(ExecEvent::Exited { code: exited.code });
-                    }
+                    ended = msg
+                        .payload::<ExecExited>()
+                        .ok()
+                        .map(|exited| ExecEvent::Exited { code: exited.code });
                     break;
                 }
                 MessageType::ExecFailed => {
-                    if let Ok(failed) = msg.payload::<ExecFailed>() {
-                        let _ = tx.send(ExecEvent::Failed(failed));
-                    }
+                    ended = msg.payload::<ExecFailed>().ok().map(ExecEvent::Failed);
                     break;
                 }
                 MessageType::ExecStdinError => {
@@ -979,6 +1008,34 @@ pub(crate) mod agent {
             }
         }
 
+        if let Some(event) = ended {
+            // The guest has ended the session and holds nothing more of it, so a connection that
+            // came from a pool can serve another operation. Settle that before saying the
+            // session is over: a consumer may let go the moment it hears, and the connection
+            // only passes on if that hold is the last and it is already marked finished. A
+            // connection dialed for this session alone is closed either way and needs none of
+            // this.
+            let pooled = client
+                .upgrade()
+                .is_some_and(|connection| connection.is_pooled());
+            if pooled {
+                // These tasks work for the session and hold its connection while they do.
+                // Neither has anything left to do for a process that is gone.
+                acknowledging.abort();
+                let _ = acknowledgement.await;
+                if let Some(feeder) = feeder {
+                    feeder.abort();
+                    let _ = feeder.await;
+                }
+
+                if let Some(connection) = client.upgrade() {
+                    connection.finish();
+                }
+            }
+
+            let _ = tx.send(event);
+        }
+
         if let Some(window) = input_window {
             window.close();
         }
@@ -1022,17 +1079,21 @@ pub(crate) mod agent {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         use super::*;
+        use crate::{
+            agent::AgentClient,
+            test_support::{expect_closed, expect_silence, pooled_agent_connection},
+        };
         use microsandbox_protocol::{codec, core::Ready, message::PROTOCOL_VERSION};
 
         const TEST_INPUT_LIMIT: u32 = 64 * 1024;
 
-        async fn flow_test_client() -> (Arc<AgentClient>, tokio::io::DuplexStream) {
+        async fn flow_test_client() -> (Arc<AgentConnection>, tokio::io::DuplexStream) {
             flow_test_client_with_version(PROTOCOL_VERSION).await
         }
 
         async fn flow_test_client_with_version(
             version: u8,
-        ) -> (Arc<AgentClient>, tokio::io::DuplexStream) {
+        ) -> (Arc<AgentConnection>, tokio::io::DuplexStream) {
             use tokio::io::AsyncWriteExt;
 
             let (host, mut peer) = tokio::io::duplex(1024);
@@ -1047,7 +1108,7 @@ pub(crate) mod agent {
                 peer
             };
             let (client, peer) = tokio::join!(connect, handshake);
-            (Arc::new(client.unwrap()), peer)
+            (Arc::new(AgentConnection::fresh(client.unwrap())), peer)
         }
 
         #[tokio::test]
@@ -1362,6 +1423,7 @@ pub(crate) mod agent {
                     id,
                     acknowledgements,
                     None,
+                    None,
                 ));
                 let handle = ExecHandle::new(id, events, None, client, None);
                 let control = handle.control();
@@ -1512,6 +1574,7 @@ pub(crate) mod agent {
                 1,
                 None,
                 None,
+                None,
             )
             .await;
             assert!(matches!(
@@ -1545,6 +1608,7 @@ pub(crate) mod agent {
                 1,
                 None,
                 None,
+                None,
             )
             .await;
             assert!(matches!(
@@ -1561,6 +1625,132 @@ pub(crate) mod agent {
                     .unwrap()
                     .contains("process exit is unconfirmed")
             );
+        }
+
+        /// Start a command with piped stdin, so the request is all the session sends by itself.
+        async fn start_piped(connection: AgentConnection, cmd: &str) -> ExecHandle {
+            let opts = ExecOptions {
+                stdin: StdinMode::Pipe,
+                ..Default::default()
+            };
+            let config = SandboxConfig::default();
+
+            start_session(connection, "sandbox", &config, cmd.to_owned(), opts, 24, 80)
+                .await
+                .unwrap()
+        }
+
+        async fn expect_request(peer: &mut tokio::io::DuplexStream) -> Message {
+            let message = tokio::time::timeout(Duration::from_secs(2), codec::read_message(peer))
+                .await
+                .expect("the request arrives")
+                .unwrap();
+            assert_eq!(message.t, MessageType::ExecRequest);
+
+            message
+        }
+
+        async fn guest_started(peer: &mut tokio::io::DuplexStream, id: u32) {
+            let started =
+                Message::with_payload(MessageType::ExecStarted, id, &ExecStarted { pid: 7 })
+                    .unwrap();
+            codec::write_message(peer, &started).await.unwrap();
+        }
+
+        async fn guest_exited(peer: &mut tokio::io::DuplexStream, id: u32) {
+            let exited =
+                Message::with_payload(MessageType::ExecExited, id, &ExecExited { code: 0 })
+                    .unwrap();
+            codec::write_message(peer, &exited).await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn finished_session_hands_its_connection_back_when_every_owner_lets_go() {
+            let (connection, mut peer, pool) = pooled_agent_connection().await;
+            let mut handle = start_piped(connection, "true").await;
+            let request = expect_request(&mut peer).await;
+            guest_started(&mut peer, request.id).await;
+            guest_exited(&mut peer, request.id).await;
+
+            let output = handle.collect().await.unwrap();
+            let control = handle.control();
+            drop(handle);
+            assert_eq!(
+                pool.count(),
+                0,
+                "a control handle still owns the connection"
+            );
+            drop(control);
+
+            assert!(output.status().success);
+            assert_eq!(pool.count(), 1);
+            expect_silence(&mut peer).await;
+        }
+
+        #[tokio::test]
+        async fn abandoned_session_closes_its_connection() {
+            let (connection, mut peer, pool) = pooled_agent_connection().await;
+            let handle = start_piped(connection, "sleep").await;
+            let request = expect_request(&mut peer).await;
+            guest_started(&mut peer, request.id).await;
+
+            drop(handle);
+            let next = tokio::time::timeout(Duration::from_secs(2), codec::read_message(&mut peer))
+                .await
+                .expect("the far end sees the connection close");
+
+            // Closing is the whole signal: no kill is sent in-band first.
+            assert!(next.is_err());
+            assert_eq!(pool.count(), 0);
+        }
+
+        #[tokio::test]
+        async fn session_that_never_started_hands_its_connection_back() {
+            let (connection, mut peer, pool) = pooled_agent_connection().await;
+            let mut handle = start_piped(connection, "missing").await;
+            let request = expect_request(&mut peer).await;
+            let refusal = ExecFailed {
+                kind: ExecFailureKind::Other,
+                errno: None,
+                errno_name: None,
+                message: "no such file".into(),
+                stage: None,
+            };
+            let failed =
+                Message::with_payload(MessageType::ExecFailed, request.id, &refusal).unwrap();
+            codec::write_message(&mut peer, &failed).await.unwrap();
+
+            let event = handle.recv().await;
+            drop(handle);
+
+            assert!(matches!(event, Some(ExecEvent::Failed(_))));
+            assert_eq!(pool.count(), 1);
+        }
+
+        #[tokio::test]
+        async fn cancelled_start_closes_its_connection() {
+            let (connection, mut peer, pool) = pooled_agent_connection().await;
+            let config = SandboxConfig::default();
+            let opts = ExecOptions {
+                stdin: StdinMode::Pipe,
+                ..Default::default()
+            };
+            let mut starting = Box::pin(start_session(
+                connection,
+                "sandbox",
+                &config,
+                "sleep".to_owned(),
+                opts,
+                24,
+                80,
+            ));
+
+            // The caller gives up while the request is still on its way out.
+            assert!(futures::poll!(starting.as_mut()).is_pending());
+            drop(starting);
+
+            expect_closed(&mut peer).await;
+            assert_eq!(pool.count(), 0);
         }
     }
 }
