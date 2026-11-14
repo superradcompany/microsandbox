@@ -18,6 +18,10 @@ const MAX_ENTRIES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
 const MAX_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 const ENTRY_HEADROOM: u64 = 64 * 1024;
+// The supported archive has at most three metadata members (descriptor,
+// labels and inventory). Cover their maximum size plus every entry's fixed
+// allocation allowance, separately from the raw disk's copy allowance.
+const IMPORT_HEADROOM: u64 = 3 * MAX_METADATA_BYTES * 4 + MAX_ENTRIES as u64 * ENTRY_HEADROOM;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -120,17 +124,21 @@ pub(crate) fn active() -> bool {
     BUDGET.try_with(|_| ()).is_ok()
 }
 
-pub(crate) async fn scope<F, T>(
-    bytes: u64,
-    maximum_disk: u64,
-    operation: F,
-) -> MicrosandboxResult<T>
+pub(crate) fn peak_bytes(maximum_disk: u64) -> MicrosandboxResult<u64> {
+    if maximum_disk == 0 {
+        return Err(invalid("snapshot maximum disk size must be positive"));
+    }
+    maximum_disk
+        .checked_mul(4)
+        .and_then(|bytes| bytes.checked_add(IMPORT_HEADROOM))
+        .ok_or_else(|| invalid("snapshot import byte bound overflow"))
+}
+
+pub(crate) async fn scope<F, T>(maximum_disk: u64, operation: F) -> MicrosandboxResult<T>
 where
     F: Future<Output = MicrosandboxResult<T>>,
 {
-    if bytes == 0 || maximum_disk == 0 {
-        return Err(invalid("snapshot import bounds must be positive"));
-    }
+    let bytes = peak_bytes(maximum_disk)?;
     BUDGET
         .scope(
             Arc::new(Mutex::new(ImportBudget {
