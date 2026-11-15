@@ -238,23 +238,19 @@ mod tests {
         let budget = ImageWriteBudget::new(FILE_HEADROOM + BLOCK_BYTES, owner);
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("detached");
-        let writer = budget
-            .scope(async {
-                let inherited = ImageWriteBudget::current();
-                tokio::spawn(ImageWriteBudget::scope_optional(inherited, async move {
-                    released.await.unwrap();
-                    let budget = ImageWriteBudget::current();
-                    tokio::task::spawn_blocking(move || {
-                        let _scope = ImageWriteBudget::enter(budget);
-                        let mut file = BudgetedFile::create(&path).unwrap();
-                        file.write_all(&[7; BLOCK_BYTES as usize]).unwrap();
-                        assert!(file.write_all(&[8]).is_err());
-                    })
-                    .await
-                    .unwrap();
-                }))
+        let inherited = budget.scope(async { ImageWriteBudget::current() }).await;
+        let writer = tokio::spawn(ImageWriteBudget::scope_optional(inherited, async move {
+            released.await.unwrap();
+            let budget = ImageWriteBudget::current();
+            tokio::task::spawn_blocking(move || {
+                let _scope = ImageWriteBudget::enter(budget);
+                let mut file = BudgetedFile::create(&path).unwrap();
+                file.write_all(&[7; BLOCK_BYTES as usize]).unwrap();
+                assert!(file.write_all(&[8]).is_err());
             })
-            .await;
+            .await
+            .unwrap();
+        }));
         drop(budget);
         assert!(
             observer.upgrade().is_some(),

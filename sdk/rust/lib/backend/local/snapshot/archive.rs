@@ -990,6 +990,56 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
     plain_tar: bool,
     force: bool,
 ) -> MicrosandboxResult<()> {
+    save_direct_file_snapshot_inner(
+        manifest,
+        labels,
+        suggested_name,
+        source_layers,
+        owned_source,
+        out,
+        plain_tar,
+        force,
+        false,
+    )
+    .await
+}
+
+/// A raw bounded capture uses dense tar entries so sparse-map fragmentation
+/// cannot increase either the archive inventory or its metadata allowance.
+pub(in crate::backend::local) async fn save_direct_raw_snapshot(
+    manifest: &microsandbox_image::snapshot::Manifest,
+    labels: &BTreeMap<String, String>,
+    suggested_name: &str,
+    source_layers: &[PathBuf],
+    out: &Path,
+    force: bool,
+) -> MicrosandboxResult<()> {
+    save_direct_file_snapshot_inner(
+        manifest,
+        labels,
+        suggested_name,
+        source_layers,
+        None,
+        out,
+        true,
+        force,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_direct_file_snapshot_inner(
+    manifest: &microsandbox_image::snapshot::Manifest,
+    labels: &BTreeMap<String, String>,
+    suggested_name: &str,
+    source_layers: &[PathBuf],
+    owned_source: Option<&Path>,
+    out: &Path,
+    plain_tar: bool,
+    force: bool,
+    dense: bool,
+) -> MicrosandboxResult<()> {
     let total_started = Instant::now();
     manifest.validate().map_err(|error| {
         MicrosandboxError::SnapshotIntegrity(format!("invalid direct snapshot: {error}"))
@@ -1032,6 +1082,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
                 suggested_name,
                 source_layers,
                 owned_source,
+                dense,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -1046,6 +1097,7 @@ pub(in crate::backend::local) async fn save_direct_file_snapshot(
                 suggested_name,
                 source_layers,
                 owned_source,
+                dense,
             )
             .await?;
             let mut inner = builder.into_inner().await?;
@@ -1198,6 +1250,7 @@ async fn write_direct_archive_entries<W>(
     suggested_name: &str,
     source_layers: &[PathBuf],
     owned_source: Option<&Path>,
+    dense: bool,
 ) -> MicrosandboxResult<()>
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
@@ -1243,14 +1296,19 @@ where
         } else {
             Vec::new()
         };
-        let layer_transport = append_artifact_file_with_prefix(
-            builder,
-            source_layer,
-            &layer_path,
-            "file-payload",
-            &prefix,
-        )
-        .await?;
+        let layer_transport = if dense {
+            append_artifact_file_dense(builder, source_layer, &layer_path, "file-payload", &prefix)
+                .await?
+        } else {
+            append_artifact_file_with_prefix(
+                builder,
+                source_layer,
+                &layer_path,
+                "file-payload",
+                &prefix,
+            )
+            .await?
+        };
         entries.push(ArchiveEntry {
             path: layer_path,
             owner_snapshot: Some(manifest.snapshot_id.to_string()),
@@ -2231,11 +2289,23 @@ async fn append_artifact_file_with_prefix<W>(
 where
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    use tokio::io::AsyncSeekExt;
     if let Some(integrity) = try_append_sparse(builder, path, name, kind, prefix).await? {
         return Ok(integrity);
     }
+    append_artifact_file_dense(builder, path, name, kind, prefix).await
+}
 
+async fn append_artifact_file_dense<W>(
+    builder: &mut Builder<W>,
+    path: &Path,
+    name: &str,
+    kind: &str,
+    prefix: &[u8],
+) -> MicrosandboxResult<WrittenArchiveMember>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    use tokio::io::AsyncSeekExt;
     let metadata = tokio::fs::metadata(path).await?;
     if !metadata.is_file() {
         return Err(MicrosandboxError::Custom(format!(

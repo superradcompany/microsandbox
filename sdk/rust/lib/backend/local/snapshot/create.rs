@@ -841,17 +841,29 @@ async fn create_snapshot_archive_inner(
         let _disk = disk;
         let _flattened = flattened;
         let _lifecycle_guard = _lifecycle_guard;
-        super::archive::save_direct_file_snapshot(
-            &manifest,
-            &labels,
-            &name,
-            &source_paths,
-            _disk.capture_root.as_deref(),
-            &owned_out,
-            plain_tar,
-            force,
-        )
-        .await?;
+        if maximum_disk_bytes.is_some() {
+            super::archive::save_direct_raw_snapshot(
+                &manifest,
+                &labels,
+                &name,
+                &source_paths,
+                &owned_out,
+                force,
+            )
+            .await?;
+        } else {
+            super::archive::save_direct_file_snapshot(
+                &manifest,
+                &labels,
+                &name,
+                &source_paths,
+                _disk.capture_root.as_deref(),
+                &owned_out,
+                plain_tar,
+                force,
+            )
+            .await?;
+        }
         lineage.commit(&manifest.snapshot_id).await?;
         Ok::<_, MicrosandboxError>((manifest, labels))
     })
@@ -3566,7 +3578,15 @@ mod tests {
         let raw = temp.path().join("root.raw");
         let qcow = temp.path().join("generation.qcow2");
         std::fs::write(&raw, vec![17; 4096]).unwrap();
-        microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 4096, &raw, "raw")
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&raw)
+            .unwrap()
+            .set_len(2 * 1024 * 1024)
+            .unwrap();
+        let mut expected_data = vec![0; 2 * 1024 * 1024];
+        expected_data[..4096].fill(17);
+        microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 2 * 1024 * 1024, &raw, "raw")
             .await
             .unwrap();
         let disk = SnapshotDiskClosure {
@@ -3584,7 +3604,7 @@ mod tests {
                     sealed_layer_id: None,
                 },
             ],
-            virtual_size: 4096,
+            virtual_size: 2 * 1024 * 1024,
         };
         let artifact = temp.path().join("artifact");
         std::fs::create_dir(&artifact).unwrap();
@@ -3650,14 +3670,19 @@ mod tests {
                 .is_err()
         );
         assert!(!archive.exists());
-        let stage = flatten_bounded_capture(&mut disk, &archive, 4096)
+        let stage = flatten_bounded_capture(&mut disk, &archive, 2 * 1024 * 1024)
             .await
             .unwrap();
         assert_eq!(disk.sources.len(), 1);
-        assert_eq!(
-            std::fs::read(&disk.sources[0].path).unwrap(),
-            vec![17; 4096]
-        );
+        assert_eq!(std::fs::read(&disk.sources[0].path).unwrap(), expected_data);
+        // APFS densifies a write after set_len; restore the known zero tail to
+        // holes so this fixture exercises the fragmented-archive boundary too.
+        let raw = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&disk.sources[0].path)
+            .unwrap();
+        microsandbox_utils::extent::punch_hole_aligned(&raw, 1024 * 1024, 1024 * 1024).unwrap();
+        raw.sync_all().unwrap();
         let manifest = new_file_manifest(
             &disk,
             vec![None],
@@ -3667,18 +3692,24 @@ mod tests {
             SnapshotRootDisk::Managed,
         )
         .unwrap();
-        super::super::archive::save_direct_file_snapshot(
+        super::super::archive::save_direct_raw_snapshot(
             &manifest,
             &BTreeMap::new(),
             "bounded",
             &[disk.sources[0].path.clone()],
-            None,
             &archive,
-            true,
             false,
         )
         .await
         .unwrap();
+        let mut tar = tar::Archive::new(std::fs::File::open(&archive).unwrap());
+        for entry in tar.entries().unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !entry.header().entry_type().is_gnu_sparse(),
+                "bounded captures must not emit sparse-map metadata"
+            );
+        }
         drop(stage);
         let local = crate::test_support::local_backend_builder(temp.path().join("bounded-home"))
             .build()
@@ -3691,7 +3722,7 @@ mod tests {
                     dest: Some(temp.path().join("bounded-import")),
                     ..Default::default()
                 },
-                4096,
+                2 * 1024 * 1024,
             )
             .await
             .unwrap();
@@ -3701,7 +3732,7 @@ mod tests {
             assert_eq!(file.disk_format, SnapshotFormat::Raw);
             assert_eq!(
                 std::fs::read(restored.layer_path(&file.layers[0]).unwrap()).unwrap(),
-                vec![17; 4096]
+                expected_data
             );
         })
         .await;
