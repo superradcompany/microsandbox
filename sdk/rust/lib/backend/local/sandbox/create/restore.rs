@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_publication_preserves_relative_disk_chain() {
+    async fn archive_publication_preserves_the_private_disk_after_relocation() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
         let archive = archive(root.path(), false, false).await;
         let backend = backend(root.path(), 18).await;
@@ -741,13 +741,16 @@ mod tests {
         super::super::relocate_archive_config(&mut config, stage.path(), &child);
         std::fs::rename(stage.path(), &child).unwrap();
         drop(stage);
-        assert_eq!(config.snapshot_upper_layers.len(), 2);
-        for pair in config.snapshot_upper_layers.windows(2) {
-            assert!(pair[0].path.is_file());
-            let backing =
-                microsandbox_image::checkpoint::qcow2_backing_basename(&pair[1].path).unwrap();
-            assert_eq!(pair[0].path, child.join(backing));
-        }
+        assert_eq!(config.snapshot_upper_layers.len(), 1);
+        assert_eq!(config.snapshot_upper_layers[0].format, "raw");
+        assert_eq!(
+            config.snapshot_upper_layers[0].path,
+            child.join("upper.ext4")
+        );
+        assert_eq!(
+            std::fs::read(&config.snapshot_upper_layers[0].path).unwrap(),
+            std::fs::read(root.path().join("source.raw")).unwrap()
+        );
     }
 
     #[tokio::test]
