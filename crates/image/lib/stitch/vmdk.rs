@@ -61,7 +61,7 @@ pub fn write_vmdk_descriptor(output: &Path, extents: &[&Path]) -> io::Result<()>
     let sectors_per_track: u64 = 63;
     let cylinders = total_sectors.div_ceil(heads * sectors_per_track);
 
-    let mut file = std::fs::File::create(output)?;
+    let mut file = crate::write_budget::BudgetedFile::create(output)?;
 
     writeln!(file, "# Disk DescriptorFile")?;
     writeln!(file, "version=1")?;

@@ -158,7 +158,7 @@ fn write_fsmeta_image(
     devt_slotoff: u32,
     _meta_blkaddr: u32,
 ) -> Result<(), ErofsError> {
-    let mut file = BufWriter::new(std::fs::File::create(output)?);
+    let mut file = BufWriter::new(crate::write_budget::BudgetedFile::create(output)?);
 
     // Phase 1: Write device table.
     write_device_table(&mut file, layer_maps, fsmeta_blocks, devt_slotoff)?;

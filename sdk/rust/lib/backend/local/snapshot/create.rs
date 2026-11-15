@@ -591,6 +591,36 @@ pub(super) async fn create_snapshot_archive(
     out: &Path,
     plain_tar: bool,
 ) -> MicrosandboxResult<SnapshotArchive> {
+    create_snapshot_archive_inner(local, config, out, plain_tar, None).await
+}
+
+impl LocalBackend {
+    pub(crate) async fn create_bounded_snapshot_archive(
+        &self,
+        config: SnapshotConfig,
+        out: &Path,
+        maximum_disk_bytes: u64,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        crate::snapshot::import_budget::peak_bytes(maximum_disk_bytes)?;
+        let out = std::path::absolute(out)?;
+        create_snapshot_archive_inner(self, config, &out, true, Some(maximum_disk_bytes)).await
+    }
+}
+
+async fn create_snapshot_archive_inner(
+    local: &LocalBackend,
+    config: SnapshotConfig,
+    out: &Path,
+    plain_tar: bool,
+    maximum_disk_bytes: Option<u64>,
+) -> MicrosandboxResult<SnapshotArchive> {
+    if maximum_disk_bytes.is_some()
+        && (config.full || serde_json::to_vec(&config.labels)?.len() > 1024 * 1024)
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "bounded capture requires disk-only state and bounded labels".into(),
+        ));
+    }
     let total_started = Instant::now();
     let SnapshotConfig {
         mut name,
@@ -704,6 +734,18 @@ pub(super) async fn create_snapshot_archive(
             "sandbox '{source_sandbox}' uses a tmpfs root disk, whose writable state exists only in a running full snapshot"
         )));
     }
+    if maximum_disk_bytes.is_some()
+        && (root_disk != SnapshotRootDisk::Managed
+            || sandbox_config
+                .spec
+                .mounts
+                .iter()
+                .any(|mount| matches!(mount, VolumeMount::Owned { .. })))
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "bounded capture requires a managed root without owned volumes".into(),
+        ));
+    }
     let sandbox_dir = local.sandboxes_dir().join(&source_sandbox);
     let disk = capture_disk_source(
         local,
@@ -718,6 +760,28 @@ pub(super) async fn create_snapshot_archive(
     )
     .await?;
     lineage.validate_source(local, &source_sandbox).await?;
+    let (disk, flattened) = match maximum_disk_bytes {
+        Some(maximum) => {
+            let out = out.to_path_buf();
+            let source_guard = _lifecycle_guard.clone();
+            tokio::task::spawn_blocking(move || {
+                let _source_guard = source_guard;
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(async move {
+                        let mut disk = disk;
+                        let stage = flatten_bounded_capture(&mut disk, &out, maximum).await?;
+                        Ok::<_, MicrosandboxError>((disk, Some(stage)))
+                    })
+            })
+            .await
+            .map_err(|error| {
+                MicrosandboxError::Runtime(format!("bounded capture materialization: {error}"))
+            })??
+        }
+        None => (disk, None),
+    };
     let integrity_started = Instant::now();
     let integrities = vec![None; disk.sources.len()];
     let labels: BTreeMap<_, _> = labels.into_iter().collect();
@@ -755,6 +819,14 @@ pub(super) async fn create_snapshot_archive(
     let digest = manifest
         .digest()
         .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+    if maximum_disk_bytes.is_some()
+        && (manifest.to_canonical_bytes()?.len() > 4 * 1024 * 1024
+            || serde_json::to_vec(&labels)?.len() > 4 * 1024 * 1024)
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "bounded capture metadata exceeds its allowance".into(),
+        ));
+    }
     let archive_started = Instant::now();
     let source_paths = disk
         .sources
@@ -767,6 +839,7 @@ pub(super) async fn create_snapshot_archive(
         // A stopped disk remains locked and a live immutable cut remains pinned until the
         // background writer finishes, even if the caller stops awaiting this operation.
         let _disk = disk;
+        let _flattened = flattened;
         let _lifecycle_guard = _lifecycle_guard;
         super::archive::save_direct_file_snapshot(
             &manifest,
@@ -805,6 +878,61 @@ pub(super) async fn create_snapshot_archive(
         manifest,
         labels,
     ))
+}
+
+/// Normalize an immutable pinned chain to one raw layer before archive output.
+/// The output is bounded by virtual capacity, regardless of chain history or
+/// sparse extents. The caller retains both this staging and the source pins
+/// until its archive writer finishes, including cancellation.
+async fn flatten_bounded_capture(
+    disk: &mut SnapshotDiskClosure,
+    out: &Path,
+    maximum: u64,
+) -> MicrosandboxResult<tempfile::TempDir> {
+    if disk.virtual_size == 0 || disk.virtual_size > maximum || !disk.owned_volumes.is_empty() {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot source exceeds its admitted disk size".into(),
+        ));
+    }
+    let layers = disk
+        .sources
+        .iter()
+        .map(|source| microsandbox_image::checkpoint::CompactLayer {
+            path: source.path.clone(),
+            qcow2: source.format == SnapshotFormat::Qcow2,
+        })
+        .collect::<Vec<_>>();
+    // Check the disk reader's capacity too, before materialize_raw_prefix opens
+    // its destination. A corrupt descriptor cannot authorize a larger output.
+    let capacities = microsandbox_image::checkpoint::layer_capacities(layers.clone())?;
+    if capacities.last().copied() != Some(disk.virtual_size)
+        || capacities.iter().any(|capacity| *capacity > maximum)
+    {
+        return Err(MicrosandboxError::InvalidConfig(
+            "snapshot layer capacity exceeds its admitted disk size".into(),
+        ));
+    }
+    let parent = out
+        .parent()
+        .ok_or_else(|| MicrosandboxError::InvalidConfig("snapshot output has no parent".into()))?;
+    tokio::fs::create_dir_all(parent).await?;
+    let stage = tempfile::Builder::new()
+        .prefix(".bounded-capture-")
+        .tempdir_in(parent)?;
+    let raw = stage.path().join("upper.raw");
+    let materialized =
+        microsandbox_image::checkpoint::materialize_raw_prefix(&layers, &raw).await?;
+    if materialized.virtual_size != disk.virtual_size {
+        return Err(MicrosandboxError::SnapshotIntegrity(
+            "snapshot disk capacity changed during materialization".into(),
+        ));
+    }
+    disk.sources = vec![SnapshotDiskSource {
+        path: raw,
+        format: SnapshotFormat::Raw,
+        sealed_layer_id: None,
+    }];
+    Ok(stage)
 }
 
 /// Publish the archive before surfacing source recovery failure, just like installed capture.
@@ -3437,8 +3565,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let raw = temp.path().join("root.raw");
         let qcow = temp.path().join("generation.qcow2");
-        let raw_file = std::fs::File::create(&raw).unwrap();
-        raw_file.set_len(4096).unwrap();
+        std::fs::write(&raw, vec![17; 4096]).unwrap();
         microsandbox_image::checkpoint::create_qcow2_overlay(&qcow, 4096, &raw, "raw")
             .await
             .unwrap();
@@ -3512,6 +3639,72 @@ mod tests {
                 .await
                 .unwrap(),
         );
+
+        // The bounded profile must publish exactly one raw disk even when the
+        // source is layered. This is the shape accepted by bounded cloud import.
+        let mut disk = disk;
+        let archive = temp.path().join("bounded.tar");
+        assert!(
+            flatten_bounded_capture(&mut disk, &archive, 2048)
+                .await
+                .is_err()
+        );
+        assert!(!archive.exists());
+        let stage = flatten_bounded_capture(&mut disk, &archive, 4096)
+            .await
+            .unwrap();
+        assert_eq!(disk.sources.len(), 1);
+        assert_eq!(
+            std::fs::read(&disk.sources[0].path).unwrap(),
+            vec![17; 4096]
+        );
+        let manifest = new_file_manifest(
+            &disk,
+            vec![None],
+            "alpine:3.21".into(),
+            format!("sha256:{}", "a".repeat(64)),
+            "box",
+            SnapshotRootDisk::Managed,
+        )
+        .unwrap();
+        super::super::archive::save_direct_file_snapshot(
+            &manifest,
+            &BTreeMap::new(),
+            "bounded",
+            &[disk.sources[0].path.clone()],
+            None,
+            &archive,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        drop(stage);
+        let local = crate::test_support::local_backend_builder(temp.path().join("bounded-home"))
+            .build()
+            .await
+            .unwrap();
+        crate::backend::with_backend(local, async {
+            let handle = crate::Snapshot::load_bounded(
+                &archive,
+                crate::LoadOpts {
+                    dest: Some(temp.path().join("bounded-import")),
+                    ..Default::default()
+                },
+                4096,
+            )
+            .await
+            .unwrap();
+            let restored = handle.open().await.unwrap();
+            let file = restored.manifest().state.as_file().unwrap();
+            assert_eq!(file.layers.len(), 1);
+            assert_eq!(file.disk_format, SnapshotFormat::Raw);
+            assert_eq!(
+                std::fs::read(restored.layer_path(&file.layers[0]).unwrap()).unwrap(),
+                vec![17; 4096]
+            );
+        })
+        .await;
     }
 
     #[test]

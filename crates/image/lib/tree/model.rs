@@ -85,6 +85,7 @@ pub const SPOOL_THRESHOLD: u64 = 64 * 1024;
 
 /// A writable spool file for large file data during tar ingestion.
 pub struct DataSpool {
+    budget: Option<crate::ImageWriteBudget>,
     file: std::fs::File,
     shared: Arc<std::sync::Mutex<std::fs::File>>,
     offset: u64,
@@ -284,6 +285,10 @@ impl Default for RegularFileId {
 impl DataSpool {
     /// Create a new spool file at the given path.
     pub fn new(path: &std::path::Path) -> std::io::Result<Self> {
+        let budget = crate::ImageWriteBudget::current();
+        if let Some(budget) = &budget {
+            budget.charge_file()?;
+        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -292,6 +297,7 @@ impl DataSpool {
             .open(path)?;
         let shared = Arc::new(std::sync::Mutex::new(file.try_clone()?));
         Ok(Self {
+            budget,
             file,
             shared,
             offset: 0,
@@ -302,6 +308,14 @@ impl DataSpool {
     pub fn write_data(&mut self, data: &[u8]) -> std::io::Result<FileData> {
         use std::io::Write;
         let offset = self.offset;
+        if let Some(budget) = &self.budget {
+            budget.charge_growth(
+                self.offset,
+                self.offset
+                    .checked_add(data.len() as u64)
+                    .ok_or_else(|| std::io::Error::other("image spool overflow"))?,
+            )?;
+        }
         self.file.write_all(data)?;
         self.offset += data.len() as u64;
         Ok(FileData::Spool {
@@ -317,6 +331,14 @@ impl DataSpool {
 
     pub fn write_chunk(&mut self, data: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
+        if let Some(budget) = &self.budget {
+            budget.charge_growth(
+                self.offset,
+                self.offset
+                    .checked_add(data.len() as u64)
+                    .ok_or_else(|| std::io::Error::other("image spool overflow"))?,
+            )?;
+        }
         self.file.write_all(data)?;
         self.offset += data.len() as u64;
         Ok(())

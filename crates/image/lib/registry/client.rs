@@ -360,6 +360,7 @@ impl Registry {
         let materializer_guard =
             CacheLockGuard::acquire_async(&cache.flat_lock_path(&derivation_digest)).await?;
         tokio::task::spawn_blocking(move || {
+            let _write_budget = crate::ImageWriteBudget::enter(cache.write_budget.clone());
             let _materializer_guard = materializer_guard;
             let _leases = leases;
             flat::materialize_flat_rootfs_locked(
@@ -913,6 +914,17 @@ impl Registry {
             staged_layers,
         } = request;
 
+        if let Some(budget) = &self.cache.write_budget {
+            if layer_descriptors.len() > 256 {
+                return Err(ImageError::Io(io::Error::other(
+                    "bounded image pull exceeds its layer limit",
+                )));
+            }
+            // Stable lock files and directory/inode allowance are charged
+            // before spawning or creating per-layer cache paths.
+            budget.charge((layer_descriptors.len() as u64 + 1) * 64 * 1024)?;
+        }
+
         // Validate all diff_ids parse as digests before spawning layer tasks.
         // diff_ids come from the remote config blob (untrusted input).
         let validated_diff_ids: Vec<Digest> = diff_ids
@@ -1000,217 +1012,225 @@ impl Registry {
                 // Detached layer tasks retain their admitted files even if pull is cancelled.
                 let leases = _leases.clone();
                 let staging = staged_layers.clone();
-                tokio::spawn(async move {
-                    let _leases = leases;
-                    let _staging = staging;
-                    let _permit =
-                        semaphore
-                            .acquire_owned()
-                            .await
-                            .map_err(|e| LayerPipelineFailure {
-                                error: ImageError::Io(io::Error::other(format!(
-                                    "layer pipeline semaphore closed: {e}"
-                                ))),
-                            })?;
-                    let layer_started_at = Instant::now();
+                let write_budget = self.cache.write_budget.clone();
+                tokio::spawn(crate::ImageWriteBudget::scope_optional(
+                    write_budget,
+                    async move {
+                        let _leases = leases;
+                        let _staging = staging;
+                        let _permit =
+                            semaphore
+                                .acquire_owned()
+                                .await
+                                .map_err(|e| LayerPipelineFailure {
+                                    error: ImageError::Io(io::Error::other(format!(
+                                        "layer pipeline semaphore closed: {e}"
+                                    ))),
+                                })?;
+                        let layer_started_at = Instant::now();
 
-                    if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                        if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                            if let Some(ref p) = progress {
+                                p.send(PullProgress::LayerMaterializeComplete {
+                                    layer_index: i,
+                                    diff_id: diff_id.clone().into(),
+                                });
+                            }
+
+                            tracing::debug!(
+                                layer_index = i,
+                                diff_id = %diff_id,
+                                elapsed_ms = layer_started_at.elapsed().as_millis(),
+                                "layer reused existing EROFS image"
+                            );
+
+                            return Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
+                                layer_index: i,
+                                tree: None,
+                                data_map: None,
+                            });
+                        }
+
+                        if staged_tar_path.is_none() && _staging.is_some() {
+                            return Err(LayerPipelineFailure {
+                                error: ImageError::ManifestParse(format!(
+                                    "archive has no staged layer {}",
+                                    diff_id
+                                )),
+                            });
+                        }
+                        if staged_tar_path.is_none()
+                            && let Err(error) = layer
+                                .download(&client, &oci_ref, size, force, progress.as_ref(), i)
+                                .await
+                        {
+                            return Err(LayerPipelineFailure { error });
+                        }
+
+                        // Acquire per-layer flock to coordinate with concurrent pulls.
+                        let materializer_guard = CacheLockGuard::acquire_async(&lock_path)
+                            .await
+                            .map_err(|error| LayerPipelineFailure { error })?;
+
+                        // Re-check after lock — another process may have materialized it.
+                        if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
+                            if let Some(ref p) = progress {
+                                p.send(PullProgress::LayerMaterializeComplete {
+                                    layer_index: i,
+                                    diff_id: diff_id.clone().into(),
+                                });
+                            }
+                            return Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
+                                layer_index: i,
+                                tree: None,
+                                data_map: None,
+                            });
+                        }
+
                         if let Some(ref p) = progress {
-                            p.send(PullProgress::LayerMaterializeComplete {
+                            p.send(PullProgress::LayerMaterializeStarted {
                                 layer_index: i,
                                 diff_id: diff_id.clone().into(),
                             });
                         }
 
-                        tracing::debug!(
-                            layer_index = i,
-                            diff_id = %diff_id,
-                            elapsed_ms = layer_started_at.elapsed().as_millis(),
-                            "layer reused existing EROFS image"
-                        );
-
-                        return Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
-                            layer_index: i,
-                            tree: None,
-                            data_map: None,
-                        });
-                    }
-
-                    if staged_tar_path.is_none() && _staging.is_some() {
-                        return Err(LayerPipelineFailure {
-                            error: ImageError::ManifestParse(format!(
-                                "archive has no staged layer {}",
-                                diff_id
-                            )),
-                        });
-                    }
-                    if staged_tar_path.is_none()
-                        && let Err(error) = layer
-                            .download(&client, &oci_ref, size, force, progress.as_ref(), i)
-                            .await
-                    {
-                        return Err(LayerPipelineFailure { error });
-                    }
-
-                    // Acquire per-layer flock to coordinate with concurrent pulls.
-                    let materializer_guard = CacheLockGuard::acquire_async(&lock_path)
-                        .await
-                        .map_err(|error| LayerPipelineFailure { error })?;
-
-                    // Re-check after lock — another process may have materialized it.
-                    if cache::is_valid_erofs_artifact_async(&erofs_path).await && !layer_force {
-                        if let Some(ref p) = progress {
-                            p.send(PullProgress::LayerMaterializeComplete {
-                                layer_index: i,
-                                diff_id: diff_id.clone().into(),
-                            });
-                        }
-                        return Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
-                            layer_index: i,
-                            tree: None,
-                            data_map: None,
-                        });
-                    }
-
-                    if let Some(ref p) = progress {
-                        p.send(PullProgress::LayerMaterializeStarted {
-                            layer_index: i,
-                            diff_id: diff_id.clone().into(),
-                        });
-                    }
-
-                    let tar_path = staged_tar_path
-                        .clone()
-                        .unwrap_or_else(|| layer.tar_path_ref());
-                    let tar_size =
-                        tokio::fs::metadata(&tar_path)
-                            .await
-                            .map_err(|e| LayerPipelineFailure {
+                        let tar_path = staged_tar_path
+                            .clone()
+                            .unwrap_or_else(|| layer.tar_path_ref());
+                        let tar_size = tokio::fs::metadata(&tar_path).await.map_err(|e| {
+                            LayerPipelineFailure {
                                 error: ImageError::Cache {
                                     path: tar_path.clone(),
                                     source: e,
                                 },
-                            })?;
-                    let tar_file = tokio::fs::File::open(&tar_path).await.map_err(|e| {
-                        LayerPipelineFailure {
-                            error: ImageError::Cache {
-                                path: tar_path.clone(),
-                                source: e,
-                            },
-                        }
-                    })?;
+                            }
+                        })?;
+                        let tar_file = tokio::fs::File::open(&tar_path).await.map_err(|e| {
+                            LayerPipelineFailure {
+                                error: ImageError::Cache {
+                                    path: tar_path.clone(),
+                                    source: e,
+                                },
+                            }
+                        })?;
 
-                    let compression =
-                        Compression::from_media_type(media_type.as_deref().unwrap_or(""));
-                    let limits = ResourceLimits::default();
-                    let spool_path = layer_work_path(&tmp_dir, &diff_id_digest, "spool");
-                    let ingest_started_at = Instant::now();
-                    let ingest_result = tar::ingest_compressed_tar(
-                        MaterializeProgressReader::new(
-                            tar_file,
-                            progress.clone(),
-                            i,
-                            tar_size.len(),
-                        ),
-                        compression,
-                        &limits,
-                        Some(&spool_path),
-                    )
-                    .await
-                    .map_err(|e| LayerPipelineFailure {
-                        error: ImageError::Materialize {
-                            digest: diff_id.clone(),
-                            message: format!("tar ingestion failed: {e}"),
-                            source: None,
-                        },
-                    })?;
-
-                    // Verify the uncompressed digest matches the config's diff_id.
-                    // This is the OCI content trust check — the diff_id is signed
-                    // as part of the image config, so a tampered layer would be caught.
-                    let expected_diff_hex = diff_id_digest.hex();
-                    if ingest_result.uncompressed_digest != expected_diff_hex {
-                        return Err(LayerPipelineFailure {
-                            error: ImageError::DigestMismatch {
+                        let compression =
+                            Compression::from_media_type(media_type.as_deref().unwrap_or(""));
+                        let limits = ResourceLimits::default();
+                        let spool_path = layer_work_path(&tmp_dir, &diff_id_digest, "spool");
+                        let ingest_started_at = Instant::now();
+                        let ingest_result = tar::ingest_compressed_tar(
+                            MaterializeProgressReader::new(
+                                tar_file,
+                                progress.clone(),
+                                i,
+                                tar_size.len(),
+                            ),
+                            compression,
+                            &limits,
+                            Some(&spool_path),
+                        )
+                        .await
+                        .map_err(|e| LayerPipelineFailure {
+                            error: ImageError::Materialize {
                                 digest: diff_id.clone(),
-                                expected: format!("sha256:{expected_diff_hex}"),
-                                actual: format!("sha256:{}", ingest_result.uncompressed_digest),
+                                message: format!("tar ingestion failed: {e}"),
+                                source: None,
                             },
-                        });
-                    }
-                    let tree = ingest_result.tree;
+                        })?;
 
-                    tracing::debug!(
-                        layer_index = i,
-                        diff_id = %diff_id,
-                        tar_bytes = tar_size.len(),
-                        elapsed_ms = ingest_started_at.elapsed().as_millis(),
-                        "layer tar ingestion completed (diff_id verified)"
-                    );
+                        // Verify the uncompressed digest matches the config's diff_id.
+                        // This is the OCI content trust check — the diff_id is signed
+                        // as part of the image config, so a tampered layer would be caught.
+                        let expected_diff_hex = diff_id_digest.hex();
+                        if ingest_result.uncompressed_digest != expected_diff_hex {
+                            return Err(LayerPipelineFailure {
+                                error: ImageError::DigestMismatch {
+                                    digest: diff_id.clone(),
+                                    expected: format!("sha256:{expected_diff_hex}"),
+                                    actual: format!("sha256:{}", ingest_result.uncompressed_digest),
+                                },
+                            });
+                        }
+                        let tree = ingest_result.tree;
 
-                    if let Some(ref p) = progress {
-                        p.send(PullProgress::LayerMaterializeWriting { layer_index: i });
-                    }
+                        tracing::debug!(
+                            layer_index = i,
+                            diff_id = %diff_id,
+                            tar_bytes = tar_size.len(),
+                            elapsed_ms = ingest_started_at.elapsed().as_millis(),
+                            "layer tar ingestion completed (diff_id verified)"
+                        );
 
-                    // Write to a temp file, then atomic rename to the final path.
-                    // This prevents partial files from being visible to concurrent readers.
-                    let temp_path = layer_work_path(&tmp_dir, &diff_id_digest, "erofs.part");
-                    let erofs_final = erofs_path.clone();
-                    let diff_id_for_join = diff_id.clone();
-                    let write_started_at = Instant::now();
-                    let worker_leases = _leases.clone();
-                    let (data_map, mut tree) = tokio::task::spawn_blocking(move || {
-                        let _protection = (materializer_guard, worker_leases);
-                        let data_map = erofs::write_erofs(&tree, &temp_path)?;
-                        std::fs::rename(&temp_path, &erofs_final).map_err(erofs::ErofsError::Io)?;
-                        Ok::<(erofs::ErofsDataMap, FileTree), erofs::ErofsError>((data_map, tree))
-                    })
-                    .await
-                    .map_err(|e| LayerPipelineFailure {
-                        error: ImageError::Materialize {
-                            digest: diff_id_for_join.clone(),
-                            message: format!("EROFS write task failed: {e}"),
-                            source: None,
-                        },
-                    })?
-                    .map_err(|e| LayerPipelineFailure {
-                        error: ImageError::Materialize {
-                            digest: diff_id.clone(),
-                            message: format!("EROFS write failed: {e}"),
-                            source: None,
-                        },
-                    })?;
+                        if let Some(ref p) = progress {
+                            p.send(PullProgress::LayerMaterializeWriting { layer_index: i });
+                        }
 
-                    // Strip file data from the retained tree to reduce memory.
-                    // Only directory structure and metadata are needed for fsmeta merge.
-                    tree.strip_file_data();
+                        // Write to a temp file, then atomic rename to the final path.
+                        // This prevents partial files from being visible to concurrent readers.
+                        let temp_path = layer_work_path(&tmp_dir, &diff_id_digest, "erofs.part");
+                        let erofs_final = erofs_path.clone();
+                        let diff_id_for_join = diff_id.clone();
+                        let write_started_at = Instant::now();
+                        let worker_leases = _leases.clone();
+                        let write_budget = crate::ImageWriteBudget::current();
+                        let (data_map, mut tree) = tokio::task::spawn_blocking(move || {
+                            let _write_budget = crate::ImageWriteBudget::enter(write_budget);
+                            let _protection = (materializer_guard, worker_leases);
+                            let data_map = erofs::write_erofs(&tree, &temp_path)?;
+                            std::fs::rename(&temp_path, &erofs_final)
+                                .map_err(erofs::ErofsError::Io)?;
+                            Ok::<(erofs::ErofsDataMap, FileTree), erofs::ErofsError>((
+                                data_map, tree,
+                            ))
+                        })
+                        .await
+                        .map_err(|e| LayerPipelineFailure {
+                            error: ImageError::Materialize {
+                                digest: diff_id_for_join.clone(),
+                                message: format!("EROFS write task failed: {e}"),
+                                source: None,
+                            },
+                        })?
+                        .map_err(|e| LayerPipelineFailure {
+                            error: ImageError::Materialize {
+                                digest: diff_id.clone(),
+                                message: format!("EROFS write failed: {e}"),
+                                source: None,
+                            },
+                        })?;
 
-                    tracing::debug!(
-                        layer_index = i,
-                        diff_id = %diff_id,
-                        elapsed_ms = write_started_at.elapsed().as_millis(),
-                        total_elapsed_ms = layer_started_at.elapsed().as_millis(),
-                        "layer EROFS image write completed"
-                    );
+                        // Strip file data from the retained tree to reduce memory.
+                        // Only directory structure and metadata are needed for fsmeta merge.
+                        tree.strip_file_data();
 
-                    // Tarball cleanup is deferred — with duplicate layer digests,
-                    // another task may still need the same blob. Tarballs are cleaned
-                    // up after all layer tasks complete.
-                    let _ = tokio::fs::remove_file(&spool_path).await;
+                        tracing::debug!(
+                            layer_index = i,
+                            diff_id = %diff_id,
+                            elapsed_ms = write_started_at.elapsed().as_millis(),
+                            total_elapsed_ms = layer_started_at.elapsed().as_millis(),
+                            "layer EROFS image write completed"
+                        );
 
-                    if let Some(ref p) = progress {
-                        p.send(PullProgress::LayerMaterializeComplete {
+                        // Tarball cleanup is deferred — with duplicate layer digests,
+                        // another task may still need the same blob. Tarballs are cleaned
+                        // up after all layer tasks complete.
+                        let _ = tokio::fs::remove_file(&spool_path).await;
+
+                        if let Some(ref p) = progress {
+                            p.send(PullProgress::LayerMaterializeComplete {
+                                layer_index: i,
+                                diff_id: diff_id.clone().into(),
+                            });
+                        }
+
+                        Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
                             layer_index: i,
-                            diff_id: diff_id.clone().into(),
-                        });
-                    }
-
-                    Ok::<_, LayerPipelineFailure>(LayerPipelineTreeSuccess {
-                        layer_index: i,
-                        tree: Some(tree),
-                        data_map: Some(data_map),
-                    })
-                })
+                            tree: Some(tree),
+                            data_map: Some(data_map),
+                        })
+                    },
+                ))
             })
             .collect();
 
@@ -1291,7 +1311,9 @@ impl Registry {
 
         let stitch_progress = progress.clone();
         let worker_cache = self.cache.clone();
+        let write_budget = worker_cache.write_budget.clone();
         tokio::task::spawn_blocking(move || {
+            let _write_budget = crate::ImageWriteBudget::enter(write_budget);
             // Both the materializer mutex and the operation pins must outlive cancellation.
             let _protection = (materializer_guard, worker_cache);
             std::fs::create_dir_all(&work_dir).map_err(|e| ImageError::Cache {
@@ -2369,6 +2391,54 @@ mod tests {
                 layer_count: 2,
             } if event_ref.as_ref() == reference.to_string()
         ));
+    }
+
+    #[tokio::test]
+    async fn cache_repair_and_flat_materialization_keep_the_pull_allowance() {
+        for bytes in [2 * 1024 * 1024, 512 * 1024 * 1024] {
+            let temp = tempdir().unwrap();
+            let cache = GlobalCache::new(temp.path()).unwrap();
+            let reference = "docker.io/library/shared-base:bounded".parse().unwrap();
+            let metadata = write_cached_image_fixture(&cache, &reference, &[true]);
+            let manifest = parse_digest(&metadata.manifest_digest);
+            let diff = parse_digest(&metadata.layers[0].diff_id);
+            std::fs::remove_file(cache.fsmeta_erofs_path(&manifest)).unwrap();
+            std::fs::remove_file(cache.vmdk_path(&manifest)).unwrap();
+            let budget = crate::ImageWriteBudget::new(bytes, std::sync::Arc::new(()));
+            budget
+                .scope(async {
+                    let cache = GlobalCache::new_async(temp.path()).await.unwrap();
+                    let registry =
+                        super::Registry::new(Platform::default(), cache.clone()).unwrap();
+                    registry
+                        .materialize_cached_layers(&reference, &metadata, false)
+                        .await
+                        .unwrap();
+                    assert!(cache.fsmeta_erofs_path(&manifest).exists());
+                    assert!(cache.vmdk_path(&manifest).exists());
+                    let flat = registry
+                        .materialize_flat_rootfs(&manifest, &[diff], false)
+                        .await;
+                    if bytes == 2 * 1024 * 1024 {
+                        assert!(
+                            flat.unwrap_err()
+                                .to_string()
+                                .contains("admitted byte allowance")
+                        );
+                        assert!(cache.read_flat_ref(&manifest).unwrap().is_none());
+                    } else {
+                        let flat = flat.unwrap();
+                        let path = cache.flat_blob_path(&flat.artifact_digest.parse().unwrap());
+                        let mut file = std::fs::File::open(&path).unwrap();
+                        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(1024 + 56))
+                            .unwrap();
+                        let mut magic = [0; 2];
+                        std::io::Read::read_exact(&mut file, &mut magic).unwrap();
+                        assert_eq!(magic, [0x53, 0xef]);
+                    }
+                })
+                .await;
+        }
     }
 
     #[tokio::test]

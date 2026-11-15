@@ -38,6 +38,7 @@ pub(crate) mod stitch;
 pub mod storage_lease;
 pub mod tar;
 pub mod tree;
+mod write_budget;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
@@ -60,3 +61,4 @@ pub use progress::{PullProgress, PullProgressHandle, PullProgressSender, progres
 pub use pull::{PullOptions, PullPolicy, PullResult, RootfsMaterialization};
 pub use registry::{Registry, RegistryBuilder};
 pub use stitch::vmdk::write_vmdk_descriptor;
+pub use write_budget::ImageWriteBudget;

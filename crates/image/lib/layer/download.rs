@@ -30,6 +30,7 @@ const DOWNLOAD_PROGRESS_EMIT_BYTES: u64 = 256 * 1024;
 
 /// A single OCI layer handle with download state.
 pub(crate) struct Layer {
+    pub(crate) write_budget: Option<crate::ImageWriteBudget>,
     /// Compressed layer digest (from manifest).
     pub digest: Digest,
     /// Cached paths derived from the global cache.
@@ -52,6 +53,7 @@ impl Layer {
     /// Create a new layer handle.
     pub fn new(digest: Digest, cache: &GlobalCache) -> Self {
         Self {
+            write_budget: cache.write_budget.clone(),
             tar_path: cache.tar_path(&digest),
             download_lock_path: cache.download_lock_path(&digest),
             part_path: cache.part_path(&digest),
@@ -114,6 +116,10 @@ impl Layer {
                 return Ok(());
             }
             Ok(_) | Err(_) => {}
+        }
+
+        if let Some(budget) = &self.write_budget {
+            budget.charge_file()?;
         }
 
         // Stream the blob to a .part file.
@@ -223,6 +229,14 @@ impl Layer {
         use futures::StreamExt;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
+            if let Some(budget) = &self.write_budget {
+                budget.charge_growth(
+                    downloaded,
+                    downloaded
+                        .checked_add(chunk.len() as u64)
+                        .ok_or_else(|| io::Error::other("image download overflow"))?,
+                )?;
+            }
             hasher.update(&chunk);
             file.write_all(&chunk)
                 .await

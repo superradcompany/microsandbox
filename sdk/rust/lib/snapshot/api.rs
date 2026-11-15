@@ -667,6 +667,32 @@ impl Snapshot {
             .create_archive(config, out.as_ref(), plain_tar)
             .await
     }
+    /// Capture a managed root as one raw disk in a plain tar archive.
+    /// The maximum is the sandbox's admitted root-disk size. Layer history is
+    /// flattened in caller-local staging before archive output; full state and
+    /// owned volumes are refused. Existing capture calls retain their formats.
+    #[cfg(feature = "local")]
+    pub async fn create_archive_bounded(
+        config: SnapshotConfig,
+        out: impl AsRef<Path>,
+        maximum_disk_bytes: u64,
+    ) -> MicrosandboxResult<SnapshotArchive> {
+        let backend = crate::backend::default_backend();
+        let out = std::path::absolute(out)?;
+        // Keep source ownership, staging and any blocking materializer alive
+        // when the requesting future is cancelled.
+        tokio::spawn(async move {
+            let local = backend.as_local().ok_or_else(|| {
+                MicrosandboxError::InvalidConfig("bounded capture requires local storage".into())
+            })?;
+            local
+                .create_bounded_snapshot_archive(config, &out, maximum_disk_bytes)
+                .await
+        })
+        .await
+        .map_err(|error| MicrosandboxError::Runtime(format!("bounded capture owner: {error}")))?
+    }
+
     /// Import an archive with an explicit dependency base.
     pub async fn load_with_base(
         path: &Path,

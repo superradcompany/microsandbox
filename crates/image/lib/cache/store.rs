@@ -76,6 +76,7 @@ pub(crate) enum VmdkWriteMode {
 /// ```
 #[derive(Clone)]
 pub struct GlobalCache {
+    pub(crate) write_budget: Option<crate::ImageWriteBudget>,
     /// An explicitly scoped operation retains all admitted entries through catalog publication.
     pub(super) operation: Option<Arc<Mutex<BTreeMap<PathBuf, StorageLease>>>>,
 
@@ -166,6 +167,9 @@ impl GlobalCache {
     ///
     /// Creates all subdirectories if they don't exist.
     pub fn new(cache_dir: &Path) -> ImageResult<Self> {
+        if let Some(budget) = crate::ImageWriteBudget::current() {
+            budget.charge(1024 * 1024)?;
+        }
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
@@ -193,6 +197,7 @@ impl GlobalCache {
         }
 
         Ok(Self {
+            write_budget: crate::ImageWriteBudget::current(),
             operation: None,
             layers_dir,
             fsmeta_dir,
@@ -207,6 +212,9 @@ impl GlobalCache {
 
     /// Create a new GlobalCache using async filesystem operations.
     pub async fn new_async(cache_dir: &Path) -> ImageResult<Self> {
+        if let Some(budget) = crate::ImageWriteBudget::current() {
+            budget.charge(1024 * 1024)?;
+        }
         let layers_dir = cache_dir.join(LAYERS_DIR);
         let fsmeta_dir = cache_dir.join(FSMETA_DIR);
         let vmdk_dir = cache_dir.join(VMDK_DIR);
@@ -236,6 +244,7 @@ impl GlobalCache {
         }
 
         Ok(Self {
+            write_budget: crate::ImageWriteBudget::current(),
             operation: None,
             layers_dir,
             fsmeta_dir,
@@ -409,6 +418,7 @@ impl GlobalCache {
         mode: VmdkWriteMode,
         progress: Option<&PullProgressSender>,
     ) -> ImageResult<()> {
+        let _write_budget = crate::ImageWriteBudget::enter(self.write_budget.clone());
         let fsmeta = self.fsmeta_erofs_path(manifest_digest);
         let layers: Vec<PathBuf> = layer_diff_ids
             .iter()
@@ -574,7 +584,11 @@ impl GlobalCache {
         let payload = serde_json::to_vec_pretty(reference).map_err(|error| {
             ImageError::ConfigParse(format!("failed to serialize flat rootfs ref: {error}"))
         })?;
-        let mut temp = std::fs::File::create(&temp_path).map_err(|source| ImageError::Cache {
+        let mut temp = crate::write_budget::BudgetedFile::create_with_budget(
+            &temp_path,
+            self.write_budget.clone(),
+        )
+        .map_err(|source| ImageError::Cache {
             path: temp_path.clone(),
             source,
         })?;
@@ -874,7 +888,10 @@ impl GlobalCache {
         metadata: &CachedImageMetadata,
     ) -> ImageResult<()> {
         let temporary_path = path.with_extension("json.part");
-        let mut temporary = std::fs::File::create(&temporary_path)?;
+        let mut temporary = crate::write_budget::BudgetedFile::create_with_budget(
+            &temporary_path,
+            self.write_budget.clone(),
+        )?;
         serde_json::to_writer(&mut temporary, metadata)
             .map_err(|error| ImageError::ConfigParse(error.to_string()))?;
         temporary.flush()?;
@@ -919,7 +936,10 @@ impl GlobalCache {
 
         // The gate covers the shared .json.part path until the complete file is durable.
         let temporary_path = path.with_extension("json.part");
-        let mut temporary = std::fs::File::create(&temporary_path)?;
+        let mut temporary = crate::write_budget::BudgetedFile::create_with_budget(
+            &temporary_path,
+            self.write_budget.clone(),
+        )?;
         temporary.write_all(archived_bytes)?;
         temporary.sync_all()?;
         std::fs::rename(temporary_path, path)?;

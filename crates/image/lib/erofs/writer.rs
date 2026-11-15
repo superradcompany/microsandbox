@@ -147,7 +147,7 @@ impl<W: Write> Write for CursorTrackingWriter<'_, W> {
 //--------------------------------------------------------------------------------------------------
 
 pub fn write_erofs(tree: &FileTree, output: &Path) -> Result<ErofsDataMap, ErofsError> {
-    let mut file = BufWriter::new(std::fs::File::create(output)?);
+    let mut file = BufWriter::new(crate::write_budget::BudgetedFile::create(output)?);
     let mut state = LayoutState::new();
 
     // Phase 1+2: Plan layout and assign NIDs.

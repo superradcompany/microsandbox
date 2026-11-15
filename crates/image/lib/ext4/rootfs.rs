@@ -99,6 +99,12 @@ pub fn materialize_ext4_rootfs(
     };
     let uuid = deterministic_uuid(&options.derivation_digest);
 
+    // Charge the complete output before the formatter creates or extends it.
+    // Sparse allocation and later validation cannot increase this allowance.
+    if let Some(budget) = crate::ImageWriteBudget::current() {
+        budget.charge_file()?;
+        budget.charge_growth(0, size_bytes)?;
+    }
     format_ext4_rootfs_with_tree_and_uuid(path, &format_options, tree, uuid)?;
     validate_rootfs_image(path)?;
 
