@@ -77,17 +77,24 @@ impl ImageWriteBudget {
     }
 
     pub(crate) fn charge(&self, bytes: u64) -> io::Result<()> {
-        self.remaining
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
-                remaining.checked_sub(bytes)
-            })
-            .map(|_| ())
-            .map_err(|_| {
+        let mut remaining = self.remaining.load(Ordering::Acquire);
+        loop {
+            let next = remaining.checked_sub(bytes).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::StorageFull,
                     "image operation exceeds its admitted byte allowance",
                 )
-            })
+            })?;
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(current) => remaining = current,
+            }
+        }
     }
 
     pub(crate) fn charge_file(&self) -> io::Result<()> {
