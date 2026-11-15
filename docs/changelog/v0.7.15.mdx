@@ -1,0 +1,51 @@
+---
+title: "v0.7.15"
+sidebarTitle: "v0.7.15"
+description: "Install an exact version or a release candidate, get faster small-file work on mounted host directories, and boot an updated guest kernel."
+icon: "bolt"
+---
+
+November 11, 2026 · [GitHub release](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.15) · [All changes](https://github.com/superradcompany/microsandbox/compare/v0.7.14...v0.7.15)
+
+## New features
+
+**Choose the version you install.** The installers still default to the latest stable release. You can now pin an exact published version, or opt in to the newest release candidate with the `rc` channel:
+
+```bash
+# Install an exact version.
+curl -fsSL https://install.microsandbox.dev | sh -s -- --version 0.7.15
+
+# Install the newest release candidate.
+curl -fsSL https://install.microsandbox.dev | sh -s -- --channel rc
+```
+
+On Windows, set `MSB_INSTALL_VERSION` or `MSB_INSTALL_CHANNEL` before running the installer, or pass `-Version` or `-Channel` to a downloaded `install.ps1`. If no active candidate exists, or it has no bundle for your platform, the `rc` channel fails instead of falling back to stable. Release candidates also publish to the npm `rc` tag and the Docker `rc` tag. Homebrew and Winget stay stable-only. [Versions](/getting-started/versions)
+
+**Faster small-file work on mounted host directories.** On macOS and Linux, local sandboxes now keep file descriptors open across file creation, metadata, and extended-attribute operations instead of closing and reopening them. This cuts host work for workloads that touch many small files, especially on network-backed directories. Flush and `fsync` behavior is unchanged. [Volumes](/sandboxes/volumes)
+
+## Fixes
+
+- New boots use guest Linux 6.12.117. On Windows x64, the guest kernel restores container networking, policy routing, and POSIX message queues.
+
+## Before upgrading
+
+- **Coming from v0.7.11 or earlier?** Read the v0.7.12 [Before upgrading](/changelog/v0.7.12#before-upgrading) notes first.
+
+## Contributors
+
+Thank you to everyone who contributed to this release.
+
+<ul className="msb-release-contributors not-prose">
+  <li>
+    <a href="https://github.com/appcypher">
+      <img src="https://avatars.githubusercontent.com/u/20358651?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@appcypher</span>
+    </a>
+  </li>
+  <li>
+    <a href="https://github.com/toksdotdev">
+      <img src="https://avatars.githubusercontent.com/u/11903253?s=80" alt="" width="32" height="32" loading="lazy" />
+      <span>@toksdotdev</span>
+    </a>
+  </li>
+</ul>
