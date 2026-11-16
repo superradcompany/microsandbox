@@ -125,6 +125,7 @@ async fn check_published_port(protocol: PortProtocol, bind: IpAddr) {
         HostRoutes {
             ipv4: false,
             ipv6: false,
+            ..HostRoutes::default()
         },
     )
     .unwrap();

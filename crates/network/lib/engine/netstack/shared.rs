@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crossbeam_queue::ArrayQueue;
-use ipnetwork::Ipv6Network;
+use ipnetwork::{Ipv4Network, Ipv6Network};
 use microsandbox_types::HttpConfig;
 use microsandbox_utils::ttl_reverse_index::TtlReverseIndex;
 pub use microsandbox_utils::wake_pipe::WakePipe;
@@ -89,6 +89,13 @@ pub struct SharedState {
     /// Per-sandbox gateway IPv6. Set once at boot. See `gateway_ipv4`.
     gateway_ipv6: OnceLock<Ipv6Addr>,
 
+    /// Host interface addresses and on-link IPv6 networks used by the
+    /// default destination policy. Set once before the network starts.
+    host_ipv4: OnceLock<Vec<Ipv4Addr>>,
+    host_ipv4_networks: OnceLock<Vec<Ipv4Network>>,
+    host_ipv6: OnceLock<Vec<Ipv6Addr>>,
+    host_ipv6_networks: OnceLock<Vec<Ipv6Network>>,
+
     /// NAT64 `/96` prefixes used by policy classification.
     nat64_prefixes: OnceLock<Vec<Ipv6Network>>,
 
@@ -142,6 +149,10 @@ impl SharedState {
             resolved_hostnames: RwLock::new(TtlReverseIndex::default()),
             gateway_ipv4: OnceLock::new(),
             gateway_ipv6: OnceLock::new(),
+            host_ipv4: OnceLock::new(),
+            host_ipv4_networks: OnceLock::new(),
+            host_ipv6: OnceLock::new(),
+            host_ipv6_networks: OnceLock::new(),
             nat64_prefixes: OnceLock::new(),
             metrics: NetworkMetrics::default(),
             http: OnceLock::new(),
@@ -167,6 +178,42 @@ impl SharedState {
     /// Gateway IPv6 address, if set.
     pub fn gateway_ipv6(&self) -> Option<Ipv6Addr> {
         self.gateway_ipv6.get().copied()
+    }
+
+    /// Set host addresses and on-link IPv6 networks used by policy matching.
+    pub fn set_host_networks(
+        &self,
+        ipv4: Vec<Ipv4Addr>,
+        ipv4_networks: Vec<Ipv4Network>,
+        ipv6: Vec<Ipv6Addr>,
+        ipv6_networks: Vec<Ipv6Network>,
+    ) {
+        let _ = self.host_ipv4.set(ipv4);
+        let _ = self.host_ipv4_networks.set(ipv4_networks);
+        let _ = self.host_ipv6.set(ipv6);
+        let _ = self.host_ipv6_networks.set(ipv6_networks);
+    }
+
+    pub fn host_ipv4(&self) -> &[Ipv4Addr] {
+        self.host_ipv4.get().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn host_ipv6(&self) -> &[Ipv6Addr] {
+        self.host_ipv6.get().map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn host_ipv4_networks(&self) -> &[Ipv4Network] {
+        self.host_ipv4_networks
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn host_ipv6_networks(&self) -> &[Ipv6Network] {
+        self.host_ipv6_networks
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Install HTTP denial settings. The first call wins.
