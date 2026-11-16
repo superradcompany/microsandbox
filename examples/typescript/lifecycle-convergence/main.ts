@@ -1,3 +1,6 @@
+// Explicit preparation calls measure readiness and concurrent convergence.
+// Ordinary shell/exec examples should rely on automatic preparation.
+
 // Import the in-tree build so this live example always exercises the current checkout's native module.
 import { Sandbox, SandboxReplacedError } from "../../../sdk/node-ts/dist/index.js";
 

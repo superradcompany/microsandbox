@@ -20,7 +20,6 @@ Replace global backend setters and scoped overrides with an explicit `RemoteCont
 import { Sandbox } from "microsandbox";
 
 const sb = await Sandbox.get("worker");
-await sb.ensureRunning();
 const output = await sb.shell("echo ready");
 ```
 
@@ -28,7 +27,6 @@ const output = await sb.shell("echo ready");
 use microsandbox::Sandbox;
 
 let sb = Sandbox::get("worker").await?;
-sb.ensure_running().await?;
 let output = sb.shell("echo ready").await?;
 ```
 
@@ -36,7 +34,6 @@ let output = sb.shell("echo ready").await?;
 from microsandbox import Sandbox
 
 sb = await Sandbox.get("worker")
-await sb.ensure_running()
 output = await sb.shell("echo ready")
 ```
 
@@ -44,18 +41,16 @@ output = await sb.shell("echo ready")
 sb, err := microsandbox.GetSandbox(ctx, "worker")
 if err != nil { return err }
 defer sb.Close()
-if err := sb.EnsureRunning(ctx); err != nil { return err }
 output, err := sb.Shell(ctx, "echo ready")
 ```
 
 ```ruby Ruby
 sb = Microsandbox::Sandbox.get("worker")
-sb.ensure_running
 output = sb.shell("echo ready")
 ```
 </CodeGroup>
 
-Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running`.
+Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running` only when you need [explicit preparation ahead of work](/sandboxes/lifecycle#prepare-ahead-of-time). Ordinary execution needs no preparation call.
 
 When preparation starts a stopped local sandbox, the receiving resource retains the new run's ownership. Connecting to an already running sandbox acquires no new shutdown ownership. Remote resources do not gain client-scope shutdown ownership. Use explicit stop or destroy when that is the intended action. See [lifecycle](/sandboxes/lifecycle) for cleanup and detachment.
 

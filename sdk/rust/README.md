@@ -272,10 +272,8 @@ let sandbox = Sandbox::builder("readme-background")
 
 sandbox.detach().await?;
 
-let handle = Sandbox::get("readme-background").await?;
-handle.ensure_running().await?;
-let reconnected = handle;
-let output = reconnected.shell("echo reconnected").await?;
+let existing = Sandbox::get("readme-background").await?;
+let output = existing.shell("echo reconnected").await?;
 println!("{}", output.stdout()?.trim());
 ```
 

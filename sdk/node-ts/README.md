@@ -307,10 +307,8 @@ const sandbox = await Sandbox.builder("ts-readme-background")
   .create();
 // Detached creation already relinquishes automatic shutdown.
 
-const handle = await Sandbox.get("ts-readme-background");
-await handle.ensureRunning();
-const reconnected = handle;
-const output = await reconnected.shell("echo reconnected");
+const existing = await Sandbox.get("ts-readme-background");
+const output = await existing.shell("echo reconnected");
 console.log(output.stdout().trim());
 ```
 

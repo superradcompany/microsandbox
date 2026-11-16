@@ -1,4 +1,8 @@
-"""Live lifecycle convergence and identity-safety example."""
+"""Live lifecycle convergence and identity-safety example.
+
+Explicit preparation measures readiness and concurrent convergence.
+Ordinary shell/exec examples should rely on automatic preparation.
+"""
 
 import asyncio
 import json

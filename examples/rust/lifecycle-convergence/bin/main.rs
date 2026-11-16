@@ -1,4 +1,6 @@
 //! Live lifecycle convergence and identity-safety example.
+//! Explicit preparation calls measure readiness and concurrent convergence;
+//! ordinary shell/exec examples should rely on automatic preparation.
 
 use std::{collections::BTreeMap, time::Instant};
 

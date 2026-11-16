@@ -1,4 +1,6 @@
 // Lifecycle convergence and identity-safety example.
+// Explicit preparation measures readiness and concurrent convergence.
+// Ordinary shell/exec examples should rely on automatic preparation.
 package main
 
 import (
