@@ -3075,7 +3075,6 @@ mod tests {
     #[cfg(feature = "net")]
     use microsandbox_types::{PortProtocol, SecretSource};
 
-    #[cfg(feature = "cloud")]
     use crate::snapshot::SnapshotReference;
 
     fn finish_prepared_restore(

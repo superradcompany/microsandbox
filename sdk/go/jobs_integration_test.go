@@ -18,11 +18,7 @@ func TestManagedJobIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	handle, err := GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sb, err := handle.Connect(ctx)
+	sb, err := GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +51,7 @@ func TestManagedJobIntegration(t *testing.T) {
 	if err := attachment.Detach(ctx); err != nil {
 		t.Fatal(err)
 	}
-	found, err := handle.GetJob(ctx, job.ID())
+	found, err := sb.GetJob(ctx, job.ID())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,11 +116,7 @@ func TestExecStreamDeadlineIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	handle, err := GetSandbox(ctx, name)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sb, err := handle.Connect(ctx)
+	sb, err := GetSandbox(ctx, name)
 	if err != nil {
 		t.Fatal(err)
 	}
