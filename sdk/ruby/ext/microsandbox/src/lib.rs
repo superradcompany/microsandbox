@@ -1724,10 +1724,18 @@ impl RubyVolume {
     fn info(ruby: &Ruby, this: typed_data::Obj<Self>) -> Result<Value, Error> {
         let volume = this.inner.clone();
         let info = run(ruby, async move { volume.info().await })?;
-        let mut value = serde_json::to_value(&info).map_err(|error| argument_error(ruby, error.to_string()))?;
-        value["labels"] = serde_json::to_value(info.labels.into_iter().collect::<std::collections::BTreeMap<_,_>>()).map_err(|error| argument_error(ruby, error.to_string()))?;
+        let mut value =
+            serde_json::to_value(&info).map_err(|error| argument_error(ruby, error.to_string()))?;
+        value["labels"] = serde_json::to_value(
+            info.labels
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .map_err(|error| argument_error(ruby, error.to_string()))?;
         ruby.require("json")?;
-        ruby.class_object().const_get::<_, Value>("JSON")?.funcall("parse", (value.to_string(),))
+        ruby.class_object()
+            .const_get::<_, Value>("JSON")?
+            .funcall("parse", (value.to_string(),))
     }
     fn created_at(&self) -> Option<String> {
         self.inner.created_at().map(|dt| dt.to_rfc3339())
