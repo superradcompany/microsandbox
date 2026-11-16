@@ -3822,6 +3822,7 @@ dependencies = [
  "h2",
  "hex",
  "http",
+ "httpdate",
  "ipnetwork",
  "keyring",
  "libc",

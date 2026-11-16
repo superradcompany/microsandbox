@@ -34,6 +34,7 @@ pub mod restore;
 pub mod run;
 pub mod sandbox;
 pub mod self_cmd;
+pub mod service;
 pub mod snapshot;
 #[cfg(feature = "ssh")]
 pub mod ssh;

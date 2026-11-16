@@ -9,6 +9,7 @@ mod logs;
 mod metrics;
 mod sandbox;
 mod sandbox_handle;
+mod service;
 mod setup;
 mod snapshot;
 mod ssh;
@@ -101,6 +102,8 @@ fn _microsandbox(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<volume::PyVolume>()?;
     m.add_class::<volume::PyVolumeHandle>()?;
     m.add_class::<volume::PyVolumeFs>()?;
+    m.add_class::<service::PyService>()?;
+    m.add_class::<service::PyServicePage>()?;
     m.add_class::<snapshot::PySnapshot>()?;
     m.add_class::<snapshot::PySnapshotArchive>()?;
     m.add_class::<snapshot::PySnapshotCopyBuilder>()?;

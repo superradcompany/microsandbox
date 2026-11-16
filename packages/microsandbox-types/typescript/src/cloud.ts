@@ -809,6 +809,68 @@ export type CloudSandboxStatus =
 
 export type CloudSandboxStatusReason = "scheduling" | "insufficient_capacity";
 
+export type CloudService = {
+  /**
+   * Globally unique Service slug.
+   */
+  slug: string;
+  /**
+   * Absolute HTTPS URL for the Service.
+   */
+  url: string;
+  /**
+   * Whether the Service routes requests, is disabled, or has no target.
+   */
+  status: CloudServiceStatus;
+  /**
+   * Current target, or no target when the Service is detached.
+   */
+  target: CloudServiceTarget | null;
+  /**
+   * Creation timestamp.
+   */
+  created_at: string;
+  /**
+   * Timestamp of the most recent state change.
+   */
+  updated_at: string;
+};
+
+export type CloudServiceStatus =
+  | "enabled"
+  | "disabled"
+  | "detached"
+  | "unknown";
+
+export type CloudServiceTarget = {
+  /**
+   * Sandbox name.
+   */
+  sandbox: string;
+  /**
+   * Sandbox port that receives requests.
+   */
+  port: number;
+};
+
+export type CloudCreateServiceRequest = {
+  /**
+   * Globally unique Service slug.
+   */
+  slug: string;
+  /**
+   * Initial Service target.
+   */
+  target: CloudServiceTarget;
+};
+
+export type CloudUpdateServiceRequest = {
+  /**
+   * New target when moving or reattaching the Service.
+   */
+  target?: CloudServiceTarget | null;
+};
+
 export type CloudCreateSnapshotRequest = {
   "kind": "disk";
   /**
