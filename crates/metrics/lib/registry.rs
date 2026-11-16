@@ -1427,7 +1427,7 @@ fn write_name(slot: &Slot, name: &str) {
     for (i, byte) in bytes.iter().take(len).enumerate() {
         slot.name_bytes[i].store(*byte, Ordering::Relaxed);
     }
-    for byte in slot.name_bytes.iter().skip(len) {
+    for byte in &slot.name_bytes[len..] {
         byte.store(0, Ordering::Relaxed);
     }
     slot.name_len.store(len as u16, Ordering::Relaxed);
