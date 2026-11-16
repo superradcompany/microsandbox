@@ -1224,6 +1224,7 @@ jobs:
       - name: Validate loaded Go provider coexistence
         working-directory: sdk/go
         env:
+          MSB_GO_FULL_PROVIDER: ${{ github.workspace }}/release-artifacts/libmicrosandbox_go_ffi-linux-amd64.so
           MSB_GO_LOCAL_PROVIDER: ${{ github.workspace }}/go-providers/go-providers-linux-x86_64/microsandbox-go-local-x86_64-unknown-linux-gnu.so
           MSB_GO_REMOTE_PROVIDER: ${{ github.workspace }}/go-providers/go-providers-linux-x86_64/microsandbox-go-remote-x86_64-unknown-linux-gnu.so
         run: go test -tags readiness_native -run '^TestProviderCoexistenceNative$' -count=1 -timeout=90s .

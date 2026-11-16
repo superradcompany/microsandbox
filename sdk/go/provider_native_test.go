@@ -20,6 +20,16 @@ func TestProviderCoexistenceNative(t *testing.T) {
 		t.Skip("requires both Go native providers")
 	}
 	t.Setenv("MSB_HOME", t.TempDir())
+	if fullPath := os.Getenv("MSB_GO_FULL_PROVIDER"); fullPath != "" {
+		// Resolve a default resource destination before registering lean providers.
+		// Later registration must preserve the full library on that destination.
+		if err := LoadFullNative(fullPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := defaultLocalContext(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	remote, err := LoadNativeProvider(remotePath, ContextRemote)
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +43,9 @@ func TestProviderCoexistenceNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultLibrary := pinned.inner.Library()
+	if os.Getenv("MSB_GO_FULL_PROVIDER") != "" && defaultLibrary == local.library {
+		t.Fatal("lean registration replaced the retained full provider")
+	}
 	localContext, err := local.NewLocalContext(LocalOptions{Home: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +83,9 @@ func TestProviderCoexistenceNative(t *testing.T) {
 	again, err := defaultLocalContext()
 	if err != nil || again.inner.Library() != defaultLibrary {
 		t.Fatal("default provider changed", err)
+	}
+	if _, err := pinned.Sandboxes().List(ctx); err != nil {
+		t.Fatal("retained default provider:", err)
 	}
 	if _, err := localContext.Sandboxes().List(ctx); err != nil {
 		t.Fatal(err)
