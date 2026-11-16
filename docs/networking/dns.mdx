@@ -23,6 +23,8 @@ The `public`, `private`, and `host` profiles already allow DNS through the gatew
 
 DNS over TLS uses TCP port `853` and needs its own allow rule. It also requires [TLS inspection](/networking/tls).
 
+The upstream DNS-over-TLS connection verifies the resolver's certificate and name against host trust. On Windows, it uses native chain validation, including retrieval of approved roots when Windows policy allows it. Other platforms load the host's native root certificates.
+
 DNS rebinding protection is separate from query access. microsandbox rejects private or reserved answers unless an explicit address rule allows them. An allow-by-default policy does not disable this protection. See [Network defenses](/security/network) for the full policy behavior.
 
 ## Blocking domains

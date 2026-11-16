@@ -740,6 +740,18 @@ fn run_c(
     let result = (|| -> Result<(), FfiError> {
         let token = lookup_cancel_token(cancel_id)?;
         let fut = f()?;
+        // Windows CGO threads can have only a 1 MiB native stack. Polling nested, unoptimized Rust
+        // creation futures there can overflow before validation returns. Use the existing
+        // Rust worker pool; only owned operation state crosses this boundary, and the FFI
+        // call still waits before writing its caller-owned output buffer. Cancellation stays
+        // inside the worker future, so returning a cancelled result also drops that work.
+        #[cfg(windows)]
+        let json = rt()
+            .block_on(rt().spawn(run_cancellable(token, fut)))
+            .map_err(|error| {
+                FfiError::internal(format!("native operation task failed: {error}"))
+            })??;
+        #[cfg(not(windows))]
         let json = rt().block_on(run_cancellable(token, fut))?;
         write_output(buf, buf_len, &json)
     })();
@@ -8038,6 +8050,78 @@ mod tests {
     use microsandbox::{MicrosandboxError, RestoreKind};
 
     use super::FfiError;
+
+    #[cfg(all(windows, feature = "local"))]
+    #[test]
+    fn creation_validation_fits_windows_caller_stack() {
+        // An invalid image reaches the real creation path without launching a VM or pulling
+        // an image. Match the CGO thread's stack, rather than Rust's larger test-thread stack.
+        std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                let mut output = [0u8; 4096];
+                let error = unsafe {
+                    super::msb_sandbox_create(
+                        super::msb_cancel_alloc(),
+                        c"small-stack-validation".as_ptr(),
+                        c"{\"image\":\"not a valid image reference\"}".as_ptr(),
+                        false,
+                        output.as_mut_ptr(),
+                        output.len(),
+                    )
+                };
+                assert!(!error.is_null());
+                // This pointer is allocated by the FFI and released after copying its payload.
+                let message = unsafe { std::ffi::CStr::from_ptr(error) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                unsafe { super::msb_free_string(error) };
+                let result: serde_json::Value = serde_json::from_str(&message).unwrap();
+                assert_eq!(result["kind"], super::error_kind::INVALID_CONFIG);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_worker_drops_operation_before_ffi_returns() {
+        struct OperationGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for OperationGuard {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = OperationGuard(dropped.clone());
+        let id = unsafe { super::msb_cancel_alloc() };
+        let token =
+            super::lookup_cancel_token(id).unwrap_or_else(|error| panic!("{}", error.message));
+        let mut output = [0u8; 4096];
+        let error = super::run_c(id, output.as_mut_ptr(), output.len(), || {
+            Ok(Box::pin(async move {
+                let _guard = guard;
+                // Cancel only after polling has begun. run_c must join the cancelled task,
+                // not return while a detached worker still holds operation resources.
+                token.cancel();
+                std::future::pending::<Result<String, FfiError>>().await
+            }))
+        });
+
+        assert!(!error.is_null());
+        let message = unsafe { std::ffi::CStr::from_ptr(error) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        unsafe { super::msb_free_string(error) };
+        let result: serde_json::Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(result["kind"], super::error_kind::CANCELLED);
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(super::lookup_cancel_token(id).is_err());
+    }
 
     #[test]
     fn missing_restore_bindings_keep_the_invalid_config_kind() {

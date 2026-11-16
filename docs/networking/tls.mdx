@@ -249,7 +249,9 @@ msb create python --name worker \
 
 ## Upstream CA trust
 
-The proxy verifies upstream certificates with the host's root store by default. You can add:
+The proxy verifies upstream certificates against host trust by default. On Windows, native chain validation follows Windows trust policy and can retrieve approved roots and issuers when that policy allows it. Other platforms load the host's native root certificates. Certificate and hostname checks remain enabled unless you explicitly override verification.
+
+Additional CA certificates apply only to the configured upstream connections; they are not installed in the host's trusted root store. You can add:
 
 - a CA trusted for every intercepted host
 - a CA trusted only for matching hosts
