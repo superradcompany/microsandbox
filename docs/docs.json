@@ -407,6 +407,7 @@
               "migrations/overview",
               "migrations/v0.7",
               "migrations/sdk-contexts",
+              "migrations/sdk-distributions",
               "migrations/sandbox-storage"
             ]
           },
