@@ -79,6 +79,7 @@ async fn start_fails_when_a_published_port_is_taken() {
         HostRoutes {
             ipv4: false,
             ipv6: false,
+            ..HostRoutes::default()
         },
     )
     .unwrap();
