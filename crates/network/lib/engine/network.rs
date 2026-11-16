@@ -195,10 +195,10 @@ impl HostRoutes {
             match interface.addr {
                 IfAddr::V4(addr) => {
                     routes.host_ipv4.push(addr.ip);
-                    if addr.prefixlen > 0 {
-                        if let Ok(network) = Ipv4Network::new(addr.ip, addr.prefixlen) {
-                            routes.host_ipv4_networks.push(network);
-                        }
+                    if addr.prefixlen > 0
+                        && let Ok(network) = Ipv4Network::new(addr.ip, addr.prefixlen)
+                    {
+                        routes.host_ipv4_networks.push(network);
                     }
                 }
                 IfAddr::V6(addr) => {
@@ -212,10 +212,10 @@ impl HostRoutes {
                     } else {
                         addr.prefixlen
                     };
-                    if prefix_len > 0 {
-                        if let Ok(network) = Ipv6Network::new(addr.ip, prefix_len) {
-                            routes.host_ipv6_networks.push(network);
-                        }
+                    if prefix_len > 0
+                        && let Ok(network) = Ipv6Network::new(addr.ip, prefix_len)
+                    {
+                        routes.host_ipv6_networks.push(network);
                     }
                 }
             }
