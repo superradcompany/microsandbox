@@ -8,6 +8,7 @@ import sys
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal, TypeAlias, TypedDict
 
 # --------------------------------------------------------------------------------------------------
@@ -81,9 +82,20 @@ class SandboxStatus(StrEnum):
     PAUSED = "paused"
 
 
-class BackendKind(StrEnum):
+class SandboxInfo(TypedDict):
+    """A fresh backend observation; timestamps are timezone-aware UTC datetimes."""
+
+    id: str
+    name: str
+    status: Literal["created", "starting", "running", "draining", "paused", "stopped", "crashed"]
+    last_failure_message: str | None
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class ContextKind(StrEnum):
     LOCAL = "local"
-    CLOUD = "cloud"
+    REMOTE = "remote"
 
 
 class ModificationPolicy(StrEnum):

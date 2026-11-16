@@ -692,7 +692,7 @@ fn run_async_command_anyhow(
         // reaper here.
         if !is_backend_independent_command(&command) {
             // Resolve once, fallibly, before backend-dependent dispatch. Unlike
-            // the SDK's ambient convenience fallback, the CLI must not run a
+            // default-local SDK shortcuts, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
             let backend = microsandbox::resolve_default_backend()?;
             if requires_current_catalog(&command)
@@ -701,7 +701,7 @@ fn run_async_command_anyhow(
                 local.prepare_cli_catalog().await?;
             }
             cleanup_backend = Some(backend.clone());
-            microsandbox::set_default_backend(backend);
+            microsandbox_cli::commands::common::set_cli_context(backend)?;
         }
 
         let result = match command {

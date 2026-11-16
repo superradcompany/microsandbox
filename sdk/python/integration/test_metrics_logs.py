@@ -38,7 +38,7 @@ async def wait_for_metrics(sandbox):
 @pytest.mark.asyncio
 async def test_metrics_snapshot_stream_and_all_sandbox_metrics(sandbox_factory):
     sandbox = await sandbox_factory("py-sdk-metrics")
-    name = await sandbox.name
+    name = sandbox.name
 
     await sandbox.shell("true")
 
@@ -93,7 +93,7 @@ async def test_logs_snapshot_filters_and_stream_resume(sandbox_factory):
     )
     assert [entry async for entry in resumed] == []
 
-    name = await sandbox.name
+    name = sandbox.name
     await sandbox.stop()
     handle = await Sandbox.get(name)
     stopped_entries = await handle.logs(tail=20, sources=[LogReadSource.STDOUT])

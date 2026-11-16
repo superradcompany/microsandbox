@@ -37,7 +37,7 @@ Configure a named volume.
 #### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">get()</span>
 
 ```ruby
-Microsandbox::Volume.get(name) # => VolumeHandle
+Microsandbox::Volume.get(name) # => Volume
 ```
 
 Look up a named volume.
@@ -55,7 +55,7 @@ Look up a named volume.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">VolumeHandle</span></div>
+    <div className="msb-param-key"><span className="msb-type">Volume</span></div>
     <div className="msb-param-desc">Metadata and filesystem access for the named volume.</div>
   </div>
 </div>
@@ -63,14 +63,14 @@ Look up a named volume.
 #### <span className="msb-recv">Microsandbox::Volume.</span><span className="msb-hn">list()</span>
 
 ```ruby
-Microsandbox::Volume.list # => Array<VolumeHandle>
+Microsandbox::Volume.list # => Array<Volume>
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Array&lt;VolumeHandle&gt;</span></div>
+    <div className="msb-param-key"><span className="msb-type">Array&lt;Volume&gt;</span></div>
     <div className="msb-param-desc">List named volumes.</div>
   </div>
 </div>
@@ -218,7 +218,7 @@ Add a string label.
 #### <span className="msb-recv">builder.</span><span className="msb-hn">create()</span>
 
 ```ruby
-builder.create # => VolumeHandle
+builder.create # => Volume
 ```
 
 <Accordion title="Example">
@@ -239,12 +239,30 @@ Create the volume; consumes the builder.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">VolumeHandle</span></div>
+    <div className="msb-param-key"><span className="msb-type">Volume</span></div>
     <div className="msb-param-desc">The created volume handle.</div>
   </div>
 </div>
 
-## VolumeHandle
+## Volume instance
+
+Creation, lookup and list items return the same `Microsandbox::Volume` class. Dropping the object does not delete storage.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">id</span>
+
+```ruby
+volume.id # => String
+```
+
+Opaque identity within the retained destination. Available without I/O; a replacement with the same name has a different identity.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">path</span>
+
+```ruby
+volume.path # => String
+```
+
+Host path for local storage. Remote volumes report an unsupported-operation error.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
 
@@ -276,65 +294,16 @@ volume.kind # => String
   </div>
 </div>
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">quota_mib</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">info</span>
 
 ```ruby
-volume.quota_mib # => Integer | nil
+info = volume.info
+puts info.fetch("quota_mib")
+puts info.fetch("used_bytes")
+puts info.fetch("labels")
 ```
 
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Configured quota.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">used_bytes</span>
-
-```ruby
-volume.used_bytes # => Integer
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Integer</span></div>
-    <div className="msb-param-desc">Used bytes.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">capacity_bytes</span>
-
-```ruby
-volume.capacity_bytes # => Integer | nil
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Capacity.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">volume.</span><span className="msb-hn">labels</span>
-
-```ruby
-volume.labels # => Hash
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
-    <div className="msb-param-desc">String keys and values.</div>
-  </div>
-</div>
+Fetch current quota, usage, capacity, labels, and metadata from the retained destination. The method performs a fresh lookup on each call; unknown usage is `nil` and lookup errors do not return captured data. Retain this returned hash when several fields should come from one observation.
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">created_at</span>
 
@@ -351,13 +320,13 @@ volume.created_at # => String | nil
   </div>
 </div>
 
-#### <span className="msb-recv">volume.</span><span className="msb-hn">remove()</span>
+#### <span className="msb-recv">volume.</span><span className="msb-hn">destroy()</span>
 
 ```ruby
-volume.remove # => nil
+volume.destroy # => nil
 ```
 
-Remove this volume.
+Delete this volume using its retained identity and context. A same-name replacement is left untouched.
 
 <p className="msb-label">Returns</p>
 

@@ -31,6 +31,13 @@ on:
       - scripts/ci/test_validate_linux_glibc.py
       - scripts/ci/wait-for-npm-packages.mjs
       - scripts/ci/publish-npm-package.mjs
+      - scripts/ci/*sdk-provider*
+      - scripts/ci/*python-provider*
+      - scripts/ci/*provider-release*
+      - sdk/go/scripts/**
+      - sdk/python/scripts/*distribution*
+      - sdk/python/scripts/rewrite_full_wheel.py
+      - sdk/node-ts/scripts/*distribution*
   # Empty input is build-only; recovery explicitly publishes an existing tag.
   workflow_dispatch:
     inputs:
@@ -1081,6 +1088,23 @@ jobs:
           pattern: python-sdk-*
           merge-multiple: true
 
+      - name: Download selected Node providers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: node-providers
+          pattern: node-providers-*
+
+      - name: Download selected Go providers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: go-providers
+          pattern: go-providers-*
+
+      - name: Validate selected provider completeness and hashes
+        run: |
+          VERSION=$(node -p 'require("./sdk/node-ts/package.json").version')
+          python3 scripts/ci/validate-provider-release.py --node node-providers --go go-providers --version "$VERSION"
+
       - name: Validate artifact manifest
         run: |
           python3 -m unittest scripts.ci.test_validate_release_artifacts
@@ -1096,7 +1120,7 @@ jobs:
           python3 scripts/ci/validate_linux_glibc.py \
             --max-version 2.28 \
             --installer scripts/install.sh \
-            release-artifacts node-artifacts python-artifacts
+            release-artifacts node-artifacts python-artifacts node-providers go-providers
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -1142,12 +1166,13 @@ jobs:
           # Keep the smoke consumer entirely on candidate packages, including
           # the SDK's runtime types dependency before this version is published.
           types_tarball=$(cd packages/microsandbox-types/typescript && npm pack --silent --pack-destination "$pack_dir")
-          main_tarball=$(cd sdk/node-ts && npm pack --silent --pack-destination "$pack_dir")
+          core_tarball=$(cd node-providers/node-providers-linux-x64-gnu/npm/core && npm pack --silent --pack-destination "$pack_dir")
+          main_tarball=$(cd node-providers/node-providers-linux-x64-gnu/npm/full && npm pack --silent --pack-destination "$pack_dir")
           platform_tarball=$(cd "$platform" && npm pack --silent --pack-destination "$pack_dir")
           cp sdk/node-ts/scripts/cloud-release-smoke.mts "$consumer_dir/"
           cd "$consumer_dir"
           npm init --yes >/dev/null
-          npm install --ignore-scripts --omit=optional "$pack_dir/$types_tarball" "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
+          npm install --ignore-scripts --omit=optional "$pack_dir/$types_tarball" "$pack_dir/$core_tarball" "$pack_dir/$main_tarball" "$pack_dir/$platform_tarball"
           node --input-type=module -e 'await import("microsandbox")'
 
       - name: Smoke test candidate SDK against production
@@ -1156,7 +1181,6 @@ jobs:
         timeout-minutes: 6
         env:
           MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
-          MSB_BACKEND: cloud
           MSB_API_URL: https://api.microsandbox.dev
           MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
           MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1167,11 +1191,42 @@ jobs:
         timeout-minutes: 4
         env:
           MSB_API_KEY: ${{ secrets.MSB_API_KEY }}
-          MSB_BACKEND: cloud
           MSB_API_URL: https://api.microsandbox.dev
           MSB_HOME: ${{ runner.temp }}/cloud-smoke-home
           MSB_SMOKE_SANDBOX_NAME: release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
         run: node --experimental-strip-types "$RUNNER_TEMP/cloud-smoke-consumer/cloud-release-smoke.mts" cleanup
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      - name: Validate thin Go module archives and offline workflows
+        run: |
+          python3 sdk/go/scripts/stage-distributions.py --out "$RUNNER_TEMP/go-provider-modules" --full
+          python3 sdk/go/scripts/check-distributions.py --staged "$RUNNER_TEMP/go-provider-modules"
+
+      - name: Validate staged npm provider installs
+        run: |
+          # This also runs on PRs, independently of the credentialed production gate.
+          cp -R node-artifacts/node-sdk-linux-x64-gnu/npm/linux-x64-gnu/. sdk/node-ts/npm/linux-x64-gnu/
+          chmod +x sdk/node-ts/npm/linux-x64-gnu/bin/msb
+          node sdk/node-ts/scripts/check-distributions.mjs --staged node-providers/node-providers-linux-x64-gnu/npm --types packages/microsandbox-types/typescript --target linux-x64-gnu --full-platform sdk/node-ts/npm/linux-x64-gnu
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+
+      - name: Validate installed Python provider wheels
+        run: |
+          mkdir -p "$RUNNER_TEMP/python-provider-wheels"
+          cp python-artifacts/*-any.whl "$RUNNER_TEMP/python-provider-wheels/"
+          cp python-artifacts/*manylinux*x86_64.whl "$RUNNER_TEMP/python-provider-wheels/"
+          python3 sdk/python/scripts/check_distributions.py --wheels "$RUNNER_TEMP/python-provider-wheels" --full
+
+      - name: Validate loaded Go provider coexistence
+        working-directory: sdk/go
+        env:
+          MSB_GO_LOCAL_PROVIDER: ${{ github.workspace }}/go-providers/go-providers-linux-x86_64/microsandbox-go-local-x86_64-unknown-linux-gnu.so
+          MSB_GO_REMOTE_PROVIDER: ${{ github.workspace }}/go-providers/go-providers-linux-x86_64/microsandbox-go-remote-x86_64-unknown-linux-gnu.so
+        run: go test -tags readiness_native -run '^TestProviderCoexistenceNative$' -count=1 -timeout=90s .
 
       - name: Upload validation manifest
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1210,6 +1265,22 @@ jobs:
       - name: Copy Windows install script
         if: hashFiles('scripts/install.ps1') != ''
         run: cp scripts/install.ps1 release-artifacts/install.ps1
+
+      - name: Download selected Go provider libraries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: go-provider-assets
+          pattern: go-providers-*
+
+      - name: Stage selected Go FFI assets
+        run: |
+          python3 - <<'PYFILES'
+          import json, shutil
+          from pathlib import Path
+          for manifest in Path("go-provider-assets").glob("*/native-manifest.json"):
+              for entry in json.loads(manifest.read_text())["artifacts"]:
+                  shutil.copy2(manifest.parent / entry["file"], Path("release-artifacts") / entry["file"])
+          PYFILES
 
       - name: Generate checksums
         working-directory: release-artifacts
@@ -1517,11 +1588,39 @@ jobs:
           }
           NODE
 
-      - name: Publish root package
+      - name: Download staged provider packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: selected-node-packages
+          pattern: node-providers-*
+
+      - name: Publish shared core and selected native packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: sdk/node-ts
-        run: node ../../scripts/ci/publish-npm-package.mjs .
+        run: |
+          node scripts/ci/publish-npm-package.mjs selected-node-packages/node-providers-darwin-arm64/npm/core
+          for target in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            for kind in local remote; do
+              node scripts/ci/publish-npm-package.mjs "selected-node-packages/node-providers-$target/npm/$kind-$target"
+            done
+          done
+
+      - name: Wait for core and native provider indexing
+        run: |
+          VERSION="${MSB_RELEASE_TAG#v}"
+          packages="@microsandbox/core"
+          for target in darwin-arm64 linux-x64-gnu linux-arm64-gnu win32-x64-msvc win32-arm64-msvc; do
+            packages="$packages @microsandbox/local-$target @microsandbox/remote-$target"
+          done
+          node scripts/ci/wait-for-npm-packages.mjs "$VERSION" $packages
+
+      - name: Publish local, remote and full SDK packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for package in local remote full; do
+            node scripts/ci/publish-npm-package.mjs "selected-node-packages/node-providers-darwin-arm64/npm/$package"
+          done
 
   # ---------------------------------------------------------------------------
   # Refresh SDK lockfiles after publication, when the new packages can resolve.
@@ -1740,12 +1839,34 @@ jobs:
           install -m644 release-dl/libmicrosandbox_go_ffi-windows-arm64.dll \
             sdk/go/internal/bundle/bundles/libmicrosandbox_go_ffi-windows-arm64.dll
 
+          python3 sdk/go/scripts/stage-distributions.py --out "$RUNNER_TEMP/go-distributions" --full
+          python3 - <<'PYMODULES'
+          import os, shutil
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "go-distributions"
+          root = Path("sdk/go")
+          for path in root.glob("*.go"):
+              path.unlink()
+          shutil.rmtree(root / "internal/ffi")
+          for path in (source / "full").iterdir():
+              destination = root / path.name
+              if path.is_dir():
+                  shutil.copytree(path, destination, dirs_exist_ok=True)
+              else:
+                  shutil.copy2(path, destination)
+          for name in ("core", "local", "remote"):
+              shutil.copytree(source / name, root / name)
+          PYMODULES
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add sdk/go/internal/bundle/bundles/
+          git add sdk/go/
           git commit -m "release: Go SDK ${ROOT_TAG} (populate embedded FFI bundles)"
-          git tag -a "${GO_TAG}" -m "Go SDK ${ROOT_TAG}" HEAD
-          git push origin "${GO_TAG}"
+          tags=("${GO_TAG}" "sdk/go/core/${ROOT_TAG}" "sdk/go/local/${ROOT_TAG}" "sdk/go/remote/${ROOT_TAG}")
+          for tag in "${tags[@]}"; do
+            git tag -a "$tag" -m "Go SDK ${ROOT_TAG}" HEAD
+          done
+          git push --atomic origin "${tags[@]}"
 
       - name: Warm Go module proxy
         # Force proxy.golang.org and sum.golang.org to ingest the new
@@ -1755,9 +1876,11 @@ jobs:
         run: |
           ROOT_TAG="${MSB_RELEASE_TAG}"
           MODULE="github.com/superradcompany/microsandbox/sdk/go"
-          curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.info" >/dev/null || true
-          curl -sSf "https://proxy.golang.org/${MODULE}/@v/${ROOT_TAG}.mod"  >/dev/null || true
-          curl -sSf "https://sum.golang.org/lookup/${MODULE}@${ROOT_TAG}"    >/dev/null || true
+          for suffix in "" /core /local /remote; do
+            curl -sSf "https://proxy.golang.org/${MODULE}${suffix}/@v/${ROOT_TAG}.info" >/dev/null || true
+            curl -sSf "https://proxy.golang.org/${MODULE}${suffix}/@v/${ROOT_TAG}.mod" >/dev/null || true
+            curl -sSf "https://sum.golang.org/lookup/${MODULE}${suffix}@${ROOT_TAG}" >/dev/null || true
+          done
 
   # ---------------------------------------------------------------------------
   # Publish Docker image to GHCR

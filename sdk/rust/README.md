@@ -96,12 +96,12 @@ let sandbox = Sandbox::builder("worker")
     .await?;
 
 println!("{}: {}", sandbox.name(), sandbox.id());
-let running = Sandbox::get("worker").await?.connect_or_start().await?;
+let running = Sandbox::get_running("worker").await?;
 running.request_stop().await?;
-let stopped = running
+running
     .wait_for_status(microsandbox::sandbox::SandboxStatus::Stopped)
     .await?;
-let restarted = stopped.restart().await?;
+let restarted = running.restart().await?;
 restarted.destroy().await?;
 ```
 
@@ -270,10 +270,11 @@ let sandbox = Sandbox::builder("readme-background")
     .create()
     .await?;
 
-sandbox.detach().await;
+sandbox.detach().await?;
 
 let handle = Sandbox::get("readme-background").await?;
-let reconnected = handle.connect().await?;
+handle.ensure_running().await?;
+let reconnected = handle;
 let output = reconnected.shell("echo reconnected").await?;
 println!("{}", output.stdout()?.trim());
 ```

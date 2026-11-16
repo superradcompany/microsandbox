@@ -62,9 +62,9 @@ func TestWithShellRoundTripsThroughConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	if !strings.Contains(h.ConfigJSON(), `"shell"`) ||
-		!strings.Contains(h.ConfigJSON(), "/bin/sh") {
-		t.Errorf("Shell not visible in ConfigJSON: %s", h.ConfigJSON())
+	if !strings.Contains(liveConfigJSON(t, ctx, h), `"shell"`) ||
+		!strings.Contains(liveConfigJSON(t, ctx, h), "/bin/sh") {
+		t.Errorf("Shell not visible in ConfigJSON: %s", liveConfigJSON(t, ctx, h))
 	}
 }
 
@@ -93,7 +93,7 @@ func TestWithEntrypointVisibleInConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := h.ConfigJSON()
+	cfg := liveConfigJSON(t, ctx, h)
 	if !strings.Contains(cfg, "echo hi") || !strings.Contains(cfg, "entrypoint") {
 		t.Errorf("Entrypoint not visible in ConfigJSON: %s", cfg)
 	}
@@ -124,10 +124,10 @@ func TestWithInitAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	if !strings.Contains(h.ConfigJSON(), `"auto"`) {
-		t.Errorf("Init.Auto not visible in ConfigJSON: %s", h.ConfigJSON())
+	if !strings.Contains(liveConfigJSON(t, ctx, h), `"auto"`) {
+		t.Errorf("Init.Auto not visible in ConfigJSON: %s", liveConfigJSON(t, ctx, h))
 	}
-	parsed, err := h.Config()
+	parsed, err := h.Config(ctx)
 	if err != nil {
 		t.Fatalf("Config: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestWithLogLevelRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := h.ConfigJSON()
+	cfg := liveConfigJSON(t, ctx, h)
 	if !strings.Contains(cfg, `"info"`) {
 		t.Errorf("LogLevel not in ConfigJSON: %s", cfg)
 	}
@@ -195,7 +195,7 @@ func TestWithQuietLogsClearsLogLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := h.ConfigJSON()
+	cfg := liveConfigJSON(t, ctx, h)
 	if !strings.Contains(cfg, `"log_level":null`) {
 		t.Errorf("expected log_level:null in ConfigJSON, got: %s", cfg)
 	}
@@ -227,7 +227,7 @@ func TestWithMaxDurationAndIdleTimeoutCreates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := h.ConfigJSON()
+	cfg := liveConfigJSON(t, ctx, h)
 	// Sub-second durations are rounded up to whole seconds; here they're
 	// already whole, so the seconds count must appear.
 	if !strings.Contains(cfg, "max_duration") || !strings.Contains(cfg, "7200") {
@@ -264,7 +264,7 @@ func TestWithScriptsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSandbox: %v", err)
 	}
-	cfg := h.ConfigJSON()
+	cfg := liveConfigJSON(t, ctx, h)
 	if !strings.Contains(cfg, "hello-from-script") {
 		t.Errorf("scripts not visible in ConfigJSON: %s", cfg)
 	}

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from integration.helpers import free_tcp_port
@@ -79,7 +77,7 @@ async def test_ip_destination_allows_specific_egress(label, destination, sandbox
     assert "cloudflare-failed" not in combined
     assert "google-failed" in combined
 
-    handle = await Sandbox.get(await sandbox.name)
-    config = json.loads(handle.config_json)
+    handle = await Sandbox.get(sandbox.name)
+    config = await handle.config()
     destinations = [rule["destination"] for rule in config["network"]["policy"]["rules"]]
     assert {"group": "link_local"} in destinations

@@ -125,7 +125,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         .map(Duration::from_secs);
 
     if args.detach {
-        let handle = Sandbox::get(&args.name).await?;
+        let handle = crate::commands::common::sandbox_record(&args.name).await?;
         anyhow::ensure!(
             handle.status_snapshot() == microsandbox::sandbox::SandboxStatus::Running,
             "detached execution requires a running sandbox; start it with `msb start {}`",
@@ -134,7 +134,7 @@ pub async fn run(args: ExecArgs) -> anyhow::Result<()> {
         let sandbox = handle.connect().await?;
         let tty = args.tty || interactive;
         let (cmd, command_args) =
-            super::common::resolve_exec_command(sandbox.config(), args.command, tty)?;
+            super::common::resolve_exec_command(&sandbox.config().await?, args.command, tty)?;
         let cmd = cmd.ok_or_else(|| {
             anyhow::anyhow!("detached execution requires a command or configured default")
         })?;
@@ -204,11 +204,14 @@ async fn run_started(
     // Resolve the command with exec semantics: an explicit command runs
     // directly, while omitted commands can still fall back to the sandbox's
     // configured image command/default shell.
-    let (cmd, cmd_args) =
-        match super::common::resolve_exec_command(sandbox.config(), args.command, interactive)? {
-            (Some(cmd), cmd_args) => (cmd, cmd_args),
-            (None, _) => return Ok(0),
-        };
+    let (cmd, cmd_args) = match super::common::resolve_exec_command(
+        &sandbox.config().await?,
+        args.command,
+        interactive,
+    )? {
+        (Some(cmd), cmd_args) => (cmd, cmd_args),
+        (None, _) => return Ok(0),
+    };
 
     if args.stream || (!interactive && !stdin_is_terminal) {
         let options = apply_common_exec_opts(

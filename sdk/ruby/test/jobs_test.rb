@@ -25,7 +25,7 @@ class ManagedJobsTest < Test::Unit::TestCase
     job = nil
     attachments = []
     Timeout.timeout(20) do
-      sandbox = Microsandbox::Sandbox.get(ENV.fetch("MSB_JOB_TEST_SANDBOX")).connect
+      sandbox = Microsandbox::Sandbox.get_running(ENV.fetch("MSB_JOB_TEST_SANDBOX"))
       job = sandbox.exec_detached("cat")
       first = job.attach
       attachments << first

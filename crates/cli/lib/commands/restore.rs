@@ -1,11 +1,11 @@
 //! Restore a snapshot into a detached sandbox with explicit host resource bindings.
 
 use clap::Args;
+#[cfg(test)]
+use microsandbox::Sandbox;
 use microsandbox::{
     MicrosandboxError, RestoreKind,
-    sandbox::{
-        ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, Sandbox, SecurityProfile,
-    },
+    sandbox::{ForkBuilder, ForkManyBuilder, GuestClockPolicy, RestoreBuilder, SecurityProfile},
 };
 
 #[cfg(feature = "net")]
@@ -213,7 +213,10 @@ pub async fn run(
     args: RestoreArgs,
     log_level: Option<microsandbox::LogLevel>,
 ) -> anyhow::Result<()> {
-    let mut builder = Sandbox::restore(&args.snapshot).name(&args.name);
+    let mut builder = crate::commands::common::selected_context()?
+        .sandboxes()
+        .restore(&args.snapshot)
+        .name(&args.name);
     if let Some(level) = log_level {
         builder = builder.log_level(level);
     }
@@ -258,7 +261,7 @@ pub async fn run(
         }
     };
     display_restore_warnings(&sandbox).await;
-    sandbox.detach().await;
+    sandbox.detach().await?;
     Ok(())
 }
 

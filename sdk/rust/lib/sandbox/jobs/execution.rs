@@ -12,7 +12,7 @@ use microsandbox_protocol::jobs::{JobOperation, JobResponse};
 #[cfg(feature = "local")]
 use crate::sandbox::SandboxStatus;
 use crate::sandbox::exec::{ExecOptionsBuilder, StdinMode};
-use crate::sandbox::{Sandbox, SandboxHandle, build_exec_request};
+use crate::sandbox::{Sandbox, SandboxRecord, build_exec_request};
 
 #[cfg(feature = "local")]
 use super::JobState;
@@ -64,8 +64,9 @@ impl Sandbox {
             }
             _ => None,
         };
+        let session = self.prepare_runtime().await?;
         let request = build_exec_request(
-            self.config(),
+            &session.config,
             cmd.into(),
             options.args,
             options.cwd,
@@ -192,7 +193,7 @@ impl Sandbox {
     }
 }
 
-impl SandboxHandle {
+impl SandboxRecord {
     /// Retrieve a retained job while preserving this handle's sandbox identity.
     pub async fn get_job(&self, id: impl AsRef<str>) -> JobResult<Job> {
         let id = JobId::parse(id.as_ref())

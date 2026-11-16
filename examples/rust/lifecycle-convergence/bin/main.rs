@@ -92,30 +92,26 @@ async fn run_concurrency_checks(
         Sandbox::get(&race_name),
     )?;
     let started = Instant::now();
-    let (first, second, third, fourth) = tokio::try_join!(
-        handles.0.connect_or_start(),
-        handles.1.connect_or_start(),
-        handles.2.connect_or_start(),
-        handles.3.connect_or_start(),
+    tokio::try_join!(
+        handles.0.ensure_running(),
+        handles.1.ensure_running(),
+        handles.2.ensure_running(),
+        handles.3.ensure_running(),
     )?;
-    timings.insert("concurrent_connect_or_start", elapsed_ms(started));
-    let connected = [first, second, third, fourth];
+    timings.insert("concurrent_ensure_running", elapsed_ms(started));
+    // Preparation retains ownership on the winning receiver; keep those same objects.
+    let connected = [handles.0, handles.1, handles.2, handles.3];
     if connected.iter().any(|sandbox| sandbox.id() != race_id) {
-        return Err("concurrent connect_or_start callers selected different identities".into());
+        return Err("concurrent ensure_running callers selected different identities".into());
     }
     assert_marker(&read_marker(&connected[0]).await?, &marker)?;
 
     connected[0].stop().await?;
     let started = Instant::now();
-    let detached = Sandbox::get(&race_name)
-        .await?
-        .connect_or_start_detached()
-        .await?;
-    timings.insert("connect_or_start_detached", elapsed_ms(started));
+    let detached = Sandbox::start_detached(&race_name).await?;
+    timings.insert("start_detached", elapsed_ms(started));
     if detached.id() != race_id || detached.owns_lifecycle() {
-        return Err(
-            "detached connect_or_start changed identity or took lifecycle ownership".into(),
-        );
+        return Err("detached ensure_running changed identity or took lifecycle ownership".into());
     }
 
     let started = Instant::now();
@@ -204,10 +200,11 @@ async fn run(name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>
 
     let handle = Sandbox::get(name).await?;
     let started = Instant::now();
-    let connected = handle.connect_or_start().await?;
-    timings.insert("connect_or_start", elapsed_ms(started));
+    handle.ensure_running().await?;
+    let connected = handle;
+    timings.insert("ensure_running", elapsed_ms(started));
     if connected.id() != original_id {
-        return Err("connect_or_start changed the persisted identity".into());
+        return Err("ensure_running changed the persisted identity".into());
     }
 
     let started = Instant::now();

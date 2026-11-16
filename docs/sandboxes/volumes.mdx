@@ -41,22 +41,28 @@ Every cloud organization has an always-present default volume. You can read and 
 
 <CodeGroup>
 ```typescript TypeScript
-const volume = await Volume.getDefault();
+const remote = RemoteContext.fromEnv();
+const volume = await remote.volumes.getDefault();
 await volume.fs().write("state.json", JSON.stringify({ ready: true }));
 ```
 
 ```rust Rust
-let volume = Volume::get_default().await?;
+let remote = RemoteContext::from_env()?;
+let volume = remote.volumes().get_default().await?;
 volume.fs().write("state.json", br#"{"ready":true}"#).await?;
 ```
 
 ```python Python
-volume = await Volume.get_default()
-await volume.fs().write("state.json", b'{"ready": true}')
+remote = RemoteContext.from_env()
+volume = await remote.volumes.get_default()
+await volume.fs.write("state.json", b'{"ready": true}')
 ```
 
 ```go Go
-volume, err := m.GetDefaultVolume(ctx)
+remote, err := m.RemoteContextFromEnv()
+if err != nil { return err }
+volume, err := remote.Volumes().GetDefault(ctx)
+if err != nil { return err }
 err = volume.FS().WriteString(ctx, "state.json", `{"ready":true}`)
 ```
 </CodeGroup>

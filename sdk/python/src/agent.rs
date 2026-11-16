@@ -33,17 +33,28 @@ impl PyAgentClient {
         name: String,
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let timeout = timeout_duration(timeout)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let bridge = match timeout {
-                Some(timeout) => AgentBridge::connect_sandbox_with_timeout(&name, timeout).await,
-                None => AgentBridge::connect_sandbox(&name).await,
-            }
-            .map_err(to_py_err_agent)?;
-            Ok(Self {
-                inner: Arc::new(bridge),
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_py_err(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
+        }
+        #[cfg(feature = "local")]
+        {
+            let timeout = timeout_duration(timeout)?;
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                let bridge = match timeout {
+                    Some(timeout) => {
+                        AgentBridge::connect_sandbox_with_timeout(&name, timeout).await
+                    }
+                    None => AgentBridge::connect_sandbox(&name).await,
+                }
+                .map_err(to_py_err_agent)?;
+                Ok(Self {
+                    inner: Arc::new(bridge),
+                })
             })
-        })
+        }
     }
 
     /// Connect to an agentd relay socket by path.
@@ -72,8 +83,17 @@ impl PyAgentClient {
     /// Sandbox names are limited to 128 UTF-8 bytes.
     #[staticmethod]
     fn socket_path(name: String) -> PyResult<String> {
-        let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_py_err)?;
-        Ok(path.to_string_lossy().into_owned())
+        #[cfg(not(feature = "local"))]
+        {
+            Err(crate::error::to_py_err(
+                microsandbox::MicrosandboxError::local_only(microsandbox::Operation::AgentConnect),
+            ))
+        }
+        #[cfg(feature = "local")]
+        {
+            let path = microsandbox::agent::AgentClient::socket_path(&name).map_err(to_py_err)?;
+            Ok(path.to_string_lossy().into_owned())
+        }
     }
 
     /// Send one frame and await a single response frame.

@@ -286,7 +286,7 @@ Use `connect_or_create` and its language-specific equivalents to reuse the exist
 
 ## When a sandbox object is stale
 
-A `Sandbox` or `SandboxHandle` keeps the ID of the exact sandbox it represents. If that sandbox is removed and the name is reused, lifecycle methods refuse to act on the replacement and return a typed error.
+A `Sandbox` keeps the ID of the exact sandbox it represents. If that sandbox is removed and the name is reused, lifecycle methods refuse to act on the replacement and return a typed error.
 
 <CodeGroup>
 ```typescript TypeScript

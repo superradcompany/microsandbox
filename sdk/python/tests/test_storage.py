@@ -42,12 +42,10 @@ def test_reports_and_pruning_use_the_captured_backend(tmp_path: Path) -> None:
         from pathlib import Path
         import time
         from microsandbox import (
-            BackendKind, MemoryCacheReport, Storage, StorageUsage, UnsupportedError,
-            backend_scope, set_default_backend,
+            MemoryCacheReport, Storage, StorageUsage, RemoteContext,
         )
 
         async def main():
-            set_default_backend(BackendKind.LOCAL)
             root = Path(os.environ["MSB_HOME"]) / "cache" / "memory"
             branches = root / "branches"
             snapshots = root / "snapshots"
@@ -62,17 +60,10 @@ def test_reports_and_pruning_use_the_captured_backend(tmp_path: Path) -> None:
 
             usage_call = Storage.usage()
             preview_call = Storage.prune(dry_run=True)
-            with backend_scope(BackendKind.CLOUD, url="http://127.0.0.1:9", api_key="test"):
-                usage = await usage_call
-                preview = await preview_call
-                for operation, expected in ((Storage.usage, "storage.usage()"),
-                                            (Storage.prune, "storage.prune()")):
-                    try:
-                        operation()
-                    except UnsupportedError as error:
-                        assert error.operation == expected
-                    else:
-                        raise AssertionError("remote operation was accepted")
+            remote = RemoteContext(url="http://127.0.0.1:9", api_key="test")
+            usage = await usage_call
+            preview = await preview_call
+            assert remote.kind == "remote"
 
             assert isinstance(usage, StorageUsage)
             assert usage.branch_memory.count == 1

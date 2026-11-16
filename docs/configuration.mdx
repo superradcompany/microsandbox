@@ -120,11 +120,11 @@ Use an absolute path to keep a location elsewhere. Programmatic SDK paths and en
   "active_profile": "prod",
   "profiles": {
     "prod": {
-      "backend": "cloud",
+      "kind": "remote",
       "api_key_ref": "env:MSB_API_KEY"
     },
     "local": {
-      "backend": "local"
+      "kind": "local"
     }
   }
 }
@@ -481,8 +481,8 @@ Named backend profiles keyed by profile name; `active_profile` selects the defau
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `backend` | required | `local` or `cloud` |
-| `api_key_ref` | none | Credential reference; required for `cloud` profiles |
+| `kind` | required | `local` or `remote`; readers also accept legacy `backend` and `cloud` |
+| `api_key_ref` | none | Credential reference; required for `remote` profiles |
 | `url` | `https://api.microsandbox.dev` | Cloud endpoint override for development, self-hosted, or on-prem control planes |
 
 Supported credential references for `api_key_ref`:

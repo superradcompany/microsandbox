@@ -69,10 +69,8 @@ impl JsSandboxBuilder {
     /// Start building a sandbox. Names are limited to 128 UTF-8 bytes.
     #[napi(constructor)]
     pub fn new(name: String) -> Self {
-        Self {
-            inner: Some(microsandbox::Sandbox::builder(name)),
-            outbound_proxy: None,
-        }
+        let builder = microsandbox::Sandbox::builder(name.clone());
+        Self::from_builder(name, builder)
     }
 
     /// Set the rootfs image source. Accepts an OCI reference or a host
@@ -948,5 +946,17 @@ impl JsSandboxBuilder {
         self.inner
             .take()
             .expect("SandboxBuilder used after consumption")
+    }
+}
+
+impl JsSandboxBuilder {
+    pub(crate) fn from_builder(
+        _name: String,
+        builder: microsandbox::sandbox::SandboxBuilder,
+    ) -> Self {
+        Self {
+            inner: Some(builder),
+            outbound_proxy: None,
+        }
     }
 }

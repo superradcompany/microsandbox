@@ -22,9 +22,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Args, ValueEnum};
 use console::style;
 use futures::{Stream, StreamExt};
-use microsandbox::backend::default_backend;
-use microsandbox::logs::{self, BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
-use microsandbox::{MicrosandboxError, Sandbox};
+use microsandbox::MicrosandboxError;
+use microsandbox::logs::{BootError, LogEntry as EngineLogEntry, LogOptions, LogSource};
 use microsandbox_utils::log_text::{base64_decode, strip_ansi};
 use regex::Regex;
 use serde::Deserialize;
@@ -182,7 +181,12 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     if args.job.is_some() {
         return run_job_logs(args).await;
     }
-    if let Some(boot_error) = logs::boot_error(&args.name).await? {
+    let context = crate::commands::common::selected_context()?;
+    if let Some(boot_error) = context
+        .sandbox_ops()
+        .boot_error(context.clone(), &args.name)
+        .await?
+    {
         render_boot_error(&boot_error, &args.name, args.json)?;
     }
 
@@ -209,7 +213,10 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
     };
 
     if !args.follow {
-        let entries = logs::read_logs(&args.name, &opts).await?;
+        let entries = context
+            .sandbox_ops()
+            .logs(context.clone(), &args.name, &opts)
+            .await?;
         for entry in &entries {
             let cli_entry = engine_entry_to_cli(entry);
             if grep_matches(grep_re.as_ref(), &cli_entry.d) {
@@ -219,7 +226,10 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let stream = logs::follow_logs(&args.name, &opts).await?;
+    let stream = context
+        .sandbox_ops()
+        .follow_logs(context.clone(), &args.name, &opts)
+        .await?;
     let stopped = wait_for_sandbox_stop(&args.name);
     follow_until_stopped(stream, stopped, FOLLOW_DRAIN_IDLE, |item| match item {
         Ok(entry) => {
@@ -246,11 +256,14 @@ pub async fn run(args: LogsArgs) -> anyhow::Result<()> {
 /// Resolve once the sandbox has stopped or no longer exists.
 async fn wait_for_sandbox_stop(name: &str) -> anyhow::Result<()> {
     // Only local status is cheap enough to poll for the whole life of a follow.
-    if default_backend().as_local().is_none() {
+    if crate::commands::common::selected_context()?
+        .as_local()
+        .is_none()
+    {
         return std::future::pending().await;
     }
 
-    let result = match Sandbox::get(name).await {
+    let result = match crate::commands::common::sandbox_record(name).await {
         Ok(handle) => handle.wait_until_stopped().await.map(|_| ()),
         Err(error) => Err(error),
     };
@@ -429,7 +442,10 @@ fn engine_entry_to_cli(entry: &EngineLogEntry) -> LogEntry {
 /// Job selection keeps sandbox-wide logs unchanged and delegates replay/follow to the SDK.
 async fn run_job_logs(args: LogsArgs) -> anyhow::Result<()> {
     let id = args.job.as_deref().expect("job branch requires a selector");
-    let job = Sandbox::get(&args.name).await?.get_job(id).await?;
+    let job = crate::commands::common::sandbox_record(&args.name)
+        .await?
+        .get_job(id)
+        .await?;
     let sources = resolve_sources(&args.source)
         .to_engine_sources()
         .into_iter()

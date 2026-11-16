@@ -9,7 +9,6 @@ See [SSH](/sandboxes/ssh) for client sessions, server endpoints, and file transf
 
 [Managed inactivity timeouts](/configuration#ssh) take precedence over all timeout options below, including disabling the timeout. This applies to local and cloud sessions using the sandbox backend's retained configuration.
 
-
 ## SandboxSshOps
 
 The SSH namespace for a sandbox, returned by [`sb.ssh()`](#sb-ssh). It opens in-process SSH clients and prepares server endpoints against the running sandbox.
@@ -39,6 +38,8 @@ Return the SSH namespace for this sandbox. The returned object exposes [`openCli
     <div className="msb-param-desc">SSH client and server helpers.</div>
   </div>
 </div>
+
+The idle SSH facade performs no startup and retains no local shutdown owner. Creating a client or prepared server endpoint prepares the receiving Sandbox and retains its selected local run. Commands and SFTP on that endpoint reuse the established run rather than reconnecting to a later generation. A helper whose original receiver group has been released returns an error. Explicit stop can interrupt active sessions.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">openClient()</span>
 

@@ -71,7 +71,7 @@ async fn wait_for_injection(event: &str) -> Value {
 
 #[cfg(target_os = "linux")]
 async fn prove_runtime_cleanup(name: &str, pid: u64) {
-    let backend = microsandbox::backend::default_backend();
+    let backend = microsandbox::context::default_local_context();
     let local = backend.as_local().unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -303,7 +303,7 @@ async fn portable_eager_forked_progress_and_stop_completion() {
             .await
             .unwrap();
         assert!(checksum.status().success);
-        let backend = microsandbox::backend::default_backend();
+        let backend = microsandbox::context::default_local_context();
         let local = backend.as_local().unwrap();
         // Open the existing catalog before timing Stop, without a reconciling handle lookup.
         let pools = local.db().await.unwrap();

@@ -1,3 +1,7 @@
+import { bindingFor } from "./internal/provider.js";
+import { Snapshot } from "./snapshot.js";
+import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
+import { Context, Sandboxes } from "./context.js";
 import { recoverStorage, type StorageRecovery, type StorageRecoveryOptions } from "./storage-recovery.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
@@ -26,6 +30,7 @@ import {
   type NapiSandbox,
   type NapiSandboxBuilderSetters,
   type NapiRestoreBuilderSetters,
+  type NapiRestoreBuilder,
   type NapiSandboxConfig,
   type NapiSandboxListOptions,
   type NapiSandboxPage,
@@ -43,11 +48,10 @@ import {
   logStreamOptionsToNapi,
 } from "./logs.js";
 import {
-  SandboxHandle,
   type DestroyOptions,
   type RestartOptions,
   type SandboxStopResult,
-} from "./sandbox-handle.js";
+} from "./lifecycle.js";
 import type { SandboxStatus } from "./sandbox-status.js";
 import type { SandboxMetrics } from "./metrics.js";
 import { metricsFromNapi } from "./internal/metrics.js";
@@ -133,9 +137,19 @@ export interface ExternalMountWarning {
   readonly staleInodes: readonly bigint[];
 }
 
+/** A single live backend observation; subsequent changes are not reflected here. */
+export interface SandboxInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly status: SandboxStatus;
+  readonly lastFailureMessage: string | null;
+  readonly createdAt: string | null;
+  readonly updatedAt: string | null;
+}
+
 /** One page returned by `Sandbox.list()` or `Sandbox.listWith()`. */
 export interface SandboxPage {
-  sandboxes: SandboxHandle[];
+  sandboxes: Sandbox[];
   nextCursor?: string;
 }
 
@@ -170,9 +184,9 @@ export class SandboxListBuilder {
   }
 }
 
-function sandboxPageFromNapi(page: NapiSandboxPage): SandboxPage {
+export function sandboxPageFromNapi(page: NapiSandboxPage): SandboxPage {
   return {
-    sandboxes: page.sandboxes.map((handle) => new SandboxHandle(handle)),
+    sandboxes: page.sandboxes.map((resource) => new Sandbox(resource, resource.name)),
     nextCursor: page.nextCursor,
   };
 }
@@ -191,7 +205,7 @@ export class PullProgressCreate {
   /** @internal */
   private readonly name: string;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string, private readonly cloudOwnsLifecycle = false) {
+  constructor(inner: NapiPullProgressCreate, name: string) {
     this.inner = inner;
     this.name = name;
   }
@@ -215,9 +229,8 @@ export class PullProgressCreate {
   /** Await the sandbox. Resolves once pull + boot finishes. */
   async awaitSandbox(): Promise<Sandbox> {
     const inner = await withMappedErrors(() => this.inner.awaitSandbox());
-    // Local full restores can auto-detach; their native ownership stays authoritative.
-    // Cloud creation captures JS scope cleanup separately from host process ownership.
-    return new Sandbox(inner, this.name, inner.backendKind === "cloud" ? this.cloudOwnsLifecycle : inner.ownsLifecycle);
+    // Native ownership accounts for local auto-detach; remote runs are independent.
+    return new Sandbox(inner, this.name);
   }
 }
 
@@ -225,8 +238,8 @@ export class PullProgressCreate {
 export class CreationProgressCreate {
   private readonly creation: PullProgressCreate;
   /** @internal */
-  constructor(inner: NapiPullProgressCreate, name: string, cloudOwnsLifecycle = false) {
-    this.creation = new PullProgressCreate(inner, name, cloudOwnsLifecycle);
+  constructor(inner: NapiPullProgressCreate, name: string) {
+    this.creation = new PullProgressCreate(inner, name);
   }
   get progress(): import("./creation-progress.js").CreationProgressStream {
     return this.creation.progress as unknown as import("./creation-progress.js").CreationProgressStream;
@@ -239,7 +252,6 @@ export class CreationProgressCreate {
 }
 
 export class Sandbox implements AsyncDisposable {
-  private detachedFromScope = false;
 
   /** Recover stopped storage after diagnosis. Never boots or stops a VM; originals are retained. */
   static async recoverStorage(name: string, options: StorageRecoveryOptions = {}): Promise<StorageRecovery> {
@@ -256,7 +268,7 @@ export class Sandbox implements AsyncDisposable {
     return new Job(await jobCall(() => this.inner.execDetached(cmd, Array.from(args))));
   }
   async execDetachedWith(cmd: string, configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder): Promise<Job> {
-    const builder = configure(new napi.ExecOptionsBuilder().stdinPipe());
+    const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)().stdinPipe());
     return new Job(await jobCall(() => this.inner.execDetachedWithBuilder(cmd, builder)));
   }
 
@@ -265,6 +277,11 @@ export class Sandbox implements AsyncDisposable {
     const builder = typeof snapshot === "string"
       ? new napi.RestoreBuilder(snapshot)
       : new napi.RestoreBuilder(snapshot.reference, snapshot.referenceKind);
+    return Sandbox.fromNativeRestoreBuilder(builder);
+  }
+
+  /** @internal Wrap terminals without replacing the native builder's retained destination. */
+  static fromNativeRestoreBuilder(builder: NapiRestoreBuilder): RestoreBuilder {
     const restore = builder.restore.bind(builder);
     const progress = builder.restoreWithProgress.bind(builder);
     let name = "";
@@ -288,46 +305,46 @@ export class Sandbox implements AsyncDisposable {
   /** Stable identity that changes when this name is removed and recreated. */
   readonly id: string;
   /** Whether this handle acquired cleanup ownership for its scope. */
-  readonly ownsLifecycle: boolean;
+  get ownsLifecycle(): boolean {
+    return this.inner.backendKind === "local" && this.inner.ownsLifecycle;
+  }
   /** Backend retained by this sandbox. */
-  readonly backendKind: "local" | "cloud";
+  readonly contextKind: "local" | "remote";
 
   /** @internal use `Sandbox.builder(name).create()` */
   constructor(
     inner: NapiSandbox,
     name: string,
-    ownsLifecycle = inner.ownsLifecycle,
   ) {
     this.inner = inner;
     this.name = name;
     this.id = inner.id;
-    this.ownsLifecycle = ownsLifecycle;
-    this.backendKind = inner.backendKind;
+    // Client scopes never acquire remote runtime ownership. Local results carry
+    // the actual launch mode, which may differ from the requested builder mode.
+    this.contextKind = inner.backendKind === "cloud" ? "remote" : "local";
   }
 
   // -- statics ------------------------------------------------------------
 
   /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
+  static ctx(context: Context): Sandboxes { return context.sandboxes; }
+
+  get context(): Context { return Context.fromNative(this.inner.context()); }
+
   static builder(name: string): SandboxBuilder {
-    const nb = new napi.SandboxBuilder(name);
+    return Sandbox.fromNativeBuilder(name, new napi.SandboxBuilder(name));
+  }
+
+  /** @internal Wrap native terminals without changing the builder's destination. */
+  static fromNativeBuilder(name: string, nb: InstanceType<typeof napi.SandboxBuilder>): SandboxBuilder {
     const origCreate = nb.create.bind(nb);
-    const origDetached = nb.detached.bind(nb);
-    let detached = false;
-    nb.detached = (enabled: boolean) => {
-      const result = origDetached(enabled);
-      detached = enabled;
-      return result;
-    };
     const origConnectOrCreate = nb.connectOrCreate.bind(nb);
     const origCreateWithPP = nb.createWithPullProgress.bind(nb);
     const origCreateWithProgress = nb.createWithProgress?.bind(nb);
     // Override the terminals so they return a TS Sandbox.
     (nb as unknown as { create: () => Promise<Sandbox> }).create = async () => {
-      const cloudOwnsLifecycle = !detached;
       const inner = await withMappedErrors(() => origCreate());
-      // Cloud workers own their OS processes, but an attached JS creation still
-      // owns scope cleanup. Preserve native ownership for local/full restores.
-      return new Sandbox(inner, name, inner.backendKind === "cloud" ? cloudOwnsLifecycle : inner.ownsLifecycle);
+      return new Sandbox(inner, name);
     };
     (
       nb as unknown as { connectOrCreate: () => Promise<Sandbox> }
@@ -342,15 +359,13 @@ export class Sandbox implements AsyncDisposable {
         createWithPullProgress: () => Promise<PullProgressCreate>;
       }
     ).createWithPullProgress = async () => {
-      const cloudOwnsLifecycle = !detached;
       const raw = await withMappedErrors(() => origCreateWithPP());
-      return new PullProgressCreate(raw, name, cloudOwnsLifecycle);
+      return new PullProgressCreate(raw, name);
     };
     (nb as unknown as { createWithProgress: () => Promise<CreationProgressCreate> }).createWithProgress = async () => {
       if (!origCreateWithProgress) throw new Error("Installed native SDK does not support creation progress");
-      const cloudOwnsLifecycle = !detached;
       const raw = await withMappedErrors(() => origCreateWithProgress());
-      return new CreationProgressCreate(raw, name, cloudOwnsLifecycle);
+      return new CreationProgressCreate(raw, name);
     };
     return nb as unknown as SandboxBuilder;
   }
@@ -361,7 +376,7 @@ export class Sandbox implements AsyncDisposable {
    */
   static async start(name: string): Promise<Sandbox> {
     const inner = await withMappedErrors(() => napi.Sandbox.start(name));
-    return new Sandbox(inner, name, /*ownsLifecycle*/ true);
+    return new Sandbox(inner, name);
   }
 
   /**
@@ -372,16 +387,22 @@ export class Sandbox implements AsyncDisposable {
     const inner = await withMappedErrors(() =>
       napi.Sandbox.startDetached(name),
     );
-    return new Sandbox(inner, name, /*ownsLifecycle*/ false);
+    return new Sandbox(inner, name);
   }
 
   /**
-   * Look up a database handle for an existing sandbox.
+   * Look up an existing sandbox without starting it.
    * Names are limited to 128 UTF-8 bytes.
    */
-  static async get(name: string): Promise<SandboxHandle> {
-    const h = await withMappedErrors(() => napi.Sandbox.get(name));
-    return new SandboxHandle(h);
+  static async get(name: string): Promise<Sandbox> {
+    const inner = await withMappedErrors(() => napi.Sandbox.get(name));
+    return new Sandbox(inner, name);
+  }
+
+  /** Get an existing sandbox and connect or start it; never creates a missing resource. */
+  static async getRunning(name: string): Promise<Sandbox> {
+    const inner = await withMappedErrors(() => napi.Sandbox.getRunning(name));
+    return new Sandbox(inner, name);
   }
 
   /** List the first page of known sandboxes. */
@@ -419,7 +440,7 @@ export class Sandbox implements AsyncDisposable {
   async execDefaultWith(
     configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecOutput> {
-    const builder = configure(new napi.ExecOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)());
     const raw = await withMappedErrors(() =>
       this.inner.execDefaultWithBuilder(builder),
     );
@@ -434,7 +455,7 @@ export class Sandbox implements AsyncDisposable {
   async execDefaultStreamWith(
     configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecHandle> {
-    const builder = configure(new napi.ExecOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)());
     const raw = await withMappedErrors(() =>
       this.inner.execDefaultStreamWithBuilder(builder),
     );
@@ -451,7 +472,7 @@ export class Sandbox implements AsyncDisposable {
     cmd: string,
     configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecOutput> {
-    const builder = configure(new napi.ExecOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)());
     const raw = await withMappedErrors(() =>
       this.inner.execWithBuilder(cmd, builder),
     );
@@ -470,7 +491,7 @@ export class Sandbox implements AsyncDisposable {
     cmd: string,
     configure: (b: NapiExecOptionsBuilder) => NapiExecOptionsBuilder,
   ): Promise<ExecHandle> {
-    const builder = configure(new napi.ExecOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).ExecOptionsBuilder)());
     const raw = await withMappedErrors(() =>
       this.inner.execStreamWithBuilder(cmd, builder),
     );
@@ -496,7 +517,7 @@ export class Sandbox implements AsyncDisposable {
   async attachDefaultWith(
     configure: (b: NapiAttachOptionsBuilder) => NapiAttachOptionsBuilder,
   ): Promise<number> {
-    const builder = configure(new napi.AttachOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).AttachOptionsBuilder)());
     return await withMappedErrors(() =>
       this.inner.attachDefaultWithBuilder(builder),
     );
@@ -511,7 +532,7 @@ export class Sandbox implements AsyncDisposable {
     cmd: string,
     configure: (b: NapiAttachOptionsBuilder) => NapiAttachOptionsBuilder,
   ): Promise<number> {
-    const builder = configure(new napi.AttachOptionsBuilder());
+    const builder = configure(new (bindingFor(this.inner, napi).AttachOptionsBuilder)());
     return await withMappedErrors(() =>
       this.inner.attachWithBuilder(cmd, builder),
     );
@@ -530,15 +551,36 @@ export class Sandbox implements AsyncDisposable {
   // -- ssh ----------------------------------------------------------------
 
   ssh(): SandboxSshOps {
-    return new SandboxSshOps(this.inner);
+    return new SandboxSshOps(this.inner.ssh());
   }
 
   // -- config -------------------------------------------------------------
 
-  /**
-   * The full configuration this sandbox was created with — image, cpus,
-   * memory, env, mounts, etc. The shape mirrors `SandboxBuilder.build()`.
-   */
+  /** Prepare this receiver, retaining any local run it starts. */
+  async ensureRunning(): Promise<void> {
+    await withMappedErrors(() => this.inner.ensureRunning());
+  }
+
+  /** Fetch related mutable fields together without preparing the runtime. */
+  async info(): Promise<SandboxInfo> {
+    const raw = JSON.parse(await withMappedErrors(() => this.inner.infoJson()));
+    return {
+      id: raw.id, name: raw.name, status: raw.status,
+      lastFailureMessage: raw.last_failure_message,
+      createdAt: raw.created_at,
+      updatedAt: raw.updated_at,
+    };
+  }
+
+  async status(): Promise<SandboxStatus> {
+    return (await this.info()).status;
+  }
+
+  async lastFailureMessage(): Promise<string | null> {
+    return (await this.info()).lastFailureMessage;
+  }
+
+  /** Fetch the latest persisted settings; these may still require a restart to apply. */
   async config(): Promise<SandboxConfig> {
     const json = await withMappedErrors(() => this.inner.configJson());
     return remapKeysToCamel(JSON.parse(json)) as SandboxConfig;
@@ -603,7 +645,7 @@ export class Sandbox implements AsyncDisposable {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
-    requireModifyCapabilities(opts);
+    requireModifyCapabilities(opts, bindingFor(this.inner, napi));
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
@@ -650,21 +692,21 @@ export class Sandbox implements AsyncDisposable {
 
   /** Create an independent local CoW child without a durable full snapshot. */
   async fork(name: string, options: ForkOptions = {}): Promise<Sandbox> {
-    const volumes = forkMountBuilders(options.volumes);
+    const volumes = forkMountBuilders(options.volumes, bindingFor(this.inner, napi));
     const child = await withMappedErrors(() => this.inner.fork(
       name, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
     ));
-    return new Sandbox(child, name, false);
+    return new Sandbox(child, name);
   }
 
   /** Capture once; return each named child's startup outcome in input order. */
   async forkMany(names: string[], options: ForkOptions = {}): Promise<ForkOutcome[]> {
-    const volumes = forkMountBuilders(options.volumes);
+    const volumes = forkMountBuilders(options.volumes, bindingFor(this.inner, napi));
     const outcomes = await withMappedErrors(() => this.inner.forkMany(
       names, options.recordIntegrity, options.guestFlush, volumes.length > 0 ? volumes : undefined,
     ));
     return outcomes.map(o => o.sandbox
-      ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name, false) }
+      ? { name: o.name, sandbox: new Sandbox(o.sandbox, o.name) }
       : { name: o.name, error: mapNapiError(new Error(o.error ?? "Child startup failed")) as Error });
   }
 
@@ -712,9 +754,17 @@ export class Sandbox implements AsyncDisposable {
    * This method has no built-in timeout. A same-name replacement is rejected
    * instead of silently redirecting the wait to the new identity.
    */
-  async waitForStatus(status: SandboxStatus): Promise<SandboxHandle> {
-    const raw = await withMappedErrors(() => this.inner.waitForStatus(status));
-    return new SandboxHandle(raw);
+  /** Capture this resource's stable identity in its retained context. */
+  async snapshot(name: string): Promise<Snapshot> {
+    return new Snapshot(await withMappedErrors(() => this.inner.snapshot(name)));
+  }
+
+  async storageUsage(): Promise<StorageItemUsage> {
+    return storageUsageFromHandle(this.inner, "Sandbox.storageUsage()");
+  }
+
+  async waitForStatus(status: SandboxStatus): Promise<void> {
+    await withMappedErrors(() => this.inner.waitForStatus(status));
   }
 
   /**
@@ -745,22 +795,18 @@ export class Sandbox implements AsyncDisposable {
   }
 
   /**
-   * Consume this handle without stopping the sandbox. New guest and filesystem
-   * operations on this handle are rejected; already admitted operations retain
-   * their connection. Await operations first when their completion matters.
+   * Disarm shared automatic cleanup without consuming this sandbox.
+   * Repeated calls succeed; guest operations and explicit stop remain available.
    */
   async detach(): Promise<void> {
     await withMappedErrors(() => this.inner.detach());
-    this.detachedFromScope = true;
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
-    if (!this.ownsLifecycle || this.detachedFromScope) return;
-    try {
-      await this.inner.stop();
-    } catch {
-      // best-effort dispose
-    }
+    if (!this.ownsLifecycle) return;
+    // The native owner checks its captured run, so an old scope cannot stop a
+    // restarted sandbox. Let await-using preserve body and cleanup errors.
+    await withMappedErrors(() => this.inner.shutdownOwned());
   }
 }
 

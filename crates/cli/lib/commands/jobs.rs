@@ -3,7 +3,6 @@
 use std::io::{IsTerminal, Read, Write};
 
 use clap::Args;
-use microsandbox::Sandbox;
 use microsandbox::jobs::{Job, JobEvent, JobId};
 
 use crate::ui::OutputFormat;
@@ -68,7 +67,10 @@ pub struct SignalArgs {
 //--------------------------------------------------------------------------------------------------
 
 async fn get(name: &str, id: &str) -> anyhow::Result<Job> {
-    Ok(Sandbox::get(name).await?.get_job(id).await?)
+    Ok(crate::commands::common::sandbox_record(name)
+        .await?
+        .get_job(id)
+        .await?)
 }
 
 /// Render one list page without acquiring a sandbox lifecycle owner.
@@ -78,7 +80,7 @@ pub async fn list(args: JobsArgs) -> anyhow::Result<()> {
         .map(JobId::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let page = Sandbox::get(&args.name)
+    let page = crate::commands::common::sandbox_record(&args.name)
         .await?
         .list_jobs_with(|options| {
             let options = options.all(args.all).limit(args.limit);

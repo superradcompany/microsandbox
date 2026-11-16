@@ -2,7 +2,10 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-export type SmokeSdk = Pick<typeof import("microsandbox"), "Sandbox" | "SandboxNotFoundError">;
+export type SmokeSdk = {
+  Sandbox: Pick<import("microsandbox").Sandboxes, "builder" | "get">;
+  SandboxNotFoundError: typeof import("microsandbox").SandboxNotFoundError;
+};
 export const MARKER = "microsandbox-release-smoke-ok";
 
 export async function exercise(sdk: SmokeSdk, name: string): Promise<void> {
@@ -52,8 +55,8 @@ async function main(): Promise<void> {
   if (action !== "run" && action !== "cleanup") throw new Error("Expected run or cleanup");
   const apiKey = process.env.MSB_API_KEY;
   if (!apiKey?.trim()) throw new Error("Set the GitHub repository secret MSB_API_KEY");
-  if (process.env.MSB_BACKEND !== "cloud" || process.env.MSB_API_URL !== "https://api.microsandbox.dev") {
-    throw new Error("Smoke test requires MSB_BACKEND=cloud and MSB_API_URL=https://api.microsandbox.dev");
+  if (process.env.MSB_API_URL !== "https://api.microsandbox.dev") {
+    throw new Error("Smoke test requires MSB_API_URL=https://api.microsandbox.dev");
   }
   const name = process.env.MSB_SMOKE_SANDBOX_NAME ?? "";
   if (!/^release-smoke-[0-9]+-[0-9]+$/.test(name)) {
@@ -67,7 +70,9 @@ async function main(): Promise<void> {
   }, action === "run" ? 300_000 : 180_000);
   try {
     // Resolve the installed candidate package, never a source-tree native override.
-    const sdk = await import("microsandbox");
+    const candidate = await import("microsandbox");
+    const remote = candidate.RemoteContext.builder().url(process.env.MSB_API_URL).apiKey(apiKey).build();
+    const sdk: SmokeSdk = { Sandbox: remote.sandboxes, SandboxNotFoundError: candidate.SandboxNotFoundError };
     console.log(`Production sandbox ${name}; action ${action}`);
     if (action === "run") await exercise(sdk, name);
     else await cleanup(sdk, name);

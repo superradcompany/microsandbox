@@ -1,0 +1,218 @@
+//go:build readiness_native && !windows
+
+package microsandbox
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
+)
+
+func TestExplicitContextsNative(t *testing.T) {
+	library := os.Getenv("MSB_READINESS_NATIVE_LIBRARY")
+	if library == "" {
+		t.Skip("requires MSB_READINESS_NATIVE_LIBRARY")
+	}
+	if os.Getenv("MSB_CONTEXT_NATIVE_CHILD") != "1" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestExplicitContextsNative$", "-test.count=1")
+		for _, entry := range os.Environ() {
+			if !strings.HasPrefix(entry, "MSB_") {
+				child.Env = append(child.Env, entry)
+			}
+		}
+		child.Env = append(child.Env, "MSB_READINESS_NATIVE_LIBRARY="+library, "MSB_CONTEXT_NATIVE_CHILD=1", "MSB_HOME="+t.TempDir())
+		if output, err := child.CombinedOutput(); err != nil {
+			t.Fatalf("native contexts: %v\n%s", err, output)
+		}
+		return
+	}
+	if err := ffi.Load(library); err != nil {
+		t.Fatal(err)
+	}
+	provider := func(id string) *RemoteContext {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer key-"+id {
+				t.Errorf("context credentials crossed destinations")
+			}
+			if r.Method != "GET" {
+				t.Errorf("lookup started or mutated resource: %s", r.Method)
+				w.WriteHeader(500)
+				return
+			}
+			observation := map[string]any{"id": id, "name": "task", "slug": "task", "org_id": "org", "status": "running", "ephemeral": false, "created_at": "2026-11-15T00:00:00Z"}
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/v1/sandboxes" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{observation}})
+			} else {
+				_ = json.NewEncoder(w).Encode(observation)
+			}
+		}))
+		t.Cleanup(server.Close)
+		destination, err := NewRemoteContext(server.URL, "key-"+id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return destination
+	}
+	a, b := provider("a"), provider("b")
+	collection := a.Sandboxes()
+	ctx, cancel := context.WithCancel(context.Background())
+	first, err := collection.Get(ctx, "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	cancel() // A finished lookup's request context must not poison the returned resource.
+	second, err := SandboxCtx(b).Get(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if first.ID() == second.ID() {
+		t.Fatal("destinations collapsed")
+	}
+	a, b = nil, nil
+	runtime.GC()
+	again, err := first.Context().Sandboxes().Get(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if again.ID() != first.ID() {
+		t.Fatal("resource context changed")
+	}
+	page, err := collection.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Sandboxes) != 1 {
+		t.Fatal("unexpected page")
+	}
+	defer page.Sandboxes[0].Close()
+	info, err := page.Sandboxes[0].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ID != first.ID() {
+		t.Fatal("listed resource lost identity")
+	}
+	exercisePersistentResources(t)
+	var nilRemote *RemoteContext
+	for _, selected := range []Context{nil, nilRemote, &RemoteContext{}} {
+		if _, err := SandboxCtx(selected).Get(context.Background(), "task"); err == nil {
+			t.Fatal("nil destination accepted")
+		}
+	}
+}
+
+func exercisePersistentResources(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	firstHome := t.TempDir()
+	first, err := NewLocalContext(LocalOptions{Home: firstHome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewLocalContext(LocalOptions{Home: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := first.Volumes().Create(ctx, "same-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := VolumeCtx(second).Create(ctx, "same-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.FS().WriteString(ctx, "value", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.FS().WriteString(ctx, "value", "b"); err != nil {
+		t.Fatal(err)
+	}
+	fetched, err := a.Context().Volumes().Get(ctx, "same-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fetched.FS().ReadString(ctx, "value"); err != nil || got != "a" {
+		t.Fatalf("retained volume = %q, %v", got, err)
+	}
+	info, err := a.Info(ctx)
+	if err != nil || info.ID != a.ID() {
+		t.Fatalf("volume info = %+v, %v", info, err)
+	}
+	if err := a.Destroy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := first.Volumes().Create(ctx, "same-name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID() == a.ID() {
+		t.Fatal("replacement reused volume identity")
+	}
+	if err := fetched.FS().WriteString(ctx, "value", "stale"); err == nil {
+		t.Fatal("stale filesystem reached replacement")
+	}
+	if err := fetched.Destroy(ctx); err == nil {
+		t.Fatal("stale destruction accepted")
+	}
+	if _, err := replacement.Info(ctx); err != nil {
+		t.Fatal("replacement was deleted", err)
+	}
+
+	directory := filepath.Join(firstHome, "snapshots", "fixture")
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := `{"schema":1,"artifact":"snapshot","scope":"disk","created_at":"2026-05-01T12:00:00Z","parent":null,"image":{"ref":"alpine:3.21","manifest_digest":"sha256:` + strings.Repeat("a", 64) + `"},"source_sandbox":"fixture","labels":{},"state":{"kind":"file","format":"raw","fstype":"ext4","upper":{"file":"disk.ext4","size_bytes":4,"integrity":null}},"extensions":{},"requires":[]}`
+	if err := os.WriteFile(filepath.Join(directory, "snapshot.json"), []byte(descriptor), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "disk.ext4"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := first.Snapshots().Open(ctx, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchedSnapshot, err := snapshot.Context().Snapshots().Get(ctx, snapshot.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fetchedSnapshot.Manifest(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := fetchedSnapshot.State(ctx)
+	if err != nil || state.Kind != "file" {
+		t.Fatalf("snapshot state = %+v, %v", state, err)
+	}
+	if err := os.Remove(filepath.Join(directory, "snapshot.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.Manifest(ctx); err == nil {
+		t.Fatal("missing artifact returned cached manifest")
+	}
+	if err := os.WriteFile(filepath.Join(directory, "snapshot.json"), []byte(descriptor), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetchedSnapshot.Destroy(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.Manifest(ctx); err == nil {
+		t.Fatal("deleted snapshot remained readable")
+	}
+}

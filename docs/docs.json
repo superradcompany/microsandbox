@@ -406,6 +406,7 @@
             "pages": [
               "migrations/overview",
               "migrations/v0.7",
+              "migrations/sdk-contexts",
               "migrations/sandbox-storage"
             ]
           },

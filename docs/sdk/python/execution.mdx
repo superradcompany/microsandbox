@@ -396,7 +396,7 @@ recv()
 wait()
 ```
 
-*(async)* Wait for the process to exit. Returns `(code, success)`
+*(async)* Wait for the process to exit, discarding remaining output. Returns `(code, success)`. After `wait()`, `collect()`, or `recv()` observes completion, later waits return the recorded status or raise the recorded terminal execution error. The command is not rerun and output is not replayed. Cancelling a wait or losing the transport does not establish that the command finished.
 
 <p className="msb-label">Returns</p>
 
@@ -408,7 +408,7 @@ wait()
 collect()
 ```
 
-*(async)* Drain remaining output and wait for exit
+*(async)* Drain remaining output and wait for exit. The terminal outcome remains available to `wait()` afterward; output is not retained for replay.
 
 <p className="msb-label">Returns</p>
 
@@ -605,8 +605,8 @@ The result of a completed command execution: collected output plus exit status. 
 |----------|------|-------------|
 | exit_code | `int` | Process exit code |
 | success | `bool` | `True` when `exit_code == 0` |
-| stdout_text | `str` | Collected stdout decoded as UTF-8. Raises on invalid encoding |
-| stderr_text | `str` | Collected stderr decoded as UTF-8. Raises on invalid encoding |
+| stdout_text | `str` | Collected stdout decoded as UTF-8. Raises `UnicodeDecodeError` on invalid encoding |
+| stderr_text | `str` | Collected stderr decoded as UTF-8. Raises `UnicodeDecodeError` on invalid encoding |
 | stdout_bytes | `bytes` | Raw stdout bytes |
 | stderr_bytes | `bytes` | Raw stderr bytes |
 
@@ -731,7 +731,7 @@ page = await sb.list_jobs(all=True, limit=50)
 async def get_job(id: str) -> Job
 ```
 
-Retrieve a retained job by ID. Also available on `SandboxHandle`.
+Retrieve a retained job by ID.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">list_jobs()</span>
 
@@ -739,7 +739,7 @@ Retrieve a retained job by ID. Also available on `SandboxHandle`.
 async def list_jobs(*, all: bool = False, limit: int = 50, cursor: str | None = None) -> JobPage
 ```
 
-List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100. Also available on `SandboxHandle`.
+List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100.
 
 ### Job
 

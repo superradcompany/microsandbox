@@ -89,10 +89,32 @@ Reuse or create the sandbox with this name. The function connects when it is run
 
 `(*`[`Sandbox`](#sandbox)`, error)`
 
+#### <span className="msb-recv">m.</span><span className="msb-hn">GetRunningSandbox()</span>
+
+```go
+func GetRunningSandbox(ctx context.Context, name string) (*Sandbox, error)
+```
+
+Get an existing sandbox and connect or start it. Missing resources are errors. Unlike StartSandbox, an already-running sandbox succeeds. The operation captures the selected destination and identity before preparation and refuses a same-name replacement.
+
+A newly started local run belongs to the returned Sandbox; connecting to an existing run acquires no shutdown ownership. Remote runtime lifetime remains independent. Release the native handle with Close when finished; use Stop when you need to await shutdown.
+
+<Accordion title="Example">
+
+```go
+sb, err := m.GetRunningSandbox(ctx, "task")
+if err != nil {
+    return err
+}
+defer sb.Close()
+```
+
+</Accordion>
+
 #### <span className="msb-recv">m.</span><span className="msb-hn">GetSandbox()</span>
 
 ```go
-func GetSandbox(ctx context.Context, name string) (*SandboxHandle, error)
+func GetSandbox(ctx context.Context, name string) (*Sandbox, error)
 ```
 
 <Accordion title="Example">
@@ -102,12 +124,17 @@ h, err := m.GetSandbox(ctx, "api")
 if err != nil {
     return err
 }
-fmt.Println(h.Status())
+defer h.Close()
+status, err := h.Status(ctx)
+if err != nil {
+    return err
+}
+fmt.Println(status)
 ```
 
 </Accordion>
 
-Look up a sandbox by name and return a metadata handle without connecting to it. Returns an error with `Kind == ErrSandboxNotFound` if no such sandbox exists. The returned [`*SandboxHandle`](#sandboxhandle) exposes `Connect`, `Start`, `Stop`, `Kill`, `Remove`, `Ping`, `Touch`, `Metrics`, `Logs`, and snapshot methods.
+Look up an existing sandbox without connecting or starting it. Returns `*Sandbox`, retaining its stable identity and selected context. Missing resources return `ErrSandboxNotFound`. `EnsureRunning(ctx)` prepares this receiver explicitly; execution also prepares it automatically. `Info`, `Status` and `Config` fetch live backend information without startup. Call `Close` when finished.
 
 <p className="msb-label">Parameters</p>
 
@@ -122,8 +149,8 @@ Look up a sandbox by name and return a metadata handle without connecting to it.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">*SandboxHandle</a></div>
-    <div className="msb-param-desc">Metadata handle with status and lifecycle control.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#sandbox">*Sandbox</a></div>
+    <div className="msb-param-desc">Unprepared resource retaining identity and context.</div>
   </div>
 </div>
 
@@ -177,7 +204,10 @@ if err != nil {
     return err
 }
 for _, h := range page.Sandboxes {
-    fmt.Printf("%s - %s\n", h.Name(), h.Status())
+    defer h.Close()
+    status, err := h.Status(ctx)
+    if err != nil { return err }
+    fmt.Printf("%s - %s\n", h.Name(), status)
 }
 ```
 
@@ -190,7 +220,7 @@ Return the first page of known sandboxes (running, stopped, draining, crashed), 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">*SandboxPage</span></div>
-    <div className="msb-param-desc">Handles in this page and an optional cursor for the next page.</div>
+    <div className="msb-param-desc">Unprepared Sandbox resources in this page and an optional cursor for the next page.</div>
   </div>
 </div>
 
@@ -223,7 +253,7 @@ if page.NextCursor != nil {
 
 </Accordion>
 
-Return a configured page of sandbox metadata. Label selectors are applied before pagination and AND-matched.
+Return a configured page of unprepared `*Sandbox` resources. Listing performs no per-item connection or startup. Label selectors are applied before pagination and AND-matched.
 
 <p className="msb-label">Parameters</p>
 
@@ -367,7 +397,21 @@ See [Runtime setup](/sdk/setup#resolve-check-install-and-ensure) for runtime ins
 
 ## Sandbox
 
-A live sandbox connection that is safe for concurrent use.
+### Live inspection and preparation
+
+```go
+func (s *Sandbox) EnsureRunning(ctx context.Context) error
+func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error)
+func (s *Sandbox) Status(ctx context.Context) (SandboxStatus, error)
+func (s *Sandbox) LastFailureMessage(ctx context.Context) (*string, error)
+func (s *Sandbox) Config(ctx context.Context) (*SandboxConfig, error)
+```
+
+`EnsureRunning` connects to an existing run or starts a stopped resource; the receiver retains any new local run. `Info` returns identity, observed name, status, optional failure message and optional creation/update timestamps in one lookup. `Name()` and `ID()` remain synchronous and require no backend I/O.
+
+Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
+
+A sandbox resource with stable identity and retained context, safe for concurrent use. Lookup and listing do not establish a runtime connection.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
@@ -465,7 +509,7 @@ for _, e := range entries {
 
 </Accordion>
 
-Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, so it works for running and stopped sandboxes alike without guest-agent protocol traffic. The default sources are stdout and stderr; add `LogSourceOutput` for PTY-merged output or `LogSourceSystem` for runtime and kernel diagnostics. The same method exists on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read persisted output from the sandbox's `exec.log`. Backed by an on-disk file, so it works for running and stopped sandboxes alike without guest-agent protocol traffic. The default sources are stdout and stderr; add `LogSourceOutput` for PTY-merged output or `LogSourceSystem` for runtime and kernel diagnostics. The same method exists on [`Sandbox`](#sandbox) for callers that don't want to start the sandbox first.
 
 <p className="msb-label">Parameters</p>
 
@@ -512,7 +556,7 @@ for {
 
 </Accordion>
 
-Start a streaming log subscription against a live sandbox. Pass `LogStreamOptions{Follow: true}` to keep the stream open past current EOF and pick up new entries as they are written. Close the returned [`*LogStreamHandle`](#logstreamhandle) when done. Also available on [`SandboxHandle`](#sandboxhandle).
+Start a streaming log subscription against a live sandbox. Pass `LogStreamOptions{Follow: true}` to keep the stream open past current EOF and pick up new entries as they are written. Close the returned [`*LogStreamHandle`](#logstreamhandle) when done. Also available on [`Sandbox`](#sandbox).
 
 <p className="msb-label">Parameters</p>
 
@@ -977,10 +1021,12 @@ Block until the sandbox is observed in a terminal state, then return how it ende
 #### <span className="msb-recv">sb.</span><span className="msb-hn">WaitForStatus()</span>
 
 ```go
-func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
+func (s *Sandbox) WaitForStatus(ctx context.Context, status SandboxStatus) error
 ```
 
-Wait until this exact sandbox reaches `status`, returning a refreshed metadata handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than following a reused name.
+Returns completion only and never starts the sandbox. The existing resource remains usable; call `Info(ctx)` for a fresh observation afterward. The observed status may change after this wait completes.
+
+Wait until this exact sandbox reaches `status`. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than following a reused name.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Restart()</span>
 
@@ -1012,7 +1058,7 @@ err := sb.Detach(ctx) // keeps running in the background
 
 </Accordion>
 
-Release the Rust-side handle **without** stopping the VM. Use on sandboxes created with [`WithDetached`](#withdetached) once the caller is done with the handle but the sandbox should keep running in the background. After `Detach`, the handle is invalid; a subsequent `Close` returns an error with `Kind == ErrInvalidHandle`. Reconnect later with [`GetSandbox`](#m-getsandbox).
+Disarm automatic shutdown without releasing the native handle. Repeated detach and subsequent operations remain valid, including explicit stop/destroy. A failed detach returns an error and leaves the handle usable. Call `Close` when finished to release client resources; `WithDetached` results already have no automatic shutdown ownership.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Close()</span>
 
@@ -1030,7 +1076,7 @@ defer sb.Close()
 
 </Accordion>
 
-Release the Rust-side handle. Safe to call multiple times; the second call returns an error with `Kind == ErrInvalidHandle`. A local attached handle stops its VM on `Close`; local detached and cloud handles release client resources only. Stop or remove a cloud sandbox explicitly.
+Release the native handle. The second call returns an error with `Kind == ErrInvalidHandle`. Releasing the final attached owner triggers fallback cleanup; `Close` does not await shutdown completion. Detached and cloud resources keep running. Call `Stop(ctx)` and observe its result before `Close` when completed shutdown is required.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">OwnsLifecycle()</span>
 
@@ -1093,6 +1139,20 @@ Why the resource could not be reconstructed.
 `[]uint64`
 
 Permanently invalid captured node IDs; empty when the whole export is unavailable.
+
+#### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
+
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```go
+Snapshot(ctx, name)
+```
+
+Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/go/snapshots).
+
+<p className="msb-label">Returns</p>
+
+`(*SnapshotArtifact, error)`
 
 ## Options
 
@@ -1956,14 +2016,6 @@ Set a deadline for [`Stop`](#sb-stop), which otherwise waits without a built-in 
   </div>
 </div>
 
-#### <span className="msb-recv"></span><span className="msb-hn">WithConnectOrStartDetached()</span>
-
-```go
-func WithConnectOrStartDetached() ConnectOrStartOption
-```
-
-When `ConnectOrStart` must start a local sandbox, start it in detached/background mode. This option does not change ownership when the sandbox is already running.
-
 #### <span className="msb-recv"></span><span className="msb-hn">WithRestartForce()</span>
 
 ```go
@@ -2328,372 +2380,6 @@ Specify the init binary explicitly with optional argv and env. `cmd` must be an 
   </div>
 </div>
 
-## SandboxHandle
-
-
-<p className="msb-backref">Returned by <a href="#m-getsandbox">GetSandbox()</a> · <a href="#m-listsandboxes">ListSandboxes()</a> · <a href="#m-listsandboxeswith">ListSandboxesWith()</a></p>
-
-A sandbox metadata and lifecycle handle that does not require an active guest-agent connection.
-
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Name()</span>
-
-```go
-Name()
-```
-
-Sandbox name, up to 128 UTF-8 bytes
-
-<p className="msb-label">Returns</p>
-
-`string`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">ID()</span>
-
-```go
-func (h *SandboxHandle) ID() string
-```
-
-Return the opaque stable identity captured by this metadata handle. Receiver lifecycle calls remain bound to this value and return `ErrSandboxReplaced` when the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Status()</span>
-
-```go
-Status()
-```
-
-Last-known lifecycle status
-
-<p className="msb-label">Returns</p>
-
-[`SandboxStatus`](#sandboxstatus)
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">ConfigJSON()</span>
-
-```go
-ConfigJSON()
-```
-
-Raw JSON configuration
-
-<p className="msb-label">Returns</p>
-
-`string`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Config()</span>
-
-<Tooltip tip="Parsed SandboxConfig is local-only; use the raw cloud specification from JSON inspection on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Config()
-```
-
-Parsed configuration
-
-<p className="msb-label">Returns</p>
-
-`(*`[`SandboxConfig`](#sandboxconfig)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">CreatedAt()</span>
-
-```go
-CreatedAt()
-```
-
-Creation time, zero value if unknown
-
-<p className="msb-label">Returns</p>
-
-`time.Time`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">UpdatedAt()</span>
-
-```go
-UpdatedAt()
-```
-
-Last-update time, zero value if unknown
-
-<p className="msb-label">Returns</p>
-
-`time.Time`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Refresh()</span>
-
-```go
-Refresh(ctx)
-```
-
-Fresh handle for the same name
-
-<p className="msb-label">Returns</p>
-
-`(*SandboxHandle, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Ping()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Ping(ctx)
-```
-
-Check agent reachability without refreshing idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`(*`[`SandboxPingResult`](#sandboxpingresult)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Touch()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Touch(ctx)
-```
-
-Explicitly refresh idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`(*`[`SandboxTouchResult`](#sandboxtouchresult)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Modify()</span>
-
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Modify(ctx, opts)
-```
-
-Plan or apply a configuration change; same [`ModifyOptions`](#modifyoptions) as [`Modify()`](#sb-modify). Does not start stopped sandboxes; changes persist for the next boot
-
-<p className="msb-label">Returns</p>
-
-`(*`[`SandboxModificationPlan`](#sandboxmodificationplan)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Metrics()</span>
-
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Metrics(ctx)
-```
-
-Point-in-time resource metrics
-
-<p className="msb-label">Returns</p>
-
-`(*`[`Metrics`](#metrics)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Logs()</span>
-
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Logs(ctx, opts)
-```
-
-Read captured `exec.log` (works without starting)
-
-<p className="msb-label">Returns</p>
-
-`([]`[`LogEntry`](#logentry)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">LogStream()</span>
-
-```go
-LogStream(ctx, opts)
-```
-
-Stream captured output
-
-<p className="msb-label">Returns</p>
-
-`(*`[`LogStreamHandle`](#logstreamhandle)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Connect()</span>
-
-```go
-Connect(ctx)
-```
-
-Reattach to the running sandbox
-
-<p className="msb-label">Returns</p>
-
-`(*`[`Sandbox`](#sandbox)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">ConnectOrStart()</span>
-
-```go
-func (h *SandboxHandle) ConnectOrStart(ctx context.Context, opts ...ConnectOrStartOption) (*Sandbox, error)
-```
-
-Connect when this exact sandbox is running, wait through `SandboxStatusStarting`, or start it when it is created, stopped, or crashed. Draining and paused states are rejected. `WithConnectOrStartDetached` affects only a required local start; connecting to an already-running sandbox does not change ownership.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Start()</span>
-
-```go
-Start(ctx)
-```
-
-Boot a stopped sandbox. The returned local handle is attached; a cloud handle does not own the service-managed VM.
-
-<p className="msb-label">Returns</p>
-
-`(*`[`Sandbox`](#sandbox)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">StartDetached()</span>
-
-```go
-StartDetached(ctx)
-```
-
-Boot a stopped sandbox in detached mode
-
-<p className="msb-label">Returns</p>
-
-`(*`[`Sandbox`](#sandbox)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">WaitForStatus()</span>
-
-```go
-func (h *SandboxHandle) WaitForStatus(ctx context.Context, status SandboxStatus) (*SandboxHandle, error)
-```
-
-Wait until this exact sandbox reaches `status`, returning a refreshed handle. The context supplies cancellation or a deadline. Returns `ErrSandboxReplaced` rather than rebinding to a replacement.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Restart()</span>
-
-```go
-func (h *SandboxHandle) Restart(ctx context.Context, opts ...RestartOption) (*Sandbox, error)
-```
-
-Restart this exact sandbox with the same state and option semantics as [`Sandbox.Restart`](#sb-restart).
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Destroy()</span>
-
-```go
-func (h *SandboxHandle) Destroy(ctx context.Context, opts ...DestroyOption) error
-```
-
-Stop and remove this exact sandbox. A stale handle returns `ErrSandboxReplaced` instead of destroying a same-name replacement.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Stop()</span>
-
-<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Stop(ctx, opts...)
-```
-
-Request graceful shutdown and wait for this exact sandbox run and local runtime ownership release, without a built-in deadline or force-kill. Accepts [`StopOption`](#withstoptimeout); context cancellation ends only the wait.
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">StopWithTimeout()</span>
-
-```go
-StopWithTimeout(ctx, timeout)
-```
-
-Bound graceful shutdown for this exact sandbox run. Expiry returns `ErrStopTimeout` without force-killing; zero or a negative duration expires before sending a request.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">RequestStop()</span>
-
-```go
-RequestStop(ctx)
-```
-
-Send a graceful shutdown request without waiting for completion or scheduling forced termination.
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Kill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Kill(ctx, opts...)
-```
-
-Force terminate; accepts [`KillOption`](#withkilltimeout)
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">RequestKill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-RequestKill(ctx)
-```
-
-Async kill request
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">RequestDrain()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-RequestDrain(ctx)
-```
-
-Async drain request
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">WaitUntilStopped()</span>
-
-```go
-WaitUntilStopped(ctx)
-```
-
-Block until terminal state
-
-<p className="msb-label">Returns</p>
-
-`(*`[`SandboxStopResult`](#sandboxstopresult)`, error)`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Remove()</span>
-
-```go
-Remove(ctx)
-```
-
-Delete sandbox and persisted state
-
-<p className="msb-label">Returns</p>
-
-`error`
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">Snapshot()</span>
-
-<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```go
-Snapshot(ctx, name)
-```
-
-Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/go/snapshots).
-
-<p className="msb-label">Returns</p>
-
-`(*SnapshotArtifact, error)`
-
 ## MetricsStreamHandle
 
 
@@ -3027,7 +2713,7 @@ One stable, newest-first page returned by [`ListSandboxes`](#m-listsandboxes) or
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `Sandboxes` | `[]*SandboxHandle` | Handles in this page |
+| `Sandboxes` | `[]*Sandbox` | Handles in this page |
 | `NextCursor` | `*string` | Opaque continuation cursor, or `nil` on the final page |
 
 ### SandboxListOption
@@ -3036,7 +2722,7 @@ Functional options accepted by [`ListSandboxesWith`](#m-listsandboxeswith).
 
 ### SandboxConfig
 
-<p className="msb-backref">Populated by <a href="#options">SandboxOption</a> · parsed by <a href="#sandboxhandle">SandboxHandle.Config()</a></p>
+<p className="msb-backref">Populated by <a href="#options">SandboxOption</a> · parsed by <a href="#sandbox">Sandbox.Config()</a></p>
 
 The full configuration of a sandbox. Most callers build a sandbox via `CreateSandbox(ctx, name, ...opts)`; `SandboxConfig` is exported for callers that prefer to construct a value directly.
 
@@ -3222,7 +2908,7 @@ Describes a terminal sandbox state observed by [`WaitUntilStopped`](#sb-waitunti
 
 ### SandboxStatus
 
-<p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.Status()</a> · <a href="#sandboxstopresult">SandboxStopResult.Status</a></p>
+<p className="msb-backref">Used by <a href="#sandbox">Sandbox.Status()</a> · <a href="#sandboxstopresult">SandboxStopResult.Status</a></p>
 
 ```go
 type SandboxStatus string

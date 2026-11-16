@@ -193,34 +193,48 @@ sb = Microsandbox::Sandbox.connect_or_create(
 Creation options apply only to new sandboxes. An existing sandbox keeps its saved configuration. To recreate it with different settings, use [replacement locally](/sandboxes/overview#naming-conflicts), or remove and recreate it on cloud.
 </Warning>
 
-If you already have a `SandboxHandle`, use `connect_or_start` to connect to that exact sandbox or start it when needed.
+## Prepare an existing sandbox
+
+`get` returns a `Sandbox` without starting it. Execution, filesystem and SSH operations connect or start that same resource when needed. Inspection methods such as `status`, `info` and `config` never start it.
+
+Use `ensure_running` when you want to prepare the sandbox explicitly before other work:
 
 <CodeGroup>
 ```typescript TypeScript
-const handle = await Sandbox.get("worker");
-const sb = await handle.connectOrStart();
+const sb = await Sandbox.get("worker");
+await sb.ensureRunning();
+const output = await sb.shell("echo ready");
 ```
 
 ```rust Rust
-let handle = Sandbox::get("worker").await?;
-let sb = handle.connect_or_start().await?;
+let sb = Sandbox::get("worker").await?;
+sb.ensure_running().await?;
+let output = sb.shell("echo ready").await?;
 ```
 
 ```python Python
-handle = await Sandbox.get("worker")
-sb = await handle.connect_or_start()
+sb = await Sandbox.get("worker")
+await sb.ensure_running()
+output = await sb.shell("echo ready")
 ```
 
 ```go Go
-handle, err := m.GetSandbox(ctx, "worker")
-sb, err := handle.ConnectOrStart(ctx)
+sb, err := m.GetSandbox(ctx, "worker")
+if err != nil { return err }
+if err := sb.EnsureRunning(ctx); err != nil { return err }
+output, err := sb.Shell(ctx, "echo ready")
 ```
 
 ```ruby Ruby
-handle = Microsandbox::Sandbox.get("worker")
-sb = handle.connect_or_start
+sb = Microsandbox::Sandbox.get("worker")
+sb.ensure_running
+output = sb.shell("echo ready")
 ```
 </CodeGroup>
+
+Preparation retains a newly started local run on the receiving object. Releasing the final owner stops that run; connecting to an already-running sandbox acquires no new cleanup ownership. `detach` explicitly releases cleanup ownership while leaving the object usable. Remote runs remain independent of client scope.
+
+Use `Sandbox.getRunning`, `Sandbox::get_running`, `Sandbox.get_running`, `GetRunningSandbox`, or `Sandbox.get_running` in TypeScript, Rust, Python, Go, or Ruby respectively for lookup and preparation together. These methods never create a missing sandbox. Static `start` and `start_detached` are strict: an already-running sandbox is an error.
 
 ## Keep a sandbox running
 
@@ -272,40 +286,44 @@ List sandboxes to discover what exists, or get one by name when you already know
 ```typescript TypeScript
 const page = await Sandbox.list();
 for (const handle of page.sandboxes) {
-  console.log(`${handle.name}: ${handle.status}`);
+  console.log(`${handle.name}: ${await handle.status()}`);
 }
 
 const handle = await Sandbox.get("worker");
-console.log(handle.status);
+console.log(await handle.status());
 ```
 
 ```rust Rust
 for handle in Sandbox::list().await?.sandboxes {
-    println!("{}: {:?}", handle.name(), handle.status_snapshot());
+    println!("{}: {:?}", handle.name(), handle.status().await?);
 }
 ```
 
 ```python Python
 for handle in (await Sandbox.list()).sandboxes:
-    print(f"{handle.name}: {handle.status}")
+    print(f"{handle.name}: {await handle.status()}")
 
 handle = await Sandbox.get("worker")
-print(handle.status)
+print(await handle.status())
 ```
 
 ```go Go
 page, err := m.ListSandboxes(ctx)
 for _, handle := range page.Sandboxes {
-    fmt.Printf("%s: %s\n", handle.Name(), handle.Status())
+    status, err := handle.Status(ctx)
+    if err != nil { return err }
+    fmt.Printf("%s: %s\n", handle.Name(), status)
 }
 
 handle, err := m.GetSandbox(ctx, "worker")
-fmt.Println(handle.Status())
+status, err := handle.Status(ctx)
+if err != nil { return err }
+fmt.Println(status)
 ```
 
 ```ruby Ruby
 Microsandbox::Sandbox.list.fetch("sandboxes").each do |handle|
-  puts "#{handle.name}: #{handle.status}"
+  puts "#{handle.name}: #{await handle.status()}"
 end
 
 handle = Microsandbox::Sandbox.get("worker")
@@ -611,7 +629,7 @@ Local status checks and startup maintenance mark abandoned starts as `Crashed`. 
 
 A name identifies the sandbox currently saved under it. An SDK handle identifies one specific sandbox. If that sandbox is removed and its name is reused, the old handle will not act on the replacement.
 
-Concurrent callers can safely use `connect_or_create` or `connect_or_start` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
+Concurrent callers can safely use `connect_or_create` or `ensure_running` to reuse a sandbox. If it is still starting, they wait rather than start another VM. See your [SDK reference](#reference) for identity checks and replacement errors.
 
 ## Troubleshooting
 

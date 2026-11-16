@@ -65,7 +65,9 @@ pub async fn maybe_stop(sandbox: &Sandbox) {
 
 /// Finish local stop cleanup before a command calls `process::exit`.
 pub(crate) async fn finish_stopped_memory_cleanup() {
-    let backend = microsandbox::backend::default_backend();
+    let Ok(backend) = crate::commands::common::selected_context() else {
+        return;
+    };
     if let Some(local) = backend.as_local() {
         local.finish_stopped_memory_cleanup().await;
     }
@@ -80,14 +82,14 @@ pub(crate) async fn finish_stopped_memory_cleanup() {
 /// pass first so any cache artifacts deleted since the last run (layer EROFS,
 /// fsmeta, VMDK) are regenerated before the VM tries to use them.
 pub async fn resolve_and_start(name: &str, quiet: bool) -> anyhow::Result<Sandbox> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
 
     match handle.status_snapshot() {
         SandboxStatus::Running | SandboxStatus::Draining => {
             // Rebuild a live sandbox. Local connects to the agent relay now;
             // cloud agent operations establish their WebSocket lazily.
             let sandbox = handle.connect().await?;
-            if sandbox.local().is_some() && sandbox.client().is_legacy_protocol() && !quiet {
+            if sandbox.local().is_some() && sandbox.client().await?.is_legacy_protocol() && !quiet {
                 // TODO(upgrade-0.6): Remove in 0.6.x or later once live-sandbox
                 // compatibility for versions before 0.5 is no longer supported.
                 ui::warn(&format!(

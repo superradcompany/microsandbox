@@ -44,6 +44,8 @@ Read an entire file from the guest filesystem into memory as raw bytes.
   </div>
 </div>
 
+Filesystem operations prepare their receiving Sandbox on demand, connecting to an existing run or starting a stopped resource. Idle helpers perform no startup and retain no local shutdown owner. Operations fail if the original receiver group has been released; acquire a new Sandbox to begin new work. Active I/O and streams retain the selected local run until completion, failure or cleanup. Explicit stop can still interrupt them.
+
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_to_string()</span>
 
 ```rust
@@ -190,7 +192,7 @@ Open a streaming writer for large files. Write chunks incrementally, then call [
 
 <Tooltip tip="Open-handle filesystem operations require a live local relay client. Use the path-based methods on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
-Handle operations expose agentd-side file and directory handles. Use them when you need repeated reads/writes against the same open file, directory iteration state, or handle-based metadata updates. They require `Sandbox::fs()` on a live local sandbox because agentd scopes handles to the relay client; `SandboxFsOps::with_backend()` can run path-style methods but returns `Unsupported` for handle methods.
+Handle operations return owned `FsHandle` values bound to the opening local connection and runtime generation. They prepare the receiving Sandbox on demand. Open files retain that run even after the Sandbox is dropped or internally reconnects. Explicit close reports errors; final drop attempts bounded best-effort cleanup. Raw numeric agent handles are internal. Remote open-handle methods remain unsupported; use remote path-based operations.
 
 <Accordion title="Example">
 
@@ -205,8 +207,8 @@ let handle = fs.open_file("/tmp/data.txt", FsOpenOptions {
     ..Default::default()
 }).await?;
 
-fs.write_handle(handle, 0, "hello").await?;
-let bytes = fs.read_handle(handle, 0, None).await?;
+fs.write_handle(&handle, 0, "hello").await?;
+let bytes = fs.read_handle(&handle, 0, None).await?;
 fs.close_handle(handle).await?;
 ```
 
@@ -239,7 +241,7 @@ Close an open file or directory handle. Always close handles you opened directly
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_handle()</span>
 
 ```rust
-async fn read_handle(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<Bytes>
+async fn read_handle(&self, handle: &FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<Bytes>
 ```
 
 Read from an open file handle at `offset`. Passing `None` for `len` reads through EOF.
@@ -247,7 +249,7 @@ Read from an open file handle at `offset`. Passing `None` for `len` reads throug
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_handle_stream()</span>
 
 ```rust
-async fn read_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsReadStream>
+async fn read_handle_stream(&self, handle: &FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsReadStream>
 ```
 
 Stream bytes from an open file handle. Use this for large reads while preserving the same open-handle semantics as [`read_handle()`](#fs-read_handle).
@@ -255,7 +257,7 @@ Stream bytes from an open file handle. Use this for large reads while preserving
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_handle()</span>
 
 ```rust
-async fn write_handle(&self, handle: FsHandle, offset: u64, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
+async fn write_handle(&self, handle: &FsHandle, offset: u64, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>
 ```
 
 Write bytes to an open file handle at `offset`.
@@ -263,7 +265,7 @@ Write bytes to an open file handle at `offset`.
 #### <span className="msb-recv">fs.</span><span className="msb-hn">write_handle_stream()</span>
 
 ```rust
-async fn write_handle_stream(&self, handle: FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsWriteSink>
+async fn write_handle_stream(&self, handle: &FsHandle, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsWriteSink>
 ```
 
 Stream writes to an open file handle at `offset`. Call [`FsWriteSink::close()`](#fswritesink) to send EOF and wait for the guest to confirm the write.
@@ -271,7 +273,7 @@ Stream writes to an open file handle at `offset`. Call [`FsWriteSink::close()`](
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_dir_handle()</span>
 
 ```rust
-async fn read_dir_handle(&self, handle: FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
+async fn read_dir_handle(&self, handle: &FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
 ```
 
 Read the next batch of entries from an open directory handle. `limit` caps the batch size when set.
@@ -279,7 +281,7 @@ Read the next batch of entries from an open directory handle. `limit` caps the b
 #### <span className="msb-recv">fs.</span><span className="msb-hn">read_dir()</span>
 
 ```rust
-async fn read_dir(&self, handle: FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
+async fn read_dir(&self, handle: &FsHandle, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>
 ```
 
 Compatibility alias for [`read_dir_handle()`](#fs-read_dir_handle).
@@ -287,7 +289,7 @@ Compatibility alias for [`read_dir_handle()`](#fs-read_dir_handle).
 #### <span className="msb-recv">fs.</span><span className="msb-hn">stat_handle()</span>
 
 ```rust
-async fn stat_handle(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
+async fn stat_handle(&self, handle: &FsHandle) -> MicrosandboxResult<FsMetadata>
 ```
 
 Return metadata for an open file or directory handle.
@@ -295,7 +297,7 @@ Return metadata for an open file or directory handle.
 #### <span className="msb-recv">fs.</span><span className="msb-hn">fstat()</span>
 
 ```rust
-async fn fstat(&self, handle: FsHandle) -> MicrosandboxResult<FsMetadata>
+async fn fstat(&self, handle: &FsHandle) -> MicrosandboxResult<FsMetadata>
 ```
 
 Unix-style compatibility alias for [`stat_handle()`](#fs-stat_handle).
@@ -303,7 +305,7 @@ Unix-style compatibility alias for [`stat_handle()`](#fs-stat_handle).
 #### <span className="msb-recv">fs.</span><span className="msb-hn">set_stat_handle()</span>
 
 ```rust
-async fn set_stat_handle(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
+async fn set_stat_handle(&self, handle: &FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
 ```
 
 Update metadata for an open file handle. Only the fields set on [`FsSetAttrs`](#fssetattrs) are changed.
@@ -311,7 +313,7 @@ Update metadata for an open file handle. Only the fields set on [`FsSetAttrs`](#
 #### <span className="msb-recv">fs.</span><span className="msb-hn">fset_stat()</span>
 
 ```rust
-async fn fset_stat(&self, handle: FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
+async fn fset_stat(&self, handle: &FsHandle, attrs: FsSetAttrs) -> MicrosandboxResult<()>
 ```
 
 Unix-style compatibility alias for [`set_stat_handle()`](#fs-set_stat_handle).
@@ -956,8 +958,19 @@ Attributes accepted by `set_stat()`. Re-exported from `microsandbox_protocol::fs
 
 <p className="msb-backref">Returned by <a href="#fs-open_file">open_file()</a> · <a href="#fs-open_dir">open_dir()</a></p>
 
-Type alias for an agentd-side filesystem handle. Handles are valid only for the live relay client that opened them; close directly opened handles with [`close_handle()`](#fs-close_handle).
+An owned open file or directory. Operations use the connection and local run that opened it, including after the Sandbox receiver changes generations. Finish active streams before explicit close when their results matter; closing can interrupt them. `close` consumes the handle and reports errors. Drop cleanup is best effort, not a successful-close acknowledgement.
 
 ```rust
-pub type FsHandle = u64;
+pub struct FsHandle { /* private state */ }
+
+impl FsHandle {
+    pub async fn read(&self, offset: u64, len: Option<u64>) -> MicrosandboxResult<Bytes>;
+    pub async fn read_stream(&self, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsReadStream>;
+    pub async fn write(&self, offset: u64, data: impl AsRef<[u8]>) -> MicrosandboxResult<()>;
+    pub async fn write_stream(&self, offset: u64, len: Option<u64>) -> MicrosandboxResult<FsWriteSink>;
+    pub async fn read_dir(&self, limit: Option<u32>) -> MicrosandboxResult<Vec<FsEntry>>;
+    pub async fn stat(&self) -> MicrosandboxResult<FsMetadata>;
+    pub async fn set_stat(&self, attrs: FsSetAttrs) -> MicrosandboxResult<()>;
+    pub async fn close(self) -> MicrosandboxResult<()>;
+}
 ```

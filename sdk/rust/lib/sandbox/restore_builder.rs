@@ -71,7 +71,14 @@ impl Sandbox {
 
 impl RestoreBuilder {
     fn new(reference: SnapshotReference) -> Self {
-        let mut inner = SandboxBuilder::new("").with_snapshot_reference(reference);
+        Self::for_context(crate::context::default_local_context(), reference)
+    }
+
+    pub(crate) fn for_context(
+        context: std::sync::Arc<dyn crate::Context>,
+        reference: SnapshotReference,
+    ) -> Self {
+        let mut inner = SandboxBuilder::for_context(context, "").with_snapshot_reference(reference);
         // The creation builder's empty environment is not a caller request to
         // clear captured settings. Destination bindings start absent as well.
         inner.config.spec.clear_env_mut();
@@ -219,7 +226,6 @@ impl RestoreBuilder {
     }
 
     /// Restore with the shared image/preparation/activation progress stream.
-    #[cfg(feature = "local")]
     pub fn restore_with_progress(
         self,
     ) -> MicrosandboxResult<(

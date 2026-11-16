@@ -21,7 +21,7 @@ use microsandbox_image::{
 
 use crate::{
     MicrosandboxError, MicrosandboxResult,
-    backend::LocalBackend,
+    context::LocalContext,
     db::entity::{
         config as config_entity, image_ref as image_ref_entity, layer as layer_entity,
         manifest as manifest_entity, manifest_layer as manifest_layer_entity,
@@ -184,7 +184,7 @@ impl Image {
     /// This avoids ~25–30 redundant write statements per cached create
     /// and keeps SQLite's single-writer lock free for other work.
     pub async fn persist(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
         metadata: CachedImageMetadata,
     ) -> MicrosandboxResult<i32> {
@@ -268,7 +268,7 @@ impl Image {
 
     /// Get an image handle by reference from the active local backend.
     pub async fn get(reference: &str) -> MicrosandboxResult<ImageHandle> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageGet))?;
@@ -277,7 +277,7 @@ impl Image {
 
     /// List all cached images from the active local backend, ordered by creation time.
     pub async fn list() -> MicrosandboxResult<Vec<ImageHandle>> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageList))?;
@@ -286,7 +286,7 @@ impl Image {
 
     /// Get full detail for an image from the active local backend.
     pub async fn inspect(reference: &str) -> MicrosandboxResult<ImageDetail> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageInspect))?;
@@ -299,7 +299,7 @@ impl Image {
     /// sandboxes and snapshots. Active storage operations always return
     /// [`MicrosandboxError::ImageInUse`], including with `force`.
     pub async fn remove(reference: &str, force: bool) -> MicrosandboxResult<()> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageRemove))?;
@@ -311,7 +311,7 @@ impl Image {
     /// If a later cleanup batch fails, the error message includes removal counts from
     /// completed batches. The failing batch may have made additional progress.
     pub async fn prune() -> MicrosandboxResult<ImagePruneReport> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImagePrune))?;
@@ -324,7 +324,7 @@ impl Image {
     /// applies extra references to the first image in the archive. Returns a
     /// handle for every image reference imported.
     pub async fn load(input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageLoad))?;
@@ -340,7 +340,7 @@ impl Image {
         output: &Path,
         format: ImageArchiveFormat,
     ) -> MicrosandboxResult<()> {
-        let backend = crate::backend::default_backend();
+        let backend = crate::context::default_local_context();
         let local = backend
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::ImageSave))?;
@@ -349,7 +349,7 @@ impl Image {
 
     /// Get an image handle by reference from an explicit local backend.
     pub async fn get_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
     ) -> MicrosandboxResult<ImageHandle> {
         let db = local.db().await?.read();
@@ -369,7 +369,7 @@ impl Image {
     }
 
     /// List all cached images from an explicit local backend, ordered by creation time.
-    pub async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>> {
+    pub async fn list_local(local: &LocalContext) -> MicrosandboxResult<Vec<ImageHandle>> {
         let db = local.db().await?.read();
 
         let models = image_ref_entity::Entity::find()
@@ -387,7 +387,7 @@ impl Image {
 
     /// Get full detail for an image from an explicit local backend.
     pub async fn inspect_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         reference: &str,
     ) -> MicrosandboxResult<ImageDetail> {
         let db = local.db().await?.read();
@@ -485,7 +485,7 @@ impl Image {
     /// applies extra references to the first image in the archive. Each loaded
     /// image is persisted to the database and returned as an [`ImageHandle`].
     pub async fn load_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         input: &Path,
         tags: Vec<String>,
     ) -> MicrosandboxResult<Vec<ImageHandle>> {
@@ -519,7 +519,7 @@ impl Image {
     /// If any reference is missing from the local cache, returns
     /// [`MicrosandboxError::ImageNotFound`].
     pub async fn save_local(
-        local: &LocalBackend,
+        local: &LocalContext,
         references: &[String],
         output: &Path,
         format: ImageArchiveFormat,
@@ -847,12 +847,11 @@ mod tests {
     #[tokio::test]
     async fn persist_preserves_oci_labels_for_inspection() {
         let temp = tempfile::tempdir().unwrap();
-        let local = LocalBackend::builder()
+        let local = LocalContext::builder()
             .config_path(temp.path().join("config.json"))
             .managed_config_path(temp.path().join("managed.json"))
             .home(temp.path())
             .build()
-            .await
             .unwrap();
         let reference = "registry.example.com/acme/labeled-image:latest";
         let metadata = CachedImageMetadata {

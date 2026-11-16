@@ -38,7 +38,6 @@ module Microsandbox
     end
   end
   Sandbox.include(JobListing)
-  SandboxHandle.include(JobListing)
 
   class Job
     def inspect = JobInfo.from_hash(JSON.parse(_inspect_json))

@@ -50,7 +50,7 @@ async def test_cow_resident_capture_and_child_isolation():
     finally:
 
         async def cleanup(sandbox):
-            if str((await Sandbox.get(await sandbox.name)).status) == "paused":
+            if str((await Sandbox.get(sandbox.name)).status) == "paused":
                 await sandbox.resume()
             await sandbox.stop()
 

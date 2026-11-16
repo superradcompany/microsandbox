@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use clap::Args;
-use microsandbox::sandbox::{DEFAULT_STOP_TIMEOUT, Sandbox, SandboxStatus};
+use microsandbox::sandbox::{DEFAULT_STOP_TIMEOUT, SandboxStatus};
 
 use crate::ui;
 
@@ -80,7 +80,7 @@ async fn restart_one(
     timeout_secs: Option<u64>,
     quiet: bool,
 ) -> anyhow::Result<()> {
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
 
     match restart_action(handle.status_snapshot()) {
         RestartAction::StopThenStart => {
@@ -106,7 +106,7 @@ async fn stop_for_restart(
         ui::Spinner::start("Stopping", name)
     };
 
-    let handle = Sandbox::get(name).await?;
+    let handle = crate::commands::common::sandbox_record(name).await?;
     let result = if force {
         handle.kill().await
     } else if let Some(timeout_secs) = timeout_secs {
@@ -132,7 +132,7 @@ async fn stop_for_restart(
 }
 
 async fn start_for_restart(
-    handle: &microsandbox::sandbox::SandboxHandle,
+    handle: &microsandbox::sandbox::SandboxRecord,
     name: &str,
     quiet: bool,
 ) -> anyhow::Result<()> {
@@ -144,7 +144,7 @@ async fn start_for_restart(
 
     match handle.start_detached().await {
         Ok(sandbox) => {
-            sandbox.detach().await;
+            sandbox.detach().await?;
             spinner.finish_success("Started");
             Ok(())
         }

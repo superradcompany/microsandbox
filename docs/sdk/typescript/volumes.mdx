@@ -9,6 +9,14 @@ See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
+Creation, lookup and list items return the same `Volume` type. Each resource retains its destination and stable identity. Dropping it does not delete storage.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">id</span>
+
+`string`
+
+Opaque identity within the retained destination, available synchronously without I/O. A replacement with the same name has a different identity.
+
 <p className="msb-member-group">Instance properties</p>
 
 #### <span className="msb-recv">volume.</span><span className="msb-hn">name</span>
@@ -30,7 +38,7 @@ Absolute host path to the volume's directory. By default volumes live under `~/.
 <Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```typescript
-static getDefault(): Promise<VolumeHandle>
+static getDefault(): Promise<Volume>
 ```
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`.
@@ -40,7 +48,8 @@ The local backend returns a typed `Unsupported` error; it never substitutes a di
 <Accordion title="Example">
 
 ```typescript
-const volume = await Volume.getDefault();
+const remote = RemoteContext.fromEnv();
+const volume = await remote.volumes.getDefault();
 await volume.fs().write("customers/acme.json", JSON.stringify({ active: true }));
 console.log(await volume.fs().readToString("customers/acme.json"));
 ```
@@ -86,19 +95,19 @@ Begin building a named volume. Directory-backed volumes are the default. Call `.
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">get()</span>
 
 ```typescript
-static get(name: string): Promise<VolumeHandle>
+static get(name: string): Promise<Volume>
 ```
 
 <Accordion title="Example">
 
 ```typescript
 const handle = await Volume.get("my-data");
-console.log(handle.usedBytes);
+console.log((await handle.info()).usedBytes);
 ```
 
 </Accordion>
 
-Get a live handle to an existing named volume. A live handle supports `.fs()` and `.remove()`, unlike the read-only handles returned by [`list()`](#volume-list).
+Get an existing named volume, retaining its identity and context for filesystem operations and `destroy()`.
 
 <p className="msb-label">Parameters</p>
 
@@ -113,7 +122,7 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">Promise&lt;VolumeHandle&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Promise&lt;Volume&gt;</a></div>
     <div className="msb-param-desc">Live handle with metadata, filesystem access, and removal.</div>
   </div>
 </div>
@@ -121,26 +130,26 @@ Get a live handle to an existing named volume. A live handle supports `.fs()` an
 #### <span className="msb-recv">Volume.</span><span className="msb-hn">list()</span>
 
 ```typescript
-static list(): Promise<VolumeHandle[]>
+static list(): Promise<Volume[]>
 ```
 
 <Accordion title="Example">
 
 ```typescript
 for (const v of await Volume.list()) {
-  console.log(`${v.name} - ${v.kind} - ${v.usedBytes} bytes`);
+  console.log(`${v.name} - ${v.kind} - ${(await v.info()).usedBytes} bytes`);
 }
 ```
 
 </Accordion>
 
-List all named volumes. Handles returned here are **read-only**: calling `.fs()` or `.remove()` on them throws. Call [`Volume.get(name)`](#volume-get) to upgrade to a live handle.
+List all named volumes. Each item is an operational `Volume`, retaining its identity and context for `.fs()` and `.destroy()` without another lookup.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">Promise&lt;VolumeHandle[]&gt;</a></div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Promise&lt;Volume[]&gt;</a></div>
     <div className="msb-param-desc">All volumes, as read-only handles.</div>
   </div>
 </div>
@@ -198,6 +207,51 @@ Get a filesystem handle for this volume. Local reads and writes use the managed 
     <div className="msb-param-desc">Host-side filesystem handle.</div>
   </div>
 </div>
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">kind</span>
+
+`string`
+
+Volume kind (`"dir"` or `"disk"`)
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">diskFormat</span>
+
+`string \| null`
+
+Disk image format (disk volumes)
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">diskFstype</span>
+
+`string \| null`
+
+Inner disk filesystem (disk volumes)
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">info()</span>
+
+```typescript
+const info = await volume.info();
+console.log(info.quotaMib, info.usedBytes, info.capacityBytes, info.labels);
+```
+
+Fetch one current backend observation. Quota, usage, capacity, and labels are read live; unknown usage stays `null`. Lookup failures are returned without captured fallback. A deleted or replaced volume fails inspection. The result also includes identity, name, kind, default-volume status, disk format/filesystem, and creation time.
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">createdAt</span>
+
+`Date \| null`
+
+Creation timestamp
+
+#### <span className="msb-recv">volume.</span><span className="msb-hn">destroy()</span>
+
+```typescript
+destroy()
+```
+
+Delete this volume by its captured identity and context. A same-name replacement is left untouched.
+
+<p className="msb-label">Returns</p>
+
+`Promise<void>`
 
 ## VolumeBuilder
 
@@ -337,7 +391,7 @@ Build and create the volume on disk, returning a [`Volume`](#instance-methods).
 
 ## VolumeFs
 
-<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volumehandle">VolumeHandle.fs()</a></p>
+<p className="msb-backref">Returned by <a href="#volume-fs">volume.fs()</a> · <a href="#volume">Volume.fs()</a></p>
 
 Host-side filesystem operations for a named volume.
 
@@ -751,89 +805,6 @@ Check whether a path exists.
   </div>
 </div>
 
-## VolumeHandle
-
-<p className="msb-backref">Returned by <a href="#volume-get">Volume.get()</a> · <a href="#volume-list">Volume.list()</a></p>
-
-A metadata and lifecycle handle for an existing volume.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`string`
-
-Volume name
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kind</span>
-
-`string`
-
-Volume kind (`"dir"` or `"disk"`)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">quotaMib</span>
-
-`number \| null`
-
-Recorded storage quota in MiB
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">usedBytes</span>
-
-`number`
-
-Current disk usage in bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">capacityBytes</span>
-
-`number \| null`
-
-Disk capacity in bytes (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFormat</span>
-
-`string \| null`
-
-Disk image format (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">diskFstype</span>
-
-`string \| null`
-
-Inner disk filesystem (disk volumes)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">labels</span>
-
-`ReadonlyArray<readonly [string, string]>`
-
-Metadata labels
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
-
-`Date \| null`
-
-Creation timestamp
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">fs()</span>
-
-```typescript
-fs()
-```
-
-Host-side filesystem (live handles only; throws on read-only handles)
-
-<p className="msb-label">Returns</p>
-
-[`VolumeFs`](#volumefs)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```typescript
-remove()
-```
-
-Delete this volume (live handles only; throws on read-only handles)
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
 
 ## VolumeFsReadStream
 

@@ -14,12 +14,11 @@ use crate::error::to_napi_error;
 use crate::exec::{ExecOutput, JsExecHandle};
 use crate::exec_options_builder::JsExecOptionsBuilder;
 use crate::fs::JsSandboxFsOps;
-use crate::mount_builder::JsMountBuilder;
-use crate::sandbox_handle::{
-    JsSandboxHandle, SandboxDestroyOptions, SandboxRestartOptions, destroy_options, restart_options,
+use crate::lifecycle::{
+    SandboxDestroyOptions, SandboxRestartOptions, destroy_options, restart_options,
 };
+use crate::mount_builder::JsMountBuilder;
 use crate::shared_handle::SharedHandle;
-use crate::ssh::{JsSshClient, JsSshServer, apply_client_options, apply_server_options};
 use crate::types::*;
 
 //--------------------------------------------------------------------------------------------------
@@ -36,7 +35,6 @@ pub struct Sandbox {
     backend_kind: &'static str,
     id: String,
     stop_name: String,
-    owns_lifecycle: bool,
 }
 
 /// One child result from a capture-once batch, in caller order.
@@ -50,7 +48,7 @@ pub struct JsBranchOutcome {
 /// One page returned by `Sandbox.list` / `Sandbox.listWith`.
 #[napi(object, object_from_js = false)]
 pub struct JsSandboxPage {
-    pub sandboxes: Vec<JsSandboxHandle>,
+    pub sandboxes: Vec<Sandbox>,
     pub next_cursor: Option<String>,
 }
 
@@ -96,22 +94,51 @@ pub struct JsLogStream {
 
 impl Sandbox {
     pub fn from_rust(inner: microsandbox::sandbox::Sandbox) -> Self {
-        let backend_kind = inner.backend_kind().as_str();
+        let backend_kind = inner.context_kind().as_str();
         let id = inner.id().to_string();
         let stop_name = inner.name().to_string();
-        let owns_lifecycle = inner.owns_lifecycle();
         Sandbox {
             inner: Arc::new(SharedHandle::new(inner)),
             backend_kind,
             id,
             stop_name,
-            owns_lifecycle,
         }
     }
 }
 
 #[napi]
 impl Sandbox {
+    /// Capture this retained identity without resolving a replacement by name.
+    #[napi]
+    pub async fn snapshot(&self, name: String) -> Result<crate::snapshot::JsSnapshot> {
+        let sandbox = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(crate::snapshot::JsSnapshot::from_rust(
+            sandbox.snapshot(&name).await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Fetch storage usage through this resource's retained destination.
+    #[napi]
+    pub async fn storage_usage(&self) -> Result<crate::storage::StorageItemUsageJs> {
+        let sandbox = self.inner.get().await.ok_or_else(consumed_error)?;
+        Ok(crate::storage::item_to_js(
+            sandbox.storage_usage().await.map_err(to_napi_error)?,
+        ))
+    }
+
+    /// Return the retained destination without selecting a new one.
+    #[napi]
+    pub fn context(&self) -> Result<crate::context::JsContext> {
+        Ok(crate::context::JsContext {
+            inner: self
+                .inner
+                .get_now()
+                .ok_or_else(consumed_error)?
+                .context()
+                .clone_shared(),
+        })
+    }
+
     /// Retrieve a retained managed job in this sandbox.
     #[napi]
     pub async fn get_job(&self, id: String) -> Result<JsJob> {
@@ -187,15 +214,27 @@ impl Sandbox {
     // Static Methods — Lookup
     //----------------------------------------------------------------------------------------------
 
-    /// Get a lightweight handle to an existing sandbox.
+    /// Look up an existing Sandbox without preparing its runtime.
     ///
     /// Sandbox names are limited to 128 UTF-8 bytes.
     #[napi]
-    pub async fn get(name: String) -> Result<JsSandboxHandle> {
+    pub async fn get(name: String) -> Result<Sandbox> {
         let handle = microsandbox::sandbox::Sandbox::get(&name)
             .await
             .map_err(to_napi_error)?;
-        Ok(JsSandboxHandle::from_rust(handle))
+        Ok(Sandbox::from_rust(handle))
+    }
+
+    /// Get an existing sandbox, connecting or starting it without creating it.
+    #[napi(ts_return_type = "Promise<Sandbox>")]
+    pub fn get_running<'env>(env: &'env Env, name: String) -> Result<PromiseRaw<'env, Sandbox>> {
+        // Select the destination before scheduling work on the native runtime.
+        let context = microsandbox::context::default_local_context();
+        let sandboxes = microsandbox::Sandbox::ctx(context.as_ref());
+        env.spawn_future(async move {
+            let sandbox = sandboxes.get_running(&name).await.map_err(to_napi_error)?;
+            Ok(Sandbox::from_rust(sandbox))
+        })
     }
 
     /// Import or recover stopped storage without starting a VM.
@@ -254,17 +293,17 @@ impl Sandbox {
     // Properties
     //----------------------------------------------------------------------------------------------
 
-    /// Backend retained by this sandbox (`"local"` or `"cloud"`).
+    /// Context retained by this sandbox (`"local"` or `"cloud"`).
     #[napi(getter)]
     pub fn backend_kind(&self) -> &'static str {
         self.backend_kind
     }
 
-    /// Sandbox name. Names are limited to 128 UTF-8 bytes.
+    /// Captured sandbox name, available without I/O or a live runtime.
     #[napi(getter)]
-    pub async fn name(&self) -> Result<String> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        Ok(sb.name().to_string())
+    pub fn name(&self) -> String {
+        // Do not acquire the native slot: identity survives busy/disposed state.
+        self.stop_name.clone()
     }
 
     /// Stable backend-assigned identity for this persisted sandbox.
@@ -276,16 +315,32 @@ impl Sandbox {
     /// Whether this handle owns the sandbox lifecycle (attached mode).
     #[napi(getter)]
     pub fn owns_lifecycle(&self) -> bool {
-        self.owns_lifecycle
+        self.inner
+            .get_now()
+            .is_some_and(|sandbox| sandbox.owns_lifecycle())
     }
 
-    /// Get the full configuration this sandbox was created with
-    /// (image, cpus, memory, env, mounts, etc.) as a JSON string.
+    /// Prepare this receiver and retain a newly started local run.
+    #[napi]
+    pub async fn ensure_running(&self) -> Result<()> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        sb.ensure_running().await.map_err(to_napi_error)
+    }
+
+    /// Fetch a single live observation without preparing or starting the resource.
+    #[napi]
+    pub async fn info_json(&self) -> Result<String> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        serde_json::to_string(&sb.info().await.map_err(to_napi_error)?)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Fetch the latest persisted configuration as a JSON string.
     /// The TS layer parses + camelCase-remaps this into a plain object.
     #[napi(js_name = "configJson")]
     pub async fn config_json(&self) -> Result<String> {
         let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        serde_json::to_string(sb.config())
+        serde_json::to_string(&sb.config().await.map_err(to_napi_error)?)
             .map_err(|e| napi::Error::from_reason(format!("failed to serialize config: {e}")))
     }
 
@@ -422,36 +477,20 @@ impl Sandbox {
 
     /// Get a filesystem handle for operations on the running sandbox.
     #[napi]
-    pub fn fs(&self) -> JsSandboxFsOps {
-        JsSandboxFsOps::new(self.inner.clone())
+    pub fn fs(&self) -> Result<JsSandboxFsOps> {
+        let sandbox = self.inner.get_now().ok_or_else(consumed_error)?;
+        Ok(JsSandboxFsOps::new(sandbox.fs()))
     }
 
     //----------------------------------------------------------------------------------------------
     // SSH
     //----------------------------------------------------------------------------------------------
 
-    /// Connect a native in-process SSH client to this sandbox.
-    #[napi(js_name = "sshConnect")]
-    pub async fn ssh_connect(&self, options: Option<SshClientOptions>) -> Result<JsSshClient> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        let client = sb
-            .ssh()
-            .connect_with(|builder| apply_client_options(options, builder))
-            .await
-            .map_err(to_napi_error)?;
-        Ok(JsSshClient::from_rust(client))
-    }
-
-    /// Prepare a reusable SSH server endpoint for this sandbox.
-    #[napi(js_name = "sshServer")]
-    pub async fn ssh_server(&self, options: Option<SshServerOptions>) -> Result<JsSshServer> {
-        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
-        let server = sb
-            .ssh()
-            .server_with(|builder| apply_server_options(options, builder))
-            .await
-            .map_err(to_napi_error)?;
-        Ok(JsSshServer::from_rust(server))
+    /// Return an idle SSH facade without retaining a local shutdown owner.
+    #[napi]
+    pub fn ssh(&self) -> Result<crate::ssh::JsSandboxSshOps> {
+        let sandbox = self.inner.get_now().ok_or_else(consumed_error)?;
+        Ok(crate::ssh::JsSandboxSshOps::new(sandbox.ssh()))
     }
 
     //----------------------------------------------------------------------------------------------
@@ -816,7 +855,7 @@ impl Sandbox {
 
     /// Wait until this exact sandbox reaches the requested status.
     #[napi(js_name = "waitForStatus")]
-    pub async fn wait_for_status(&self, status: String) -> Result<JsSandboxHandle> {
+    pub async fn wait_for_status(&self, status: String) -> Result<()> {
         let sandbox = self.inner.get().await.ok_or_else(consumed_error)?;
         let status = match status.as_str() {
             "created" => microsandbox::sandbox::SandboxStatus::Created,
@@ -832,11 +871,7 @@ impl Sandbox {
                 )));
             }
         };
-        let handle = sandbox
-            .wait_for_status(status)
-            .await
-            .map_err(to_napi_error)?;
-        Ok(JsSandboxHandle::from_rust(handle))
+        sandbox.wait_for_status(status).await.map_err(to_napi_error)
     }
 
     /// Stop and start this exact sandbox.
@@ -876,16 +911,18 @@ impl Sandbox {
         Ok(exit_status_to_js(status))
     }
 
-    /// Detach from the sandbox — it will continue running after this handle is dropped.
-    /// New operations are rejected; already admitted operations retain their connection.
+    /// Disarm shared automatic cleanup, keeping this sandbox usable.
     #[napi]
     pub async fn detach(&self) -> Result<()> {
-        if let Some(sb) = self.inner.take().await {
-            // Only detach consumes the Rust value. Ordinary operations clone the Arc,
-            // not the sandbox configuration; admitted operations keep their reference.
-            Arc::unwrap_or_clone(sb).detach().await;
-        }
-        Ok(())
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        sb.detach().await.map_err(to_napi_error)
+    }
+
+    /// Native implementation of ownership-aware language scope cleanup.
+    #[napi]
+    pub async fn shutdown_owned(&self) -> Result<()> {
+        let sb = self.inner.get().await.ok_or_else(consumed_error)?;
+        sb.shutdown_owned().await.map_err(to_napi_error)
     }
 
     /// Remove the persisted database record after stopping.
@@ -948,13 +985,9 @@ pub(crate) fn branch_outcomes(
         .collect()
 }
 
-fn sandbox_page_to_js(page: microsandbox::sandbox::SandboxPage) -> JsSandboxPage {
+pub(crate) fn sandbox_page_to_js(page: microsandbox::sandbox::SandboxPage) -> JsSandboxPage {
     JsSandboxPage {
-        sandboxes: page
-            .sandboxes
-            .into_iter()
-            .map(JsSandboxHandle::from_rust)
-            .collect(),
+        sandboxes: page.sandboxes.into_iter().map(Sandbox::from_rust).collect(),
         next_cursor: page.next_cursor,
     }
 }
@@ -1031,7 +1064,7 @@ impl AsyncGenerator for JsLogStream {
 
 /// Open a log stream against the given sandbox name and bridge it
 /// onto a JS-side mpsc channel. Shared between `Sandbox::log_stream`
-/// and `SandboxHandle::log_stream`.
+/// and `Sandbox::log_stream`.
 pub async fn spawn_log_stream_from_stream(
     mut stream: Pin<
         Box<
@@ -1492,7 +1525,7 @@ pub(crate) fn exit_status_to_js(status: std::process::ExitStatus) -> ExitStatus 
 }
 
 fn consumed_error() -> napi::Error {
-    napi::Error::from_reason("Sandbox handle has been consumed (detached or removed)")
+    napi::Error::from_reason("Sandbox handle has been consumed (removed or disposed)")
 }
 
 //--------------------------------------------------------------------------------------------------

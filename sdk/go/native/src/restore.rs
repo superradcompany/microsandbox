@@ -19,6 +19,7 @@ use super::{
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RestoreOptions {
+    context_handle: Option<u64>,
     snapshot: String,
     snapshot_reference_kind: Option<String>,
     cpus: Option<u8>,
@@ -95,7 +96,13 @@ fn builder(name: String, opts: &RestoreOptions) -> Result<RestoreBuilder, FfiErr
         opts.snapshot.clone(),
         opts.snapshot_reference_kind.as_deref().unwrap_or(""),
     )?;
-    let mut builder = Sandbox::restore_ref(reference).name(name);
+    let context = match opts.context_handle {
+        Some(handle) => super::context::get(handle)?,
+        None => microsandbox::context::default_local_context(),
+    };
+    let mut builder = Sandbox::ctx(context.as_ref())
+        .restore_ref(reference)
+        .name(name);
     if let Some(cpus) = opts.cpus {
         builder = builder.cpus(cpus);
     }
@@ -205,7 +212,7 @@ pub unsafe extern "C" fn msb_sandbox_restore(
             } else {
                 builder.restore().await?
             };
-            let backend_kind = sandbox.backend_kind().as_str();
+            let backend_kind = sandbox.context_kind().as_str();
             let id = sandbox.id().to_string();
             let handle = register(sandbox)?;
             Ok(

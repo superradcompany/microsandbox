@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{self, CreationStorage};
+use crate::context::local::creation::{self, CreationStorage};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox;
 #[cfg(feature = "local")]
 use crate::runtime::{launch_contract, owned_volumes, protected_state};
 #[cfg(feature = "local")]
-use crate::{LocalBackend, SandboxConfig};
+use crate::{LocalContext, SandboxConfig};
 use crate::{MicrosandboxError, MicrosandboxResult};
 
 use super::Sandbox;
@@ -71,6 +71,20 @@ impl Sandbox {
         name: &str,
         options: StorageRecoveryOptions,
     ) -> MicrosandboxResult<StorageRecovery> {
+        crate::context::default_local_context()
+            .sandboxes()
+            .recover_storage(name, options)
+            .await
+    }
+}
+
+impl crate::Sandboxes {
+    /// Recover storage on this retained local destination, preserving the same validation and locks.
+    pub async fn recover_storage(
+        &self,
+        name: &str,
+        options: StorageRecoveryOptions,
+    ) -> MicrosandboxResult<StorageRecovery> {
         if !options.selections.is_empty() && !options.accept_selected_view {
             return Err(MicrosandboxError::InvalidConfig(
                 "explicit storage selection requires acknowledging that the selected view may omit later writes".into(),
@@ -85,7 +99,7 @@ impl Sandbox {
         }
         #[cfg(feature = "local")]
         {
-            recover_local(name, options).await
+            recover_local(self.context.clone(), name, options).await
         }
     }
 }
@@ -96,29 +110,26 @@ impl Sandbox {
 
 #[cfg(feature = "local")]
 async fn recover_local(
+    context: std::sync::Arc<dyn crate::Context>,
     name: &str,
     options: StorageRecoveryOptions,
 ) -> MicrosandboxResult<StorageRecovery> {
-    with_locked_storage(
-        crate::backend::default_backend(),
-        name,
-        async |local, config, storage| {
-            protected_state::prepare_selected(local, config, storage, &options).await?;
-            Ok(StorageRecovery {
-                name: name.into(),
-                ready: true,
-                originals_retained: true,
-            })
-        },
-    )
+    with_locked_storage(context, name, async |local, config, storage| {
+        protected_state::prepare_selected(local, config, storage, &options).await?;
+        Ok(StorageRecovery {
+            name: name.into(),
+            ready: true,
+            originals_retained: true,
+        })
+    })
     .await
 }
 
 #[cfg(feature = "local")]
 pub(super) async fn with_locked_storage<T>(
-    backend: std::sync::Arc<dyn crate::backend::Backend>,
+    backend: std::sync::Arc<dyn crate::context::Context>,
     name: &str,
-    action: impl AsyncFnOnce(&LocalBackend, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
+    action: impl AsyncFnOnce(&LocalContext, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
 ) -> MicrosandboxResult<T> {
     with_target_locks(backend, name, async |local| {
         with_catalog_storage(local, name, action).await
@@ -130,9 +141,9 @@ pub(super) async fn with_locked_storage<T>(
 /// may initialize or migrate the user's catalog.
 #[cfg(feature = "local")]
 pub(super) async fn with_target_locks<T>(
-    backend: std::sync::Arc<dyn crate::backend::Backend>,
+    backend: std::sync::Arc<dyn crate::context::Context>,
     name: &str,
-    action: impl AsyncFnOnce(&LocalBackend) -> MicrosandboxResult<T>,
+    action: impl AsyncFnOnce(&LocalContext) -> MicrosandboxResult<T>,
 ) -> MicrosandboxResult<T> {
     super::validate_sandbox_name(name)?;
     backend.info()?;
@@ -140,7 +151,7 @@ pub(super) async fn with_target_locks<T>(
         MicrosandboxError::InvalidConfig("storage recovery requires the local backend".into())
     })?;
     let run = local.config().run_dir();
-    let _transition = LocalBackend::acquire_sandbox_transition_guard(&run, name).await?;
+    let _transition = LocalContext::acquire_sandbox_transition_guard(&run, name).await?;
     let _lineage = crate::snapshot::lineage::lock_source(&run, name).await?;
     let _lifecycle = crate::runtime::acquire_sandbox_lifecycle_guard(
         &run,
@@ -153,9 +164,9 @@ pub(super) async fn with_target_locks<T>(
 
 #[cfg(feature = "local")]
 async fn with_catalog_storage<T>(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
-    action: impl AsyncFnOnce(&LocalBackend, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
+    action: impl AsyncFnOnce(&LocalContext, &SandboxConfig, &CreationStorage) -> MicrosandboxResult<T>,
 ) -> MicrosandboxResult<T> {
     let db = local.db().await?;
     let model = sandbox::Entity::find()
@@ -170,7 +181,7 @@ async fn with_catalog_storage<T>(
     }
     // Older generations can publish a stopped row before their process and disk handles exit.
     // The PID check is conservative on reuse and never sends a signal to another process.
-    if LocalBackend::load_latest_run(db.read(), model.id)
+    if LocalContext::load_latest_run(db.read(), model.id)
         .await?
         .and_then(|run| run.pid)
         .is_some_and(microsandbox_utils::process::pid_exists)
@@ -188,11 +199,11 @@ async fn with_catalog_storage<T>(
 
 #[cfg(feature = "local")]
 pub(super) async fn guard_target_storage(
-    local: &LocalBackend,
+    local: &LocalContext,
     name: &str,
     config: &SandboxConfig,
 ) -> MicrosandboxResult<CreationStorage> {
-    LocalBackend::validate_completed_restore(config)?;
+    LocalContext::validate_completed_restore(config)?;
     launch_contract::validate_runtime_config(config, local.config()).await?;
     owned_volumes::wait_for_disk_release(
         &local.sandboxes_dir().join(name),

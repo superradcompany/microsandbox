@@ -13,7 +13,7 @@ Production and integration-test builds use the platform's managed path.
 Integration tests that construct a backend should run on a dedicated test host
 whose policy is controlled by the test environment.
 
-Backend unit tests use `LocalBackend::builder().config_path(...)` with a temporary
+Backend unit tests use `LocalContext::builder().config_path(...)` with a temporary
 file and the test-only `managed_config_path(...)` setter, so neither the user's
 config nor the machine's policy affects them. Only tests exercising
 environment-based selection or runtime paths should use the shared `lock_env()`.

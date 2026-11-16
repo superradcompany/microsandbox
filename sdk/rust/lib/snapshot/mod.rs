@@ -1,4 +1,4 @@
-//! Backend-neutral snapshot capture, inspection, archives, and restore references.
+//! Context-neutral snapshot capture, inspection, archives, and restore references.
 //!
 //! Local storage supports disk and full execution snapshots, immutable groups,
 //! layered disks, owned storage, and incremental archives. Cloud storage retains
@@ -6,13 +6,14 @@
 
 mod api;
 mod copy;
+mod metadata;
 mod types;
 
 //--------------------------------------------------------------------------------------------------
 // Re-Exports
 //--------------------------------------------------------------------------------------------------
 
-pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotHandle, SnapshotReference};
+pub use api::{Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotReference};
 pub use copy::SnapshotCopyBuilder;
 pub use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId, FileSnapshotState,
@@ -28,9 +29,9 @@ pub use types::{
 
 #[cfg(feature = "local")]
 #[doc(hidden)]
-pub use crate::backend::local::snapshot::downgrade;
+pub use crate::context::local::snapshot::downgrade;
 #[cfg(feature = "local")]
-pub(crate) use crate::backend::local::snapshot::{
+pub(crate) use crate::context::local::snapshot::{
     CHECKPOINT_DIRECTORY, adopt_local_branch_for_child, apply_additional_disks, lineage,
     materialize_additional_disks, materialize_checkpoint_disk_for_child,
     materialize_checkpoint_for_child, materialize_file_snapshot_for_child,

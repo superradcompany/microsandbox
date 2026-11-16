@@ -3,7 +3,7 @@ import { Sandbox, JobError, type Job, type JobAttachment } from "../dist/index.j
 
 describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("managed jobs on a disposable VM", () => {
   it("preserves ownership and binary I/O across detach, and cancels an idle log stream", async () => {
-    const sb = await (await Sandbox.get(process.env.MSB_JOB_TEST_SANDBOX!)).connect();
+    const sb = await Sandbox.getRunning(process.env.MSB_JOB_TEST_SANDBOX!);
     const jobs: Job[] = [];
     const attachments: JobAttachment[] = [];
     try {
@@ -46,7 +46,7 @@ describe.skipIf(!process.env.MSB_HOME || !process.env.MSB_JOB_TEST_SANDBOX)("man
     }
   }, 20_000);
   it("enforces streaming deadlines without polling output", async () => {
-    const sb = await (await Sandbox.get(process.env.MSB_JOB_TEST_SANDBOX!)).connect();
+    const sb = await Sandbox.getRunning(process.env.MSB_JOB_TEST_SANDBOX!);
     for (const tty of [false, true]) {
       const handle = await sb.execStreamWith("sleep", b => b.args(["30"]).tty(tty).timeout(500));
       try {

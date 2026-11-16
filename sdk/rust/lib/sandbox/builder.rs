@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(feature = "local")]
-use microsandbox_image::{PullProgressHandle, PullProgressSender, snapshot::SnapshotRootDisk};
+use microsandbox_image::{PullProgressSender, snapshot::SnapshotRootDisk};
 #[cfg(feature = "net")]
 use microsandbox_network::builder::{NetworkBuilder, SecretBuilder};
 #[cfg(feature = "net")]
 use microsandbox_network::policy::Rule;
 #[cfg(feature = "net")]
 use microsandbox_network::{OutboundProxyBuilder, OutboundProxyConfig};
+use microsandbox_types::pull_progress::PullProgressHandle;
 use microsandbox_types::{
     CpuPlacement, EnvVar, PullPolicy, RegistryAuth, SandboxSpecPatch, VsockRouteSpec,
     VsockSocketType,
@@ -36,10 +37,10 @@ use super::{
 };
 #[cfg(feature = "local")]
 use crate::UnsupportedReason;
-use crate::backend::default_backend;
 use crate::config::layers::BackendConfig;
 #[cfg(feature = "local")]
 use crate::config::{GlobalConfig, GlobalConfigPatch};
+use crate::context::default_local_context;
 #[cfg(feature = "local")]
 use crate::runtime::SpawnMode;
 use crate::snapshot::SnapshotReference;
@@ -51,6 +52,7 @@ use crate::{LogLevel, MicrosandboxError, MicrosandboxResult, Operation, size::Me
 
 /// Builder for constructing a [`SandboxConfig`] with a fluent API.
 pub struct SandboxBuilder {
+    context: std::sync::Arc<dyn crate::Context>,
     /// Per-sandbox configuration assembled by file, CLI, and SDK inputs.
     pub(crate) config: SandboxConfigPatch,
     detached: bool,
@@ -110,6 +112,22 @@ impl RegistryConfigBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl SandboxBuilder {
+    /// Rebuild a captured configuration on an explicit destination without re-resolving selection.
+    #[cfg(test)]
+    pub(crate) fn from_config_for_context(
+        context: std::sync::Arc<dyn crate::Context>,
+        config: SandboxConfig,
+    ) -> Self {
+        let mut builder = Self::from(config);
+        builder.context = context;
+        builder
+    }
+
+    /// The destination retained by this builder. This performs no backend I/O.
+    pub fn context(&self) -> &dyn crate::Context {
+        self.context.as_ref()
+    }
+
     /// Select validation of authorized external filesystem mappings and captured handles.
     /// Strict is the default; relaxed accepts supported mismatches with warnings.
     /// Neither policy grants host access or waives full restore's required-resource checks.
@@ -126,6 +144,14 @@ impl SandboxBuilder {
     /// [`replace`](Self::replace) is set) and no longer than 128 UTF-8 bytes.
     /// Defaults and managed overrides come from the backend active when [`build`](Self::build) runs.
     pub fn new(name: impl Into<String>) -> Self {
+        Self::for_context(default_local_context(), name)
+    }
+
+    /// Retain the destination before any deferred preparation or spawned work.
+    pub(crate) fn for_context(
+        context: std::sync::Arc<dyn crate::Context>,
+        name: impl Into<String>,
+    ) -> Self {
         // Builder calls accumulate one patch for final configuration resolution.
         // SDK env() appends preserve order and duplicates; sparse overlays still merge by key.
         let patch = SandboxSpecPatch::new()
@@ -134,6 +160,7 @@ impl SandboxBuilder {
         let config = SandboxConfigPatch::new().spec(patch);
 
         Self {
+            context,
             config,
             detached: false,
             build_error: None,
@@ -1281,7 +1308,7 @@ impl SandboxBuilder {
     /// Defer snapshot resolution to the selected backend.
     ///
     /// References returned by [`crate::snapshot::Snapshot::reference`] and
-    /// [`SnapshotHandle::reference`](crate::snapshot::SnapshotHandle::reference)
+    /// [`Snapshot::reference`](crate::snapshot::Snapshot::reference)
     /// preserve whether the selected backend resolves the value as an
     /// identifier or a path.
     pub(crate) fn with_snapshot_reference(
@@ -1334,7 +1361,7 @@ impl SandboxBuilder {
     /// Local archive preparation reads metadata only. Keep the archive available until
     /// creation finishes; payload validation and extraction happen during creation.
     pub async fn build(mut self) -> MicrosandboxResult<SandboxConfig> {
-        let backend = default_backend();
+        let backend = self.context.clone();
         #[cfg(feature = "cloud")]
         if let Some(cloud) = backend.as_cloud() {
             return cloud.build_sandbox_config(self).await;
@@ -1507,13 +1534,13 @@ impl SandboxBuilder {
     #[cfg(feature = "local")]
     pub(crate) fn capture_host_paths(
         &mut self,
-        backend: &dyn crate::Backend,
+        backend: &dyn crate::Context,
     ) -> MicrosandboxResult<()> {
         if backend.as_local().is_some() {
             let captured = self.config.local_restore_paths_resolved == Some(true);
-            crate::backend::local::host_paths::resolve_patch_paths(&mut self.config)?;
+            crate::context::local::host_paths::resolve_patch_paths(&mut self.config)?;
             if !captured && let ConfigSource::Snapshot(reference) = &mut self.config_source {
-                crate::backend::local::host_paths::resolve_snapshot_reference(reference)?;
+                crate::context::local::host_paths::resolve_snapshot_reference(reference)?;
             }
         }
         Ok(())
@@ -1523,7 +1550,7 @@ impl SandboxBuilder {
     /// The backend borrows only the pending fields needed before image resolution.
     pub(crate) async fn prepare(
         &mut self,
-        backend: std::sync::Arc<dyn crate::Backend>,
+        backend: std::sync::Arc<dyn crate::Context>,
     ) -> MicrosandboxResult<&mut SandboxConfigPatch> {
         if let Some(error) = self.build_error.take() {
             return Err(error);
@@ -1556,7 +1583,7 @@ impl SandboxBuilder {
     /// their payloads are extracted only during creation.
     async fn resolve_pending(
         &mut self,
-        backend: std::sync::Arc<dyn crate::Backend>,
+        backend: std::sync::Arc<dyn crate::Context>,
     ) -> MicrosandboxResult<()> {
         let pending = match std::mem::take(&mut self.config_source) {
             ConfigSource::Snapshot(reference) => Some(reference),
@@ -1623,7 +1650,7 @@ impl SandboxBuilder {
 
         #[cfg(feature = "local")]
         if let Some(local) = backend.as_local() {
-            crate::backend::local::host_paths::resolve_host_paths(&mut config)?;
+            crate::context::local::host_paths::resolve_host_paths(&mut config)?;
             if let Some(snapshot_ref) = snapshot_ref {
                 local
                     .prepare_local_restore(backend.clone(), &mut config, snapshot_ref)
@@ -1633,7 +1660,7 @@ impl SandboxBuilder {
             }
         } else if let Some(snapshot_ref) = snapshot_ref {
             backend
-                .snapshots()
+                .snapshot_ops()
                 .prepare_restore(backend.clone(), &mut config, snapshot_ref)
                 .await?;
         }
@@ -1641,7 +1668,7 @@ impl SandboxBuilder {
         #[cfg(not(feature = "local"))]
         if let Some(snapshot_ref) = snapshot_ref {
             backend
-                .snapshots()
+                .snapshot_ops()
                 .prepare_restore(backend.clone(), &mut config, snapshot_ref)
                 .await?;
         }
@@ -1692,7 +1719,15 @@ impl SandboxBuilder {
 
         let name = self.config.spec.name.clone().unwrap_or_default();
         let detached = self.detached;
-        match Sandbox::get(&name).await {
+        let sandboxes = crate::Sandboxes {
+            context: self.context.clone(),
+        };
+        match sandboxes
+            .context
+            .sandbox_ops()
+            .get(sandboxes.context.clone(), &name)
+            .await
+        {
             Ok(handle) => return handle.connect_or_start_with_mode(detached).await,
             Err(MicrosandboxError::SandboxNotFound(_)) => {}
             Err(error) => return Err(error),
@@ -1701,7 +1736,10 @@ impl SandboxBuilder {
         match self.create().await {
             Ok(sandbox) => Ok(sandbox),
             Err(MicrosandboxError::SandboxAlreadyExists(_)) => {
-                Sandbox::get(&name)
+                sandboxes
+                    .context
+                    .sandbox_ops()
+                    .get(sandboxes.context.clone(), &name)
                     .await?
                     .connect_or_start_with_mode(detached)
                     .await
@@ -1724,26 +1762,35 @@ impl SandboxBuilder {
     ///
     /// Events are best-effort and never block creation. Await the task for the authoritative
     /// result; dropping the progress receiver does not cancel it. Abort the task to cancel.
-    #[cfg(feature = "local")]
     pub fn create_with_progress(
         mut self,
     ) -> crate::MicrosandboxResult<(
         crate::CreationProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<super::Sandbox>>,
     )> {
-        let backend = crate::backend::default_backend();
+        let backend = self.context.clone();
+        #[cfg(feature = "local")]
         self.capture_host_paths(backend.as_ref())?;
         let (handle, sender) = crate::progress::channel();
-        self.config.creation_progress = Some(sender.downgrade());
-        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
+        #[cfg(feature = "local")]
+        {
+            self.config.creation_progress = Some(sender.downgrade());
+        }
+        let task = tokio::spawn(async move {
             if matches!(self.config_source, ConfigSource::Snapshot(_)) {
                 let _ = sender.try_send(crate::CreationProgress::Startup(
                     crate::StartupProgress::phase(crate::StartupPhase::PreparingSnapshot),
                 ));
             }
-            let (mut pull, pull_sender) = microsandbox_image::progress_channel();
+            let (mut pull, pull_sender) = microsandbox_types::pull_progress::progress_channel();
+            #[cfg(not(feature = "local"))]
+            drop(pull_sender);
             let detached = self.detached;
-            let create = self.create_with_mode(detached, Some(pull_sender));
+            let create = self.create_with_mode(
+                detached,
+                #[cfg(feature = "local")]
+                Some(pull_sender),
+            );
             let forward = async {
                 while let Some(event) = pull.recv().await {
                     let _ = sender.try_send(crate::CreationProgress::Pull(event));
@@ -1752,12 +1799,11 @@ impl SandboxBuilder {
             // No detached forwarding task: cancellation drops both futures together.
             let (result, ()) = tokio::join!(create, forward);
             result
-        }));
+        });
         Ok((handle, task))
     }
 
     /// Create a detached sandbox with the same creation-progress stream.
-    #[cfg(feature = "local")]
     pub fn create_detached_with_progress(
         self,
     ) -> crate::MicrosandboxResult<(
@@ -1775,38 +1821,52 @@ impl SandboxBuilder {
     ///
     /// Snapshot restoration has its own `RestoreBuilder::restore_with_progress`
     /// terminal; both operations spawn work without blocking the caller.
-    #[cfg(feature = "local")]
     pub fn create_with_pull_progress(
         mut self,
     ) -> MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
-        let backend = crate::backend::default_backend();
+        let backend = self.context.clone();
+        #[cfg(feature = "local")]
         self.capture_host_paths(backend.as_ref())?;
-        let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
+        let (handle, sender) = microsandbox_types::pull_progress::progress_channel();
+        let task = tokio::spawn(async move {
+            #[cfg(not(feature = "local"))]
+            drop(sender);
             let detached = self.detached;
-            self.create_with_mode(detached, Some(sender)).await
-        }));
+            self.create_with_mode(
+                detached,
+                #[cfg(feature = "local")]
+                Some(sender),
+            )
+            .await
+        });
         Ok((handle, task))
     }
 
     /// Like `create_with_pull_progress` but spawns the sandbox process in detached
     /// mode so the sandbox survives after the creating process exits.
-    #[cfg(feature = "local")]
     pub fn create_detached_with_pull_progress(
         mut self,
     ) -> MicrosandboxResult<(
         PullProgressHandle,
         tokio::task::JoinHandle<crate::MicrosandboxResult<Sandbox>>,
     )> {
-        let backend = crate::backend::default_backend();
+        let backend = self.context.clone();
+        #[cfg(feature = "local")]
         self.capture_host_paths(backend.as_ref())?;
-        let (handle, sender) = microsandbox_image::progress_channel();
-        let task = tokio::spawn(crate::backend::with_backend(backend, async move {
-            self.create_with_mode(true, Some(sender)).await
-        }));
+        let (handle, sender) = microsandbox_types::pull_progress::progress_channel();
+        #[cfg(not(feature = "local"))]
+        drop(sender);
+        let task = tokio::spawn(async move {
+            self.create_with_mode(
+                true,
+                #[cfg(feature = "local")]
+                Some(sender),
+            )
+            .await
+        });
         Ok((handle, task))
     }
 
@@ -1815,7 +1875,7 @@ impl SandboxBuilder {
         detached: bool,
         #[cfg(feature = "local")] progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
-        let backend = default_backend();
+        let backend = self.context.clone();
         #[cfg(feature = "local")]
         if let Some(local) = backend.as_local() {
             let mode = if detached {
@@ -1837,7 +1897,7 @@ impl SandboxBuilder {
         self.prepare(backend.clone()).await?;
 
         // Custom backends receive a concrete request and own their configuration behavior.
-        let sandboxes = backend.sandboxes();
+        let sandboxes = backend.sandbox_ops();
         let config = self.finish(None, None)?;
         if detached || config.resumed_from_full_snapshot() {
             sandboxes.create_detached(backend.clone(), config).await
@@ -2174,13 +2234,13 @@ pub(crate) fn prepare_local_snapshot_restore(
 ) -> MicrosandboxResult<()> {
     // A security profile is a boot-time guest policy, not a host-side restore override.
     // Validate the caller's explicit intent before preparing any snapshot resources.
-    config.validate_restore_options(snap.manifest().scope, config.snapshot_restore_mode)?;
+    config.validate_restore_options(snap.loaded_manifest()?.scope, config.snapshot_restore_mode)?;
     if config.spec.runtime.user.is_none() {
-        config.spec.runtime.user = snap.manifest().restore_defaults()?.user;
+        config.spec.runtime.user = snap.loaded_manifest()?.restore_defaults()?.user;
     }
-    apply_snapshot_guest_clock(config, snap.manifest())?;
+    apply_snapshot_guest_clock(config, snap.loaded_manifest()?)?;
     config.snapshot_parent = Some(snap.id().to_string());
-    let unsupported = snap.manifest().unsupported_requires();
+    let unsupported = snap.loaded_manifest()?.unsupported_requires();
     if !unsupported.is_empty() {
         return Err(crate::MicrosandboxError::unsupported(
             Operation::SnapshotOps,
@@ -2190,16 +2250,16 @@ pub(crate) fn prepare_local_snapshot_restore(
             )),
         ));
     }
-    let snap_ref = snap.manifest().image.reference.clone();
+    let snap_ref = snap.loaded_manifest()?.image.reference.clone();
     config.spec.image = RootfsSource::oci(snap_ref);
-    config.manifest_digest = Some(snap.manifest().image.manifest_digest.clone());
-    apply_snapshot_root_layout(config, &snap.manifest().root_disk)?;
-    crate::sandbox::require_recorded_mounts(config, snap.manifest())?;
+    config.manifest_digest = Some(snap.loaded_manifest()?.image.manifest_digest.clone());
+    apply_snapshot_root_layout(config, &snap.loaded_manifest()?.root_disk)?;
+    crate::sandbox::require_recorded_mounts(config, snap.loaded_manifest()?)?;
 
-    let file_state = match &snap.manifest().state {
+    let file_state = match &snap.loaded_manifest()?.state {
         crate::snapshot::SnapshotState::File(state) => state,
         crate::snapshot::SnapshotState::Checkpoint(state) => {
-            if snap.manifest().scope != crate::snapshot::SnapshotScope::Full {
+            if snap.loaded_manifest()?.scope != crate::snapshot::SnapshotScope::Full {
                 return Err(crate::MicrosandboxError::SnapshotIntegrity(
                     "checkpoint state must use full snapshot scope".into(),
                 ));
@@ -2217,7 +2277,7 @@ pub(crate) fn prepare_local_snapshot_restore(
                     "snapshot and checkpoint closure identities differ".into(),
                 ));
             }
-            crate::snapshot::validate_checkpoint_owned_inventory(snap.manifest(), &opened)?;
+            crate::snapshot::validate_checkpoint_owned_inventory(snap.loaded_manifest()?, &opened)?;
             if config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly {
                 // A disk-only restore does not reconnect captured external binds; require
                 // destination mounts up front.
@@ -2263,7 +2323,7 @@ pub(crate) fn prepare_local_snapshot_restore(
             "disk_only requires a full snapshot with checkpoint state".into(),
         ));
     }
-    if snap.manifest().scope != crate::snapshot::SnapshotScope::Disk {
+    if snap.loaded_manifest()?.scope != crate::snapshot::SnapshotScope::Disk {
         return Err(crate::MicrosandboxError::SnapshotIntegrity(
             "file state must use disk snapshot scope".into(),
         ));
@@ -2282,7 +2342,7 @@ pub(crate) fn prepare_local_snapshot_restore(
         .iter()
         .map(|layer| {
             Ok(microsandbox_runtime::launch::RootfsUpperLayerConfig {
-                path: snap.layer_path(layer)?,
+                path: snap.loaded_layer_path(layer)?,
                 format: match layer.format {
                     crate::snapshot::SnapshotFormat::Raw => "raw",
                     crate::snapshot::SnapshotFormat::Qcow2 => "qcow2",
@@ -2292,7 +2352,7 @@ pub(crate) fn prepare_local_snapshot_restore(
         })
         .collect::<MicrosandboxResult<Vec<_>>>()?;
     config.snapshot_root_virtual_size = Some(file_state.virtual_size);
-    let owned = snap.manifest().owned_volumes()?;
+    let owned = snap.loaded_manifest()?.owned_volumes()?;
     if !owned.is_empty() {
         config.snapshot_owned_source = Some((snap.path()?.to_path_buf(), owned));
     }
@@ -2558,6 +2618,7 @@ impl From<SandboxConfig> for SandboxBuilder {
         caller_overrides.caller_config_overrides = None;
 
         Self {
+            context: default_local_context(),
             config: caller_overrides,
             detached: false,
             build_error: None,
@@ -3015,7 +3076,6 @@ mod tests {
     use microsandbox_types::{PortProtocol, SecretSource};
 
     #[cfg(feature = "cloud")]
-    use crate::backend::with_backend;
     use crate::snapshot::SnapshotReference;
 
     fn finish_prepared_restore(
@@ -3046,15 +3106,19 @@ mod tests {
         let managed =
             serde_json::from_str(r#"{"sandbox_defaults":{"cpus":2,"shell":"/bin/admin"}}"#)
                 .unwrap();
-        let local_backend = crate::LocalBackend::from_backend_config(
+        let local_backend = crate::LocalContext::from_backend_config(
             BackendConfig::new(Default::default(), managed)
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
-            crate::BackendSelectionSource::Programmatic,
+            crate::ContextSelectionSource::Programmatic,
             None,
         );
-        crate::backend::with_backend(local_backend, async {
-            let local = SandboxBuilder::new("local-policy")
+        async {
+            let destination: std::sync::Arc<dyn crate::Context> = (local_backend).into();
+
+            let local = destination
+                .sandboxes()
+                .builder("local-policy")
                 .image("alpine")
                 .cpus(4)
                 .build()
@@ -3065,27 +3129,31 @@ mod tests {
                 r#"{"sandbox_defaults":{"cpus":3,"shell":"/bin/cloud-policy"}}"#,
             )
             .unwrap();
-            let cloud_backend = crate::CloudBackend::builder()
+            let cloud_backend = crate::RemoteContext::builder()
                 .url("https://cloud.example")
                 .api_key("test-token")
                 .config_sources(BackendConfig::new(Default::default(), cloud_policy))
                 .build()
                 .unwrap();
-            let cloud = crate::backend::with_backend(cloud_backend, async {
-                SandboxBuilder::new("cloud-defaults")
+            let cloud = async {
+                let destination: std::sync::Arc<dyn crate::Context> = (cloud_backend).into();
+
+                destination
+                    .sandboxes()
+                    .builder("cloud-defaults")
                     .image("alpine")
                     .cpus(4)
                     .build()
                     .await
                     .unwrap()
-            })
+            }
             .await;
             assert_eq!(cloud.spec.resources.cpus, 3);
             assert_eq!(
                 cloud.spec.runtime.shell.as_deref(),
                 Some("/bin/cloud-policy")
             );
-        })
+        }
         .await;
     }
 
@@ -4335,14 +4403,18 @@ mod tests {
             SnapshotReference::id("00000000-0000-0000-0000-000000000003"),
             SnapshotReference::path("snapshots/ready"),
         ] {
-            let config = with_backend(cloud.clone(), async {
-                crate::Sandbox::restore_ref(reference.clone())
+            let config = async {
+                let destination: std::sync::Arc<dyn crate::Context> = (cloud.clone()).into();
+
+                destination
+                    .sandboxes()
+                    .restore_ref(reference.clone())
                     .name("test")
                     .inner
                     .build()
                     .await
                     .unwrap()
-            })
+            }
             .await;
             assert_eq!(config.snapshot_reference, Some(reference));
             // Reference routing must not smuggle creation defaults into host bindings.
@@ -5425,15 +5497,19 @@ mod tests {
             r#"{"sandbox_defaults":{"outbound_proxy":{"protocol":"socks5","address":"127.0.0.1:1080"}}}"#,
         )
         .unwrap();
-        let backend = crate::LocalBackend::from_backend_config(
+        let backend = crate::LocalContext::from_backend_config(
             BackendConfig::new(global, Default::default())
                 .prepare_for_local_backend(Default::default())
                 .unwrap(),
-            crate::BackendSelectionSource::Programmatic,
+            crate::ContextSelectionSource::Programmatic,
             None,
         );
-        crate::backend::with_backend(backend, async {
-            let inherited = SandboxBuilder::new("inherited-proxy")
+        async {
+            let destination: std::sync::Arc<dyn crate::Context> = (backend).into();
+
+            let inherited = destination
+                .sandboxes()
+                .builder("inherited-proxy")
                 .image("alpine")
                 .network(|n| n.port(8080, 80))
                 .build()
@@ -5446,7 +5522,9 @@ mod tests {
             ));
             assert_eq!(inherited.spec.network.ports.len(), 1);
 
-            let overridden = SandboxBuilder::new("override-proxy")
+            let overridden = destination
+                .sandboxes()
+                .builder("override-proxy")
                 .image("alpine")
                 .proxy(|p| p.socks4("127.0.0.1:2080"))
                 .build()
@@ -5457,7 +5535,7 @@ mod tests {
                 Some(microsandbox_types::OutboundProxy::Socks4 { ref address, .. })
                     if address == "127.0.0.1:2080"
             ));
-        })
+        }
         .await;
     }
 
@@ -5480,11 +5558,11 @@ mod tests {
                 "sandbox_defaults": {"outbound_proxy": proxy}
             }))
             .unwrap();
-            let backend = crate::LocalBackend::from_backend_config(
+            let backend = crate::LocalContext::from_backend_config(
                 BackendConfig::new(global, Default::default())
                     .prepare_for_local_backend(Default::default())
                     .unwrap(),
-                crate::BackendSelectionSource::Programmatic,
+                crate::ContextSelectionSource::Programmatic,
                 None,
             );
             let config = SandboxBuilder::new("override-invalid-proxy")

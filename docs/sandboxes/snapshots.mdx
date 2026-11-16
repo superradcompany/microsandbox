@@ -55,8 +55,7 @@ Start a `python:3.12` sandbox named `baseline` using the [create guide](/sandbox
 ```typescript TypeScript
 const baseline = await Sandbox.get("baseline");
 
-const session = await baseline.connect();
-await session.exec("pip", ["install", "requests"]);
+await baseline.exec("pip", ["install", "requests"]);
 
 await baseline.stop();
 ```
@@ -64,8 +63,7 @@ await baseline.stop();
 ```rust Rust
 let baseline = Sandbox::get("baseline").await?;
 
-let session = baseline.connect().await?;
-session.exec("pip", ["install", "requests"]).await?;
+baseline.exec("pip", ["install", "requests"]).await?;
 
 baseline.stop().await?;
 ```
@@ -73,8 +71,7 @@ baseline.stop().await?;
 ```python Python
 baseline = await Sandbox.get("baseline")
 
-session = await baseline.connect()
-await session.exec("pip", ["install", "requests"])
+await baseline.exec("pip", ["install", "requests"])
 
 await baseline.stop()
 ```
@@ -83,10 +80,7 @@ await baseline.stop()
 baseline, err := m.GetSandbox(ctx, "baseline")
 if err != nil { return err }
 
-session, err := baseline.Connect(ctx)
-if err != nil { return err }
-
-_, err = session.Exec(ctx, "pip", []string{"install", "requests"})
+_, err = baseline.Exec(ctx, "pip", []string{"install", "requests"})
 if err != nil { return err }
 
 err = baseline.Stop(ctx)
@@ -96,8 +90,7 @@ if err != nil { return err }
 ```ruby Ruby
 baseline = Microsandbox::Sandbox.get("baseline")
 
-session = baseline.connect
-session.exec("pip", ["install", "requests"])
+baseline.exec("pip", ["install", "requests"])
 
 baseline.stop
 ```

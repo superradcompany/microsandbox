@@ -55,7 +55,7 @@ describe.skipIf(!msbPath())("end-to-end smoke", () => {
     expect(out.stdout()).toBe("$MSB_SDK_SECRET_TOKEN");
     expect(out.stdout()).not.toContain("dummy-private-value");
     const handle = await Sandbox.get(SANDBOX_NAME);
-    for (const config of [await sb.config(), handle.config()]) {
+    for (const config of [await sb.config(), await handle.config()]) {
       expect(config.labels).toEqual({ setup_db: "one", setupDb: "two" });
       expect(config.runtime.scripts).toEqual({ setup_db: "echo one", setupDb: "echo two" });
     }
@@ -445,7 +445,7 @@ describe.skipIf(!msbPath())("listWith by labels", () => {
 
     const web = handles.find((h) => h.name === webName);
     expect(web).toBeDefined();
-    await expect(web!.refresh()).resolves.toMatchObject({ name: webName });
+    await expect(web!.info()).resolves.toMatchObject({ name: webName });
   });
 
   it("AND-matches multiple labels", async () => {

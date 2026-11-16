@@ -199,7 +199,7 @@ jobs:
     name: Go FFI (${{ inputs.target }})
     needs: runtime
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -242,11 +242,22 @@ jobs:
           path: target/${{ inputs.rust_target }}/release/microsandbox_go_ffi.dll
           compression-level: 0
 
+      - name: Build selected Go providers
+        shell: pwsh
+        run: python scripts/ci/build-sdk-providers.py --out go-providers --sdks go --providers local remote --target ${{ inputs.rust_target }}
+
+      - name: Upload selected Go providers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-providers-${{ inputs.target }}
+          path: go-providers/
+          compression-level: 0
+
   node:
     name: Node SDK (${{ inputs.target }})
     needs: runtime
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -308,11 +319,25 @@ jobs:
             sdk/node-ts/npm/${{ inputs.npm_dir }}/lib/*
           compression-level: 0
 
+      - name: Build and stage selected Node providers
+        shell: pwsh
+        run: |
+          python scripts/ci/build-sdk-providers.py --out node-providers-native --sdks node --providers local remote --target ${{ inputs.napi_target }}
+          npm --prefix sdk/node-ts run build:ts
+          python scripts/ci/stage-sdk-providers.py --manifest node-providers-native/native-manifest.json --out node-providers --sdks node
+
+      - name: Upload selected Node packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: node-providers-${{ inputs.npm_dir }}
+          path: node-providers/
+          compression-level: 0
+
   python:
     name: Python SDK (${{ inputs.target }})
     needs: runtime
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -349,6 +374,14 @@ jobs:
           working-directory: sdk/python
           command: build
           args: --release --out dist --target ${{ inputs.rust_target }}
+
+      - name: Build selected Python providers
+        shell: pwsh
+        run: python scripts/ci/build-python-providers.py --out sdk/python/dist --target ${{ inputs.rust_target }}
+
+      - name: Reconcile full wheel with shared core types
+        shell: pwsh
+        run: python sdk/python/scripts/rewrite_full_wheel.py sdk/python/dist
 
       - name: Upload Python SDK wheel
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

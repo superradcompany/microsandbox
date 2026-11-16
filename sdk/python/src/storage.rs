@@ -92,13 +92,22 @@ impl PyStorage {
     /// Observe backend storage without changing files; remote accounting is unsupported.
     #[staticmethod]
     fn usage<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        // Capture before scheduling: later backend_scope changes must not redirect this call.
-        let backend = resolve_local(microsandbox::Operation::StorageUsage)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let local = backend.as_local().expect("validated local backend");
-            let report = Storage::usage_local(local).await.map_err(to_py_err)?;
-            Ok(PyStorageUsage::from_rust(report))
-        })
+        #[cfg(not(feature = "local"))]
+        {
+            Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::StorageUsage,
+            )))
+        }
+        #[cfg(feature = "local")]
+        {
+            // Capture before scheduling: later backend_scope changes must not redirect this call.
+            let backend = resolve_local(microsandbox::Operation::StorageUsage)?;
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                let local = backend.as_local().expect("validated local backend");
+                let report = Storage::usage_local(local).await.map_err(to_py_err)?;
+                Ok(PyStorageUsage::from_rust(report))
+            })
+        }
     }
 
     /// Prune unused runtime RAM, or inspect candidates with dry_run=True.
@@ -112,19 +121,28 @@ impl PyStorage {
         dry_run: bool,
         older_than_seconds: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let options = MemoryPruneOptions {
-            dry_run,
-            older_than: parse_older_than(older_than_seconds.as_ref())?,
-            ..Default::default()
-        };
-        let backend = resolve_local(microsandbox::Operation::StoragePrune)?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let local = backend.as_local().expect("validated local backend");
-            let report = Storage::prune_local(local, &options)
-                .await
-                .map_err(to_py_err)?;
-            Ok(PyMemoryCacheReport::from_rust(report))
-        })
+        #[cfg(not(feature = "local"))]
+        {
+            Err(to_py_err(microsandbox::MicrosandboxError::local_only(
+                microsandbox::Operation::StoragePrune,
+            )))
+        }
+        #[cfg(feature = "local")]
+        {
+            let options = MemoryPruneOptions {
+                dry_run,
+                older_than: parse_older_than(older_than_seconds.as_ref())?,
+                ..Default::default()
+            };
+            let backend = resolve_local(microsandbox::Operation::StoragePrune)?;
+            pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                let local = backend.as_local().expect("validated local backend");
+                let report = Storage::prune_local(local, &options)
+                    .await
+                    .map_err(to_py_err)?;
+                Ok(PyMemoryCacheReport::from_rust(report))
+            })
+        }
     }
 }
 
@@ -222,8 +240,9 @@ impl PyMemoryCacheReport {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-fn resolve_local(op: microsandbox::Operation) -> PyResult<Arc<dyn microsandbox::Backend>> {
-    let backend = microsandbox::backend::default_backend();
+#[cfg(feature = "local")]
+fn resolve_local(op: microsandbox::Operation) -> PyResult<Arc<dyn microsandbox::Context>> {
+    let backend = microsandbox::context::default_local_context();
     if backend.as_local().is_none() {
         return Err(to_py_err(microsandbox::MicrosandboxError::local_only(op)));
     }

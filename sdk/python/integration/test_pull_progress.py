@@ -47,7 +47,7 @@ async def test_create_with_progress_emits_events_and_returns_sandbox(sandbox_nam
         assert complete.reference == resolved.reference
         assert complete.layer_count == resolved.layer_count
 
-        assert await sandbox.name == name
+        assert sandbox.name == name
     finally:
         if sandbox is not None:
             with suppress(Exception):
@@ -111,13 +111,14 @@ async def test_create_with_progress_detached_returns_detached_sandbox(sandbox_na
         assert event_types[0] is PullEventType.RESOLVING
         assert PullEventType.RESOLVED in event_types
         assert PullEventType.COMPLETE in event_types
-        assert await sandbox.name == name
+        assert sandbox.name == name
         assert await sandbox.owns_lifecycle is False
 
         sandbox = None
 
         handle = await Sandbox.get(name)
-        connected = await handle.connect()
+        await handle.ensure_running()
+        connected = handle
         assert await connected.owns_lifecycle is False
         out = await connected.shell("printf 'detached-progress\\n'")
         assert out.success is True

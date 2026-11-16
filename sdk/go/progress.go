@@ -41,28 +41,31 @@ type CreationResult struct {
 // Always receive the result and close its Sandbox when finished. Ignoring progress never
 // delays or cancels creation. Cancel ctx to cancel creation, not just observation.
 func CreateSandboxWithProgress(ctx context.Context, name string, opts ...SandboxOption) (<-chan CreationProgress, <-chan CreationResult) {
+	if err := ctx.Err(); err != nil {
+		return failedCreationProgress(err)
+	}
 	config := SandboxConfig{}
-	for _, opt := range opts {
-		opt(&config)
+	for _, option := range opts {
+		option(&config)
 	}
 	if err := prepareSandboxCreateConfig(&config); err != nil {
-		events := make(chan CreationProgress)
-		results := make(chan CreationResult, 1)
-		results <- CreationResult{Err: err}
-		close(events)
-		close(results)
-		return events, results
+		return failedCreationProgress(err)
 	}
-	return sandboxWithProgress(ctx, func(id uint64) (*ffi.Sandbox, error) {
-		options := buildFFICreateOptions(config)
-		options.CreationProgress = id
-		return ffi.CreateSandbox(ctx, name, options)
-	})
+	local, err := defaultLocalContext()
+	if err != nil {
+		return failedCreationProgress(err)
+	}
+	return local.Sandboxes().createWithProgress(ctx, name, config)
 }
 
 // RestoreSandboxWithProgress restores a detached sandbox with bounded progress events.
 func RestoreSandboxWithProgress[T SnapshotSeed](ctx context.Context, snapshot T, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
-	return sandboxWithProgress(ctx, func(id uint64) (*ffi.Sandbox, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return failedCreationProgress(err)
+	}
+	destination := local.inner
+	return sandboxWithProgress(ctx, destination.Library(), func(id uint64) (*ffi.Sandbox, error) {
 		config := RestoreConfig{}
 		for _, opt := range opts {
 			opt(&config)
@@ -72,29 +75,29 @@ func RestoreSandboxWithProgress[T SnapshotSeed](ctx context.Context, snapshot T,
 		}
 		options := buildFFIRestoreOptions(snapshot, config)
 		options.CreationProgress = id
-		return ffi.RestoreSandbox(ctx, name, options)
+		return destination.RestoreSandbox(ctx, name, options)
 	})
 }
 
-func sandboxWithProgress(ctx context.Context, start func(uint64) (*ffi.Sandbox, error)) (<-chan CreationProgress, <-chan CreationResult) {
+func sandboxWithProgress(ctx context.Context, library *ffi.Library, start func(uint64) (*ffi.Sandbox, error)) (<-chan CreationProgress, <-chan CreationResult) {
 
 	events := make(chan CreationProgress, 64)
 	results := make(chan CreationResult, 1)
 	go func() {
 		defer close(events)
 		defer close(results)
-		id, err := ffi.OpenCreationProgress(ctx)
+		id, err := library.OpenCreationProgress(ctx)
 		if err != nil {
 			results <- CreationResult{Err: wrapFFI(err)}
 			return
 		}
-		defer ffi.CloseCreationProgress(id)
+		defer library.CloseCreationProgress(id)
 		observation, stop := context.WithCancel(ctx)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			for {
-				raw, err := ffi.ReceiveCreationProgress(observation, id)
+				raw, err := library.ReceiveCreationProgress(observation, id)
 				if err != nil {
 					return
 				}
@@ -118,4 +121,58 @@ func sandboxWithProgress(ctx context.Context, start func(uint64) (*ffi.Sandbox, 
 		results <- CreationResult{Sandbox: &Sandbox{inner: inner}}
 	}()
 	return events, results
+}
+
+// CreateWithProgress retains this collection's provider for creation and telemetry.
+func (s *Sandboxes) CreateWithProgress(ctx context.Context, name string, opts ...SandboxOption) (<-chan CreationProgress, <-chan CreationResult) {
+	config := SandboxConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if err := prepareSandboxCreateConfig(&config); err != nil {
+		return failedCreationProgress(err)
+	}
+	return s.createWithProgress(ctx, name, config)
+}
+
+// The options have already been applied and validated; callbacks run only once.
+func (s *Sandboxes) createWithProgress(ctx context.Context, name string, config SandboxConfig) (<-chan CreationProgress, <-chan CreationResult) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return failedCreationProgress(err)
+	}
+	return sandboxWithProgress(ctx, destination.Library(), func(id uint64) (*ffi.Sandbox, error) {
+		options := buildFFICreateOptions(config)
+		options.CreationProgress = id
+		return destination.CreateSandbox(ctx, name, options, false)
+	})
+}
+
+func failedCreationProgress(err error) (<-chan CreationProgress, <-chan CreationResult) {
+	events := make(chan CreationProgress)
+	results := make(chan CreationResult, 1)
+	results <- CreationResult{Err: err}
+	close(events)
+	close(results)
+	return events, results
+}
+
+// RestoreWithProgress restores a reference in this collection's destination.
+func (s *Sandboxes) RestoreWithProgress(ctx context.Context, snapshot string, name string, opts ...RestoreOption) (<-chan CreationProgress, <-chan CreationResult) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return failedCreationProgress(err)
+	}
+	config := RestoreConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if err := validateRestoreConfig(config); err != nil {
+		return failedCreationProgress(err)
+	}
+	return sandboxWithProgress(ctx, destination.Library(), func(id uint64) (*ffi.Sandbox, error) {
+		options := buildFFIRestoreOptions(snapshot, config)
+		options.CreationProgress = id
+		return destination.RestoreSandbox(ctx, name, options)
+	})
 }

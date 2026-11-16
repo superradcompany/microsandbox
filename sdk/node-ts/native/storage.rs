@@ -87,15 +87,24 @@ pub struct MemoryCacheReportJs {
 /// Observe storage in the selected local backend without removing files.
 #[napi(js_name = "storageUsage", ts_return_type = "Promise<StorageUsageJs>")]
 pub fn storage_usage<'env>(env: &'env Env) -> Result<PromiseRaw<'env, StorageUsageJs>> {
-    // Capture on the JS thread, before scheduling: callers may change the default
-    // backend immediately after receiving the promise. Errors still reject that promise.
-    let backend = resolve_local(microsandbox::Operation::StorageUsage);
-    env.spawn_future(async move {
-        let backend = backend?;
-        let local = backend.as_local().expect("validated local backend");
-        let report = Storage::usage_local(local).await.map_err(to_napi_error)?;
-        usage_to_js(report)
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::StorageUsage,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        // Capture on the JS thread, before scheduling: callers may change the default
+        // backend immediately after receiving the promise. Errors still reject that promise.
+        let backend = resolve_local(microsandbox::Operation::StorageUsage);
+        env.spawn_future(async move {
+            let backend = backend?;
+            let local = backend.as_local().expect("validated local backend");
+            let report = Storage::usage_local(local).await.map_err(to_napi_error)?;
+            usage_to_js(report)
+        })
+    }
 }
 
 /// Inspect or remove unused published runtime RAM; never remove durable state or locks.
@@ -108,27 +117,37 @@ pub fn storage_prune<'env>(
     dry_run: Option<bool>,
     older_than_seconds: Option<f64>,
 ) -> Result<PromiseRaw<'env, MemoryCacheReportJs>> {
-    let backend = resolve_local(microsandbox::Operation::StoragePrune);
-    let older_than = parse_age(older_than_seconds.unwrap_or(0.0));
-    env.spawn_future(async move {
-        let backend = backend?;
-        let local = backend.as_local().expect("validated local backend");
-        let options = MemoryPruneOptions {
-            dry_run: dry_run.unwrap_or(false),
-            older_than: older_than?,
-            ..Default::default()
-        };
-        let report = Storage::prune_local(local, &options)
-            .await
-            .map_err(to_napi_error)?;
-        prune_to_js(report)
-    })
+    #[cfg(not(feature = "local"))]
+    {
+        Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
+            microsandbox::Operation::StoragePrune,
+        )))
+    }
+    #[cfg(feature = "local")]
+    {
+        let backend = resolve_local(microsandbox::Operation::StoragePrune);
+        let older_than = parse_age(older_than_seconds.unwrap_or(0.0));
+        env.spawn_future(async move {
+            let backend = backend?;
+            let local = backend.as_local().expect("validated local backend");
+            let options = MemoryPruneOptions {
+                dry_run: dry_run.unwrap_or(false),
+                older_than: older_than?,
+                ..Default::default()
+            };
+            let report = Storage::prune_local(local, &options)
+                .await
+                .map_err(to_napi_error)?;
+            prune_to_js(report)
+        })
+    }
 }
 
-fn resolve_local(operation: microsandbox::Operation) -> Result<Arc<dyn microsandbox::Backend>> {
+#[cfg(feature = "local")]
+fn resolve_local(operation: microsandbox::Operation) -> Result<Arc<dyn microsandbox::Context>> {
     // Keep this selected backend alive across the await; concurrent selection changes must
     // not redirect a scan or a deletion to a different configured runtime home.
-    let backend = microsandbox::backend::default_backend();
+    let backend = microsandbox::context::default_local_context();
     if backend.as_local().is_none() {
         return Err(to_napi_error(microsandbox::MicrosandboxError::local_only(
             operation,

@@ -167,9 +167,9 @@ def test_restore_duration_rejects_invalid_values(option, value):
 
 
 def test_fork_public_surface_and_outcome_alias():
-    from microsandbox import BranchOutcome, ForkOutcome, SandboxHandle
+    from microsandbox import BranchOutcome, ForkOutcome
 
     assert BranchOutcome is ForkOutcome
-    for cls in (Sandbox, SandboxHandle):
+    for cls in (Sandbox,):
         for method in ("fork", "fork_many", "branch", "branch_many"):
             assert callable(getattr(cls, method))

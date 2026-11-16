@@ -1,0 +1,90 @@
+---
+title: "SDK contexts and unified resources"
+description: "Migrate destination selection, resource access, inspection and ownership to the redesigned SDK."
+---
+
+The redesigned SDK uses one `Sandbox`, `Volume`, and `Snapshot` type each. Lookups and lists return operational resources; there is no separate resource Handle type or conversion step. This is a breaking application API migration. It does not change the runtime protocol or persisted resource format.
+
+## Keep default-local workflows simple
+
+Keep `Sandbox.builder`, `Sandbox::builder`, `Sandbox.create`, and Go's `CreateSandbox` for ordinary local work. The matching get/list and Volume/Snapshot factories remain available. SDK shortcuts always select local execution; environment profiles no longer redirect them.
+
+Replace global backend setters and scoped overrides with an explicit `RemoteContext` or custom `LocalContext`. Builders and returned resources retain that destination. See [context selection](/operations/backends#sdk-contexts) for complete language examples. TypeScript and Python collections are synchronous properties (`context.sandboxes`); Rust and Go use methods (`context.sandboxes()` and `context.Sandboxes()`). Ruby uses ordinary method access. `Sandbox.ctx(context)` and the corresponding Volume/Snapshot entry points remain available.
+
+## Use the returned resource directly
+
+`get` and `list` do not start a stopped sandbox. Execution, filesystem and SSH operations prepare the receiver when needed. `ensure_running` explicitly performs that same preparation and returns no new owning object. `get_running` combines lookup and preparation without creating a missing resource.
+
+<CodeGroup>
+```typescript TypeScript
+import { Sandbox } from "microsandbox";
+
+const sb = await Sandbox.get("worker");
+await sb.ensureRunning();
+const output = await sb.shell("echo ready");
+```
+
+```rust Rust
+use microsandbox::Sandbox;
+
+let sb = Sandbox::get("worker").await?;
+sb.ensure_running().await?;
+let output = sb.shell("echo ready").await?;
+```
+
+```python Python
+from microsandbox import Sandbox
+
+sb = await Sandbox.get("worker")
+await sb.ensure_running()
+output = await sb.shell("echo ready")
+```
+
+```go Go
+sb, err := microsandbox.GetSandbox(ctx, "worker")
+if err != nil { return err }
+defer sb.Close()
+if err := sb.EnsureRunning(ctx); err != nil { return err }
+output, err := sb.Shell(ctx, "echo ready")
+```
+
+```ruby Ruby
+sb = Microsandbox::Sandbox.get("worker")
+sb.ensure_running
+output = sb.shell("echo ready")
+```
+</CodeGroup>
+
+Explicit static `start` and `start_detached` are strict: they start an existing stopped resource and fail if it is already running. They do not perform connect-or-start. There is no separate instance `start`; use `ensure_running`.
+
+When preparation starts a stopped local sandbox, the receiving resource retains the new run's ownership. Connecting to an already running sandbox acquires no new shutdown ownership. Remote resources do not gain client-scope shutdown ownership. Use explicit stop or destroy when that is the intended action. See [lifecycle](/sandboxes/lifecycle) for cleanup and detachment.
+
+## Read current state explicitly
+
+Identity (`id`, `name`, `context`) is synchronous and performs no I/O. A captured name is a lookup label; resource operations target the captured stable identity and must not act on a replacement that reused that name.
+
+Mutable inspection and configuration perform fresh backend lookups. Rust `config()` now returns `Result<SandboxConfig>` asynchronously rather than borrowing a captured configuration. TypeScript uses `await sb.config()`, Python uses `await sb.config()`, Go uses `sb.Config(ctx)`, and Ruby's `config` performs the lookup. Keep the returned value yourself when you want an observation without further I/O.
+
+Use `info` to obtain related fields together. `status` and `last_failure_message` are live convenience methods. No refresh call is required, and a failed live lookup does not silently fall back to cached state. Inspection observes one moment; it does not prevent subsequent changes. Configuration means the latest persisted settings, which may require restart before they apply to a running VM.
+
+Volume quota, usage, capacity, and labels also require live inspection: `await volume.info()` in TypeScript/Python, `volume.info().await?` in Rust, `volume.Info(ctx)` in Go, and `volume.info` in Ruby. A missing provider measurement remains unknown rather than becoming zero.
+
+Local context `build()` is synchronous and validates configuration immediately; the catalog opens lazily. Profile writers use `kind: "remote"` or `kind: "local"`, while readers still accept `backend` and `cloud`. Older SDKs may reject profiles rewritten in the new format.
+
+## Update cleanup and execution code
+
+Volume and Snapshot instance deletion is `destroy`; static or collection `remove` remains an explicit name/reference-selected convenience. Remote path-based Snapshot destruction reports Unsupported until the provider can atomically enforce the captured identity. Explicit collection removal remains available.
+
+`wait_for_status` signals completion only. Keep using the original resource and call `info` afterward if a new observation is needed. Snapshot `manifest` and `state` load metadata lazily through fallible I/O; get/list do not eagerly read every artifact.
+
+Execution retains its terminal outcome. A later wait returns the same recorded completion after an earlier wait, collection, or terminal event read. This does not rerun the command or replay its output. Cancelling a caller's wait is not proof that the command finished.
+
+Rust `client()` is now asynchronous and returns an owned `Arc<AgentClient>` bound to the selected local run. Filesystem handles are owned run-bound objects with explicit asynchronous close. Idle filesystem/SSH accessors do not keep a run alive; active operations and open handles retain the run they selected.
+
+## Choose the distribution independently
+
+Full packages remain available. Lean local and remote packages use the same public resource types with a selected native implementation. They exclude runtime executables and firmware. Go's thin modules additionally require explicit FFI provisioning. See [installation](/sdk/overview#select-a-smaller-distribution) for package names and setup; changing the package does not change resource ownership or destination retention.
+
+## Memory values in Python
+
+Memory options accept integer MiB or `Size`, including `Size.gib(1)`. A `Size` value must represent a nonnegative whole number of MiB within the option's integer range; fractional MiB and overflow raise an error before creation or modification. Existing integer inputs keep their MiB meaning.

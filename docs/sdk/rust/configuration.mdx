@@ -1,7 +1,7 @@
 ---
 title: Configuration
 "og:title": Rust SDK configuration reference
-description: Read global settings and configure local backends with the Rust SDK.
+description: Read global settings and configure local contexts with the Rust SDK.
 ---
 
 See [Global configuration](/configuration) for file fields and defaults, and [Runtime setup](/sdk/setup) for installation.
@@ -26,9 +26,9 @@ Save the patch without filling in defaults. Omitted fields stay omitted and expl
 
 ## GlobalConfig
 
-Resolved settings after layering. Use [`LocalBackend::config()`](#config) to read the effective configuration for a backend.
+Resolved settings after layering. Use [`LocalContext::config()`](#config) to read the effective configuration for a backend.
 
-## LocalBackend
+## LocalContext
 
 ### config()
 
@@ -60,12 +60,11 @@ When your code owns an explicit local backend, prefer the backend-owned config:
 <Accordion title="Example">
 
 ```rust
-use microsandbox::{setup::resolve_runtime, LocalBackend};
+use microsandbox::{setup::resolve_runtime, LocalContext};
 
-let backend = LocalBackend::builder()
+let backend = LocalContext::builder()
     .home("/tmp/msb-home")
-    .build()
-    .await?;
+    .build()?;
 
 let cfg = backend.config();
 let runtime = resolve_runtime(cfg)?;
@@ -73,13 +72,13 @@ let runtime = resolve_runtime(cfg)?;
 
 </Accordion>
 
-`LocalBackend` has two plain constructors alongside the builder. `LocalBackend::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalBackend::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
+`LocalContext` has two plain constructors alongside the builder. `LocalContext::lazy()?` is synchronous and defers opening (and migrating) the local sandbox database until the first operation; it is what backend resolution uses when no backend is set explicitly. `LocalContext::new().await?` opens the database up front, so startup fails fast if the database is unusable. All constructors read, layer, and validate global configuration before returning a backend; only database setup is lazy. Proxy settings are validated after sandbox options and managed overrides are composed, before network use.
 
-`LocalBackendBuilder::build_lazy()` now returns `Result<LocalBackend>`. It replaces `try_build_lazy()`, and `LocalBackend` no longer implements `Default`; use `LocalBackend::lazy()?` instead.
+`LocalContextBuilder::build()` now returns `Result<LocalContext>`. It replaces `try_build()`, and `LocalContext` no longer implements `Default`; use `LocalContext::lazy()?` instead.
 
-For a long-lived process, construct a new backend to pick up configuration changes. Installing it with `set_default_backend` affects future operations; existing sandbox and volume handles retain their original backend. Construct the replacement successfully before installing it.
+For a long-lived process, construct a new context to pick up configuration changes. Bind subsequent work with `Sandbox::ctx(&context)` or the context’s collections. Existing collections, builders and resources retain their original destination and settings.
 
-## LocalBackendBuilder
+## LocalContextBuilder
 
 ### config_path()
 
@@ -92,11 +91,11 @@ Read a specific user configuration file without changing `MSB_CONFIG_PATH`. Mana
 <Accordion title="Example">
 
 ```rust
-use microsandbox::LocalBackend;
+use microsandbox::LocalContext;
 
-let backend = LocalBackend::builder()
+let backend = LocalContext::builder()
     .config_path("/etc/my-app/microsandbox.json")
-    .build_lazy()?;
+    .build()?;
 ```
 
 </Accordion>
@@ -122,3 +121,66 @@ Override the user-configured SSH inactivity timeout. Zero disables it; managed s
 Use [`SandboxBuilder::overlay()`](/sdk/rust/sandbox#sandbox-overlay) to override individual settings or explicitly clear an inherited working directory. These choices survive `SandboxBuilder::from(config)` and local database reloads. Without saved caller overrides, `workdir: None` still means omitted.
 
 Edit settings through builder setters, `overlay()`, or sandbox modification APIs; saved overrides can overwrite direct edits to a resolved `SandboxConfig`. See [configuration layering](/configuration#sandbox_defaults) for precedence and backend differences.
+
+## Context
+
+### sandboxes(), volumes(), snapshots()
+
+```rust
+fn sandboxes(&self) -> Sandboxes;
+fn volumes(&self) -> Volumes;
+fn snapshots(&self) -> Snapshots;
+```
+
+Select an explicit destination for resource factories. These accessors perform no backend I/O. Collections and their builders retain the context, so the original context variable can go out of scope. Use the ordinary resource factories for the default destination; select a context for remote operation or custom local settings.
+
+<Accordion title="Example">
+```rust
+use microsandbox::{Context, LocalContext, Sandbox};
+
+let context = LocalContext::builder().home("/srv/msb/project-a").build()?;
+let direct = Sandbox::ctx(&context).builder("worker-a").image("python");
+let collection = context.sandboxes().builder("worker-b").image("python");
+drop(context);
+let worker_a = direct.create().await?;
+let worker_b = collection.create().await?;
+```
+</Accordion>
+
+### clone_shared()
+
+```rust
+fn clone_shared(&self) -> std::sync::Arc<dyn Context>;
+```
+
+Retain the selected destination and shared implementation state. `LocalContext` clones share configuration, database initialization and control state. `RemoteContext` clones share their HTTP client and captured configuration. Context binding accepts `&dyn Context`; callers do not need to allocate an `Arc` themselves.
+
+### Resource and builder context()
+
+```rust
+fn context(&self) -> &dyn Context;
+```
+
+`Sandbox`, `Volume`, `Snapshot` and their builders expose the retained destination through this synchronous accessor. It borrows the existing context without allocation or backend I/O. Use it to select another collection on the same destination.
+
+## RemoteContext
+
+### builder()
+
+```rust
+fn builder() -> RemoteContextBuilder;
+```
+
+Configure a remote endpoint, credentials and transport options. The builder’s synchronous `build()` validates and captures its settings. Resource requests happen through its collections or `Resource::ctx(&context)`.
+
+<Accordion title="Example">
+```rust
+use microsandbox::{Context, RemoteContext};
+
+let context = RemoteContext::builder()
+    .url("https://api.example.com")
+    .api_key(std::env::var("MSB_API_KEY")?)
+    .build()?;
+let sandbox = context.sandboxes().builder("worker").image("python").create().await?;
+```
+</Accordion>

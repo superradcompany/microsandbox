@@ -304,7 +304,7 @@ impl PyJobLogStream {
 
 pub(crate) fn decode(kind: &str, value: serde_json::Value) -> PyResult<Py<PyAny>> {
     Python::attach(|py| {
-        let value = crate::sandbox_handle::json_value_to_py(py, value)?;
+        let value = crate::conversion::json_value_to_py(py, value)?;
         Ok(py
             .import("microsandbox.jobs")?
             .getattr(format!("_decode_{kind}"))?

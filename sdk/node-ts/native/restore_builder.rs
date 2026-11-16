@@ -25,6 +25,14 @@ pub struct JsRestoreBuilder {
 // Methods
 //--------------------------------------------------------------------------------------------------
 
+impl JsRestoreBuilder {
+    pub(crate) fn from_builder(builder: RestoreBuilder) -> Self {
+        Self {
+            inner: Some(builder),
+        }
+    }
+}
+
 #[napi]
 impl JsRestoreBuilder {
     /// Select an installed snapshot or archive; this does not start a VM.

@@ -12,12 +12,6 @@ import (
 )
 
 func TestLifecycleConvergenceOptions(t *testing.T) {
-	connect := connectOrStartOptions{}
-	WithConnectOrStartDetached()(&connect)
-	if !connect.detached {
-		t.Fatal("WithConnectOrStartDetached did not enable detached mode")
-	}
-
 	restart := restartOptions{}
 	WithRestartForce()(&restart)
 	WithRestartTimeout(3 * time.Second)(&restart)
@@ -74,7 +68,7 @@ func marshalRestoreOptions[T SnapshotSeed](t *testing.T, snapshot T) map[string]
 }
 
 func TestRestorePreservesTypedReference(t *testing.T) {
-	snapshot := &SnapshotArtifact{
+	snapshot := &Snapshot{
 		reference:     "baseline",
 		referenceKind: "path",
 	}

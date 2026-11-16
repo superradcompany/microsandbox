@@ -9,7 +9,6 @@ See [SSH](/sandboxes/ssh) for client sessions, server endpoints, and file transf
 
 [Managed inactivity timeouts](/configuration#ssh) take precedence over all timeout options below, including disabling the timeout. This applies to local and cloud sessions using the sandbox backend's retained configuration.
 
-
 ## Sandbox
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ssh()</span>
@@ -42,6 +41,8 @@ Return the SSH namespace for this sandbox. The namespace holds the SSH client an
 <p className="msb-backref">Returned by <a href="#sb-ssh">sb.ssh()</a></p>
 
 SSH operations for a sandbox.
+
+The idle SSH facade performs no startup and retains no local shutdown owner. Creating a client or prepared server endpoint prepares the receiving Sandbox and retains its selected local run. Commands and SFTP on that endpoint reuse the established run rather than reconnecting to a later generation. A helper whose original receiver group has been released returns an error. Explicit stop can interrupt active sessions.
 
 #### <span className="msb-recv">ssh.</span><span className="msb-hn">open_client()</span>
 
@@ -165,7 +166,6 @@ Prepare a reusable SSH server endpoint for this sandbox. Loads or creates the ho
 <p className="msb-backref">Returned by <a href="#ssh-open_client">ssh.open_client()</a></p>
 
 Native in-process SSH client session.
-
 
 A connected, native in-process SSH client session, obtained from [`ssh.open_client()`](#ssh-open_client).
 
@@ -300,7 +300,6 @@ Close this native SSH client session. Sends a disconnect and aborts the internal
 
 Reusable SSH server endpoint for a sandbox.
 
-
 A reusable SSH server endpoint for a sandbox, obtained from [`ssh.prepare_server()`](#ssh-prepare_server).
 
 #### <span className="msb-recv">server.</span><span className="msb-hn">serve_connection()</span>
@@ -338,11 +337,9 @@ Release this prepared server endpoint. This method is synchronous.
 
 ## SftpClient
 
-
 <p className="msb-backref">Returned by <a href="#client-sftp">client.sftp()</a></p>
 
 High-level SFTP client session over an SSH connection. All methods are async.
-
 
 #### <span className="msb-recv">sftp.</span><span className="msb-hn">read()</span>
 

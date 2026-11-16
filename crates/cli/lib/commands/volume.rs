@@ -1,7 +1,7 @@
 //! `msb volume` command — manage named volumes.
 
 use clap::{Args, Subcommand};
-use microsandbox::volume::{Volume, VolumeKind};
+use microsandbox::volume::VolumeKind;
 use microsandbox_utils::format::format_bytes;
 
 use crate::ui::{self, OutputFormat};
@@ -106,7 +106,9 @@ pub async fn run(args: VolumeArgs) -> anyhow::Result<()> {
 
 async fn create(args: VolumeCreateArgs) -> anyhow::Result<()> {
     let name = resolve_create_volume_name(&args)?;
-    let mut builder = Volume::builder(name);
+    let mut builder = crate::commands::common::selected_context()?
+        .volumes()
+        .builder(name);
     let kind = parse_volume_kind(&args.kind)?;
 
     match kind {
@@ -139,7 +141,10 @@ async fn create(args: VolumeCreateArgs) -> anyhow::Result<()> {
 }
 
 async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
-    let volumes = Volume::list().await?;
+    let volumes = crate::commands::common::selected_context()?
+        .volumes()
+        .list()
+        .await?;
 
     if args.format == Some(OutputFormat::Json) {
         let entries: Vec<serde_json::Value> = volumes
@@ -148,9 +153,9 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
                 serde_json::json!({
                     "name": v.name(),
                     "kind": v.kind().as_str(),
-                    "quota_mib": v.quota_mib(),
-                    "used_bytes": v.used_bytes(),
-                    "capacity_bytes": v.capacity_bytes(),
+                    "quota_mib": v.observation().quota_mib,
+                    "used_bytes": v.observation().used_bytes,
+                    "capacity_bytes": v.observation().capacity_bytes,
                     "disk_format": v.disk_format(),
                     "disk_fstype": v.disk_fstype(),
                     "created_at": v.created_at().map(|dt| ui::format_json_datetime(&dt)),
@@ -178,11 +183,13 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
     for v in &volumes {
         let size = match v.kind() {
             VolumeKind::Directory => v
-                .quota_mib()
+                .observation()
+                .quota_mib
                 .map(format_mib)
                 .unwrap_or_else(|| "-".to_string()),
             VolumeKind::Disk => v
-                .capacity_bytes()
+                .observation()
+                .capacity_bytes
                 .map(format_bytes)
                 .unwrap_or_else(|| "-".to_string()),
         };
@@ -205,7 +212,10 @@ async fn list(args: VolumeListArgs) -> anyhow::Result<()> {
 }
 
 async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
-    let handle = Volume::get(&args.name).await?;
+    let handle = crate::commands::common::selected_context()?
+        .volumes()
+        .get(&args.name)
+        .await?;
 
     let created = handle
         .created_at()
@@ -213,7 +223,7 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
         .map(ui::format_datetime)
         .unwrap_or_else(|| "-".to_string());
 
-    let labels = handle.labels();
+    let labels = handle.observation().labels;
     let labels_str = if labels.is_empty() {
         "-".to_string()
     } else {
@@ -233,7 +243,8 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
     match handle.kind() {
         VolumeKind::Directory => {
             let quota = handle
-                .quota_mib()
+                .observation()
+                .quota_mib
                 .map(format_mib)
                 .unwrap_or_else(|| "unlimited".to_string());
             ui::detail_kv("Quota", &quota);
@@ -243,7 +254,8 @@ async fn inspect(args: VolumeInspectArgs) -> anyhow::Result<()> {
             ui::detail_kv("Format", handle.disk_format().unwrap_or("raw"));
             ui::detail_kv("Filesystem", handle.disk_fstype().unwrap_or("ext4"));
             let capacity = handle
-                .capacity_bytes()
+                .observation()
+                .capacity_bytes
                 .map(format_bytes)
                 .unwrap_or_else(|| "-".to_string());
             ui::detail_kv("Capacity", &capacity);
@@ -267,7 +279,11 @@ async fn remove(args: VolumeRemoveArgs) -> anyhow::Result<()> {
             ui::Spinner::start("Removing", name)
         };
 
-        match Volume::remove(name).await {
+        match crate::commands::common::selected_context()?
+            .volumes()
+            .remove(name)
+            .await
+        {
             Ok(()) => {
                 spinner.finish_success("Removed");
             }

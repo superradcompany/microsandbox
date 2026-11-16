@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../dist/internal/napi.js", () => ({ napi: {} }));
 import { Sandbox } from "../../dist/sandbox.js";
-import { SandboxHandle } from "../../dist/sandbox-handle.js";
 import { StopTimeoutError } from "../../dist/errors.js";
 
 describe("graceful stop wrappers", () => {
@@ -18,7 +17,7 @@ describe("graceful stop wrappers", () => {
         kill: vi.fn(async () => {}),
       };
       const wrapper = kind === "sandbox"
-        ? new Sandbox(native as never, "fixture") : new SandboxHandle(native as never);
+        ? new Sandbox(native as never, "fixture") : new Sandbox(native as never);
       return { native, wrapper };
     }
 
@@ -77,7 +76,7 @@ describe("kill timeout wrappers", () => {
         killWithTimeout: vi.fn(async (_ms: number) => {}),
       };
       const wrapper = kind === "sandbox"
-        ? new Sandbox(native as never, "fixture") : new SandboxHandle(native as never);
+        ? new Sandbox(native as never, "fixture") : new Sandbox(native as never);
       return { native, wrapper };
     }
 
@@ -103,38 +102,22 @@ describe("kill timeout wrappers", () => {
   }
 });
 
-describe("connect timeout wrapper", () => {
-  function fixture() {
-    const connected = {
-      id: "same-run", name: "fixture", backendKind: "local", ownsLifecycle: false,
-    };
+describe("live unified resource inspection", () => {
+  it("returns independent observations and propagates lookup failure", async () => {
     const native = {
-      ...connected, status: "running", configJson: "{}",
-      connectWithTimeout: vi.fn(async (_ms: number) => connected),
+      id: "original", name: "task", backendKind: "cloud",
+      infoJson: vi.fn()
+        .mockResolvedValueOnce(JSON.stringify({ id: "original", name: "task", status: "stopped", last_failure_message: null, created_at: "2026-11-16T00:00:00.123456789Z", updated_at: null }))
+        .mockResolvedValueOnce(JSON.stringify({ id: "original", name: "task", status: "running", last_failure_message: null, created_at: null, updated_at: null }))
+        .mockRejectedValueOnce(new Error("provider unavailable")),
+      ensureRunning: vi.fn(),
     };
-    return { native, wrapper: new SandboxHandle(native as never) };
-  }
-
-  it.each([-1, NaN, Infinity, 0.5, 4294967296])("handle rejects %s before dispatch", async (ms) => {
-    const { native, wrapper } = fixture();
-
-    const result = wrapper.connectWithTimeout(ms);
-    await expect(result).rejects.toBeInstanceOf(RangeError);
-    await expect(result).rejects.toThrow(
-      "connect timeout must be an integer from 0 to 4294967295 milliseconds",
-    );
-
-    expect(native.connectWithTimeout).not.toHaveBeenCalled();
-  });
-
-  it.each([0, 4294967295])("handle forwards %s unchanged", async (ms) => {
-    const { native, wrapper } = fixture();
-
-    const connected = await wrapper.connectWithTimeout(ms);
-
-    expect(native.connectWithTimeout).toHaveBeenCalledExactlyOnceWith(ms);
-    expect(connected).toBeInstanceOf(Sandbox);
-    expect(connected.id).toBe(native.id);
-    expect(connected.ownsLifecycle).toBe(false);
+    const sb = new Sandbox(native as never, "task");
+    const first = await sb.info();
+    expect(first.createdAt).toBe("2026-11-16T00:00:00.123456789Z");
+    expect(await sb.status()).toBe("running");
+    expect(first.status).toBe("stopped");
+    await expect(sb.info()).rejects.toThrow("provider unavailable");
+    expect(native.ensureRunning).not.toHaveBeenCalled();
   });
 });

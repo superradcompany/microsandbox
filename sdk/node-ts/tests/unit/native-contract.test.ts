@@ -7,11 +7,20 @@ afterEach(() => {
 });
 
 describe("native Sandbox lifecycle contract", () => {
+  it("exports getRunning as a native static factory", () => {
+    expect(typeof napi.Sandbox.getRunning).toBe("function");
+  });
+
   it("exports the live lifecycle methods used by the TS wrapper", () => {
     const proto = napi.Sandbox.prototype as Record<string, unknown>;
 
     for (const method of [
+      "ensureRunning",
+      "infoJson",
+      "configJson",
       "stop",
+      "shutdownOwned",
+      "detach",
       "requestStop",
       "stopWithTimeout",
       "kill",
@@ -78,13 +87,13 @@ describe("native Sandbox lifecycle contract", () => {
   });
 
   it("exports the handle health methods used by the TS wrapper", () => {
-    const proto = napi.SandboxHandle.prototype as Record<string, unknown>;
+    const proto = napi.Sandbox.prototype as Record<string, unknown>;
 
     for (const method of [
       "ping",
       "touch",
       "modify",
-      "connectOrStart",
+      "ensureRunning",
       "waitForStatus",
       "restart",
       "destroy",
@@ -141,7 +150,7 @@ describe("native snapshot contract", () => {
   it("exports instance archive methods", () => {
     expect(typeof napi.Snapshot.prototype.saveTo).toBe("function");
     expect(typeof napi.Snapshot.prototype.copyTo).toBe("function");
-    expect(typeof napi.SnapshotHandle.prototype.saveTo).toBe("function");
+    expect(typeof napi.Snapshot.prototype.saveTo).toBe("function");
   });
 });
 

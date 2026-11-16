@@ -2,15 +2,12 @@ package microsandbox
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
-
-// Snapshot is the factory namespace for backend-neutral snapshot operations.
-var Snapshot snapshotFactory
-
-type snapshotFactory struct{}
 
 // SnapshotCreateOptions configures Snapshot.Create.
 type SnapshotCreateOptions struct {
@@ -87,20 +84,20 @@ func (a *SnapshotArchive) Path() string             { return a.path }
 // SnapshotCopyBuilder configures a new archive containing an existing
 // snapshot's disk data and replacement metadata.
 type SnapshotCopyBuilder struct {
-	snapshot          *SnapshotArtifact
+	snapshot          *Snapshot
 	outputArchivePath string
 	labels            map[string]string
 	recordIntegrity   bool
 }
 
-// Snapshot payload scope values, as reported by SnapshotArtifact.Scope
-// and SnapshotHandle.Scope.
+// Snapshot payload scope values, as reported by Snapshot.Scope
+// and Snapshot.Scope.
 const (
 	SnapshotScopeDisk = "disk"
 	SnapshotScopeFull = "full"
 )
 
-// SnapshotVerifyReport is returned by SnapshotArtifact.Verify.
+// SnapshotVerifyReport is returned by Snapshot.Verify.
 type SnapshotVerifyReport struct {
 	Digest     string
 	Path       string
@@ -150,419 +147,310 @@ type SnapshotIntegrity struct {
 	LeafSize    uint32
 }
 
-// SnapshotArtifact is a backend-neutral disk snapshot.
-type SnapshotArtifact struct {
-	headUpdate          *SnapshotHeadUpdate
-	id                  string
-	path                *string
-	reference           string
-	referenceKind       string
-	digest              string
-	sizeBytes           *uint64
-	imageRef            string
-	imageManifestDigest string
-	scope               string
-	state               SnapshotState
-	parent              *string
-	createdAt           string
-	labels              map[string]string
-	sourceSandbox       *string
+// Snapshot is one persistent resource returned by creation, lookup, listing and import.
+// Artifact metadata is loaded only by the methods that need it.
+type Snapshot struct {
+	inner         *ffi.PersistentResource
+	id            string
+	name          *string
+	group         *string
+	reference     string
+	referenceKind string
+	path          *string
+	digest        string
+	headUpdate    *SnapshotHeadUpdate
 }
 
-func snapshotFromInfo(info *ffi.SnapshotInfo) *SnapshotArtifact {
-	return &SnapshotArtifact{
-		headUpdate:          snapshotHeadUpdateFromInfo(info.HeadUpdate),
-		id:                  info.ID,
-		path:                cloneStringPtr(info.Path),
-		reference:           info.Reference,
-		referenceKind:       info.ReferenceKind,
-		digest:              info.Digest,
-		sizeBytes:           info.SizeBytes,
-		imageRef:            info.ImageRef,
-		imageManifestDigest: info.ImageManifestDigest,
-		scope:               normalizeSnapshotScope(info.Scope),
-		state:               snapshotStateFromInfo(info),
-		parent:              info.Parent,
-		createdAt:           info.CreatedAt,
-		labels:              cloneMap(info.Labels),
-		sourceSandbox:       info.SourceSandbox,
+func snapshotFromResource(inner *ffi.PersistentResource) (*Snapshot, error) {
+	var info ffi.SnapshotHandleInfo
+	if err := json.Unmarshal(inner.Observation, &info); err != nil {
+		return nil, err
 	}
+	return &Snapshot{inner: inner, id: info.ID, name: cloneStringPtr(info.Name), group: cloneStringPtr(info.Group), reference: info.Reference, referenceKind: info.ReferenceKind, path: cloneStringPtr(info.Path), digest: info.Digest, headUpdate: snapshotHeadUpdateFromInfo(info.HeadUpdate)}, nil
 }
+func (s *Snapshot) ID() string                      { return s.id }
+func (s *Snapshot) Name() *string                   { return cloneStringPtr(s.name) }
+func (s *Snapshot) Group() *string                  { return cloneStringPtr(s.group) }
+func (s *Snapshot) Reference() string               { return s.reference }
+func (s *Snapshot) ReferenceKind() string           { return s.referenceKind }
+func (s *Snapshot) Digest() string                  { return s.digest }
+func (s *Snapshot) Context() Context                { return contextFromNative(s.inner.Context()) }
+func (s *Snapshot) HeadUpdate() *SnapshotHeadUpdate { return cloneSnapshotHeadUpdate(s.headUpdate) }
 
-func (s *SnapshotArtifact) ID() string { return s.id }
-
-// Path returns the local filesystem path. It panics for remote snapshots.
-//
-// Deprecated: use Reference for backend-neutral code.
-func (s *SnapshotArtifact) Path() string {
+// Path returns an error for destinations that do not expose a local artifact path.
+func (s *Snapshot) Path() (string, error) {
 	if s.path == nil {
-		panic("snapshot has no local filesystem path; use Reference() instead")
+		return "", &Error{Kind: ErrUnsupportedOperation, Message: "snapshot has no local artifact path"}
 	}
-	return *s.path
+	return *s.path, nil
 }
 
-func (s *SnapshotArtifact) Reference() string           { return s.reference }
-func (s *SnapshotArtifact) ReferenceKind() string       { return s.referenceKind }
-func (s *SnapshotArtifact) Digest() string              { return s.digest }
-func (s *SnapshotArtifact) SizeBytes() *uint64          { return cloneUint64Ptr(s.sizeBytes) }
-func (s *SnapshotArtifact) ImageRef() string            { return s.imageRef }
-func (s *SnapshotArtifact) ImageManifestDigest() string { return s.imageManifestDigest }
-func (s *SnapshotArtifact) Scope() string               { return s.scope }
-func (s *SnapshotArtifact) State() SnapshotState        { return cloneSnapshotState(s.state) }
-func (s *SnapshotArtifact) Format() string {
-	if s.state.File != nil {
-		return s.state.File.Format
-	}
-	return ""
+// Manifest fetches and validates artifact metadata; lookup and list do not load it eagerly.
+func (s *Snapshot) Manifest(ctx context.Context) (map[string]any, error) {
+	var manifest map[string]any
+	err := s.inner.Operation(ctx, "manifest", nil, &manifest)
+	return manifest, wrapFFI(err)
 }
-func (s *SnapshotArtifact) Fstype() string {
-	if s.state.File != nil {
-		return s.state.File.Fstype
-	}
-	return ""
-}
-func (s *SnapshotArtifact) Parent() *string           { return cloneStringPtr(s.parent) }
-func (s *SnapshotArtifact) CreatedAt() string         { return s.createdAt }
-func (s *SnapshotArtifact) Labels() map[string]string { return cloneMap(s.labels) }
-func (s *SnapshotArtifact) SourceSandbox() *string    { return cloneStringPtr(s.sourceSandbox) }
-
-// HeadUpdate returns the group head outcome recorded by this capture, if any.
-func (s *SnapshotArtifact) HeadUpdate() *SnapshotHeadUpdate {
-	return cloneSnapshotHeadUpdate(s.headUpdate)
-}
-
-// Verify recomputes recorded content integrity for the snapshot.
-func (s *SnapshotArtifact) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
-	report, err := ffi.SnapshotVerify(ctx, s.reference, s.referenceKind)
-	if err != nil {
+func (s *Snapshot) metadata(ctx context.Context) (*ffi.SnapshotInfo, error) {
+	var info ffi.SnapshotInfo
+	if err := s.inner.Operation(ctx, "metadata", nil, &info); err != nil {
 		return nil, wrapFFI(err)
 	}
-	return snapshotVerifyReportFromInfo(report), nil
+	return &info, nil
 }
-
-// SaveTo bundles this snapshot using its typed backend-neutral reference.
-// Backends that do not expose artifact archives return ErrUnsupportedOperation.
-func (s *SnapshotArtifact) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
-	return saveSnapshotReference(ctx, s.reference, s.referenceKind, outPath, opts)
-}
-
-// CopyTo starts configuring a new archive containing this snapshot's disk data.
-// The returned builder replaces labels and integrity metadata without changing
-// the source snapshot. Save returns ErrUnsupportedOperation when the backend
-// does not expose artifact archives.
-func (s *SnapshotArtifact) CopyTo(outputArchivePath string) *SnapshotCopyBuilder {
-	return &SnapshotCopyBuilder{
-		snapshot:          s,
-		outputArchivePath: outputArchivePath,
-		labels:            map[string]string{},
+func (s *Snapshot) State(ctx context.Context) (SnapshotState, error) {
+	info, err := s.metadata(ctx)
+	if err != nil {
+		return SnapshotState{}, err
 	}
+	return snapshotStateFromInfo(info), nil
 }
-
-// Labels replaces the copied snapshot's labels.
+func (s *Snapshot) Labels(ctx context.Context) (map[string]string, error) {
+	info, err := s.metadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cloneMap(info.Labels), nil
+}
+func (s *Snapshot) Verify(ctx context.Context) (*SnapshotVerifyReport, error) {
+	var report ffi.SnapshotVerifyReport
+	if err := s.inner.Operation(ctx, "verify", nil, &report); err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotVerifyReportFromInfo(&report), nil
+}
+func (s *Snapshot) Destroy(ctx context.Context, force bool) error {
+	return wrapFFI(s.inner.Operation(ctx, "destroy", map[string]any{"force": force}, nil))
+}
+func (s *Snapshot) SaveTo(ctx context.Context, path string, opts SnapshotSaveOptions) error {
+	return wrapFFI(s.inner.Operation(ctx, "save", map[string]any{"path": path, "options": ffi.SnapshotSaveOptions{WithParents: opts.WithParents, WithImage: opts.WithImage, PlainTar: opts.PlainTar, Since: opts.Since, LastLayers: opts.LastLayers}}, nil))
+}
+func (s *Snapshot) CopyTo(path string) *SnapshotCopyBuilder {
+	return &SnapshotCopyBuilder{snapshot: s, outputArchivePath: path, labels: map[string]string{}}
+}
 func (b *SnapshotCopyBuilder) Labels(labels map[string]string) *SnapshotCopyBuilder {
 	b.labels = cloneMap(labels)
 	return b
 }
-
-// RecordIntegrity chooses whether to calculate and record disk integrity.
 func (b *SnapshotCopyBuilder) RecordIntegrity(enabled bool) *SnapshotCopyBuilder {
 	b.recordIntegrity = enabled
 	return b
 }
-
-// Save writes the configured snapshot archive.
 func (b *SnapshotCopyBuilder) Save(ctx context.Context) error {
 	if b == nil || b.snapshot == nil {
 		return &Error{Kind: ErrInvalidConfig, Message: "snapshot copy builder has no source"}
 	}
-	return wrapFFI(ffi.SnapshotCopy(
-		ctx,
-		b.snapshot.reference,
-		b.snapshot.referenceKind,
-		b.outputArchivePath,
-		ffi.SnapshotCopyOptions{
-			Labels:          b.labels,
-			RecordIntegrity: b.recordIntegrity,
-		},
-	))
+	return wrapFFI(b.snapshot.inner.Operation(ctx, "copy", map[string]any{"path": b.outputArchivePath, "options": ffi.SnapshotCopyOptions{Labels: b.labels, RecordIntegrity: b.recordIntegrity}}, nil))
 }
 
-// SnapshotHandle is a lightweight handle returned by the active backend.
-type SnapshotHandle struct {
-	group                    *string
-	headUpdate               *SnapshotHeadUpdate
-	id                       string
-	path                     *string
-	digest                   string
-	name                     *string
-	parentDigest             *string
-	scope                    string
-	imageRef                 string
-	stateKind                string
-	format                   *string
-	fstype                   *string
-	checkpointManifestDigest *string
-	sizeBytes                *uint64
-	locality                 string
-	availability             string
-	migrationState           string
-	migrationErrorCode       *string
-	createdAtUnix            int64
-	reference                string
-	referenceKind            string
-}
+type Snapshots struct{ selected Context }
 
-func snapshotHandleFromInfo(info *ffi.SnapshotHandleInfo) *SnapshotHandle {
-	return &SnapshotHandle{
-		group:                    info.Group,
-		headUpdate:               snapshotHeadUpdateFromInfo(info.HeadUpdate),
-		id:                       info.ID,
-		path:                     cloneStringPtr(info.Path),
-		digest:                   info.Digest,
-		name:                     info.Name,
-		parentDigest:             info.ParentDigest,
-		scope:                    normalizeSnapshotScope(info.Scope),
-		imageRef:                 info.ImageRef,
-		stateKind:                info.StateKind,
-		format:                   info.Format,
-		fstype:                   info.Fstype,
-		checkpointManifestDigest: info.CheckpointManifestDigest,
-		sizeBytes:                info.SizeBytes,
-		locality:                 info.Locality,
-		availability:             info.Availability,
-		migrationState:           info.MigrationState,
-		migrationErrorCode:       info.MigrationErrorCode,
-		createdAtUnix:            info.CreatedAtUnix,
-		reference:                info.Reference,
-		referenceKind:            info.ReferenceKind,
+func SnapshotCtx(selected Context) *Snapshots { return &Snapshots{selected: selected} }
+func (s *Snapshots) Context() Context         { return s.selected }
+func (s *Snapshots) operation(ctx context.Context, operation, name string, args any) ([]*Snapshot, error) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return nil, err
 	}
-}
-
-func (h *SnapshotHandle) ID() string     { return h.id }
-func (h *SnapshotHandle) Digest() string { return h.digest }
-func (h *SnapshotHandle) Name() *string  { return cloneStringPtr(h.name) }
-
-// Group returns the local group containing this indexed snapshot.
-func (h *SnapshotHandle) Group() *string { return cloneStringPtr(h.group) }
-
-// HeadUpdate returns the group head outcome recorded by this import, if any.
-func (h *SnapshotHandle) HeadUpdate() *SnapshotHeadUpdate {
-	return cloneSnapshotHeadUpdate(h.headUpdate)
-}
-func (h *SnapshotHandle) ParentDigest() *string { return cloneStringPtr(h.parentDigest) }
-func (h *SnapshotHandle) Scope() string         { return h.scope }
-func (h *SnapshotHandle) ImageRef() string      { return h.imageRef }
-func (h *SnapshotHandle) StateKind() string     { return h.stateKind }
-func (h *SnapshotHandle) Format() *string       { return cloneStringPtr(h.format) }
-func (h *SnapshotHandle) Fstype() *string       { return cloneStringPtr(h.fstype) }
-func (h *SnapshotHandle) CheckpointManifestDigest() *string {
-	return cloneStringPtr(h.checkpointManifestDigest)
-}
-func (h *SnapshotHandle) SizeBytes() *uint64          { return cloneUint64Ptr(h.sizeBytes) }
-func (h *SnapshotHandle) Locality() string            { return h.locality }
-func (h *SnapshotHandle) Availability() string        { return h.availability }
-func (h *SnapshotHandle) MigrationState() string      { return h.migrationState }
-func (h *SnapshotHandle) MigrationErrorCode() *string { return cloneStringPtr(h.migrationErrorCode) }
-
-// Path returns the local filesystem path. It panics for remote snapshots.
-//
-// Deprecated: use Reference for backend-neutral code.
-func (h *SnapshotHandle) Path() string {
-	if h.path == nil {
-		panic("snapshot has no local filesystem path; use Reference() instead")
-	}
-	return *h.path
-}
-
-func (h *SnapshotHandle) Reference() string     { return h.reference }
-func (h *SnapshotHandle) ReferenceKind() string { return h.referenceKind }
-func (h *SnapshotHandle) CreatedAt() time.Time  { return time.Unix(h.createdAtUnix, 0) }
-
-func (h *SnapshotHandle) Open(ctx context.Context) (*SnapshotArtifact, error) {
-	info, err := ffi.SnapshotOpen(ctx, h.reference, h.referenceKind)
+	resources, err := destination.Resources(ctx, operation, name, args)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
-	return snapshotFromInfo(info), nil
+	snapshots := make([]*Snapshot, len(resources))
+	for i, resource := range resources {
+		snapshots[i], err = snapshotFromResource(resource)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return snapshots, nil
 }
-
-func (h *SnapshotHandle) Remove(ctx context.Context, force bool) error {
-	return wrapFFI(ffi.SnapshotRemove(ctx, h.reference, h.referenceKind, force))
+func (s *Snapshots) request(ctx context.Context, operation, name string, args, result any) error {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return err
+	}
+	return wrapFFI(destination.Request(ctx, operation, name, args, result))
 }
-
-// SaveTo bundles this snapshot using its typed backend-neutral reference.
-// Backends that do not expose artifact archives return ErrUnsupportedOperation.
-func (h *SnapshotHandle) SaveTo(ctx context.Context, outPath string, opts SnapshotSaveOptions) error {
-	return saveSnapshotReference(ctx, h.reference, h.referenceKind, outPath, opts)
+func oneSnapshot(snapshots []*Snapshot, err error) (*Snapshot, error) {
+	if err != nil {
+		return nil, err
+	}
+	if len(snapshots) != 1 {
+		return nil, fmt.Errorf("native lookup did not return one snapshot")
+	}
+	return snapshots[0], nil
 }
-
-func (snapshotFactory) Create(ctx context.Context, opts SnapshotCreateOptions) (*SnapshotArtifact, error) {
+func snapshotCreateOptions(opts SnapshotCreateOptions) ffi.SnapshotCreateOptions {
+	return ffi.SnapshotCreateOptions{Name: opts.Name, Group: opts.Group, DestDir: opts.DestDir, Labels: opts.Labels, Force: opts.Force, RecordIntegrity: opts.RecordIntegrity, Full: opts.Full, GuestFlush: string(opts.GuestFlush)}
+}
+func (s *Snapshots) Create(ctx context.Context, opts SnapshotCreateOptions) (*Snapshot, error) {
 	if opts.FromSandbox == "" {
 		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
 	}
-	info, err := ffi.SnapshotCreate(ctx, opts.FromSandbox, ffi.SnapshotCreateOptions{
-		Name:            opts.Name,
-		Group:           opts.Group,
-		DestDir:         opts.DestDir,
-		Labels:          opts.Labels,
-		Force:           opts.Force,
-		RecordIntegrity: opts.RecordIntegrity,
-		Full:            opts.Full,
-		GuestFlush:      string(opts.GuestFlush),
-	})
-	if err != nil {
-		return nil, wrapFFI(err)
+	return oneSnapshot(s.operation(ctx, "snapshot_create", opts.FromSandbox, snapshotCreateOptions(opts)))
+}
+func (s *Snapshots) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
+	if opts.FromSandbox == "" || opts.ArchivePath == "" {
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires FromSandbox and ArchivePath"}
 	}
-	return snapshotFromInfo(info), nil
+	var result ffi.SnapshotArchiveInfo
+	err := s.request(ctx, "snapshot_create_archive", opts.FromSandbox, map[string]any{"path": opts.ArchivePath, "plain_tar": opts.PlainTar, "options": snapshotCreateOptions(opts.SnapshotCreateOptions)}, &result)
+	if err != nil {
+		return nil, err
+	}
+	return &SnapshotArchive{id: result.ID, descriptorDigest: result.DescriptorDigest, path: result.Path}, nil
+}
+func (s *Snapshots) Get(ctx context.Context, name string) (*Snapshot, error) {
+	return oneSnapshot(s.operation(ctx, "snapshot_get", name, nil))
+}
+func (s *Snapshots) Open(ctx context.Context, reference string) (*Snapshot, error) {
+	return oneSnapshot(s.operation(ctx, "snapshot_open", reference, nil))
+}
+func (s *Snapshots) List(ctx context.Context) ([]*Snapshot, error) {
+	return s.operation(ctx, "snapshot_list", "", nil)
+}
+func (s *Snapshots) ListDir(ctx context.Context, dir string) ([]*Snapshot, error) {
+	return s.operation(ctx, "snapshot_list_dir", dir, nil)
+}
+func (s *Snapshots) Remove(ctx context.Context, reference string, force bool) error {
+	_, err := s.operation(ctx, "snapshot_remove", reference, map[string]any{"force": force})
+	return err
+}
+func (s *Snapshots) Reindex(ctx context.Context, dir string) (uint32, error) {
+	var result struct {
+		Count uint32 `json:"count"`
+	}
+	err := s.request(ctx, "snapshot_reindex", dir, nil, &result)
+	return result.Count, err
+}
+func (s *Snapshots) Save(ctx context.Context, reference, path string, opts SnapshotSaveOptions) error {
+	snapshot, err := s.Open(ctx, reference)
+	if err != nil {
+		return err
+	}
+	return snapshot.SaveTo(ctx, path, opts)
+}
+func (s *Snapshots) Load(ctx context.Context, archive, dest string) (*Snapshot, error) {
+	return s.LoadWithOptions(ctx, archive, SnapshotLoadOptions{Dest: dest})
+}
+func (s *Snapshots) LoadWithBase(ctx context.Context, archive, dest, base string) (*Snapshot, error) {
+	return s.LoadWithOptions(ctx, archive, SnapshotLoadOptions{Dest: dest, Base: base})
+}
+func (s *Snapshots) LoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*Snapshot, error) {
+	return oneSnapshot(s.LoadMany(ctx, []string{archive}, opts))
+}
+func (s *Snapshots) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Snapshot, error) {
+	return s.operation(ctx, "snapshot_load", "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead}})
+}
+func (s *Snapshots) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+	var result ffi.SnapshotHeadUpdate
+	if err := s.request(ctx, "snapshot_group_head", selector, nil, &result); err != nil {
+		return nil, err
+	}
+	return snapshotHeadUpdateFromInfo(&result), nil
 }
 
-// CreateArchive captures a disk or full snapshot directly into one archive file.
-// It does not create an installed snapshot directory or index row.
-func (snapshotFactory) CreateArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
+func CreateSnapshot(ctx context.Context, opts SnapshotCreateOptions) (*Snapshot, error) {
 	if opts.FromSandbox == "" {
-		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires a source sandbox (FromSandbox)"}
+		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot create requires a source sandbox (FromSandbox)"}
 	}
-	if opts.ArchivePath == "" {
-		return nil, &Error{Kind: ErrInvalidConfig, Message: "snapshot archive create requires ArchivePath"}
-	}
-	info, err := ffi.SnapshotCreateArchive(ctx, opts.FromSandbox, opts.ArchivePath, ffi.SnapshotCreateOptions{
-		Name:            opts.Name,
-		Group:           opts.Group,
-		Labels:          opts.Labels,
-		Force:           opts.Force,
-		RecordIntegrity: opts.RecordIntegrity,
-		Full:            opts.Full,
-		GuestFlush:      string(opts.GuestFlush),
-	}, opts.PlainTar)
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return &SnapshotArchive{
-		id:               info.ID,
-		descriptorDigest: info.DescriptorDigest,
-		path:             info.Path,
-	}, nil
+	return local.Snapshots().Create(ctx, opts)
 }
-
-func (snapshotFactory) Open(ctx context.Context, pathOrName string) (*SnapshotArtifact, error) {
-	info, err := ffi.SnapshotOpen(ctx, pathOrName, "")
+func CreateSnapshotArchive(ctx context.Context, opts SnapshotArchiveOptions) (*SnapshotArchive, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return snapshotFromInfo(info), nil
+	return local.Snapshots().CreateArchive(ctx, opts)
 }
-
-func (snapshotFactory) Get(ctx context.Context, nameOrDigest string) (*SnapshotHandle, error) {
-	info, err := ffi.SnapshotGet(ctx, nameOrDigest)
+func GetSnapshot(ctx context.Context, name string) (*Snapshot, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return snapshotHandleFromInfo(info), nil
+	return local.Snapshots().Get(ctx, name)
 }
-
-func (snapshotFactory) List(ctx context.Context) ([]*SnapshotHandle, error) {
-	infos, err := ffi.SnapshotList(ctx)
+func OpenSnapshot(ctx context.Context, reference string) (*Snapshot, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	out := make([]*SnapshotHandle, len(infos))
-	for i, info := range infos {
-		out[i] = snapshotHandleFromInfo(info)
-	}
-	return out, nil
+	return local.Snapshots().Open(ctx, reference)
 }
-
-func (snapshotFactory) ListDir(ctx context.Context, dir string) ([]*SnapshotArtifact, error) {
-	infos, err := ffi.SnapshotListDir(ctx, dir)
+func ListSnapshots(ctx context.Context) ([]*Snapshot, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	out := make([]*SnapshotArtifact, len(infos))
-	for i, info := range infos {
-		out[i] = snapshotFromInfo(info)
-	}
-	return out, nil
+	return local.Snapshots().List(ctx)
 }
-
-func (snapshotFactory) Remove(ctx context.Context, pathOrName string, force bool) error {
-	return wrapFFI(ffi.SnapshotRemove(ctx, pathOrName, "", force))
-}
-
-func (snapshotFactory) Reindex(ctx context.Context, dir string) (uint32, error) {
-	n, err := ffi.SnapshotReindex(ctx, dir)
-	return n, wrapFFI(err)
-}
-
-func (snapshotFactory) Save(ctx context.Context, nameOrPath, outPath string, opts SnapshotSaveOptions) error {
-	return saveSnapshotReference(ctx, nameOrPath, "", outPath, opts)
-}
-
-func saveSnapshotReference(ctx context.Context, reference, referenceKind, outPath string, opts SnapshotSaveOptions) error {
-	return wrapFFI(ffi.SnapshotSave(ctx, reference, referenceKind, outPath, ffi.SnapshotSaveOptions{
-		WithParents: opts.WithParents,
-		WithImage:   opts.WithImage,
-		PlainTar:    opts.PlainTar,
-		Since:       opts.Since,
-		LastLayers:  opts.LastLayers,
-	}))
-}
-
-func (snapshotFactory) Load(ctx context.Context, archive, dest string) (*SnapshotHandle, error) {
-	info, err := ffi.SnapshotLoad(ctx, archive, dest)
+func ListSnapshotsDir(ctx context.Context, dir string) ([]*Snapshot, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return snapshotHandleFromInfo(info), nil
+	return local.Snapshots().ListDir(ctx, dir)
 }
-
-// LoadWithBase imports a dependent archive into a complete locally owned snapshot closure.
-func (snapshotFactory) LoadWithBase(ctx context.Context, archive, dest, base string) (*SnapshotHandle, error) {
-	info, err := ffi.SnapshotLoadWithBase(ctx, archive, dest, base)
+func RemoveSnapshot(ctx context.Context, reference string, force bool) error {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return err
 	}
-	return snapshotHandleFromInfo(info), nil
+	return local.Snapshots().Remove(ctx, reference, force)
 }
-
-// LoadWithOptions imports an archive into a selected or generated group.
-func (snapshotFactory) LoadWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*SnapshotHandle, error) {
-	info, err := ffi.SnapshotLoadWithOptions(ctx, archive, ffi.SnapshotLoadOptions{
-		Dest:    opts.Dest,
-		Base:    opts.Base,
-		Group:   opts.Group,
-		SetHead: opts.SetHead,
-	})
+func ReindexSnapshots(ctx context.Context, dir string) (uint32, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return 0, err
 	}
-	return snapshotHandleFromInfo(info), nil
+	return local.Snapshots().Reindex(ctx, dir)
 }
-
-// LoadMany imports archives together into one group, resolving dependencies regardless of input order.
-func (snapshotFactory) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*SnapshotHandle, error) {
-	infos, err := ffi.SnapshotLoadMany(ctx, archives, ffi.SnapshotLoadOptions{
-		Dest:    opts.Dest,
-		Base:    opts.Base,
-		Group:   opts.Group,
-		SetHead: opts.SetHead,
-	})
+func SaveSnapshot(ctx context.Context, reference, path string, opts SnapshotSaveOptions) error {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return err
 	}
-	handles := make([]*SnapshotHandle, len(infos))
-	for index, info := range infos {
-		handles[index] = snapshotHandleFromInfo(info)
-	}
-	return handles, nil
+	return local.Snapshots().Save(ctx, reference, path, opts)
 }
-
-// GroupHead reads a group head, or selects a group:member as its head.
-func (snapshotFactory) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
-	update, err := ffi.SnapshotGroupHead(ctx, selector)
+func LoadSnapshot(ctx context.Context, archive, dest string) (*Snapshot, error) {
+	local, err := defaultLocalContext()
 	if err != nil {
-		return nil, wrapFFI(err)
+		return nil, err
 	}
-	return snapshotHeadUpdateFromInfo(update), nil
+	return local.Snapshots().Load(ctx, archive, dest)
+}
+func LoadSnapshotWithBase(ctx context.Context, archive, dest, base string) (*Snapshot, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	return local.Snapshots().LoadWithBase(ctx, archive, dest, base)
+}
+func LoadSnapshotWithOptions(ctx context.Context, archive string, opts SnapshotLoadOptions) (*Snapshot, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	return local.Snapshots().LoadWithOptions(ctx, archive, opts)
+}
+func LoadSnapshots(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Snapshot, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	return local.Snapshots().LoadMany(ctx, archives, opts)
+}
+func SnapshotGroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	return local.Snapshots().GroupHead(ctx, selector)
 }
 
 func snapshotHeadUpdateFromInfo(update *ffi.SnapshotHeadUpdate) *SnapshotHeadUpdate {
@@ -700,4 +588,147 @@ func cloneMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// SnapshotInfo is a fresh artifact observation, distinct from the resource itself.
+type SnapshotInfo struct {
+	ID                       string     `json:"id"`
+	Name                     *string    `json:"name"`
+	Group                    *string    `json:"group"`
+	Digest                   string     `json:"digest"`
+	ParentDigest             *string    `json:"parent_digest"`
+	Scope                    string     `json:"scope"`
+	ImageRef                 string     `json:"image_ref"`
+	StateKind                string     `json:"state_kind"`
+	Format                   *string    `json:"format"`
+	Fstype                   *string    `json:"fstype"`
+	CheckpointManifestDigest *string    `json:"checkpoint_manifest_digest"`
+	SizeBytes                *uint64    `json:"size_bytes"`
+	Locality                 string     `json:"locality"`
+	Availability             string     `json:"availability"`
+	MigrationState           string     `json:"migration_state"`
+	MigrationErrorCode       *string    `json:"migration_error_code"`
+	CreatedAt                *time.Time `json:"created_at"`
+}
+
+func (s *Snapshot) Info(ctx context.Context) (*SnapshotInfo, error) {
+	var info SnapshotInfo
+	if err := s.inner.Operation(ctx, "info", nil, &info); err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &info, nil
+}
+func (s *Snapshot) ParentDigest(ctx context.Context) (*string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.ParentDigest, nil
+}
+func (s *Snapshot) Scope(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Scope, nil
+}
+func (s *Snapshot) ImageRef(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.ImageRef, nil
+}
+func (s *Snapshot) StateKind(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.StateKind, nil
+}
+func (s *Snapshot) Format(ctx context.Context) (*string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.Format, nil
+}
+func (s *Snapshot) Fstype(ctx context.Context) (*string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.Fstype, nil
+}
+func (s *Snapshot) CheckpointManifestDigest(ctx context.Context) (*string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.CheckpointManifestDigest, nil
+}
+func (s *Snapshot) SizeBytes(ctx context.Context) (*uint64, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.SizeBytes, nil
+}
+func (s *Snapshot) Locality(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Locality, nil
+}
+func (s *Snapshot) Availability(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.Availability, nil
+}
+func (s *Snapshot) MigrationState(ctx context.Context) (string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.MigrationState, nil
+}
+func (s *Snapshot) MigrationErrorCode(ctx context.Context) (*string, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.MigrationErrorCode, nil
+}
+func (s *Snapshot) CreatedAt(ctx context.Context) (*time.Time, error) {
+	info, err := s.Info(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.CreatedAt, nil
+}
+func (s *Snapshot) ImageManifestDigest(ctx context.Context) (string, error) {
+	info, err := s.metadata(ctx)
+	if err != nil {
+		return "", err
+	}
+	return info.ImageManifestDigest, nil
+}
+func (s *Snapshot) SourceSandbox(ctx context.Context) (*string, error) {
+	info, err := s.metadata(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return info.SourceSandbox, nil
+}
+
+// Snapshot captures this Sandbox identity without selecting a same-name replacement.
+func (s *Sandbox) Snapshot(ctx context.Context, name string) (*Snapshot, error) {
+	resource, err := s.inner.Snapshot(ctx, name)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return snapshotFromResource(resource)
 }

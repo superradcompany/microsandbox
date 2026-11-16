@@ -15,12 +15,17 @@ pub mod compat;
 mod guest_flush;
 #[doc(hidden)]
 pub mod helpers;
+pub mod memory_cache;
 pub mod modify;
+#[doc(hidden)]
+#[cfg(feature = "progress")]
+pub mod pull_progress;
 mod registry;
 mod secret;
 #[doc(hidden)]
 pub mod secret_plan;
 pub mod snapshot;
+pub mod startup_progress;
 mod validation;
 
 #[cfg(feature = "ts")]

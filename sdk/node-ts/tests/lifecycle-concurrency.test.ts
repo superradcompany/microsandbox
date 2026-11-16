@@ -30,7 +30,7 @@ async function fixture(label: string, run: (source: Sandbox, observer: Sandbox) 
   const source = await Sandbox.builder(name).image("alpine").rootDisk(512).memory(256).create();
   let observer: Sandbox | undefined;
   try {
-    observer = await (await Sandbox.get(name)).connect();
+    observer = await Sandbox.getRunning(name);
     await run(source, observer);
   } finally {
     // A separate handle can recover a paused VM even if the tested wrapper is
@@ -102,14 +102,16 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
     });
   });
 
-  it("detach consumes new calls and existing filesystem facades without draining exec", async () => {
+  it("detach preserves new calls and existing filesystem facades without draining exec", async () => {
     await fixture("detach", async (source, observer) => {
       const fs = source.fs();
       const { pending } = await gatedExec(source, observer);
       await bounded(source.detach(), "detach during exec");
-      await expect(source.pause()).rejects.toThrow(consumed);
-      await expect(source.exec("true")).rejects.toThrow(consumed);
-      await expect(fs.exists("/dev/shm/started")).rejects.toThrow(consumed);
+      expect(source.ownsLifecycle).toBe(false);
+      await bounded(source.pause(), "pause after detach");
+      await bounded(source.resume(), "resume after detach");
+      expect((await source.exec("true")).status.success).toBe(true);
+      expect(await fs.exists("/dev/shm/started")).toBe(true);
       await source.detach(); // Detach remains idempotent.
       await observer.fs().write("/dev/shm/release", "go");
       expect((await bounded(pending, "detached exec completion")).stdout().trim()).toBe("completed");
@@ -144,7 +146,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
         await bounded(source.pause(), "pause during upload");
         await bounded(source.resume(), "resume during upload");
         await bounded(source.detach(), "detach during upload");
-        await expect(fs.exists("/tmp")).rejects.toThrow(consumed);
+        expect(await bounded(fs.exists("/tmp"), "filesystem after detach")).toBe(true);
         await writer.writeFile("private upload payload");
         await writer.close();
         closed = true;
@@ -160,7 +162,7 @@ describe.skipIf(process.env.MSB_NODE_LIFECYCLE_LIVE !== "1")("same-object lifecy
 
   it("removal consumes its wrapper while exec is pending, independently of lifecycle locking", async () => {
     await fixture("remove", async (source, observer) => {
-      const raw = await (await native.Sandbox.get(source.name)).connect();
+      const raw = await native.Sandbox.getRunning(source.name);
       const fs = raw.fs();
       const pending = raw.exec("sh", ["-c", "touch /dev/shm/started; while [ ! -e /dev/shm/release ]; do sleep 0.02; done; echo completed"]);
       void pending.catch(() => undefined);

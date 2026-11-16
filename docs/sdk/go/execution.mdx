@@ -300,7 +300,7 @@ for {
 
 </Accordion>
 
-Block until the next event arrives or the stream ends. Returns an event with `Kind == ExecEventDone` when all events have been consumed. `ctx` controls the wait; cancellation causes `Recv` to return `ctx.Err()` immediately. The underlying Rust call may continue to completion in the background.
+Block until the next event arrives or the stream ends. Returns an event with `Kind == ExecEventDone` when all events have been consumed. `ctx` controls the wait. Cancellation signals the native call and returns `ctx.Err()` after it releases its borrowed FFI buffers. This is not necessarily immediate and does not establish that the guest process exited.
 
 <p className="msb-label">Parameters</p>
 
@@ -364,7 +364,7 @@ Drain the stream, accumulate all output, and return it as an [`*ExecOutput`](#ex
 func (h *ExecHandle) Wait(ctx context.Context) (int, error)
 ```
 
-Block until the process exits and return its exit code. Unlike [`Collect`](#h-collect), stdout and stderr are discarded. The handle should be closed after `Wait` returns.
+Block until the process exits and return its exit code, discarding remaining output. Once `Wait`, `Collect`, or `Recv` observes a terminal outcome, subsequent `Wait` calls return the recorded exit code or terminal execution error while the handle remains open. They do not rerun the command or replay output. Cancelling a wait or losing the transport does not establish that the command finished. Close the handle when finished using it.
 
 <p className="msb-label">Parameters</p>
 
@@ -959,7 +959,7 @@ result, err := job.Wait(ctx)
 func (s *Sandbox) GetJob(ctx context.Context, id string) (*Job, error)
 ```
 
-Retrieve a retained job by ID. Also available on `SandboxHandle`.
+Retrieve a retained job by ID.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">ListJobs()</span>
 
@@ -967,7 +967,7 @@ Retrieve a retained job by ID. Also available on `SandboxHandle`.
 func (s *Sandbox) ListJobs(ctx context.Context, opts ...JobListOption) (*JobPage, error)
 ```
 
-List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100. Also available on `SandboxHandle`.
+List active jobs, or include retained history with the all option. Returns items and a next-page cursor. Default page size: 50; range: 1–100.
 
 ### Job
 

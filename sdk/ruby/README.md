@@ -122,12 +122,9 @@ Microsandbox.use_cloud_profile!("production")
 
 ## Lifecycle
 
-A lifecycle-owning `Sandbox` stops when Ruby garbage-collects it. Prefer
-`Sandbox.with` for scoped work. Call `sandbox.detach` when the VM must outlive
-the Ruby object, then manage it through `Sandbox.get`.
+Final-owner garbage collection triggers fallback cleanup without guaranteeing completed shutdown. Prefer `Sandbox.with` to await shutdown of its owned local run. Detached and remote runs are not stopped. `sandbox.detach` relinquishes automatic shutdown and leaves the object usable.
 
-If both a `Sandbox.with` block and its cleanup fail, the block's original
-exception is preserved.
+Cleanup failures are raised. If both a `Sandbox.with` block and its cleanup fail, the cleanup exception retains the body exception as its cause.
 
 Blocking calls do not prevent other Ruby threads from running. Forked child
 processes recreate the native runtime before use.
@@ -142,10 +139,10 @@ sandbox = Microsandbox::Sandbox.connect_or_create(
 )
 
 puts "#{sandbox.name}: #{sandbox.id}"
-running = Microsandbox::Sandbox.get("worker").connect_or_start
+running = Microsandbox::Sandbox.get_running("worker")
 running.request_stop
-stopped = running.wait_for_status("stopped")
-restarted = stopped.restart
+running.wait_for_status("stopped")
+restarted = running.restart
 restarted.destroy
 ```
 

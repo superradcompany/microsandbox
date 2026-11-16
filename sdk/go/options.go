@@ -81,11 +81,11 @@ type SandboxConfig struct {
 	Volumes             map[string]MountConfig // guest path → mount config
 }
 
-// SnapshotSeed is accepted by RestoreSandbox. Passing a SnapshotArtifact or
-// SnapshotHandle preserves its typed reference; a string remains a
+// SnapshotSeed is accepted by RestoreSandbox. Passing a Snapshot or
+// passing the resource preserves its typed reference; a string remains a
 // backend-relative compatibility reference.
 type SnapshotSeed interface {
-	string | *SnapshotArtifact | *SnapshotHandle
+	string | *Snapshot
 }
 
 // SandboxOption is a functional option for configuring a sandbox.

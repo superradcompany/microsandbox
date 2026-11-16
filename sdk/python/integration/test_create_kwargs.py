@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import suppress
 
 import pytest
@@ -91,7 +90,7 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
         assert await sandbox.owns_lifecycle is False
 
         handle = await Sandbox.get(name)
-        config = json.loads(handle.config_json)
+        config = await handle.config()
 
         assert config["name"] == name
         assert config["resources"]["cpus"] == 1
@@ -120,7 +119,8 @@ async def test_create_kwargs_round_trip_through_config_json(sandbox_name):
 
         sandbox = None
 
-        connected = await handle.connect()
+        await handle.ensure_running()
+        connected = handle
         assert await connected.owns_lifecycle is False
         out = await connected.shell("printf 'detached-create\\n'")
         assert out.success is True

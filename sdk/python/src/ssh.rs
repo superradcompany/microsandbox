@@ -17,7 +17,7 @@ use crate::error::to_py_err;
 /// SSH namespace for a sandbox.
 #[pyclass(name = "SandboxSshOps")]
 pub struct PySandboxSshOps {
-    inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>,
+    inner: microsandbox::sandbox::SandboxSshOps,
 }
 
 pub type PySandboxSsh = PySandboxSshOps;
@@ -53,13 +53,8 @@ pub struct PySshServer {
 //--------------------------------------------------------------------------------------------------
 
 impl PySandboxSshOps {
-    pub fn new(inner: Arc<Mutex<Option<microsandbox::sandbox::Sandbox>>>) -> Self {
+    pub fn new(inner: microsandbox::sandbox::SandboxSshOps) -> Self {
         Self { inner }
-    }
-
-    async fn clone_sandbox(&self) -> PyResult<microsandbox::sandbox::Sandbox> {
-        let guard = self.inner.lock().await;
-        guard.as_ref().cloned().ok_or_else(crate::error::consumed)
     }
 }
 
@@ -81,9 +76,8 @@ impl PySandboxSshOps {
             inner: self.inner.clone(),
         };
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = ssh.clone_sandbox().await?;
-            let client = sandbox
-                .ssh()
+            let client = ssh
+                .inner
                 .open_client_with(|builder| {
                     let mut builder = builder.user(user).sftp(sftp);
                     if let Some(term) = term {
@@ -124,9 +118,8 @@ impl PySandboxSshOps {
             inner: self.inner.clone(),
         };
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sandbox = ssh.clone_sandbox().await?;
-            let server = sandbox
-                .ssh()
+            let server = ssh
+                .inner
                 .prepare_server_with(|builder| {
                     let mut builder = builder.sftp(sftp);
                     if let Some(path) = host_key_path {

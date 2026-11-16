@@ -53,16 +53,18 @@ func main() {
 		log.Fatalf("Close base: %v", err)
 	}
 
-	baseHandle, err := microsandbox.GetSandbox(ctx, baseName)
-	if err != nil {
-		log.Fatalf("GetSandbox base: %v", err)
-	}
-	artifact, err := baseHandle.Snapshot(ctx, snapshotName)
+	artifact, err := microsandbox.CreateSnapshot(ctx, microsandbox.SnapshotCreateOptions{
+		FromSandbox: baseName, Name: snapshotName,
+	})
 	if err != nil {
 		log.Fatalf("Snapshot: %v", err)
 	}
 	size := "unknown"
-	if sizeBytes := artifact.SizeBytes(); sizeBytes != nil {
+	sizeBytes, err := artifact.SizeBytes(ctx)
+	if err != nil {
+		log.Fatalf("Snapshot size: %v", err)
+	}
+	if sizeBytes != nil {
 		size = fmt.Sprintf("%d", *sizeBytes)
 	}
 	fmt.Printf("snapshot created: digest=%s size=%s bytes\n", artifact.Digest(), size)
@@ -73,7 +75,7 @@ func main() {
 	}
 	fmt.Printf("snapshot verified: upper=%s\n", report.Upper.Kind)
 
-	handle, err := microsandbox.Snapshot.Get(ctx, snapshotSelector)
+	handle, err := microsandbox.GetSnapshot(ctx, snapshotSelector)
 	if err != nil {
 		log.Fatalf("Snapshot.Get: %v", err)
 	}
@@ -119,5 +121,5 @@ func cleanupSandbox(name string) {
 }
 
 func cleanupSnapshot(name string) {
-	_ = microsandbox.Snapshot.Remove(context.Background(), name, true)
+	_ = microsandbox.RemoveSnapshot(context.Background(), name, true)
 }

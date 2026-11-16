@@ -194,9 +194,9 @@ func (h *ExecHandle) TakeStdin() *ExecSink {
 // Recv blocks until the next event arrives or the stream ends. Returns an
 // event with Kind==ExecEventDone when all events have been consumed.
 //
-// ctx controls the wait; cancellation causes Recv to return ctx.Err()
-// immediately. The underlying Rust call may continue to completion in the
-// background (same semantics as all blocking FFI calls).
+// ctx controls the wait. Cancellation signals the native call and returns
+// ctx.Err() after that call releases its borrowed FFI buffers. This is not
+// necessarily immediate and does not establish that the guest process exited.
 func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
 	ev, err := h.inner.Recv(ctx)
 	if err != nil {
@@ -213,7 +213,8 @@ func (h *ExecHandle) Recv(ctx context.Context) (*ExecEvent, error) {
 
 // Collect drains the stream, accumulates all output, and returns it as
 // ExecOutput. Equivalent to calling Recv in a loop and assembling the result.
-// The handle should be closed after Collect returns.
+// Completion remains available to Wait afterward; output is not replayed.
+// Close the handle when finished using it.
 func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error) {
 	res, err := h.inner.Collect(ctx)
 	if err != nil {
@@ -227,8 +228,10 @@ func (h *ExecHandle) Collect(ctx context.Context) (*ExecOutput, error) {
 }
 
 // Wait blocks until the process exits and returns its exit code. Unlike
-// Collect, stdout and stderr are discarded. The handle should be closed after
-// Wait returns.
+// Collect, stdout and stderr are discarded. A terminal outcome observed by
+// Wait, Collect, or Recv is retained for subsequent waits while the handle is open.
+// Cancelling a wait does not establish that the command finished.
+// Close the handle when finished using it.
 func (h *ExecHandle) Wait(ctx context.Context) (int, error) {
 	code, err := h.inner.Wait(ctx)
 	return code, wrapFFI(err)

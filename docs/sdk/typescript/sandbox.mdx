@@ -25,6 +25,20 @@ Return one [`SandboxMetrics`](#sandboxmetrics) snapshot for every running sandbo
 
 ## Sandbox
 
+### Live inspection
+
+```typescript
+const sb = await Sandbox.get("task");
+const info = await sb.info();
+const status = await sb.status();
+const failure = await sb.lastFailureMessage();
+const config = await sb.config();
+```
+
+`SandboxInfo` contains `id`, `name`, `status`, `lastFailureMessage`, `createdAt` and `updatedAt`. This worktree preserves timestamps as RFC3339 `string | null` without discarding sub-millisecond precision; the final cross-resource timestamp API remains under review. `lastFailureMessage` is `string | null`. Identity properties `sb.id` and `sb.name` are synchronous. List pages contain unprepared `Sandbox` objects without per-item connections or startup.
+
+Each inspection method performs a fresh backend lookup without starting the resource. A failed lookup raises or returns an error; it never substitutes cached data. Use `info` when several related fields are needed together. Configuration is the latest persisted settings, which may differ from settings applied to the current run. Retain the returned value when you want a snapshot.
+
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">builder()</span>
 
 ```typescript
@@ -61,40 +75,58 @@ Begin building a new sandbox. Configure it with chainable setters, then call `.c
   </div>
 </div>
 
-#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">getRunning()</span>
 
 ```typescript
-static get(name: string): Promise<SandboxHandle>
+static getRunning(name: string): Promise<Sandbox>
 ```
+
+Get an existing sandbox and connect to its run, starting it when stopped. A missing sandbox is an error; this never creates one. Unlike explicit start, an already-running sandbox succeeds. If the name is replaced during preparation, the operation fails instead of targeting the replacement.
+
+A newly started local run is owned by the returned Sandbox. Connecting to an existing run acquires no shutdown ownership. Remote runtime lifetime remains independent of the client.
 
 <Accordion title="Example">
 
 ```typescript
-const handle = await Sandbox.get("api");
-console.log(handle.status);
+const sb = await Sandbox.getRunning("task");
+const output = await sb.shell("echo hello");
 ```
 
 </Accordion>
 
-Get a live handle to an existing sandbox (running or stopped). The handle provides status, configuration, and lifecycle control without requiring a full connection to the guest agent.
+#### <span className="msb-recv">Sandbox.</span><span className="msb-hn">get()</span>
 
-<p className="msb-label">Parameters</p>
+```typescript
+static get(name: string): Promise<Sandbox>
+```
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>name</code><span className="msb-type">string</span></div>
-    <div className="msb-param-desc">Sandbox name, up to 128 UTF-8 bytes.</div>
-  </div>
-</div>
+Look up an existing sandbox without starting it or connecting to its guest. The result is the same Sandbox type returned by creation. Guest execution prepares it automatically, while inspection remains non-starting. A missing or replaced resource is an error.
 
-<p className="msb-label">Returns</p>
+<Accordion title="Example">
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#sandboxhandle">Promise&lt;SandboxHandle&gt;</a></div>
-    <div className="msb-param-desc">Live handle with status and lifecycle control.</div>
-  </div>
-</div>
+```typescript
+const sb = await Sandbox.get("api");
+const output = await sb.shell("echo hello");
+```
+
+</Accordion>
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">ensureRunning()</span>
+
+```typescript
+ensureRunning(): Promise<void>
+```
+
+Optionally prepare this receiver before work. It connects when running or starts the captured resource when stopped. A newly started attached local run belongs to this receiver and its clones; connecting to an existing run acquires no ownership. Repeated calls preserve the shared owner. Ordinary shell and exec calls perform this preparation internally.
+
+<Accordion title="Example">
+
+```typescript
+const sb = await Sandbox.get("api");
+await sb.ensureRunning();
+```
+
+</Accordion>
 
 #### <span className="msb-recv">Sandbox.</span><span className="msb-hn">recoverStorage()</span>
 
@@ -144,7 +176,7 @@ static list(): Promise<SandboxPage>
 ```typescript
 const page = await Sandbox.list();
 for (const h of page.sandboxes) {
-  console.log(`${h.name} - ${h.status}`);
+  console.log(`${h.name} - ${await h.status()}`);
 }
 ```
 
@@ -298,7 +330,7 @@ Restart a stopped sandbox in detached mode. The sandbox survives after your proc
 
 <p className="msb-member-group" id="instance-methods">Instance methods</p>
 
-A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes created with `Sandbox.builder(...).create()` or its progress variants also own scope cleanup unless `.detached(true)` is set. Connected cloud handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
+A running `Sandbox` exposes `name` (`string`), `id` (`string`), and `ownsLifecycle` (`boolean`) as read-only properties. The stable opaque `id` changes when a removed name is recreated. Local attached handles own lifecycle. Cloud sandboxes remain independent of client scope lifetime, including creation, start, restart and progress results. Connected handles and detached handles do not acquire cleanup ownership. Calling `detach()` releases scope cleanup.
 
 Command execution (`exec`, `execWith`, `execStream`, `execStreamWith`, `shell`, `shellStream`) and foreground attachment (`attach`, `attachWith`, `attachShell`) live on the [Execution](/sdk/typescript/execution) page.
 
@@ -319,7 +351,7 @@ console.log(`${config.memoryMib} MiB`);
 
 </Accordion>
 
-Get the full configuration the sandbox was created with - image, cpus, memory, env, mounts, and the rest. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
+Fetch the latest persisted configuration from the backend. Lookup errors are returned without a cached fallback; saved settings may still require restart to apply. The shape mirrors [`SandboxBuilder.build()`](#sandboxbuilder-build).
 
 <p className="msb-label">Returns</p>
 
@@ -344,9 +376,9 @@ await sandbox.detach(); // keeps running in the background
 
 </Accordion>
 
-Release the handle without stopping the sandbox. The sandbox continues running as a background process. Reconnect later with [`Sandbox.get()`](#sandbox-get).
+Disarm automatic shutdown without consuming the sandbox. Repeated calls succeed; the sandbox and its existing filesystem helpers remain usable. `ownsLifecycle` becomes false after successful detach, and explicit stop/destroy remain available.
 
-After detaching, this handle and its existing `fs()` objects reject new guest operations. Already-started operations retain their connection; await them before detaching if you need their results first.
+If detach fails, it rejects without consuming the object or clearing its cleanup authority. Detach does not cancel work or scoped shutdown that has already begun.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">fs()</span>
 
@@ -458,7 +490,7 @@ const recent = await handle.logs({
 
 </Accordion>
 
-Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike - there is no protocol traffic. The same method is available on [`SandboxHandle`](#sandboxhandle) for callers that don't want to start the sandbox first.
+Read captured output from the sandbox's `exec.log`. Backed by an on-disk JSON Lines file the runtime writes via the relay tap. Works on running and stopped sandboxes alike - there is no protocol traffic. Reading logs does not start the sandbox.
 
 The default sources are `"stdout"`, `"stderr"`, and `"output"` (PTY-merged). Pass `"system"` to also include synthetic lifecycle markers and runtime/kernel diagnostic lines, or `"all"` for every source.
 
@@ -807,10 +839,12 @@ Wait indefinitely for graceful shutdown and release of the targeted runtime's ow
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">waitForStatus()</span>
 
 ```typescript
-waitForStatus(status: SandboxStatus): Promise<SandboxHandle>
+waitForStatus(status: SandboxStatus): Promise<void>
 ```
 
-Wait without a built-in timeout until this exact persisted sandbox reaches `status`. Returns a refreshed metadata handle and throws `SandboxReplacedError` rather than following a reused name. Use `Promise.race` when the caller needs its own deadline; the underlying wait is not cancellable yet.
+Returns completion only and never starts the sandbox. The existing resource remains usable; call `info()` for a fresh observation afterward. The observed status may change after this wait completes.
+
+Wait without a built-in timeout until this exact persisted sandbox reaches `status`. Throws `SandboxReplacedError` rather than following a reused name. Use `Promise.race` when the caller needs its own deadline; the underlying wait is not cancellable yet.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restart()</span>
 
@@ -895,12 +929,12 @@ Block until the sandbox is observed in a terminal non-running state, without tri
 {
   await using sandbox = await Sandbox.builder("api").image("python").create();
   await sandbox.exec("python", ["-V"]);
-} // sandbox.stop() runs here, automatically
+} // Await shutdown of this scope's owned local run.
 ```
 
 </Accordion>
 
-Implements `AsyncDisposable` so the sandbox can be used with `await using`. When the binding goes out of scope, the sandbox is stopped (best-effort) - but only if `ownsLifecycle` is `true`.
+Implements `AsyncDisposable` for `await using`. Scope exit awaits graceful shutdown of the local run this object owns, preserving persisted state except for configured ephemeral cleanup. Detached, independently connected, and cloud resources are not stopped. Cleanup checks the captured run, so an old scope cannot stop a replacement run. Cleanup errors reject; when both the body and disposal fail, `await using` preserves both in its `SuppressedError`.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">restoreWarnings()</span>
 
@@ -929,6 +963,20 @@ Why the resource could not be reconstructed.
 `readonly bigint[]`
 
 Permanently invalid captured node IDs; empty when the whole export is unavailable.
+
+#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
+
+<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
+
+```typescript
+snapshot(name)
+```
+
+Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/typescript/snapshots).
+
+<p className="msb-label">Returns</p>
+
+`Promise<Snapshot>`
 
 ## SandboxBuilder
 
@@ -2301,7 +2349,7 @@ Use with `for await...of`
 [Symbol.asyncDispose]()
 ```
 
-Stop iterating; safe to use with `await using`
+Stop yielding metrics through both `recv()` and iteration; safe to use with `await using`. A sample arriving from an in-flight read after disposal is suppressed. Disposal does not interrupt that native read, and a pending read error still rejects its caller.
 
 <p className="msb-label">Returns</p>
 
@@ -2381,371 +2429,6 @@ labels(record)
 ```
 
 Add several AND-matched labels
-
-## SandboxHandle
-
-
-<p className="msb-backref">Returned by <a href="#sandbox-get">Sandbox.get()</a> · <a href="#sandbox-list">Sandbox.list()</a> · <a href="#sandbox-listwith">Sandbox.listWith()</a></p>
-
-A metadata and lifecycle handle for an existing sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
-
-`string`
-
-Sandbox name, up to 128 UTF-8 bytes
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">id</span>
-
-`string`
-
-Opaque stable identity captured by this handle. Receiver lifecycle methods remain bound to this value and throw `SandboxReplacedError` if the reusable name now points to another sandbox.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">status</span>
-
-[`SandboxStatus`](#sandboxstatus)
-
-Current status
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">configJson</span>
-
-`string`
-
-Raw JSON configuration
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">createdAt</span>
-
-`Date \| null`
-
-Creation timestamp
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">updatedAt</span>
-
-`Date \| null`
-
-Last update timestamp
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">config()</span>
-
-<Tooltip tip="Parsed SandboxConfig is local-only; use raw cloud JSON inspection on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-config()
-```
-
-Parsed configuration
-
-<p className="msb-label">Returns</p>
-
-[`SandboxConfig`](#sandboxconfig)
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">refresh()</span>
-
-```typescript
-refresh()
-```
-
-Re-read the handle's state from the database
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxHandle`](#sandboxhandle)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">ping()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-ping()
-```
-
-Check agent reachability without refreshing idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxPingResult`](#sandboxpingresult)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">touch()</span>
-
-<Tooltip tip="Not available on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-touch()
-```
-
-Explicitly refresh idle activity; does not start stopped sandboxes
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxTouchResult`](#sandboxtouchresult)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">modify()</span>
-
-<Tooltip tip="On microsandbox cloud, modify changes secrets only: a value, allowed hosts and removal can apply live; other secret changes need the next-start policy."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-modify(opts?)
-```
-
-Plan or apply a configuration change; same options as [`modify()`](#sandbox-modify). Does not start stopped sandboxes; changes persist for the next boot
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxModificationPlan`](#sandboxmodificationplan)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">metrics()</span>
-
-<Tooltip tip="SDK metrics methods are local-only. On microsandbox cloud, use the dashboard or REST API."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-metrics()
-```
-
-Point-in-time resource metrics
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxMetrics`](#sandboxmetrics)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">logs()</span>
-
-<Tooltip tip="Bounded log reads are not available on microsandbox cloud; follow live and persist output externally."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-logs()
-```
-
-Read captured `exec.log` (works without starting)
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`LogEntry`](#logentry)`[]>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">logStream()</span>
-
-```typescript
-logStream()
-```
-
-Stream captured `exec.log`, with optional follow
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`LogStream`](#logstream)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">start()</span>
-
-```typescript
-start()
-```
-
-Start in attached mode
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`Sandbox`](#instance-methods)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">startDetached()</span>
-
-```typescript
-startDetached()
-```
-
-Start in detached mode
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`Sandbox`](#instance-methods)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">connect()</span>
-
-```typescript
-connect()
-```
-
-Connect to a running sandbox without taking ownership. Returns an error if it doesn't respond within 10_000 ms
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`Sandbox`](#instance-methods)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">connectWithTimeout()</span>
-
-```typescript
-connectWithTimeout(timeoutMs)
-```
-
-Same as `connect()` with an explicit timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`Sandbox`](#instance-methods)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">connectOrStart()</span>
-
-```typescript
-connectOrStart(options?: { detached?: boolean }): Promise<Sandbox>
-```
-
-Connect when this exact sandbox is running, wait through `starting`, or start it when it is `created`, `stopped`, or `crashed`. `draining` and `paused` are rejected. Set `detached` only to make a required local start run in the background; connecting to an already-running sandbox does not change ownership.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">waitForStatus()</span>
-
-```typescript
-waitForStatus(status: SandboxStatus): Promise<SandboxHandle>
-```
-
-Wait without a built-in timeout until this exact sandbox reaches `status`, returning a refreshed handle. Throws `SandboxReplacedError` rather than rebinding to a replacement.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">restart()</span>
-
-```typescript
-restart(options?: { force?: boolean; timeoutMs?: number; detached?: boolean }): Promise<Sandbox>
-```
-
-Restart this exact sandbox with the same state and option semantics as [`sandbox.restart()`](#sandbox-restart).
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">destroy()</span>
-
-```typescript
-destroy(options?: { force?: boolean; timeoutMs?: number }): Promise<void>
-```
-
-Stop and remove this exact sandbox. A stale handle cannot destroy a same-name replacement.
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">stop()</span>
-
-<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-stop()
-```
-
-Wait indefinitely for graceful completion and release of the targeted runtime's ownership. Never implicitly kills.
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">stopWithTimeout()</span>
-
-<Tooltip tip="On Cloud, the timeout only limits how long the SDK waits; the accepted stop may continue server-side."><span className="msb-badge-limited">Different on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-stopWithTimeout(timeoutMs)
-```
-
-Same completion contract as `stop()` under one total milliseconds budget. Expiry throws `StopTimeoutError` without killing; zero expires before dispatch.
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">requestStop()</span>
-
-```typescript
-requestStop()
-```
-
-Request graceful shutdown without waiting
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">kill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-kill()
-```
-
-Force terminate and wait until stopped state is observed
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">killWithTimeout()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-killWithTimeout(timeoutMs)
-```
-
-Same as `kill()` with an explicit observation timeout in milliseconds. `timeoutMs` must be an integer from 0 to 4294967295, inclusive; other values reject with `RangeError` before calling native.
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">requestKill()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-requestKill()
-```
-
-Request force termination without waiting
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">requestDrain()</span>
-
-<Tooltip tip="Not available on microsandbox cloud; use a graceful stop."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-requestDrain()
-```
-
-Request graceful drain without waiting
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">waitUntilStopped()</span>
-
-```typescript
-waitUntilStopped()
-```
-
-Block until the sandbox reaches terminal state
-
-<p className="msb-label">Returns</p>
-
-`Promise<`[`SandboxStopResult`](#sandboxstopresult)`>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```typescript
-remove()
-```
-
-Delete sandbox and state
-
-<p className="msb-label">Returns</p>
-
-`Promise<void>`
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
-
-<Tooltip tip="Cloud disk snapshots require a stopped persistent source. Local snapshots also support running or paused sources."><span className="msb-badge-limited">Limited on cloud <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```typescript
-snapshot(name)
-```
-
-Capture a disk snapshot. Locally, the name selects a member within the sandbox's snapshot group. See [Snapshots](/sdk/typescript/snapshots).
-
-<p className="msb-label">Returns</p>
-
-`Promise<Snapshot>`
 
 ## RegistryConfigBuilder
 
@@ -3133,7 +2816,7 @@ One stable, newest-first page returned by [`Sandbox.list()`](#sandbox-list) or [
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `sandboxes` | `SandboxHandle[]` | Handles in this page |
+| `sandboxes` | `Sandbox[]` | Unprepared Sandbox resources in this page |
 | `nextCursor` | `string \| undefined` | Opaque continuation cursor, absent on the final page |
 
 ### SandboxModificationPlan
@@ -3269,7 +2952,7 @@ Observed terminal sandbox state returned by [`waitUntilStopped()`](#sandbox-wait
 
 ### SandboxStatus
 
-<p className="msb-backref">Used by <a href="#sandboxhandle">SandboxHandle.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
+<p className="msb-backref">Used by <a href="#sandbox">Sandbox.status</a> · <a href="#sandboxstopresult">SandboxStopResult.status</a></p>
 
 Current lifecycle state of a sandbox. String literal type.
 

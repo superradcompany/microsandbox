@@ -85,7 +85,7 @@ const output = await sandbox.shell("echo 'Hello from microsandbox!'");
 console.log(output.stdout().trim());
 ```
 
-`await using` calls `Sandbox.stop()` when the handle leaves scope. Use a plain `const sandbox = ...` and call lifecycle methods yourself when you need finer control.
+`await using` awaits shutdown of its owned local run and exposes cleanup errors. Detached, independently connected, and remote runs are not stopped. If both the body and cleanup fail, `SuppressedError` retains both. Use `sandbox.detach()` to relinquish automatic cleanup while keeping the object usable.
 
 ### Reusable Lifecycle Convergence
 
@@ -98,10 +98,10 @@ const sandbox = await Sandbox.builder("worker")
   .connectOrCreate();
 
 console.log(`${sandbox.name}: ${sandbox.id}`);
-const running = await (await Sandbox.get("worker")).connectOrStart();
+const running = await Sandbox.getRunning("worker");
 await running.requestStop();
-const stopped = await running.waitForStatus("stopped");
-const restarted = await stopped.restart();
+await running.waitForStatus("stopped");
+const restarted = await running.restart();
 await restarted.destroy();
 ```
 
@@ -127,7 +127,7 @@ for (const entry of result.entries) {
 
 Pruning removes only unused published runtime RAM. Live mappings, retained baselines, and pending handoffs remain protected. Saved snapshots, images, sandbox disks, volumes, and stable lock files are retained. `olderThanSeconds` must be a whole non-negative safe integer; the default is zero. `dryRun` defaults to false. The SDK does not prompt for confirmation, and each apply call rechecks ownership. Individual failures remain in `entries` alongside completed removals; `physicalBytesReclaimed` is unknown (`null`). Cloud backends reject these local-only operations. Each call captures its backend before returning the promise; changing the default while it runs cannot redirect it. An older native addon without these methods raises `UnsupportedOperationError` when they are called.
 
-`SandboxHandle.storageUsage()`, `Snapshot.storageUsage()`, and `SnapshotHandle.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. Snapshot records returned by `Snapshot.list()` contain metadata only; fetch a native handle with `Snapshot.get()` before inspecting its storage.
+`Sandbox.storageUsage()` and `Snapshot.storageUsage()` report one object using its captured backend, with the same bigint byte fields and null unknowns. `Snapshot.get()` and `Snapshot.list()` return operational `Snapshot` objects retaining their context; descriptor inspection is lazy and awaitable.
 
 ## Common Examples
 
@@ -305,10 +305,11 @@ const sandbox = await Sandbox.builder("ts-readme-background")
   .detached(true)
   .replace()
   .create();
-await sandbox.detach();
+// Detached creation already relinquishes automatic shutdown.
 
 const handle = await Sandbox.get("ts-readme-background");
-const reconnected = await handle.connect();
+await handle.ensureRunning();
+const reconnected = handle;
 const output = await reconnected.shell("echo reconnected");
 console.log(output.stdout().trim());
 ```

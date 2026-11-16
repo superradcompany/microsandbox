@@ -1,7 +1,6 @@
 //! Direct local execution forking without a durable full snapshot.
 
 use clap::Args;
-use microsandbox::Sandbox;
 
 use crate::ui;
 
@@ -45,7 +44,7 @@ pub struct BranchArgs {
 
 /// Fork source execution. The child's CoW memory is inherent to this operation.
 pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
-    let source = Sandbox::get(&args.source).await?;
+    let source = crate::commands::common::sandbox_record(&args.source).await?;
     if !args.names.is_empty() {
         let mut builder = args
             .resources
@@ -62,7 +61,7 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
                     if !args.quiet {
                         ui::success("Forked", child.name());
                     }
-                    child.detach().await;
+                    child.detach().await?;
                 }
                 Err(error) => {
                     failed += 1;
@@ -100,7 +99,7 @@ pub async fn run(args: BranchArgs) -> anyhow::Result<()> {
     if !args.quiet {
         ui::success("Forked", child.name());
     }
-    child.detach().await;
+    child.detach().await?;
     Ok(())
 }
 

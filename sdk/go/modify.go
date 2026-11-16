@@ -216,23 +216,6 @@ func (s *Sandbox) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModif
 	return parseModificationPlan(out)
 }
 
-// Modify plans or applies a sandbox modification by name. It does not start
-// stopped sandboxes; next-start changes persist for the next boot.
-func (h *SandboxHandle) Modify(ctx context.Context, opts ModifyOptions) (*SandboxModificationPlan, error) {
-	if err := requireModifyCapabilities(opts); err != nil {
-		return nil, err
-	}
-	payload, err := buildModifyRequestJSON(opts)
-	if err != nil {
-		return nil, err
-	}
-	out, err := ffi.ModifySandboxByName(ctx, h.name, payload)
-	if err != nil {
-		return nil, wrapFFI(err)
-	}
-	return parseModificationPlan(out)
-}
-
 // requireModifyCapabilities rejects options that an older native library
 // would accept but not apply.
 func requireModifyCapabilities(opts ModifyOptions) error {

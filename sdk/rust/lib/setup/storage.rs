@@ -9,9 +9,8 @@ use microsandbox_runtime::checkpoint::migration::{self, Inspection, MigrationSta
 use sea_orm::sqlx::{self, Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use serde::{Deserialize, Serialize};
 
-use crate::backend::BackendKind;
-use crate::config::backend::BackendSelection;
 use crate::config::{GlobalConfig, GlobalConfigPatch, layers::BackendConfig};
+use crate::context::ContextKind;
 use crate::{MicrosandboxError, MicrosandboxResult, SandboxConfig};
 
 //--------------------------------------------------------------------------------------------------
@@ -144,7 +143,7 @@ impl StorageDiagnosis {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-/// Inspect explicitly selected local sandbox storage without opening a `LocalBackend`.
+/// Inspect explicitly selected local sandbox storage without opening a `LocalContext`.
 ///
 /// Resolves ordinary settings and managed policy without downloading or launching a runtime.
 /// No catalog records, migration history, permissions, guards, configuration or disk contents
@@ -159,31 +158,35 @@ pub async fn diagnose_storage(
     diagnose_resolved(sources.resolved_config(), selection).await
 }
 
+/// Inspect a captured local destination without opening or migrating its catalog.
+#[doc(hidden)]
+pub async fn diagnose_storage_in(
+    context: &dyn crate::Context,
+    options: GlobalConfigPatch,
+    selection: StorageSelection,
+) -> MicrosandboxResult<StorageDiagnosis> {
+    let sources = inspection_config_in(context, options)?;
+    diagnose_resolved(sources.resolved_config(), selection).await
+}
+
 fn inspection_config(options: GlobalConfigPatch) -> MicrosandboxResult<BackendConfig> {
-    let (source, sources) = if let Some(captured) = crate::backend::initialized_backend_config()? {
-        if captured.info.kind != BackendKind::Local {
-            return Err(diagnostic_error(
-                "storage diagnostics are local-only; select the intended local backend",
-            ));
-        }
-        let sources = captured.config.ok_or_else(|| {
-            diagnostic_error("storage diagnostics require a local backend with captured settings")
-        })?;
-        (
-            captured.info.source,
-            sources.apply_operation_patch(options)?,
-        )
-    } else {
-        let (selection, source, sources) =
-            BackendSelection::inspect(&crate::config::config_path())?;
-        if !matches!(selection, BackendSelection::Local { .. }) {
-            return Err(diagnostic_error(
-                "storage diagnostics are local-only; select the intended local backend",
-            ));
-        }
-        (source, sources.prepare_for_local_backend(options)?)
-    };
-    sources.require_backend(BackendKind::Local, Some(source))?;
+    inspection_config_in(crate::context::default_local_context().as_ref(), options)
+}
+
+fn inspection_config_in(
+    context: &dyn crate::Context,
+    options: GlobalConfigPatch,
+) -> MicrosandboxResult<BackendConfig> {
+    let info = context.info()?;
+    let sources = BackendConfig::for_backend(context)
+        .ok_or_else(|| diagnostic_error("storage diagnostics require a local context"))?;
+    if info.kind != ContextKind::Local {
+        return Err(diagnostic_error(
+            "storage diagnostics require a local context",
+        ));
+    }
+    let sources = sources.clone().apply_operation_patch(options)?;
+    sources.require_backend(ContextKind::Local, Some(info.source))?;
     Ok(sources)
 }
 
@@ -573,5 +576,8 @@ mod storage_alias_catalog;
 
 #[path = "storage_repair.rs"]
 mod repair;
-pub use repair::{StorageRepairBlocker, storage_repair_blockers, storage_repair_targets};
+pub use repair::{
+    StorageRepairBlocker, storage_repair_blockers, storage_repair_blockers_in,
+    storage_repair_targets,
+};
 pub(crate) use repair::{preview_alias_catalog, preview_target};

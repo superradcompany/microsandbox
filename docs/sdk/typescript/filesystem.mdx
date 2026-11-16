@@ -44,6 +44,8 @@ Read the entire contents of a file as raw bytes.
   </div>
 </div>
 
+Filesystem operations prepare their receiving Sandbox on demand, connecting to an existing run or starting a stopped resource. Idle helpers perform no startup and retain no local shutdown owner. Operations fail if the original receiver group has been released; acquire a new Sandbox to begin new work. Active I/O and streams retain the selected local run until completion, failure or cleanup. Explicit stop can still interrupt them.
+
 #### <span className="msb-recv">fs.</span><span className="msb-hn">readToString()</span>
 
 ```typescript

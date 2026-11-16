@@ -9,12 +9,50 @@ See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
+Creation, lookup and list items return the same `Volume` type. Each resource retains its context and stable identity; dropping it does not delete its storage.
+
+#### <span className="msb-recv">vol.</span><span className="msb-hn">id()</span>
+
+```rust
+fn id(&self) -> &VolumeId
+```
+
+Borrow the opaque identity without I/O. Removing and recreating a name creates a different resource identity. Identities are interpreted within their retained context.
+
+#### <span className="msb-recv">vol.</span><span className="msb-hn">context()</span>
+
+```rust
+fn context(&self) -> &dyn Context
+```
+
+Borrow the retained destination without I/O or allocation.
+
+#### <span className="msb-recv">Volume::</span><span className="msb-hn">ctx()</span>
+
+```rust
+fn ctx(context: &dyn Context) -> Volumes
+```
+
+Select an explicit destination. The returned collection, builders and resources retain the context's shared state.
+
+<Accordion title="Example: explicit destination">
+
+```rust
+use microsandbox::{Context, Volume};
+
+let volumes = Volume::ctx(&remote);
+let volume = volumes.builder("cache").create().await?;
+volume.destroy().await?;
+```
+
+</Accordion>
+
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get_default()</span>
 
 <Tooltip tip="Available only on microsandbox cloud; the local backend has no default volume."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
-async fn get_default() -> MicrosandboxResult<VolumeHandle>
+async fn get_default() -> MicrosandboxResult<Volume>
 ```
 
 Get the Cloud account's always-present default volume. It has no user-assigned name, cannot be removed, and supports direct filesystem operations through `.fs()`. The local backend returns a typed `Unsupported` error; it never substitutes a directory from the caller's machine.
@@ -22,7 +60,8 @@ Get the Cloud account's always-present default volume. It has no user-assigned n
 <Accordion title="Example">
 
 ```rust
-let volume = Volume::get_default().await?;
+let remote = RemoteContext::from_env()?;
+let volume = remote.volumes().get_default().await?;
 volume.fs().write("customers/acme.json", br#"{"active":true}"#).await?;
 println!("{}", volume.fs().read_to_string("customers/acme.json").await?);
 ```
@@ -111,19 +150,19 @@ Provision a volume from a [`VolumeConfig`](#volumespec). Routes through the acti
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">get()</span>
 
 ```rust
-async fn get(name: &str) -> MicrosandboxResult<VolumeHandle>
+async fn get(name: &str) -> MicrosandboxResult<Volume>
 ```
 
 <Accordion title="Example">
 
 ```rust
 let h = Volume::get("pip-cache").await?;
-println!("{} - {} bytes used", h.name(), h.used_bytes());
+println!("{} - {:?} bytes used", h.name(), h.used_bytes().await?);
 ```
 
 </Accordion>
 
-Get a handle to an existing named volume. Use the handle to access the volume's filesystem from the host, read its metadata, or delete it. Fails with `VolumeNotFound` if no volume by that name exists.
+Get an existing named volume. Use the resource to access the volume's filesystem from the host, read its metadata, or delete it. Fails with `VolumeNotFound` if no volume by that name exists.
 
 <p className="msb-label">Parameters</p>
 
@@ -138,15 +177,15 @@ Get a handle to an existing named volume. Use the handle to access the volume's 
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">VolumeHandle</a></div>
-    <div className="msb-param-desc">Handle for host-side operations.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Volume</a></div>
+    <div className="msb-param-desc">Volume for host-side operations.</div>
   </div>
 </div>
 
 #### <span className="msb-recv">Volume::</span><span className="msb-hn">list()</span>
 
 ```rust
-async fn list() -> MicrosandboxResult<Vec<VolumeHandle>>
+async fn list() -> MicrosandboxResult<Vec<Volume>>
 ```
 
 <Accordion title="Example">
@@ -165,8 +204,8 @@ List all named volumes, newest first.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumehandle">Vec&lt;VolumeHandle&gt;</a></div>
-    <div className="msb-param-desc">All volume handles.</div>
+    <div className="msb-param-key"><a className="msb-type" href="#volume">Vec&lt;Volume&gt;</a></div>
+    <div className="msb-param-desc">All volumes.</div>
   </div>
 </div>
 
@@ -305,7 +344,7 @@ Host path to the managed raw disk image (`disk.raw`) for disk volumes. Returns `
 #### <span className="msb-recv">vol.</span><span className="msb-hn">capacity_bytes()</span>
 
 ```rust
-fn capacity_bytes(&self) -> Option<u64>
+async fn capacity_bytes(&self) -> MicrosandboxResult<Option<u64>>
 ```
 
 Disk capacity in bytes for disk volumes. `None` for directory volumes.
@@ -353,20 +392,20 @@ Inner disk filesystem type for disk volumes (always `"ext4"` for managed disk vo
   </div>
 </div>
 
-#### <span className="msb-recv">vol.</span><span className="msb-hn">backend_kind()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">context_kind()</span>
 
 ```rust
-fn backend_kind(&self) -> BackendKind
+fn context_kind(&self) -> ContextKind
 ```
 
-Which backend variant this volume is bound to: `Local` or `Cloud`.
+Which backend variant this volume is bound to: `Local` or `Remote`.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">BackendKind</span></div>
-    <div className="msb-param-desc"><code>Local</code> or <code>Cloud</code>.</div>
+    <div className="msb-param-key"><span className="msb-type">ContextKind</span></div>
+    <div className="msb-param-desc"><code>Local</code> or <code>Remote</code>.</div>
   </div>
 </div>
 
@@ -408,109 +447,52 @@ Returns `Some` for cloud-backed volumes and `None` otherwise.
   </div>
 </div>
 
-## VolumeHandle
-
-<p className="msb-backref">Returned by <a href="#volumeget">Volume::get()</a> · <a href="#volumelist">Volume::list()</a></p>
-
-A metadata and lifecycle handle for a named volume.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">name()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">destroy()</span>
 
 ```rust
-fn name(&self) -> &str
-```
-
-The unique name identifying this volume.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">&amp;str</span></div>
-    <div className="msb-param-desc">Volume name.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">kind()</span>
-
-```rust
-fn kind(&self) -> VolumeKind
-```
-
-The storage kind. See [`VolumeKind`](#volumekind).
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumekind">VolumeKind</a></div>
-    <div className="msb-param-desc">Storage kind.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">fs()</span>
-
-```rust
-fn fs(&self) -> VolumeFs<'_>
+async fn destroy(&self) -> MicrosandboxResult<()>
 ```
 
 <Accordion title="Example">
 
 ```rust
-let h = Volume::get("pip-cache").await?;
-let names = h.fs().list("/").await?;
+Volume::get("pip-cache").await?.destroy().await?;
 ```
 
 </Accordion>
 
-Get a filesystem handle for reading and writing the volume's files directly, without a running sandbox. See [`VolumeFs`](#volumefs).
+Delete this volume and its contents using its captured identity and context. A replacement with the same name is left untouched. Local removal retains its database record until filesystem cleanup succeeds, so interrupted cleanup can be retried.
 
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><a className="msb-type" href="#volumefs">VolumeFs</a></div>
-    <div className="msb-param-desc">Filesystem handle.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">remove()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">used_bytes()</span>
 
 ```rust
-async fn remove(&self) -> MicrosandboxResult<()>
+async fn used_bytes(&self) -> MicrosandboxResult<Option<u64>>
 ```
 
-<Accordion title="Example">
-
-```rust
-Volume::get("pip-cache").await?.remove().await?;
-```
-
-</Accordion>
-
-Delete this volume and its contents. Locally the database record is removed first, then the directory.
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">used_bytes()</span>
-
-```rust
-fn used_bytes(&self) -> u64
-```
-
-Disk usage snapshot from when this handle was created. Not live; call [`Volume::get()`](#volumeget) again for a fresh reading.
+Fetch fresh provider-reported disk usage. `None` means the provider has no measurement.
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
     <div className="msb-param-key"><span className="msb-type">u64</span></div>
-    <div className="msb-param-desc">Bytes used at handle-creation time.</div>
+    <div className="msb-param-desc">Current reported usage, when available.</div>
   </div>
 </div>
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">quota_mib()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">info()</span>
 
 ```rust
-fn quota_mib(&self) -> Option<u32>
+let info = vol.info().await?;
+println!("{:?}: {:?} bytes", info.labels, info.used_bytes);
+```
+
+Fetch mutable metadata together for the captured identity. Each call reads the backend and returns lookup errors rather than captured data. Quota, usage, capacity, and label convenience methods are also asynchronous. Use `info()` to avoid observations from separate moments.
+
+#### <span className="msb-recv">vol.</span><span className="msb-hn">quota_mib()</span>
+
+```rust
+async fn quota_mib(&self) -> MicrosandboxResult<Option<u32>>
 ```
 
 Maximum storage in MiB, or `None` if unlimited.
@@ -524,78 +506,10 @@ Maximum storage in MiB, or `None` if unlimited.
   </div>
 </div>
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">capacity_bytes()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">labels()</span>
 
 ```rust
-fn capacity_bytes(&self) -> Option<u64>
-```
-
-Disk capacity in bytes for disk volumes. `None` for directory volumes.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;u64&gt;</span></div>
-    <div className="msb-param-desc">Capacity in bytes, or <code>None</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">disk_format()</span>
-
-```rust
-fn disk_format(&self) -> Option<&str>
-```
-
-Disk image format for disk volumes. `None` for directory volumes.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;str&gt;</span></div>
-    <div className="msb-param-desc">Format string, or <code>None</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">disk_fstype()</span>
-
-```rust
-fn disk_fstype(&self) -> Option<&str>
-```
-
-Inner disk filesystem type for disk volumes. `None` for directory volumes.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;str&gt;</span></div>
-    <div className="msb-param-desc">Filesystem type, or <code>None</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">disk_path()</span>
-
-```rust
-fn disk_path(&self) -> Option<PathBuf>
-```
-
-Host path to the managed raw disk image (`disk.raw`) for local disk volumes. `None` otherwise.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;PathBuf&gt;</span></div>
-    <div className="msb-param-desc">Path to <code>disk.raw</code>, or <code>None</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">labels()</span>
-
-```rust
-fn labels(&self) -> &[(String, String)]
+async fn labels(&self) -> MicrosandboxResult<Vec<(String, String)>>
 ```
 
 Key-value labels for organizing and filtering volumes.
@@ -609,7 +523,7 @@ Key-value labels for organizing and filtering volumes.
   </div>
 </div>
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">created_at()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">created_at()</span>
 
 ```rust
 fn created_at(&self) -> Option<DateTime<Utc>>
@@ -626,66 +540,11 @@ When this volume was first created, if recorded.
   </div>
 </div>
 
-#### <span className="msb-recv">h.</span><span className="msb-hn">backend_kind()</span>
-
-```rust
-fn backend_kind(&self) -> BackendKind
-```
-
-Which backend variant this handle is bound to: `Local` or `Cloud`.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">BackendKind</span></div>
-    <div className="msb-param-desc"><code>Local</code> or <code>Cloud</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">local()</span>
-
-<Tooltip tip="Returns state only for local-backed volume handles; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```rust
-fn local(&self) -> Option<&VolumeHandleLocalState>
-```
-
-Returns `Some` for local-backed handles and `None` otherwise.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;VolumeHandleLocalState&gt;</span></div>
-    <div className="msb-param-desc">Local state, or <code>None</code>.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">h.</span><span className="msb-hn">cloud()</span>
-
-<Tooltip tip="Returns state only for cloud-backed volume handles; None on the local backend."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
-
-```rust
-fn cloud(&self) -> Option<&VolumeHandleCloudState>
-```
-
-Returns `Some` for cloud-backed handles and `None` otherwise.
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;VolumeHandleCloudState&gt;</span></div>
-    <div className="msb-param-desc">Cloud state, or <code>None</code>.</div>
-  </div>
-</div>
-
 ## VolumeFs
 
 Local operations remain confined to the opened volume directory, including symlink traversal, missing parents, streams, copy, rename, and recursive deletion. Paths that leave the volume return an error. A leading `/` denotes the volume root; valid in-volume parent components and symlinks keep their meaning. Removing or renaming the volume root is refused.
 
-<p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a> · <a href="#h-fs">VolumeHandle::fs()</a></p>
+<p className="msb-backref">Returned by <a href="#vol-fs">Volume::fs()</a></p>
 
 Host-side filesystem operations for a named volume.
 
@@ -1732,7 +1591,7 @@ Flush and close
 
 Storage kind for a named volume.
 
-<p className="msb-backref">Returned by <a href="#vol-kind">Volume::kind()</a> · <a href="#h-kind">VolumeHandle::kind()</a></p>
+<p className="msb-backref">Returned by <a href="#vol-kind">Volume::kind()</a></p>
 
 | Variant | Description |
 |---------|-------------|

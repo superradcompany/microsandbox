@@ -14,7 +14,7 @@ from microsandbox import ExecTimeoutError, JobError, Sandbox, Stdin
     reason="requires an isolated MSB_HOME and running MSB_JOB_TEST_SANDBOX",
 )
 async def test_managed_job_ownership_io_and_cancellation():
-    sandbox = await (await Sandbox.get(os.environ["MSB_JOB_TEST_SANDBOX"])).connect()
+    sandbox = await Sandbox.get(os.environ["MSB_JOB_TEST_SANDBOX"])
     jobs = []
     attachments = []
     try:
@@ -97,7 +97,7 @@ async def test_managed_job_ownership_io_and_cancellation():
     reason="requires an isolated MSB_HOME and running MSB_JOB_TEST_SANDBOX",
 )
 async def test_stream_timeout_without_output_polling():
-    sandbox = await (await Sandbox.get(os.environ["MSB_JOB_TEST_SANDBOX"])).connect()
+    sandbox = await Sandbox.get(os.environ["MSB_JOB_TEST_SANDBOX"])
     async with asyncio.timeout(20):
         for tty in [False, True]:
             handle = await sandbox.exec_stream("sleep", ["30"], timeout=0.5, tty=tty)

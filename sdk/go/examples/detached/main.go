@@ -70,8 +70,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("ListSandboxes: %v", err)
 	}
-	var found *microsandbox.SandboxHandle
+	var found *microsandbox.Sandbox
 	for _, h := range page.Sandboxes {
+		defer h.Close()
 		if h.Name() == name {
 			found = h
 			break
@@ -80,17 +81,19 @@ func main() {
 	if found == nil {
 		log.Fatalf("sandbox %q missing from ListSandboxes after detach", name)
 	}
-	fmt.Printf("  ListSandboxes: still present (status=%s, created=%s)\n",
-		found.Status(), found.CreatedAt().Format(time.RFC3339))
+	info, err := found.Info(ctx)
+	if err != nil {
+		log.Fatalf("Info: %v", err)
+	}
+	fmt.Printf("  ListSandboxes: still present (status=%s, created=%v)\n", info.Status, info.CreatedAt)
 
-	// Reattach via GetSandbox + Connect.
-	h, err := microsandbox.GetSandbox(ctx, name)
+	// Get the same resource and prepare it explicitly. Shell also prepares on demand.
+	sb2, err := microsandbox.GetSandbox(ctx, name)
 	if err != nil {
 		log.Fatalf("GetSandbox: %v", err)
 	}
-	sb2, err := h.Connect(ctx)
-	if err != nil {
-		log.Fatalf("Connect: %v", err)
+	if err := sb2.EnsureRunning(ctx); err != nil {
+		log.Fatalf("EnsureRunning: %v", err)
 	}
 	defer func() {
 		stopCtx, c := context.WithTimeout(context.Background(), 30*time.Second)

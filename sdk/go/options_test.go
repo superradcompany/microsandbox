@@ -1150,7 +1150,7 @@ func TestForkOptionsKeepBranchAliases(t *testing.T) {
 	}
 	// Deprecated option aliases remain assignable to the fork method types.
 	var _ func(*Sandbox, context.Context, string, ...BranchOption) (*Sandbox, error) = (*Sandbox).Fork
-	var _ func(*SandboxHandle, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*SandboxHandle).ForkMany
+	var _ func(*Sandbox, context.Context, []string, ...BranchOption) ([]BranchOutcome, error) = (*Sandbox).ForkMany
 	if _, ok := reflect.TypeOf(RestoreConfig{}).FieldByName("Forked"); !ok {
 		t.Fatal("restore lost the deprecated Forked field")
 	}

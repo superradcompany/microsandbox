@@ -102,7 +102,7 @@ func runConcurrencyChecks(
 	if err = raced[0].Stop(ctx); err != nil {
 		return err
 	}
-	handles := make([]*microsandbox.SandboxHandle, len(candidates))
+	handles := make([]*microsandbox.Sandbox, len(candidates))
 	for index := range handles {
 		handles[index], err = microsandbox.GetSandbox(ctx, raceName)
 		if err != nil {
@@ -118,7 +118,8 @@ func runConcurrencyChecks(
 		go func() {
 			defer group.Done()
 			<-start
-			connected[index], errs[index] = handles[index].ConnectOrStart(ctx)
+			connected[index] = handles[index]
+			errs[index] = connected[index].EnsureRunning(ctx)
 		}()
 	}
 	close(start)
@@ -143,8 +144,12 @@ func runConcurrencyChecks(
 		return err
 	}
 	started = time.Now()
-	detached, err := handles[0].ConnectOrStart(ctx, microsandbox.WithConnectOrStartDetached())
+	detached := handles[0]
+	err = detached.EnsureRunning(ctx)
 	if err != nil {
+		return err
+	}
+	if err := detached.Detach(ctx); err != nil {
 		return err
 	}
 	*live = append(*live, detached)
@@ -257,7 +262,8 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 		return nil, err
 	}
 	started = time.Now()
-	connected, err := handle.ConnectOrStart(ctx)
+	connected := handle
+	err = connected.EnsureRunning(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +274,7 @@ func run(ctx context.Context, name, image, platform string) (_ *Metrics, err err
 	}
 
 	started = time.Now()
-	if _, err = connected.WaitForStatus(ctx, microsandbox.SandboxStatusRunning); err != nil {
+	if err = connected.WaitForStatus(ctx, microsandbox.SandboxStatusRunning); err != nil {
 		return nil, err
 	}
 	timings["wait_for_running"] = elapsedMS(started)

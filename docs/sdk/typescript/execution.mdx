@@ -476,7 +476,7 @@ Take ownership of the stdin sink. Returns `null` after the first call
 wait()
 ```
 
-Wait for the process to exit
+Wait for the process to exit, discarding remaining output. After `wait()`, `collect()`, `recv()`, or event iteration observes completion, later waits return the recorded status or reject with the recorded terminal execution error. The command is not rerun and output is not replayed. A nonzero exit remains an exit status. An interrupted observer or lost transport does not establish that the command finished.
 
 <p className="msb-label">Returns</p>
 
@@ -488,7 +488,7 @@ Wait for the process to exit
 collect()
 ```
 
-Drain stdout/stderr and wait for exit
+Drain stdout/stderr and wait for exit. The terminal outcome remains available to `wait()` afterward; output is not retained for replay.
 
 <p className="msb-label">Returns</p>
 
@@ -1023,7 +1023,7 @@ Configure detached execution with the existing execution builder. `stdinNull()` 
 getJob(id: string): Promise<Job>
 ```
 
-Look up a sandbox-scoped job. Available on `Sandbox` and `SandboxHandle`.
+Look up a sandbox-scoped job. Available on `Sandbox` and `Sandbox`.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobs()</span>
 
@@ -1031,7 +1031,7 @@ Look up a sandbox-scoped job. Available on `Sandbox` and `SandboxHandle`.
 listJobs(): Promise<JobPage>
 ```
 
-List active jobs. Available on `Sandbox` and `SandboxHandle`.
+List active jobs. Available on `Sandbox` and `Sandbox`.
 
 #### <span className="msb-recv">sandbox.</span><span className="msb-hn">listJobsWith()</span>
 
@@ -1039,7 +1039,7 @@ List active jobs. Available on `Sandbox` and `SandboxHandle`.
 listJobsWith(configure: (b: JobListBuilder) => JobListBuilder): Promise<JobPage>
 ```
 
-Configure pagination or include retained completed jobs. Available on `Sandbox` and `SandboxHandle`.
+Configure pagination or include retained completed jobs. Available on `Sandbox` and `Sandbox`.
 
 ### Job
 

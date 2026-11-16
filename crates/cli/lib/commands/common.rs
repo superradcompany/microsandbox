@@ -1,17 +1,17 @@
 //! Common sandbox configuration flags shared between commands.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Args, Command, FromArgMatches};
 #[cfg(feature = "net")]
 use microsandbox::OutboundProxy;
 use microsandbox::VolumeKind;
-use microsandbox::backend::{Backend, LocalBackend};
+use microsandbox::context::{Context, LocalContext};
 use microsandbox::sandbox::{
     CpuPlacement, DeploymentProfile, DiskImageFormat, FlatClone, GuestClockPolicy, MountBuilder,
-    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxHandle, SecurityProfile,
+    Patch, RootDiskBuilder, Sandbox, SandboxBuilder, SandboxRecord, SecurityProfile,
     TransparentHugePagePolicy, VolumeMount, VsockSocketType,
 };
 #[cfg(feature = "net")]
@@ -25,19 +25,46 @@ use microsandbox_types::SecretSubstitution;
 use crate::ui;
 
 //--------------------------------------------------------------------------------------------------
-// Functions: Backend resolution
+// Constants
 //--------------------------------------------------------------------------------------------------
+
+static CLI_CONTEXT: OnceLock<Arc<dyn Context>> = OnceLock::new();
+
+//--------------------------------------------------------------------------------------------------
+// Functions: Context resolution
+//--------------------------------------------------------------------------------------------------
+
+/// Install the command destination once, after fallible profile resolution in main.
+pub fn set_cli_context(context: Arc<dyn Context>) -> microsandbox::MicrosandboxResult<()> {
+    CLI_CONTEXT.set(context).map_err(|_| {
+        microsandbox::MicrosandboxError::InvalidConfig("CLI context was already initialized".into())
+    })
+}
+
+/// Borrow the command's captured destination. Direct library callers resolve explicitly.
+pub fn selected_context() -> microsandbox::MicrosandboxResult<Arc<dyn Context>> {
+    match CLI_CONTEXT.get() {
+        Some(context) => Ok(context.clone()),
+        None => microsandbox::resolve_default_backend(),
+    }
+}
+
+/// Read a provider observation for CLI inspection and explicit lifecycle commands.
+pub(crate) async fn sandbox_record(name: &str) -> microsandbox::MicrosandboxResult<SandboxRecord> {
+    let context = crate::commands::common::selected_context()?;
+    context.sandbox_ops().get(context.clone(), name).await
+}
 
 /// Resolve the process-wide local backend exactly once at the CLI entry point.
 ///
 /// CLI commands always operate against the active default backend. Returns
-/// an `Arc<dyn Backend>` plus a borrow of the `LocalBackend` inside it so
+/// an `Arc<dyn Context>` plus a borrow of the `LocalContext` inside it so
 /// callers can dispatch through either the trait or the local-only APIs.
 /// Errors when the resolved default backend isn't a local one (e.g. when
 /// the user has installed a cloud profile but is running a local-only
 /// command).
-pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
-    let backend = microsandbox::backend::default_backend();
+pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Context>> {
+    let backend = crate::commands::common::selected_context()?;
     if backend.as_local().is_none() {
         anyhow::bail!(
             "this command requires a local backend, but the active default is a cloud backend"
@@ -48,8 +75,13 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Backend>> {
 
 /// Display relaxed-restore diagnostics even when ordinary progress is quiet.
 pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
-    if !sandbox.config().resumed_from_full_snapshot() {
-        return;
+    match sandbox.config().await {
+        Ok(config) if !config.resumed_from_full_snapshot() => return,
+        Ok(_) => {}
+        Err(error) => {
+            ui::warn(&format!("could not inspect restore configuration: {error}"));
+            return;
+        }
     }
     match sandbox.restore_warnings().await {
         Ok(warnings) => {
@@ -66,8 +98,8 @@ pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
     }
 }
 
-/// Borrow the `LocalBackend` inside the resolved default backend, or error.
-pub fn local_backend_ref(backend: &Arc<dyn Backend>) -> anyhow::Result<&LocalBackend> {
+/// Borrow the `LocalContext` inside the resolved default backend, or error.
+pub fn local_backend_ref(backend: &Arc<dyn Context>) -> anyhow::Result<&LocalContext> {
     backend
         .as_local()
         .ok_or_else(|| anyhow::anyhow!("this command requires a local backend"))
@@ -3657,20 +3689,21 @@ pub fn parse_label_selectors(labels: &[String]) -> Vec<(String, String)> {
 }
 
 /// List every page of sandboxes matching repeatable `--label KEY[=VALUE]` selectors.
-pub async fn list_sandboxes(labels: &[String]) -> anyhow::Result<Vec<SandboxHandle>> {
+pub async fn list_sandboxes(labels: &[String]) -> anyhow::Result<Vec<SandboxRecord>> {
     let labels = parse_label_selectors(labels);
     let mut cursor: Option<String> = None;
     let mut sandboxes = Vec::new();
 
     loop {
-        let page = Sandbox::list_with(|list| {
-            let list = list.limit(100).labels(labels.clone());
-            match cursor.as_ref() {
-                Some(cursor) => list.cursor(cursor.clone()),
-                None => list,
-            }
-        })
-        .await?;
+        let context = crate::commands::common::selected_context()?;
+        let query = microsandbox::SandboxListBuilder::default()
+            .limit(100)
+            .labels(labels.clone());
+        let query = match cursor.as_ref() {
+            Some(cursor) => query.cursor(cursor.clone()),
+            None => query,
+        };
+        let page = context.sandbox_ops().list(context.clone(), query).await?;
         sandboxes.extend(page.sandboxes);
 
         match page.next_cursor {

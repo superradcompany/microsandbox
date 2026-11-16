@@ -14,8 +14,8 @@ use microsandbox_types::{EnvVar, RootDisk, RootfsSource};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, sea_query::Expr};
 
 #[cfg(feature = "local")]
-use crate::backend::local::creation::{self, CreationStorage};
-use crate::backend::{Backend, ControlSession};
+use crate::context::local::creation::{self, CreationStorage};
+use crate::context::{Context, ControlSession};
 use crate::db::entity::{sandbox as sandbox_entity, sandbox_label as sandbox_label_entity};
 use crate::error::{Operation, UnsupportedReason};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -334,7 +334,7 @@ pub(super) async fn dry_run(
 ) -> MicrosandboxResult<SandboxModificationPlan> {
     let handle = builder
         .backend
-        .sandboxes()
+        .sandbox_ops()
         .get(builder.backend.clone(), &builder.name)
         .await?;
     let status = handle.status_snapshot();
@@ -378,7 +378,7 @@ pub(super) async fn apply(
 ) -> MicrosandboxResult<SandboxModificationPlan> {
     let handle = builder
         .backend
-        .sandboxes()
+        .sandbox_ops()
         .get(builder.backend.clone(), &builder.name)
         .await?;
 
@@ -391,7 +391,7 @@ pub(super) async fn apply(
     let mut config = handle.config()?;
     // A failed restore can still own staged immutable lower layers. Do not let
     // offline disk growth or a restart-backed modification bypass its launch gate.
-    crate::LocalBackend::validate_completed_restore(&config)?;
+    crate::LocalContext::validate_completed_restore(&config)?;
     let mut active = handle.active_config().ok().flatten();
     let mut active_json = handle.active_config_json().map(str::to_owned);
     let (live, session) = live_control(
@@ -781,7 +781,7 @@ fn root_disk_grow_target(
 
 /// Grow the sandbox-owned layered upper or flat root disk while it is stopped.
 async fn grow_root_disk_now(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     expected_id: i32,
     config: &SandboxConfig,
@@ -793,7 +793,7 @@ async fn grow_root_disk_now(
             UnsupportedReason::LocalOnly,
         )
     })?;
-    let transition = crate::LocalBackend::acquire_sandbox_transition_guard(
+    let transition = crate::LocalContext::acquire_sandbox_transition_guard(
         &local_backend.config().run_dir(),
         name,
     )
@@ -876,7 +876,7 @@ async fn grow_root_disk_now(
 
 /// Discover which live-control operations the running sandbox serves.
 async fn live_control(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     name: &str,
     status: SandboxStatus,
     patch: &SandboxModificationPatch,
@@ -1219,8 +1219,8 @@ fn resolve_secret_source_value(
 /// `expected_json`; otherwise the transaction rolls back and returns
 /// [`MicrosandboxError::ControlStateChanged`].
 async fn persist_config(
-    backend: &Arc<dyn Backend>,
-    handle: &crate::sandbox::SandboxHandle,
+    backend: &Arc<dyn Context>,
+    handle: &crate::sandbox::SandboxRecord,
     config: &SandboxConfig,
     active_labels: Option<ActiveLabelsUpdate>,
 ) -> MicrosandboxResult<()> {
@@ -1309,7 +1309,7 @@ async fn persist_config(
 /// Save the running config through its control session and advance the expected JSON.
 /// The session checks that the run and previously observed config still match.
 async fn persist_active_config(
-    backend: &Arc<dyn Backend>,
+    backend: &Arc<dyn Context>,
     session: &ControlSession,
     expected: &mut Option<String>,
     active: &SandboxConfig,
@@ -1328,9 +1328,9 @@ async fn persist_active_config(
     Ok(())
 }
 
-async fn start_after_modify(handle: &crate::sandbox::SandboxHandle) -> MicrosandboxResult<()> {
+async fn start_after_modify(handle: &crate::sandbox::SandboxRecord) -> MicrosandboxResult<()> {
     let sandbox = handle.refresh().await?.start_detached().await?;
-    sandbox.detach().await;
+    sandbox.detach().await?;
     Ok(())
 }
 
@@ -2146,18 +2146,17 @@ mod tests {
 
     use super::super::SecretPatchBuilder;
     use super::*;
-    use crate::backend::LocalBackend;
+    use crate::context::LocalContext;
     #[cfg(unix)]
     use crate::db::entity::run;
     use crate::size::SizeExt;
 
-    async fn stopped_growth_fixture() -> (tempfile::TempDir, Arc<LocalBackend>, SandboxConfig, i32)
+    async fn stopped_growth_fixture() -> (tempfile::TempDir, Arc<LocalContext>, SandboxConfig, i32)
     {
         let home = tempdir().unwrap();
         let local = Arc::new(
             crate::test_support::local_backend_builder(home.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let mut config = SandboxConfig::default();
@@ -2190,7 +2189,7 @@ mod tests {
             let owner = microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, "growth")
                 .unwrap()
                 .unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
+            let backend: Arc<dyn Context> = local.clone();
             let expected_id = if change == "identity" { id + 1 } else { id };
             let mut growth = Box::pin(grow_root_disk_now(
                 &backend,
@@ -2260,7 +2259,7 @@ mod tests {
                 microsandbox_runtime::ipc::try_acquire_lifecycle_guard(&run_dir, "growth")
                     .unwrap()
                     .unwrap();
-            let backend: Arc<dyn Backend> = local.clone();
+            let backend: Arc<dyn Context> = local.clone();
             let pending = tokio::spawn(async move {
                 grow_root_disk_now(&backend, "growth", id, &config, 1).await
             });
@@ -2377,7 +2376,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         // No runtime/control endpoint exists: fixed geometry needs no query.
         for cpus in [1, 2, 4] {
@@ -2403,7 +2401,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run_with_status(&local, "api", SandboxStatus::Starting).await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2463,7 +2460,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&local, "api").await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2527,7 +2523,6 @@ mod tests {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&local, "api").await;
         let agent = local.agent_socket_paths("api").remove(0);
@@ -2599,11 +2594,9 @@ mod tests {
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
         let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
-            .await
             .unwrap();
         let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&first, "worker").await;
         seed_control_run(&second, "worker").await;
@@ -2684,11 +2677,9 @@ mod tests {
         let second_home = tempfile::tempdir_in("/tmp").unwrap();
         let first = crate::test_support::local_backend_builder(first_home.path())
             .build()
-            .await
             .unwrap();
         let second = crate::test_support::local_backend_builder(second_home.path())
             .build()
-            .await
             .unwrap();
         seed_control_run(&first, "worker").await;
         seed_control_run(&second, "worker").await;
@@ -2770,10 +2761,9 @@ mod tests {
     #[tokio::test]
     async fn size_setters_accept_bare_mib_and_typed_sizes() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
+        let backend: Arc<dyn Context> = Arc::new(
             crate::test_support::local_backend_builder(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let plain = SandboxModificationBuilder::new(backend.clone(), "size-api")
@@ -2801,11 +2791,11 @@ mod tests {
         config
     }
 
-    async fn seed_control_run(local: &LocalBackend, name: &str) {
+    async fn seed_control_run(local: &LocalContext, name: &str) {
         seed_control_run_with_status(local, name, SandboxStatus::Running).await;
     }
 
-    async fn seed_control_run_with_status(local: &LocalBackend, name: &str, status: SandboxStatus) {
+    async fn seed_control_run_with_status(local: &LocalContext, name: &str, status: SandboxStatus) {
         use crate::db::entity::{run, sandbox};
 
         let db = local.db().await.unwrap();
@@ -2831,15 +2821,15 @@ mod tests {
         .unwrap();
     }
 
-    async fn label_backend(home: &std::path::Path) -> (Arc<LocalBackend>, Arc<dyn Backend>) {
+    async fn label_backend(home: &std::path::Path) -> (Arc<LocalContext>, Arc<dyn Context>) {
         let builder = crate::test_support::local_backend_builder(home);
-        let local = Arc::new(builder.build().await.unwrap());
+        let local = Arc::new(builder.build().unwrap());
         let backend = local.clone();
         (local, backend)
     }
 
     async fn seed_running_labeled(
-        local: &LocalBackend,
+        local: &LocalContext,
         saved: &SandboxConfig,
         active: &SandboxConfig,
     ) -> i32 {
@@ -2872,7 +2862,7 @@ mod tests {
     }
 
     async fn label_copies(
-        local: &LocalBackend,
+        local: &LocalContext,
         sandbox_id: i32,
     ) -> (
         BTreeMap<String, String>,
@@ -2908,13 +2898,12 @@ mod tests {
     #[tokio::test]
     async fn persist_config_replaces_labels_and_preserves_caller_config_overrides() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -2962,7 +2951,7 @@ mod tests {
             ..Default::default()
         });
         let handle = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), &updated.spec.name)
             .await
             .unwrap();
@@ -2998,7 +2987,7 @@ mod tests {
 
         // Reload through the real handle boundary before rebuilding with new defaults.
         let reloaded = backend
-            .sandboxes()
+            .sandbox_ops()
             .get(backend.clone(), &updated.spec.name)
             .await
             .unwrap();
@@ -3046,7 +3035,6 @@ mod tests {
             let local = Arc::new(
                 crate::test_support::local_backend_builder(temp.path())
                     .build()
-                    .await
                     .unwrap(),
             );
             let current = config(2, 1024);
@@ -3085,13 +3073,12 @@ mod tests {
     #[tokio::test]
     async fn modify_rejects_invalid_env_and_saves_nothing() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -3270,7 +3257,7 @@ mod tests {
                 .unwrap();
             let before = label_copies(&local, sandbox_id).await;
             let handle = backend
-                .sandboxes()
+                .sandbox_ops()
                 .get(backend.clone(), &current.spec.name)
                 .await
                 .unwrap();
@@ -4731,13 +4718,12 @@ mod tests {
     #[tokio::test]
     async fn setting_an_invalid_label_key_is_refused_and_nothing_is_saved() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -5192,13 +5178,12 @@ mod tests {
     #[tokio::test]
     async fn applying_stopped_secret_policy_edits_persists_each_option() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();
@@ -5319,7 +5304,7 @@ mod tests {
             .join(microsandbox_utils::libkrunfw_filename(std::env::consts::OS));
         std::fs::write(&library, b"").unwrap();
 
-        let backend: Arc<dyn Backend> =
+        let backend: Arc<dyn Context> =
             Arc::new(crate::test_support::local_backend(GlobalConfig {
                 home: Some(home),
                 paths: PathsConfig {
@@ -6694,13 +6679,12 @@ mod tests {
     #[tokio::test]
     async fn duplicate_secret_names_through_with_patch_are_refused() {
         let temp = tempdir().unwrap();
-        let backend: Arc<dyn Backend> = Arc::new(
-            LocalBackend::builder()
+        let backend: Arc<dyn Context> = Arc::new(
+            LocalContext::builder()
                 .config_path(temp.path().join("config.json"))
                 .managed_config_path(temp.path().join("managed.json"))
                 .home(temp.path())
                 .build()
-                .await
                 .unwrap(),
         );
         let pools = backend.as_local().unwrap().db().await.unwrap();

@@ -11,7 +11,7 @@ See [Images](/images/overview) for image sources and caching behavior.
 
 ## Image
 
-These methods resolve the active backend with `microsandbox::backend::default_backend()`.
+These methods use the default local image cache. Use the corresponding `_local` method with a `LocalContext` to select another local cache.
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get()</span>
 
@@ -145,15 +145,14 @@ Image::save(&references, Path::new("python.tar"), ImageArchiveFormat::Docker).aw
 
 <p className="msb-member-group">Explicit local variants</p>
 
-Use these when your program owns a specific `LocalBackend` and should not depend on the process default backend.
+Use these when your program owns a specific `LocalContext` and should not depend on the process default backend.
 
 ```rust
-use microsandbox::{Image, LocalBackend};
+use microsandbox::{Image, LocalContext};
 
-let backend = LocalBackend::builder()
+let backend = LocalContext::builder()
     .home("/tmp/msb-home")
-    .build()
-    .await?;
+    .build()?;
 
 let image = Image::get_local(&backend, "python:3.12").await?;
 let images = Image::list_local(&backend).await?;
@@ -165,43 +164,43 @@ let report = Image::prune_local(&backend).await?;
 #### <span className="msb-recv">Image::</span><span className="msb-hn">get_local()</span>
 
 ```rust
-async fn get_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageHandle>
+async fn get_local(local: &LocalContext, reference: &str) -> MicrosandboxResult<ImageHandle>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">list_local()</span>
 
 ```rust
-async fn list_local(local: &LocalBackend) -> MicrosandboxResult<Vec<ImageHandle>>
+async fn list_local(local: &LocalContext) -> MicrosandboxResult<Vec<ImageHandle>>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">inspect_local()</span>
 
 ```rust
-async fn inspect_local(local: &LocalBackend, reference: &str) -> MicrosandboxResult<ImageDetail>
+async fn inspect_local(local: &LocalContext, reference: &str) -> MicrosandboxResult<ImageDetail>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">remove_local()</span>
 
 ```rust
-async fn remove_local(local: &LocalBackend, reference: &str, force: bool) -> MicrosandboxResult<()>
+async fn remove_local(local: &LocalContext, reference: &str, force: bool) -> MicrosandboxResult<()>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">prune_local()</span>
 
 ```rust
-async fn prune_local(local: &LocalBackend) -> MicrosandboxResult<ImagePruneReport>
+async fn prune_local(local: &LocalContext) -> MicrosandboxResult<ImagePruneReport>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">load_local()</span>
 
 ```rust
-async fn load_local(local: &LocalBackend, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>
+async fn load_local(local: &LocalContext, input: &Path, tags: Vec<String>) -> MicrosandboxResult<Vec<ImageHandle>>
 ```
 
 #### <span className="msb-recv">Image::</span><span className="msb-hn">save_local()</span>
 
 ```rust
-async fn save_local(local: &LocalBackend, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>
+async fn save_local(local: &LocalContext, references: &[String], output: &Path, format: ImageArchiveFormat) -> MicrosandboxResult<()>
 ```
 
 ## ImageHandle

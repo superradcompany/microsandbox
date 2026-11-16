@@ -6,7 +6,7 @@ keywords: ["microsandbox SDK", "Python SDK", "TypeScript SDK", "Rust SDK", "Go S
 icon: "play"
 ---
 
-The SDK runs microsandbox directly from your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. With an API key set, the same SDK runs sandboxes on [microsandbox cloud](/cloud/overview) instead.
+The SDK runs microsandbox directly from your application. Running locally, creating a sandbox spawns a VM as a child process; there is no daemon to install and no server to connect to. Use an explicit `RemoteContext` to run sandboxes on [microsandbox cloud](/cloud/overview) or another compatible remote API. See [contexts](/operations/backends#sdk-contexts) for destination selection.
 
 ## Installation
 
@@ -37,6 +37,79 @@ gem install microsandbox
 All five SDKs can use a separately provisioned runtime. See [Runtime setup](/sdk/setup#bring-your-own-runtime) for code tabs covering each SDK’s packaging and setup requirements.
 
 </Accordion>
+
+## Select a smaller distribution
+
+The full `microsandbox` package remains available. TypeScript and Python also have separate local and remote packages that include only their selected native binding. These lean packages do not include `msb`, firmware, a runtime launcher, or an automatic runtime download during installation.
+
+For a remote API:
+
+<CodeGroup>
+```bash TypeScript
+npm install @microsandbox/remote
+```
+
+```bash Python
+pip install microsandbox-remote
+```
+</CodeGroup>
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "@microsandbox/remote";
+
+const remote = RemoteContext.builder()
+  .url("https://api.microsandbox.dev")
+  .apiKey(process.env.MSB_API_KEY!)
+  .build();
+const sb = await remote.sandboxes.get("worker");
+console.log(await sb.status());
+```
+
+```python Python
+import asyncio
+import os
+from microsandbox_remote import RemoteContext
+
+async def main():
+    remote = RemoteContext(api_key=os.environ["MSB_API_KEY"])
+    sb = await remote.sandboxes.get("worker")
+    print(await sb.status())
+
+asyncio.run(main())
+```
+</CodeGroup>
+
+For local execution with a [separately provisioned runtime](/sdk/setup#bring-your-own-runtime), install `@microsandbox/local` or `microsandbox-local`. Import `Sandbox` from that package and use the ordinary default-local factories shown below. Explicit `LocalContext` is needed only for custom local configuration.
+
+Go also supports thin `sdk/go/local` and `sdk/go/remote` modules over the common `sdk/go/core` module. They do not embed the FFI. Provision the selected native library explicitly before constructing a context:
+
+```bash
+go get github.com/superradcompany/microsandbox/sdk/go/remote
+# Use the exact SDK version, artifact URL and SHA-256 from the trusted release.
+go run github.com/superradcompany/microsandbox/sdk/go/core/cmd/ffi-setup@VERSION \
+  --kind remote --source EXACT_ARTIFACT_URL --sha256 TRUSTED_SHA256
+```
+
+```go
+import (
+    "context"
+    "os"
+
+    "github.com/superradcompany/microsandbox/sdk/go/remote"
+)
+
+// An empty path selects the verified install cache; a path selects a trusted offline library.
+destination, err := remote.NewContext("", "https://api.microsandbox.dev", os.Getenv("MSB_API_KEY"))
+if err != nil { return err }
+sb, err := destination.Sandboxes().Get(context.Background(), "worker")
+if err != nil { return err }
+defer sb.Close()
+```
+
+Go setup accepts an offline native file through `--source` too. `--target` permits cross-target provisioning without loading the library. Neither module installation, import, nor first use downloads FFI or runtime files. Local execution still needs a separately provisioned runtime pair.
+
+Both providers can be installed in one application. They share the public `Sandbox`, `Volume`, `Snapshot`, configuration and error types; each resource retains its selected provider. Installing a remote provider does not redirect default-local factories. A missing provider produces an installation error when selected.
 
 ## Small example
 

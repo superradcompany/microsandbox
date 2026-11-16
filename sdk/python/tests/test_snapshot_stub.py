@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 
-def test_batch_load_preserves_single_load_options_and_returns_handles() -> None:
+def test_batch_load_preserves_single_load_options_and_returns_resources() -> None:
     stub = Path(__file__).parent.parent / "microsandbox" / "_microsandbox.pyi"
     tree = ast.parse(stub.read_text())
     snapshot = next(
@@ -24,5 +24,5 @@ def test_batch_load_preserves_single_load_options_and_returns_handles() -> None:
     assert [ast.dump(value) for value in batch.args.kw_defaults] == [
         ast.dump(value) for value in single.args.kw_defaults
     ]
-    assert ast.unparse(single.returns) == "SnapshotHandle"
-    assert ast.unparse(batch.returns) == "list[SnapshotHandle]"
+    assert ast.unparse(single.returns) == "Snapshot"
+    assert ast.unparse(batch.returns) == "list[Snapshot]"

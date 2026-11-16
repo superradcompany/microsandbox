@@ -7,14 +7,14 @@ use microsandbox_network::dns::Nameserver;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyModule};
 
-use crate::snapshot::{PySnapshot, PySnapshotHandle};
+use crate::snapshot::PySnapshot;
 
 //--------------------------------------------------------------------------------------------------
 // Constants
 //--------------------------------------------------------------------------------------------------
 
 /// Kwargs accepted by `Sandbox.create` / `Sandbox.create_with_progress`.
-/// `detached` is consumed by the callers in `sandbox.rs`, not here.
+/// Lifecycle mode is retained on the builder for every creation terminal.
 const KNOWN_CREATE_KWARGS: &[&str] = &[
     "image",
     "memory",
@@ -150,7 +150,9 @@ impl RootDiskSpec {
 /// members are also strings, so ordinary string extraction would silently
 /// preserve the legacy raw-string API.
 pub(crate) fn extract_str_enum(value: &Bound<'_, PyAny>, enum_name: &str) -> PyResult<String> {
-    let enum_class = PyModule::import(value.py(), "microsandbox.types")?.getattr(enum_name)?;
+    let enum_class =
+        PyModule::import(value.py(), crate::provider::public_module("types").as_str())?
+            .getattr(enum_name)?;
     if !value.is_instance(&enum_class)? {
         return Err(pyo3::exceptions::PyTypeError::new_err(format!(
             "expected {enum_name}, got {}",
@@ -162,7 +164,8 @@ pub(crate) fn extract_str_enum(value: &Bound<'_, PyAny>, enum_name: &str) -> PyR
 
 /// Construct a public Python `StrEnum` member from a trusted wire value.
 pub(crate) fn str_enum_member(py: Python<'_>, enum_name: &str, value: &str) -> PyResult<Py<PyAny>> {
-    let enum_class = PyModule::import(py, "microsandbox.types")?.getattr(enum_name)?;
+    let enum_class = PyModule::import(py, crate::provider::public_module("types").as_str())?
+        .getattr(enum_name)?;
     Ok(enum_class.call1((value,))?.unbind())
 }
 
@@ -176,9 +179,22 @@ pub(crate) fn restore_builder_from_args(
     name: String,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
+    restore_builder_with_context(
+        microsandbox::context::default_local_context(),
+        snapshot,
+        name,
+        kwargs,
+    )
+}
+
+/// Bind restore before parsing options so deferred progress work cannot change destination.
+pub(crate) fn restore_builder_with_context(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    snapshot: &Bound<'_, PyAny>,
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<microsandbox::sandbox::RestoreBuilder> {
     let snapshot = if let Ok(value) = snapshot.extract::<PyRef<'_, PySnapshot>>() {
-        value.rust_reference()
-    } else if let Ok(value) = snapshot.extract::<PyRef<'_, PySnapshotHandle>>() {
         value.rust_reference()
     } else if let Ok(value) = snapshot.extract::<String>() {
         SnapshotReference::auto(value)
@@ -188,12 +204,12 @@ pub(crate) fn restore_builder_from_args(
             .and_then(|path| path.extract::<String>())
             .map_err(|_| {
                 pyo3::exceptions::PyTypeError::new_err(
-                    "snapshot must be Snapshot, SnapshotHandle, str, or os.PathLike[str]",
+                    "snapshot must be Snapshot, str, or os.PathLike[str]",
                 )
             })?;
         SnapshotReference::path(path)
     };
-    let mut builder = microsandbox::Sandbox::restore_ref(snapshot).name(name);
+    let mut builder = context.sandboxes().restore_ref(snapshot).name(name);
     let Some(kwargs) = kwargs else {
         return Ok(builder);
     };
@@ -236,7 +252,7 @@ pub(crate) fn restore_builder_from_args(
     if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
         builder = builder.cpus(cpus);
     }
-    if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
+    if let Some(memory) = extract_memory_mib(kwargs, "memory")? {
         builder = builder.memory(memory);
     }
     if let Some(value) = kwargs.get_item("network_policy")?.filter(|v| !v.is_none()) {
@@ -403,6 +419,14 @@ pub fn sandbox_builder_from_args(
     name: String,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<SandboxBuilder> {
+    sandbox_builder_with_context(microsandbox::context::default_local_context(), name, kwargs)
+}
+
+pub(crate) fn sandbox_builder_with_context(
+    context: std::sync::Arc<dyn microsandbox::Context>,
+    name: String,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<SandboxBuilder> {
     let Some(kwargs) = kwargs else {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "image= is required; use Sandbox.restore() for snapshots",
@@ -419,7 +443,10 @@ pub fn sandbox_builder_from_args(
             "image= is required; use Sandbox.restore() for snapshots",
         ));
     }
-    let mut builder = microsandbox::Sandbox::builder(name);
+    let mut builder = microsandbox::Sandbox::ctx(context.as_ref()).builder(name);
+    if let Some(detached) = kwargs.get_item("detached")? {
+        builder = builder.detached(detached.extract::<bool>()?);
+    }
 
     {
         let image_obj = kwargs.get_item("image")?.unwrap();
@@ -484,13 +511,13 @@ pub fn sandbox_builder_from_args(
         };
     }
 
-    if let Some(memory) = extract_opt::<u32>(kwargs, "memory")? {
+    if let Some(memory) = extract_memory_mib(kwargs, "memory")? {
         builder = builder.memory(memory);
     }
     if let Some(cpus) = extract_opt::<u8>(kwargs, "cpus")? {
         builder = builder.cpus(cpus);
     }
-    if let Some(max_memory) = extract_opt::<u32>(kwargs, "max_memory")? {
+    if let Some(max_memory) = extract_memory_mib(kwargs, "max_memory")? {
         builder = builder.max_memory(max_memory);
     }
     if let Some(max_cpus) = extract_opt::<u8>(kwargs, "max_cpus")? {
@@ -2115,7 +2142,8 @@ fn reject_unknown_kwargs(kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
 
 /// Return whether `obj` has exactly the named public SDK type.
 pub(crate) fn is_exact_sdk_type(obj: &Bound<'_, PyAny>, type_name: &str) -> PyResult<bool> {
-    let class = PyModule::import(obj.py(), "microsandbox.types")?.getattr(type_name)?;
+    let class = PyModule::import(obj.py(), crate::provider::public_module("types").as_str())?
+        .getattr(type_name)?;
     Ok(obj.get_type().as_any().is(&class))
 }
 
@@ -2441,6 +2469,49 @@ fn parse_serialized_violation_action(
     parse_violation_action(&s)
 }
 
+/// Integer memory inputs remain MiB. Size values must be exactly representable;
+/// reject fractional MiB and overflow instead of silently rounding or truncating.
+pub(crate) fn memory_mib(value: &Bound<'_, PyAny>) -> PyResult<u32> {
+    if value.is_instance_of::<pyo3::types::PyInt>() {
+        return value.extract();
+    }
+    let size = value
+        .py()
+        .import(crate::provider::public_module("types"))?
+        .getattr("Size")?;
+    if value.is_instance(&size)? {
+        let bytes = value.getattr("bytes")?;
+        if bytes.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "Size.bytes must be an integer",
+            ));
+        }
+        let bytes: u64 = bytes.extract()?;
+        const MIB: u64 = 1024 * 1024;
+        if !bytes.is_multiple_of(MIB) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "memory Size must be a whole number of MiB",
+            ));
+        }
+        u32::try_from(bytes / MIB).map_err(|_| {
+            pyo3::exceptions::PyOverflowError::new_err(
+                "memory Size exceeds the supported MiB range",
+            )
+        })
+    } else {
+        value.extract()
+    }
+}
+
+fn extract_memory_mib(kwargs: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u32>> {
+    kwargs
+        .get_item(key)?
+        .filter(|value| !value.is_none())
+        .as_ref()
+        .map(memory_mib)
+        .transpose()
+}
+
 fn extract_opt<'py, T: for<'a> FromPyObject<'a, 'py, Error = PyErr>>(
     dict: &Bound<'py, PyDict>,
     key: &str,
@@ -2526,6 +2597,34 @@ pub(crate) mod tests {
         let globals = PyDict::new(py);
         py.run(&CString::new(code)?, Some(&globals), None)?;
         Ok(globals.get_item("volumes")?.unwrap().cast_into()?)
+    }
+
+    #[test]
+    fn memory_size_conversion_is_exact_and_checked() {
+        let _guard = PYTHON_TYPES_LOCK.lock().unwrap();
+        Python::initialize();
+        Python::attach(|py| {
+            let _ = volumes(py).unwrap();
+            let size = py
+                .import("microsandbox.types")
+                .unwrap()
+                .getattr("Size")
+                .unwrap();
+            let gib = size.call_method1("gib", (1,)).unwrap();
+            assert_eq!(memory_mib(&gib).unwrap(), 1024);
+            for invalid in [
+                -1_i64,
+                1,
+                1024 * 1024 + 1,
+                (u32::MAX as i64 + 1) * 1024 * 1024,
+            ] {
+                assert!(memory_mib(&size.call1((invalid,)).unwrap()).is_err());
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("memory", 512).unwrap();
+            assert_eq!(extract_memory_mib(&kwargs, "memory").unwrap(), Some(512));
+            assert_eq!(extract_memory_mib(&kwargs, "max_memory").unwrap(), None);
+        });
     }
 
     fn disk_of(py: Python<'_>, prepared: &[(String, Py<PyDict>)]) -> String {

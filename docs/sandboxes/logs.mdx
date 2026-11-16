@@ -54,7 +54,7 @@ entries, err := handle.Logs(ctx, m.LogOptions{})
 
 ```ruby Ruby
 # Ruby reads logs through a connection to a running local sandbox.
-sb = Microsandbox::Sandbox.get("web").connect
+sb = Microsandbox::Sandbox.get("web")
 entries = sb.logs
 ```
 </CodeGroup>

@@ -66,7 +66,11 @@ func RestoreSandbox[T SnapshotSeed](ctx context.Context, snapshot T, name string
 	if err := validateRestoreConfig(config); err != nil {
 		return nil, err
 	}
-	inner, err := ffi.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
+	local, err := defaultLocalContext()
+	if err != nil {
+		return nil, err
+	}
+	inner, err := local.inner.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
@@ -184,11 +188,7 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 	switch value := any(snapshot).(type) {
 	case string:
 		reference = value
-	case *SnapshotArtifact:
-		if value != nil {
-			reference, referenceKind = value.Reference(), value.ReferenceKind()
-		}
-	case *SnapshotHandle:
+	case *Snapshot:
 		if value != nil {
 			reference, referenceKind = value.Reference(), value.ReferenceKind()
 		}
@@ -225,4 +225,24 @@ func buildFFIRestoreOptions[T SnapshotSeed](snapshot T, config RestoreConfig) ff
 		MaxInboundTCPConnections: config.MaxInboundTCPConnections,
 		Vsock:                    buildFFIVsockRoutes(config.Vsock),
 	}
+}
+
+// Restore restores a snapshot reference in the retained destination.
+func (s *Sandboxes) Restore(ctx context.Context, snapshot string, name string, opts ...RestoreOption) (*Sandbox, error) {
+	destination, err := nativeDestination(s.selected)
+	if err != nil {
+		return nil, err
+	}
+	config := RestoreConfig{}
+	for _, opt := range opts {
+		opt(&config)
+	}
+	if err := validateRestoreConfig(config); err != nil {
+		return nil, err
+	}
+	inner, err := destination.RestoreSandbox(ctx, name, buildFFIRestoreOptions(snapshot, config))
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &Sandbox{inner: inner}, nil
 }

@@ -4,14 +4,15 @@ title: Snapshots
 description: Capture and manage snapshots with the Ruby SDK.
 ---
 
+
 See [Snapshots](/sandboxes/snapshots) for capture behavior and compatibility. Ruby does not expose sandbox restore or full-capture options. See [forking availability](#forking).
 
-## SandboxHandle
+## Sandbox
 
 #### <span className="msb-recv">handle.</span><span className="msb-hn">snapshot()</span>
 
 ```ruby
-handle.snapshot(name) # => Hash
+handle.snapshot(name) # => Snapshot
 ```
 
 <Accordion title="Example">
@@ -19,7 +20,7 @@ handle.snapshot(name) # => Hash
 ```ruby
 handle = Microsandbox::Sandbox.get("worker")
 checkpoint = handle.snapshot("after-build")
-puts checkpoint["reference"]
+puts checkpoint.reference
 ```
 
 </Accordion>
@@ -39,7 +40,7 @@ Capture a named snapshot using the selected backend's default capture behavior. 
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Hash</span></div>
+    <div className="msb-param-key"><span className="msb-type">Snapshot</span></div>
     <div className="msb-param-desc">String keys: digest, reference, reference_kind, and size_bytes.</div>
   </div>
 </div>
@@ -75,7 +76,7 @@ Open a snapshot using the selected backend.
 #### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">get()</span>
 
 ```ruby
-Microsandbox::Snapshot.get(name) # => SnapshotHandle
+Microsandbox::Snapshot.get(name) # => Snapshot
 ```
 
 Look up snapshot metadata using the selected backend.
@@ -93,7 +94,7 @@ Look up snapshot metadata using the selected backend.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">SnapshotHandle</span></div>
+    <div className="msb-param-key"><span className="msb-type">Snapshot</span></div>
     <div className="msb-param-desc">Snapshot metadata and lifecycle handle.</div>
   </div>
 </div>
@@ -101,14 +102,14 @@ Look up snapshot metadata using the selected backend.
 #### <span className="msb-recv">Microsandbox::Snapshot.</span><span className="msb-hn">list()</span>
 
 ```ruby
-Microsandbox::Snapshot.list # => Array<SnapshotHandle>
+Microsandbox::Snapshot.list # => Array<Snapshot>
 ```
 
 <p className="msb-label">Returns</p>
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Array&lt;SnapshotHandle&gt;</span></div>
+    <div className="msb-param-key"><span className="msb-type">Array&lt;Snapshot&gt;</span></div>
     <div className="msb-param-desc">List snapshots using the selected backend.</div>
   </div>
 </div>
@@ -300,69 +301,7 @@ snapshot.reference_kind # => String
   </div>
 </div>
 
-## SnapshotHandle
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">digest</span>
-
-```ruby
-handle.digest # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Snapshot digest.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">size_bytes</span>
-
-```ruby
-handle.size_bytes # => Integer | nil
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Integer | nil</span></div>
-    <div className="msb-param-desc">Snapshot size.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">reference</span>
-
-```ruby
-handle.reference # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Backend-specific reference.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">reference_kind</span>
-
-```ruby
-handle.reference_kind # => String
-```
-
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Kind of reference; preserve it with the value.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">name</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">name</span>
 
 ```ruby
 handle.name # => String | nil
@@ -377,7 +316,7 @@ handle.name # => String | nil
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">image_ref</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">image_ref</span>
 
 ```ruby
 handle.image_ref # => String
@@ -392,7 +331,7 @@ handle.image_ref # => String
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">state_kind</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state_kind</span>
 
 ```ruby
 handle.state_kind # => String
@@ -407,26 +346,13 @@ handle.state_kind # => String
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">open()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">destroy()</span>
 
 ```ruby
-handle.open # => Snapshot
+snapshot.destroy(force) # => nil
 ```
 
-<p className="msb-label">Returns</p>
-
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Snapshot</span></div>
-    <div className="msb-param-desc">Open the snapshot through the retained backend.</div>
-  </div>
-</div>
-
-#### <span className="msb-recv">handle.</span><span className="msb-hn">remove()</span>
-
-```ruby
-handle.remove(force) # => nil
-```
+Instance deletion of a remote path-based snapshot returns `Unsupported` until the provider supports atomic conditional deletion. Explicit path-selected static removal remains available. Managed remote snapshot deletion uses its captured server ID; local deletion retains its identity checks. Force does not bypass this restriction.
 
 Remove the snapshot through the retained backend.
 
@@ -448,43 +374,29 @@ Remove the snapshot through the retained backend.
   </div>
 </div>
 
-#### <span className="msb-recv">handle.</span><span className="msb-hn">save_to()</span>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">id</span>
 
 ```ruby
-handle.save_to(output_path, **options) # => nil
+snapshot.id # => String
 ```
 
-Export through the backend retained by this handle. Archive export is local-only.
+Stable identity captured at selection time; no backend I/O.
 
-<p className="msb-label">Parameters</p>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">manifest</span>
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><code>output_path</code><span className="msb-type">String</span></div>
-    <div className="msb-param-desc">Destination archive path on the host.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>with_parents</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Include parent snapshots; defaults to false.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>with_image</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Include the source image; defaults to false.</div>
-  </div>
-  <div className="msb-param">
-    <div className="msb-param-key"><code>plain_tar</code><span className="msb-type">Boolean</span></div>
-    <div className="msb-param-desc">Write an uncompressed tar archive; defaults to false.</div>
-  </div>
-</div>
+```ruby
+snapshot.manifest # => Hash
+```
 
-<p className="msb-label">Returns</p>
+Fresh normalized descriptor, validated against the captured identity.
 
-<div className="msb-params">
-  <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">nil</span></div>
-    <div className="msb-param-desc">No return value.</div>
-  </div>
-</div>
+#### <span className="msb-recv">snapshot.</span><span className="msb-hn">state</span>
+
+```ruby
+snapshot.state # => Hash
+```
+
+Fresh descriptor state. Missing or replaced artifacts raise errors rather than returning cached data.
 
 ## Forking
 

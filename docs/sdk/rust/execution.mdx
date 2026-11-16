@@ -939,7 +939,7 @@ Receive the next event. `None` when the session has ended and all output has bee
 wait()
 ```
 
-Wait for the process to exit, discarding any remaining output.
+Wait for the process to exit, discarding any remaining output. Once `wait()`, `collect()`, or `recv()` observes a terminal outcome, later `wait()` calls return the recorded exit status or terminal execution error. They do not rerun the command or replay output. A nonzero exit remains an exit status. Cancelling a wait or losing the transport does not establish that the command finished.
 
 <p className="msb-label">Returns</p>
 
@@ -951,7 +951,7 @@ Wait for the process to exit, discarding any remaining output.
 collect()
 ```
 
-Wait for exit and collect all remaining stdout/stderr.
+Wait for exit and collect all remaining stdout/stderr. Completion remains available to `wait()` afterward; collected output is not retained for replay.
 
 <p className="msb-label">Returns</p>
 
@@ -1338,7 +1338,7 @@ let page = sb.list_jobs_with(|b| b.all(true).limit(50)).await?;
 async fn get_job(&self, id: impl AsRef<str>) -> JobResult<Job>
 ```
 
-Retrieve a retained job by ID. Also available on `SandboxHandle`.
+Retrieve a retained job by ID.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">list_jobs()</span>
 
@@ -1346,7 +1346,7 @@ Retrieve a retained job by ID. Also available on `SandboxHandle`.
 async fn list_jobs(&self) -> JobResult<JobPage>
 ```
 
-List up to 50 active jobs. Returns items and a next-page cursor. Use `list_jobs_with()` to include retained history or change the page size. Also available on `SandboxHandle`.
+List up to 50 active jobs. Returns items and a next-page cursor. Use `list_jobs_with()` to include retained history or change the page size.
 
 #### <span className="msb-recv">sb.</span><span className="msb-hn">list_jobs_with()</span>
 
@@ -1356,7 +1356,7 @@ async fn list_jobs_with(
 ) -> JobResult<JobPage>
 ```
 
-Configure a page with `JobListBuilder`. Also available on `SandboxHandle`.
+Configure a page with `JobListBuilder`.
 
 ### Job
 

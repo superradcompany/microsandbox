@@ -14,12 +14,12 @@ import pytest
 
 from microsandbox import (
     Action,
-    BackendKind,
     ChangeKind,
     DeploymentProfile,
     DiskImageFormat,
     ExecEventType,
     ImageArchiveFormat,
+    LocalContext,
     LogLevel,
     ModificationDisposition,
     MountConfig,
@@ -47,12 +47,9 @@ from microsandbox import (
     SecurityProfile,
     Snapshot,
     SnapshotCopyBuilder,
-    SnapshotHandle,
     Stdin,
     StdinMode,
     Volume,
-    default_backend_kind,
-    set_default_backend,
 )
 
 
@@ -62,7 +59,6 @@ def test_snapshot_types_expose_archive_operations() -> None:
     assert callable(SnapshotCopyBuilder.labels)
     assert callable(SnapshotCopyBuilder.record_integrity)
     assert callable(SnapshotCopyBuilder.save)
-    assert callable(SnapshotHandle.save_to)
 
 
 def test_enum_members_compare_equal_to_values() -> None:
@@ -77,7 +73,7 @@ def test_enum_members_stringify_to_values() -> None:
 
 
 def test_native_enum_outputs_are_enum_members() -> None:
-    assert isinstance(default_backend_kind(), BackendKind)
+    assert LocalContext().kind == "local"
 
 
 @pytest.mark.parametrize(
@@ -95,8 +91,6 @@ def test_sandbox_create_rejects_raw_enum_strings(field: str, value: str) -> None
 
 
 def test_native_methods_reject_raw_enum_strings() -> None:
-    with pytest.raises(TypeError, match="BackendKind"):
-        set_default_backend("local")
     with pytest.raises(TypeError, match="VolumeKind"):
         Volume.create("enum-probe", kind="dir")
     with pytest.raises(TypeError, match="NamedVolumeMode"):

@@ -1,0 +1,121 @@
+"""Validate staged wheels using offline installs and real provider libraries."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import zipfile
+
+
+def run(command):
+    subprocess.run(command, check=True, timeout=120)
+
+
+PROBE = r'''
+import asyncio, importlib, json, tempfile, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import microsandbox_core as core
+import microsandbox_local as local
+import microsandbox_remote as remote
+assert local.Sandbox is remote.Sandbox is core.Sandbox
+assert local.Volume is remote.Volume is core.Volume
+assert local.Snapshot is remote.Snapshot is core.Snapshot
+assert local.MicrosandboxError is remote.MicrosandboxError
+assert local.SandboxStatus is remote.SandboxStatus
+requests = []
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        requests.append(self.path)
+        assert self.headers['Authorization'] == 'Bearer key'
+        value = dict(id='original', org_id='org', name='task', slug='task', status='stopped', ephemeral=False, created_at='2026-11-16T00:00:00Z')
+        if self.path.split('?')[0] == '/v1/sandboxes': value = dict(data=[value])
+        self.send_response(200)
+        self.send_header('Content-Type','application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(value).encode())
+    def log_message(self, *args): pass
+server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+async def probe():
+    with tempfile.TemporaryDirectory() as home:
+        selected = remote.RemoteContext(url=f'http://127.0.0.1:{server.server_port}', api_key='key')
+        retained = selected.sandboxes
+        destination = local.LocalContext(home=home)
+        assert destination.kind == 'local' and selected.kind == 'remote'
+        sb = await retained.get('task')
+        assert isinstance(sb, core.Sandbox)
+        assert isinstance(sb.context, core.Context)
+        assert isinstance(sb.context.sandboxes, core.Sandboxes)
+        assert (await sb.info())['id'] == sb.id
+        assert await sb.status() is core.SandboxStatus.STOPPED
+        assert not await sb.owns_lifecycle
+        async with sb as borrowed:
+            assert borrowed is sb
+        assert (await sb.context.sandboxes.get('task')).id == sb.id
+        page = await retained.list()
+        assert isinstance(page.sandboxes[0], core.Sandbox)
+        assert await sb.wait_for_status('stopped') is None
+        # A default-local operation must never reach the remote endpoint.
+        before = len(requests)
+        try: await destination.sandboxes.get('missing')
+        except core.MicrosandboxError: pass
+        else: raise AssertionError('missing local sandbox unexpectedly exists')
+        assert len(requests) == before
+try: asyncio.run(probe())
+finally:
+    server.shutdown()
+    server.server_close()
+    thread.join()
+'''
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--wheels", type=Path, required=True)
+    parser.add_argument("--full", action="store_true", help="Also check coexistence with the staged full wheel")
+    args = parser.parse_args()
+    wheels = {}
+    for kind in ("core", "local", "remote"):
+        candidates = list(args.wheels.glob(f"microsandbox_{kind}-*.whl"))
+        if len(candidates) != 1:
+            parser.error(f"expected one {kind} wheel")
+        wheels[kind] = str(candidates[0].resolve())
+        with zipfile.ZipFile(candidates[0]) as archive:
+            paths = archive.namelist()
+            if any("_bundled/" in path or "libkrunfw" in path or path.endswith(("/msb", "/msb.exe", "/_cli.py")) for path in paths):
+                raise RuntimeError(f"{kind} includes runtime payload or launcher")
+            if kind == "core" and any(path.endswith((".so", ".dylib", ".pyd")) for path in paths):
+                raise RuntimeError("core includes native payload")
+    with tempfile.TemporaryDirectory(prefix="msb-python-packages-") as temporary:
+        for first, second in (("local", "remote"), ("remote", "local")):
+            venv = Path(temporary) / f"{first}-{second}"
+            run(["uv", "venv", str(venv)])
+            python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+            install = ["uv", "pip", "install", "--offline", "--python", python]
+            run([*install, wheels["core"]])
+            run([python, "-c", "import sys, microsandbox_core; assert not any(name.startswith('microsandbox_local') or name.startswith('microsandbox_remote') for name in sys.modules)"])
+            run([*install, wheels[first]])
+            run([*install, wheels[second]])
+            run([python, "-c", PROBE])
+            run(["uv", "pip", "uninstall", "--python", python, f"microsandbox-{first}"])
+            constructor = "LocalContext()" if second == "local" else "RemoteContext(api_key='key')"
+            run([python, "-c", f"import microsandbox_{second} as sdk; assert sdk.{constructor}.kind == {second!r}"])
+        if args.full:
+            full = list(args.wheels.glob("microsandbox-[0-9]*.whl"))
+            if len(full) != 1:
+                parser.error("--full requires exactly one full wheel")
+            venv = Path(temporary) / "full"
+            run(["uv", "venv", str(venv)])
+            python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+            run(["uv", "pip", "install", "--offline", "--python", python, *wheels.values(), str(full[0].resolve())])
+            prefix = "import microsandbox as full\nfrom microsandbox_core._native import default_binding\noriginal = default_binding()\n"
+            suffix = "\nassert full.Sandbox is core.Sandbox and full.MicrosandboxError is core.MicrosandboxError\nassert default_binding() is original\n"
+            run([python, "-c", prefix + PROBE + suffix])
+            run([python, "-c", PROBE + "\nimport microsandbox as full\nassert full.Sandbox is core.Sandbox\n"])
+    print("Wheel payloads, shared types, live resource calls, context retention, offline installs and independent uninstall passed.")
+
+
+if __name__ == "__main__":
+    main()

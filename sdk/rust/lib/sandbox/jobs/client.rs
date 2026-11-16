@@ -7,10 +7,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::stream;
 use microsandbox_protocol::jobs::{JobOperation, JobOutput, JobOutputPage, JobResponse};
 
-use crate::backend::Backend;
+use crate::context::Context;
 #[cfg(feature = "local")]
 use crate::sandbox::SandboxStatus;
-use crate::sandbox::{SandboxHandle, SandboxId};
+use crate::sandbox::{SandboxId, SandboxRecord};
 
 use super::{
     JobError, JobExit, JobId, JobInfo, JobLogEntry, JobLogOptions, JobLogStream, JobResult,
@@ -34,14 +34,14 @@ pub struct Job {
 
 #[derive(Clone)]
 pub(super) struct Target {
-    pub backend: Arc<dyn Backend>,
+    pub backend: Arc<dyn Context>,
     pub name: String,
     pub sandbox_id: SandboxId,
 }
 
 #[cfg(feature = "local")]
 pub(super) struct JobConnection {
-    pub session: crate::backend::local::control::ControlSession,
+    pub session: crate::context::local::control::ControlSession,
     pub boot_id: String,
 }
 
@@ -50,10 +50,10 @@ pub(super) struct JobConnection {
 //--------------------------------------------------------------------------------------------------
 
 impl Target {
-    pub async fn validate(&self) -> JobResult<SandboxHandle> {
+    pub async fn validate(&self) -> JobResult<SandboxRecord> {
         let handle = self
             .backend
-            .sandboxes()
+            .sandbox_ops()
             .get(self.backend.clone(), &self.name)
             .await?;
         if handle.id() != self.sandbox_id {
