@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -375,7 +375,8 @@ impl CheckpointCoordinator {
     ) -> Result<Self, String> {
         let host = super::layout::host_root(runtime_dir)?;
         let root = host.join("checkpoints");
-        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        microsandbox_utils::private_file::create_private_dir_all(&root)
+            .map_err(|error| error.to_string())?;
         let store = LocalObjectStore::open(host.join("checkpoint-store"))
             .map_err(|error| error.to_string())?;
         let root_disk = RuntimeOwnedRootDisk::open(runtime_dir, vm)?;
@@ -559,7 +560,7 @@ impl CheckpointCoordinator {
             ));
         }
         let path = self.root.join(checkpoint_id);
-        if let Err(error) = std::fs::create_dir(&path) {
+        if let Err(error) = microsandbox_utils::private_file::create_private_directory(&path) {
             if user_pause.is_none()
                 && let Some(workload) = workload
             {
@@ -589,7 +590,8 @@ impl CheckpointCoordinator {
         // execution serialization is needed for this cold-boot storage artifact.
         let result: Result<_, Failure> = (|| {
             if !self.owned_directories.is_empty() {
-                std::fs::create_dir_all(path.join("owned")).map_err(Failure::pre_rebind)?;
+                microsandbox_utils::private_file::create_private_dir_all(&path.join("owned"))
+                    .map_err(Failure::pre_rebind)?;
             }
             let captured = self.root_disk.as_mut().expect("validated root").rollover(
                 vm,
@@ -840,7 +842,8 @@ impl CheckpointCoordinator {
                 ".{checkpoint_id}.{}.staging",
                 rand::random::<u64>()
             ));
-        std::fs::create_dir(&staging).map_err(CheckpointFailure::before_pause)?;
+        microsandbox_utils::private_file::create_private_directory(&staging)
+            .map_err(CheckpointFailure::before_pause)?;
         let staging_us = staging_started.elapsed().as_micros();
 
         // Preparing an immutable baseline does not read live guest RAM. Keep this potentially
@@ -1388,7 +1391,8 @@ impl CheckpointCoordinator {
         let mut local_disks = Vec::new();
         let mut owned_volumes = Vec::new();
         if !self.owned_directories.is_empty() {
-            std::fs::create_dir_all(staging.join("owned")).map_err(CheckpointFailure::resumable)?;
+            microsandbox_utils::private_file::create_private_dir_all(&staging.join("owned"))
+                .map_err(CheckpointFailure::resumable)?;
         }
         for (tag, directory) in &self.owned_directories {
             directory
@@ -1672,7 +1676,12 @@ impl CheckpointCoordinator {
                 let bytes = serde_json::to_vec(&state).map_err(CheckpointFailure::resumable)?;
                 // This handoff has no snapshot root or RAM object manifest. Child-owned disk
                 // links and bounded metadata are installed before acknowledging the capture.
-                std::fs::write(staging.join("branch.json"), bytes)
+                let branch_path = staging.join("branch.json");
+                let mut branch = microsandbox_utils::private_file::create_new(&branch_path)
+                    .map_err(CheckpointFailure::resumable)?;
+                branch
+                    .write_all(&bytes)
+                    .and_then(|()| branch.sync_all())
                     .map_err(CheckpointFailure::resumable)?;
                 std::fs::rename(staging, final_path).map_err(CheckpointFailure::resumable)?;
                 tracing::info!(target: "microsandbox_checkpoint_timing", operation = "local_memory_capture", incremental, reflink, capture_us = timings.memory_capture_us, paused_prepare_us = timings.memory_paused_prepare_us, finish_us = timings.memory_finish_us, guest_bytes_read = stats.guest_bytes_read, unplugged_bytes_skipped = stats.unplugged_bytes_skipped);
@@ -2414,11 +2423,8 @@ fn coalesce_extents(extents: Vec<MemoryExtent>) -> Vec<MemoryExtent> {
 
 fn publish_root_last(staging: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), String> {
     let root = staging.join("checkpoint.json");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&root)
-        .map_err(|error| error.to_string())?;
+    let mut file =
+        microsandbox_utils::private_file::create_new(&root).map_err(|error| error.to_string())?;
     use std::io::Write as _;
     file.write_all(bytes).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
@@ -2464,13 +2470,8 @@ fn resource_kind(device_type: u32) -> &'static str {
 /// Local handoffs reuse the state codecs and object paths, but make no crash-recovery promise.
 /// Only bounded CPU/device state reaches this helper; RAM goes straight to its mmap backing.
 fn put_local_object(staging: &Path, bytes: &[u8]) -> Result<ObjectId, String> {
-    let id = ObjectId::from_bytes(bytes).map_err(|e| e.to_string())?;
     let store = LocalObjectStore::open(staging).map_err(|e| e.to_string())?;
-    let path = store.object_path(&id);
-    std::fs::create_dir_all(path.parent().expect("confined object parent"))
-        .map_err(|e| e.to_string())?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())?;
-    Ok(id)
+    store.put_bytes(bytes).map_err(|error| error.to_string())
 }
 
 fn persist_device_states(
@@ -2923,7 +2924,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let staging = temp.path().join("checkpoint.staging");
         let published = temp.path().join("checkpoint");
-        std::fs::create_dir(&staging).unwrap();
+        microsandbox_utils::private_file::create_private_directory(&staging).unwrap();
 
         publish_root_last(&staging, &published, b"checkpoint-root").unwrap();
 
@@ -2932,6 +2933,22 @@ mod tests {
             std::fs::read(published.join("checkpoint.json")).unwrap(),
             b"checkpoint-root"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&published).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(published.join("checkpoint.json"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

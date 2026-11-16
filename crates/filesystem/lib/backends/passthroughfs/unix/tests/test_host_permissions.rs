@@ -1,6 +1,6 @@
 //! Tests for the `HostPermissions` policy: Private vs Mirror semantics.
 
-use std::os::unix::fs::PermissionsExt;
+use std::{os::unix::fs::PermissionsExt, process::Command};
 
 use super::*;
 use crate::backends::passthroughfs::{HostPermissions, StatVirtualization};
@@ -296,4 +296,163 @@ fn test_off_creates_with_requested_mode_directly() {
     let _ = entry;
 
     assert_eq!(host_mode(&sb, "plain"), 0o644);
+}
+
+#[test]
+fn stat_off_create_does_not_mirror_setuid_or_setgid_bits_to_host() {
+    let sb = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Off;
+        cfg
+    });
+
+    sb.fs
+        .create(
+            sb.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("no-host-privilege-bits"),
+            0o6755,
+            false,
+            LINUX_O_RDWR,
+            0,
+            Extensions::default(),
+        )
+        .unwrap();
+
+    assert_eq!(host_mode(&sb, "no-host-privilege-bits"), 0o755);
+}
+
+#[test]
+fn host_umask_does_not_change_init_or_guest_created_modes() {
+    const CHILD_MODE: &str = "MSB_TEST_PASSTHROUGH_HOST_UMASK";
+
+    for host_umask in [0o000, 0o022, 0o077] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("host_umask_child")
+            .arg("--nocapture")
+            .env(CHILD_MODE, format!("{host_umask:o}"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "host umask {host_umask:03o} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn host_umask_child() {
+    const CHILD_MODE: &str = "MSB_TEST_PASSTHROUGH_HOST_UMASK";
+    let Ok(value) = std::env::var(CHILD_MODE) else {
+        return;
+    };
+    let host_umask = u32::from_str_radix(&value, 8).unwrap();
+    let previous_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+    let sandbox = TestSandbox::with_config(|mut cfg| {
+        cfg.stat_virtualization = StatVirtualization::Off;
+        cfg
+    });
+
+    let observed_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+    assert_eq!(observed_umask as u32, host_umask);
+
+    let (file, _, _) = sandbox
+        .fs
+        .create(
+            sandbox.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("created-file"),
+            0o666,
+            false,
+            LINUX_O_RDWR,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(file.attr.st_mode as u32 & 0o777, 0o644);
+    assert_eq!(host_mode(&sandbox, "created-file"), 0o644);
+
+    let directory = sandbox
+        .fs
+        .mkdir(
+            sandbox.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("created-directory"),
+            0o777,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(directory.attr.st_mode as u32 & 0o777, 0o755);
+    assert_eq!(host_mode(&sandbox, "created-directory"), 0o755);
+
+    let node = sandbox
+        .fs
+        .mknod(
+            sandbox.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("created-node"),
+            libc::S_IFREG as u32 | 0o666,
+            0,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(node.attr.st_mode as u32 & 0o777, 0o644);
+    assert_eq!(host_mode(&sandbox, "created-node"), 0o644);
+
+    let private = TestSandbox::with_config(|mut cfg| {
+        cfg.host_permissions = HostPermissions::Private;
+        cfg
+    });
+    let observed_umask = unsafe { libc::umask(host_umask as libc::mode_t) };
+    assert_eq!(observed_umask as u32, host_umask);
+
+    let (private_file, _, _) = private
+        .fs
+        .create(
+            private.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("private-file"),
+            0o666,
+            false,
+            LINUX_O_RDWR,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(private_file.attr.st_mode as u32 & 0o777, 0o644);
+    assert_eq!(host_mode(&private, "private-file"), 0o600);
+
+    let private_directory = private
+        .fs
+        .mkdir(
+            private.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("private-directory"),
+            0o777,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(private_directory.attr.st_mode as u32 & 0o777, 0o755);
+    assert_eq!(host_mode(&private, "private-directory"), 0o700);
+
+    let private_node = private
+        .fs
+        .mknod(
+            private.ctx(),
+            ROOT_INODE,
+            &TestSandbox::cstr("private-node"),
+            libc::S_IFREG as u32 | 0o666,
+            0,
+            0o022,
+            Extensions::default(),
+        )
+        .unwrap();
+    assert_eq!(private_node.attr.st_mode as u32 & 0o777, 0o644);
+    assert_eq!(host_mode(&private, "private-node"), 0o600);
+
+    unsafe { libc::umask(previous_umask) };
 }

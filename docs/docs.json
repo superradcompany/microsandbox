@@ -412,8 +412,15 @@
             "icon": "arrow-right-arrow-left",
             "pages": [
               "migrations/overview",
-              "migrations/v0.7",
-              "migrations/sandbox-storage"
+              "migrations/v0.7"
+            ]
+          },
+          {
+            "group": "Repair guides",
+            "icon": "wrench",
+            "pages": [
+              "repairs/sandbox-storage",
+              "repairs/file-permissions"
             ]
           },
           {
@@ -504,6 +511,10 @@
     ]
   },
   "redirects": [
+    {
+      "source": "/migrations/sandbox-storage",
+      "destination": "/repairs/sandbox-storage"
+    },
     {
       "source": "/getting-started/installation",
       "destination": "/getting-started/versions"

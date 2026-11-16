@@ -292,6 +292,8 @@ Sources: [`crates/utils/lib/lib.rs`](crates/utils/lib/lib.rs) and [`crates/runti
 
 Renaming a directory or file requires migration or old-location probing. Preserve atomic publication and cleanup ordering, and never infer that an unrecognized old path is safe to delete.
 
+Unix FUSE initialization preserves the runtime process umask. Guest creation modes still use the guest request and mask; new host-managed files and directories request `0600` and `0700` and clear inherited ACLs. Explicit repair of stopped, protected sandboxes tightens recognized host state and clears its ACLs, including intentional sharing on that state; guest-state and directory-volume contents, external mounts, shared caches, and unknown paths remain excluded. Repair leaves already-private snapshot hardlinks unchanged and refuses non-private links outside the recognized set or objects replaced since inspection. No catalog, journal, launch, or guest-protocol format changes; Windows ready-storage repair remains a no-op.
+
 ## 8. Disk and Filesystem Image Formats
 
 Disk-image bytes outlive the binary that produced them. ext4 compatibility includes superblock feature flags, group descriptors, checksums, inode size and reserved inodes, 64-bit layouts, JBD2 journal state, resize-inode behavior, clean/dirty state, and replay requirements. EROFS and VMDK constants, descriptors, block sizes, extents, device tables, adapters, and alignment rules are likewise durable formats.

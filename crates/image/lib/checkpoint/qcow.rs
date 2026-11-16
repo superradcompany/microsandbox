@@ -206,13 +206,9 @@ pub async fn create_qcow2_overlay(
     let parent = destination.parent().ok_or_else(|| {
         ImageError::ManifestParse("qcow2 destination has no parent directory".into())
     })?;
-    std::fs::create_dir_all(parent)?;
+    microsandbox_utils::private_file::create_private_dir_all(parent)?;
     let temporary = temporary_path(parent, destination);
-    let std_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let std_file = microsandbox_utils::private_file::create_new_read_write(&temporary)?;
     let storage = ImagoFile::try_from(std_file)?;
     let create = Qcow2::<ImagoFile>::create_builder(storage)
         .size(virtual_size)
