@@ -8,7 +8,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGETS = {
- "aarch64-apple-darwin": ("darwin-arm64", "macosx_11_0_arm64"),
+ # Match the release workflow deployment floor; a lower wheel tag would let
+ # pip install libraries on macOS versions they cannot support.
+ "aarch64-apple-darwin": ("darwin-arm64", "macosx_14_0_arm64"),
  "x86_64-unknown-linux-gnu": ("linux-x64-gnu", "linux_x86_64"),
  "aarch64-unknown-linux-gnu": ("linux-arm64-gnu", "linux_aarch64"),
  "x86_64-pc-windows-msvc": ("win32-x64-msvc", "win_amd64"),

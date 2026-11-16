@@ -2,6 +2,8 @@
 import hashlib
 import importlib.util
 import json
+import re
+import runpy
 from pathlib import Path
 import tempfile
 import unittest
@@ -12,6 +14,14 @@ SPEC.loader.exec_module(VALIDATOR)
 
 
 class ProviderReleaseTests(unittest.TestCase):
+    def test_macos_wheel_floor_matches_release_build(self):
+        root = Path(__file__).resolve().parents[2]
+        staging = runpy.run_path(str(root / "scripts/ci/stage-sdk-providers.py"))
+        workflow = (root / ".github/workflows/release-macos.yml").read_text()
+        floor = re.search(r'MACOSX_DEPLOYMENT_TARGET: "([0-9.]+)"', workflow).group(1)
+        self.assertEqual(staging["TARGETS"]["aarch64-apple-darwin"][1],
+                         f"macosx_{floor.replace('.', '_')}_arm64")
+
     def fixture(self, root):
         for triple, (release, platform) in VALIDATOR.TARGETS.items():
             for sdk, directory in (("go", root / "go" / f"go-providers-{release}"), ("node", root / "node" / f"node-providers-{platform}")):
