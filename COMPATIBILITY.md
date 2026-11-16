@@ -392,6 +392,8 @@ Bind mounts and volumes persist virtual Linux stat information outside the guest
 
 Compatibility-sensitive elements include xattr, ADS, and sidecar names; payload version, width, and byte order; uid, gid, mode, and rdev interpretation; symlink representation; path encoding; hidden-metadata filtering; reserved inode/handle values; and whiteout immunity.
 
+Guest xattr access on Unix passthrough host mounts is limited to user.* attributes outside Microsandbox's reserved user.msb and OverlayFS's user.overlay namespaces. New runtimes hide other host xattr namespaces and reject guest reads, writes, and removals; older runtimes retain their previous behavior. Existing host xattrs are not rewritten or removed.
+
 Sources: [`crates/filesystem/lib/backends/shared/stat_override.rs`](crates/filesystem/lib/backends/shared/stat_override.rs), [`crates/filesystem/lib/backends/passthroughfs/windows`](crates/filesystem/lib/backends/passthroughfs/windows), and [`crates/filesystem/lib/backends/shared/init_binary.rs`](crates/filesystem/lib/backends/shared/init_binary.rs).
 
 New metadata layouts require a new decoder version and, when old writers must consume the state, a migration or clean refusal before mutation.
