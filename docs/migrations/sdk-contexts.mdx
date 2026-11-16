@@ -88,3 +88,7 @@ Full packages remain available. Lean local and remote packages use the same publ
 ## Memory values in Python
 
 Memory options accept integer MiB or `Size`, including `Size.gib(1)`. A `Size` value must represent a nonnegative whole number of MiB within the option's integer range; fractional MiB and overflow raise an error before creation or modification. Existing integer inputs keep their MiB meaning.
+
+### Captured launch outcomes
+
+Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiver's retained session. Its `init_owns_boot_workload` and `resumed_from_full_snapshot` flags describe preparation outcomes, not persisted settings or live status. An unprepared lookup returns `None`. The CLI uses these outcomes to avoid executing an init-owned workload twice and to report full-restore warnings. Continue using `config().await?` for current persisted configuration and `status().await?` for current lifecycle state.

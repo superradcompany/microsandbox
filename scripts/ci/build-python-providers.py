@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Build lean wheels inside the platform's existing native build environment."""
 import argparse
-import json
 from pathlib import Path
 import subprocess
 import sys

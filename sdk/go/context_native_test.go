@@ -3,6 +3,7 @@
 package microsandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -149,6 +150,17 @@ func exercisePersistentResources(t *testing.T) {
 	}
 	if got, err := fetched.FS().ReadString(ctx, "value"); err != nil || got != "a" {
 		t.Fatalf("retained volume = %q, %v", got, err)
+	}
+	// Exercise the unified retained-resource route, not the legacy root-only helper.
+	large := bytes.Repeat([]byte("volume-data"), 200000)
+	if err := a.FS().Write(ctx, "large", large); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fetched.FS().Read(ctx, "large"); err != nil || !bytes.Equal(got, large) {
+		t.Fatalf("unified large read: %d bytes, %v", len(got), err)
+	}
+	if got, err := fetched.FS().ReadString(ctx, "large"); err != nil || got != string(large) {
+		t.Fatalf("unified large string read: %d bytes, %v", len(got), err)
 	}
 	info, err := a.Info(ctx)
 	if err != nil || info.ID != a.ID() {

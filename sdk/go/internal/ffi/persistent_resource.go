@@ -16,6 +16,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"runtime"
 	"unsafe"
@@ -70,8 +71,11 @@ func (r *PersistentResource) Operation(ctx context.Context, operation string, ar
 	}
 	request := C.CString(string(raw))
 	defer C.free(unsafe.Pointer(request))
-	out, err := r.lib().call(ctx, func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
+	invoke := func(id C.uint64_t, buf *C.uint8_t, size C.size_t) *C.char {
 		return C.provider_call_msb_resource_operation(r.lib().table, id, C.uint64_t(r.handle), request, buf, size)
+	}
+	out, err := readResourceResult(ctx, operation, func(size int) (string, error) {
+		return r.lib().callBuf(ctx, size, invoke)
 	})
 	runtime.KeepAlive(r)
 	if err != nil {
@@ -159,4 +163,25 @@ func (library *Library) persistentResourcesFromJSON(c *Context, out string) ([]*
 		resources[i] = resource
 	}
 	return resources, nil
+}
+
+// Only filesystem reads can be retried with a larger buffer. Never replay writes,
+// destruction, or creation after a native operation has already taken effect.
+func readResourceResult(ctx context.Context, operation string, invoke func(int) (string, error)) (string, error) {
+	size := defaultBufSize
+	for {
+		out, err := invoke(size)
+		var native *Error
+		if operation != "fs_read" || !errors.As(err, &native) || native.Kind != KindBufferTooSmall {
+			return out, err
+		}
+		var needed, available int
+		if _, parseErr := fmt.Sscanf(native.Message, "output buffer too small: need %d, have %d", &needed, &available); parseErr != nil || needed <= size || available != size {
+			return out, err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		size = needed
+	}
 }

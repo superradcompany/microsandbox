@@ -306,7 +306,7 @@ pub(crate) fn decode(kind: &str, value: serde_json::Value) -> PyResult<Py<PyAny>
     Python::attach(|py| {
         let value = crate::conversion::json_value_to_py(py, value)?;
         Ok(py
-            .import("microsandbox.jobs")?
+            .import(crate::provider::public_module("jobs").as_str())?
             .getattr(format!("_decode_{kind}"))?
             .call1((value,))?
             .unbind())
@@ -320,7 +320,7 @@ pub(crate) fn job_error(error: JobError) -> PyErr {
     };
     Python::attach(|py| {
         match py
-            .import("microsandbox.errors")
+            .import(crate::provider::public_module("errors").as_str())
             .and_then(|m| m.getattr("JobError"))
             .and_then(|c| c.call1((error.code(), error.to_string(), id)))
         {

@@ -75,13 +75,11 @@ pub fn resolve_local_backend() -> anyhow::Result<Arc<dyn Context>> {
 
 /// Display relaxed-restore diagnostics even when ordinary progress is quiet.
 pub(crate) async fn display_restore_warnings(sandbox: &Sandbox) {
-    match sandbox.config().await {
-        Ok(config) if !config.resumed_from_full_snapshot() => return,
-        Ok(_) => {}
-        Err(error) => {
-            ui::warn(&format!("could not inspect restore configuration: {error}"));
-            return;
-        }
+    if !sandbox
+        .launch_info()
+        .is_some_and(|info| info.resumed_from_full_snapshot)
+    {
+        return;
     }
     match sandbox.restore_warnings().await {
         Ok(warnings) => {

@@ -168,7 +168,7 @@ pub use handle::{
 };
 pub use identity::SandboxId;
 pub use init::{HandoffInit, InitOptionsBuilder};
-pub use inspection::SandboxInfo;
+pub use inspection::{SandboxInfo, SandboxLaunchInfo};
 pub use metrics::SandboxMetrics;
 #[cfg(feature = "local")]
 pub use metrics::{

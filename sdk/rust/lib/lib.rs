@@ -92,10 +92,10 @@ pub use sandbox::{
 pub use sandbox::{
     ExecOutput, ExternalMountRestorePolicy, ExternalMountWarning, MAX_HOSTNAME_BYTES,
     MAX_SANDBOX_NAME_BYTES, NetworkSpecPatch, Sandbox, SandboxConfig, SandboxConfigPatch,
-    SandboxInfo, SandboxListBuilder, SandboxMetrics, SandboxPage, SandboxPingResult,
-    SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch, SandboxSpecPatch,
-    SandboxTouchResult, StorageRecovery, StorageRecoveryOptions, StorageRecoverySelection,
-    VsockSpecPatch, validate_sandbox_name,
+    SandboxInfo, SandboxLaunchInfo, SandboxListBuilder, SandboxMetrics, SandboxPage,
+    SandboxPingResult, SandboxPolicyPatch, SandboxResourcesPatch, SandboxRuntimeOptionsPatch,
+    SandboxSpecPatch, SandboxTouchResult, StorageRecovery, StorageRecoveryOptions,
+    StorageRecoverySelection, VsockSpecPatch, validate_sandbox_name,
 };
 #[cfg(feature = "local")]
 pub use sandbox::{

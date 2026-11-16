@@ -226,7 +226,10 @@ async fn run_new(
 
     common::display_restore_warnings(&sandbox).await;
 
-    if sandbox.config().await?.resumed_from_full_snapshot() {
+    if sandbox
+        .launch_info()
+        .is_some_and(|info| info.resumed_from_full_snapshot)
+    {
         if !args.command.is_empty() {
             ui::warn(&format!(
                 "command ignored because snapshot restore resumed its captured workload (use `msb exec {name} -- ...` after restore)"
@@ -253,7 +256,10 @@ async fn run_new(
     let interactive =
         common::use_interactive_tty(io::stdin().is_terminal(), args.no_tty || args.no_stdin);
 
-    if sandbox.config().await?.init_owns_boot_workload() {
+    if sandbox
+        .launch_info()
+        .is_some_and(|info| info.init_owns_boot_workload)
+    {
         let observe = observe_init_owned_workload(&sandbox, launch_started_at);
         let result = match exec_opts.timeout {
             Some(duration) => match tokio::time::timeout(duration, observe).await {

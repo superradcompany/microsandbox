@@ -8,14 +8,15 @@ import tempfile
 import zipfile
 
 
-def run(command):
-    subprocess.run(command, check=True, timeout=120)
+def run(command, *, env=None):
+    subprocess.run(command, check=True, timeout=120, env=env)
 
 
 PROBE = r'''
 import asyncio, importlib, json, tempfile, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import microsandbox_core as core
+from microsandbox_core.errors import JobError
 import microsandbox_local as local
 import microsandbox_remote as remote
 assert local.Sandbox is remote.Sandbox is core.Sandbox
@@ -50,6 +51,10 @@ async def probe():
         assert isinstance(sb.context.sandboxes, core.Sandboxes)
         assert (await sb.info())['id'] == sb.id
         assert await sb.status() is core.SandboxStatus.STOPPED
+        # Unsupported remote jobs must retain their typed error in every package.
+        try: await sb.exec_detached('true')
+        except JobError: pass
+        else: raise AssertionError('remote jobs unexpectedly succeeded')
         assert not await sb.owns_lifecycle
         async with sb as borrowed:
             assert borrowed is sb
@@ -71,10 +76,38 @@ finally:
 '''
 
 
+# Optional real-runtime coverage exercises native decoders after installing each
+# package independently, so the full package cannot mask a lean import defect.
+JOBS_PROBE = r'''
+import asyncio, importlib, os, uuid
+from contextlib import suppress
+sdk=importlib.import_module(os.environ['MSB_TEST_PACKAGE'])
+from microsandbox_core.jobs import JobExit, JobInfo, JobPage
+async def main():
+    name='review-jobs-'+uuid.uuid4().hex[:8]
+    sb=await sdk.Sandbox.create(name, image='mirror.gcr.io/library/alpine', memory=512, cpus=1)
+    try:
+        job=await sb.exec_detached('sh', args=['-c','printf job-output; exit 7'])
+        outcome=await job.wait()
+        assert isinstance(outcome, JobExit) and outcome.code==7
+        info=await job.inspect()
+        assert isinstance(info, JobInfo) and info.id==job.id
+        page=await sb.list_jobs(all=True)
+        assert isinstance(page, JobPage) and any(item.id==job.id for item in page.items)
+        logs=await job.logs()
+        assert b'job-output' in b''.join(item.data for item in logs)
+        print(os.environ['MSB_TEST_PACKAGE'], 'native wait/inspect/list/output decoded')
+    finally:
+        with suppress(Exception): await sb.stop()
+        await sdk.Sandbox.remove(name)
+asyncio.run(main())
+'''
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wheels", type=Path, required=True)
     parser.add_argument("--full", action="store_true", help="Also check coexistence with the staged full wheel")
+    parser.add_argument("--live-jobs-home", type=Path, help="Opt-in isolated runtime home with a cached alpine image for native job decoding")
     args = parser.parse_args()
     wheels = {}
     for kind in ("core", "local", "remote"):
@@ -111,9 +144,26 @@ def main():
             python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
             run(["uv", "pip", "install", "--offline", "--python", python, *wheels.values(), str(full[0].resolve())])
             prefix = "import microsandbox as full\nfrom microsandbox_core._native import default_binding\noriginal = default_binding()\n"
-            suffix = "\nassert full.Sandbox is core.Sandbox and full.MicrosandboxError is core.MicrosandboxError\nassert default_binding() is original\n"
+            suffix = """
+from microsandbox.jobs import _decode_exit, _decode_page
+assert _decode_exit(dict(code=0, success=True, timed_out=False)).success
+assert _decode_page(dict(items=[], next_cursor=None)).items == []
+assert full.Sandbox is core.Sandbox and full.MicrosandboxError is core.MicrosandboxError
+assert default_binding() is original
+"""
             run([python, "-c", prefix + PROBE + suffix])
             run([python, "-c", PROBE + "\nimport microsandbox as full\nassert full.Sandbox is core.Sandbox\n"])
+        if args.live_jobs_home:
+            for kind in ("local", "full") if args.full else ("local",):
+                venv = Path(temporary) / f"jobs-{kind}"
+                run(["uv", "venv", str(venv)])
+                python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
+                artifact = str(full[0].resolve()) if kind == "full" else wheels[kind]
+                run(["uv", "pip", "install", "--offline", "--python", python, wheels["core"], artifact])
+                home = str(args.live_jobs_home.resolve())
+                env = dict(os.environ, MSB_HOME=home, MSB_CONFIG_PATH=str(Path(home) / "config.json"),
+                           MSB_TEST_PACKAGE="microsandbox" if kind == "full" else "microsandbox_local")
+                run([python, "-c", JOBS_PROBE], env=env)
     print("Wheel payloads, shared types, live resource calls, context retention, offline installs and independent uninstall passed.")
 
 

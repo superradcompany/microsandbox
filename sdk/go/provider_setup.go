@@ -94,8 +94,10 @@ func InstallNativeProvider(ctx context.Context, options NativeInstallOptions) (s
 	if err != nil {
 		return "", fmt.Errorf("native setup lock: %w; another install may be active", err)
 	}
-	lock.Close()
 	defer os.Remove(lock.Name())
+	if err := lock.Close(); err != nil {
+		return "", fmt.Errorf("close native setup lock: %w", err)
+	}
 	source, err := openNativeSource(ctx, options.Source)
 	if err != nil {
 		return "", err

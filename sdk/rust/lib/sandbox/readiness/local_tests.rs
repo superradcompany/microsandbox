@@ -577,3 +577,29 @@ async fn retained_compaction_builder_rejects_a_same_name_replacement() {
     ));
     finish(&sb).await;
 }
+
+#[tokio::test]
+async fn live_config_does_not_erase_launch_outcomes() {
+    let (owner, _peer, _stdin, _home) = fixture(None).await;
+    persist_owner(&owner).await;
+    let session = owner.prepared_runtime().unwrap();
+    let mut config = session.config.clone();
+    config.init_owns_workload = true;
+    config.resumed_from_full_snapshot = true;
+    owner
+        .binding
+        .publish(Arc::new(crate::sandbox::state::RuntimeSession {
+            inner: crate::context::SandboxInner::Local(owner.local().unwrap()),
+            config,
+        }));
+    let clone = owner.clone();
+    let persisted = owner.config().await.unwrap();
+    assert!(!persisted.init_owns_boot_workload());
+    assert!(!persisted.resumed_from_full_snapshot());
+    let launch = clone.launch_info().unwrap();
+    assert!(launch.init_owns_boot_workload);
+    assert!(launch.resumed_from_full_snapshot);
+    let independent = Sandbox::ctx(owner.context()).get("task").await.unwrap();
+    assert!(independent.launch_info().is_none());
+    finish(&owner).await;
+}

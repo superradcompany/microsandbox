@@ -11,7 +11,6 @@ import base64
 import csv
 import hashlib
 import io
-import json
 from pathlib import Path
 import tomllib
 import zipfile
@@ -97,6 +96,10 @@ def full_wrapper_files():
         if source.name == "__init__.py":
             continue
         text = source.read_text() if source.name in ("_runtime.py", "_cli.py") else f"from microsandbox_core.{source.stem} import *\n"
+        if source.stem == "jobs":
+            # Native full bindings use these private decoders too. A wildcard
+            # import alone omits them, breaking successful job responses.
+            text += "from microsandbox_core.jobs import _decode_info, _decode_exit, _decode_log, _decode_logs, _decode_page, _decode_event\n"
         files[f"microsandbox/{source.name}"] = text.encode()
     files["microsandbox/__init__.py"] = ("from microsandbox_core import *\nfrom microsandbox_core import __all__\n"
         "from microsandbox_core._native import register_full_provider as _register\n"
