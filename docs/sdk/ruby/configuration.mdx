@@ -131,6 +131,14 @@ Microsandbox::RemoteContext.new(url: nil, api_key: nil, profile: nil, request_ti
 
 Capture a remote API destination using explicit credentials or a named profile. `request_timeout_ms` must be a nonnegative integer.
 
+#### with_url
+
+```ruby
+Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil) # => RemoteContext
+```
+
+Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses the hosted endpoint. Options use the same validation as `new`.
+
 #### from_env / from_profile
 
 ```ruby

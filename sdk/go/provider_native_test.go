@@ -63,7 +63,13 @@ func TestProviderCoexistenceNative(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	selected, err := remote.NewRemoteContext(server.URL, "provider-key")
+	if _, err := remote.NewRemoteContext("hosted-key"); err != nil {
+		t.Fatal("provider hosted constructor:", err)
+	}
+	if _, err := remote.NewRemoteContextWithURL("", "key"); err == nil {
+		t.Fatal("provider accepted empty explicit URL")
+	}
+	selected, err := remote.NewRemoteContextWithURL(server.URL, "provider-key")
 	if err != nil {
 		t.Fatal(err)
 	}

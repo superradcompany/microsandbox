@@ -47,8 +47,8 @@ def main():
         directory.mkdir()
         (directory / "go.mod").write_text(f"module {BASE}/{kind}\n\ngo 1.22\n\nrequire {BASE}/core v{version}\n")
         selected = kind.title()
-        parameters = "options core.LocalOptions" if kind == "local" else "url, apiKey string"
-        arguments = "options" if kind == "local" else "url, apiKey"
+        parameters = "options core.LocalOptions" if kind == "local" else "apiKey string"
+        arguments = "options" if kind == "local" else "apiKey"
         (directory / "provider.go").write_text(f'''// Package {kind} selects the {kind}-only native build. It never downloads on import or use.
 package {kind}
 import core "{BASE}/core"
@@ -63,6 +63,17 @@ func NewContext(path string, {parameters}) (*core.{selected}Context, error) {{
  if err != nil {{ return nil, err }}
  return provider.New{selected}Context({arguments})
 }}
+''')
+        if kind == "remote":
+            # Keep the generated lean module aligned with the shared core constructors.
+            with (directory / "provider.go").open("a") as stream:
+                stream.write('''
+// NewContextWithURL captures an explicit endpoint on the selected provider.
+func NewContextWithURL(path, url, apiKey string) (*core.RemoteContext, error) {
+ provider, err := Load(path)
+ if err != nil { return nil, err }
+ return provider.NewRemoteContextWithURL(url, apiKey)
+}
 ''')
     if args.full:
         full = out / "full"

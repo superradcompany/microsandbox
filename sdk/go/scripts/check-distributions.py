@@ -56,7 +56,11 @@ func TestSharedTypesAndMissingProvider(t *testing.T) {{
  var resource *core.Sandbox
  {full_identity}
  _ = local.NewContext
- _ = remote.NewContext
+ var hosted func(string, string) (*core.RemoteContext, error) = remote.NewContext
+ var explicit func(string, string, string) (*core.RemoteContext, error) = remote.NewContextWithURL
+ var coreHosted func(string) (*core.RemoteContext, error) = core.NewRemoteContext
+ var coreExplicit func(string, string) (*core.RemoteContext, error) = core.NewRemoteContextWithURL
+ _, _, _, _ = hosted, explicit, coreHosted, coreExplicit
  if _, err := core.InstalledNativeProvider(core.ContextRemote, t.TempDir()); err == nil {{ t.Fatal("missing provider unexpectedly loaded") }}
 }}
 ''')

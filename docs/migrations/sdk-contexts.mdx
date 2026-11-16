@@ -92,3 +92,13 @@ Memory options accept integer MiB or `Size`, including `Size.gib(1)`. A `Size` v
 ### Captured launch outcomes
 
 Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiver's retained session. Its `init_owns_boot_workload` and `resumed_from_full_snapshot` flags describe preparation outcomes, not persisted settings or live status. An unprepared lookup returns `None`. The CLI uses these outcomes to avoid executing an init-owned workload twice and to report full-restore warnings. Continue using `config().await?` for current persisted configuration and `status().await?` for current lifecycle state.
+
+## Remote context construction
+
+Rust's hosted constructor is now `RemoteContext::new(api_key)?`. Replace the former `RemoteContext::new(url, api_key)?` with `RemoteContext::with_url(url, api_key)?`, and replace `RemoteContext::with_api_key(api_key)?` with `RemoteContext::new(api_key)?`; the redundant `with_api_key` entry point is removed.
+
+Go follows the same distinction: `NewRemoteContext(apiKey)` for the hosted endpoint and `NewRemoteContextWithURL(url, apiKey)` for an explicit endpoint, including methods on `NativeProvider`. Replace the former two-argument `NewRemoteContext` calls accordingly. Passing an empty URL to the explicit factory now fails; use the key-only constructor for the hosted default.
+
+TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/operations/backends#remote-endpoints).
+
+This is a public source API change. Runtime protocols, stored configuration, resource identity and default-local routing are unchanged.

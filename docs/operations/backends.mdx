@@ -29,7 +29,7 @@ Choose an explicit context when a workflow needs a remote API or a different loc
 ```typescript TypeScript
 import { LocalContext, RemoteContext, Sandbox } from "microsandbox";
 
-const remote = RemoteContext.builder().apiKey(process.env.MSB_API_KEY!).build();
+const remote = new RemoteContext({ apiKey: process.env.MSB_API_KEY! });
 const sb = await remote.sandboxes.builder("task").image("python").create();
 const sameDestination = await Sandbox.ctx(remote).get("task");
 const local = LocalContext.builder().home("/srv/microsandbox").build();
@@ -38,7 +38,7 @@ const local = LocalContext.builder().home("/srv/microsandbox").build();
 ```rust Rust
 use microsandbox::{Context, LocalContext, RemoteContext, Sandbox};
 
-let remote = RemoteContext::builder().api_key(std::env::var("MSB_API_KEY")?).build()?;
+let remote = RemoteContext::new(std::env::var("MSB_API_KEY")?)?;
 let sb = remote.sandboxes().builder("task").image("python").create().await?;
 let same_destination = Sandbox::ctx(&remote).get("task").await?;
 let local = LocalContext::builder().home("/srv/microsandbox").build()?;
@@ -55,7 +55,7 @@ local = LocalContext(home="/srv/microsandbox")
 ```
 
 ```go Go
-remote, err := microsandbox.NewRemoteContext("", os.Getenv("MSB_API_KEY"))
+remote, err := microsandbox.NewRemoteContext(os.Getenv("MSB_API_KEY"))
 if err != nil { return err }
 sb, err := remote.Sandboxes().Create(ctx, "task", microsandbox.WithImage("python"))
 if err != nil { return err }
@@ -80,6 +80,46 @@ TypeScript and Python expose `sandboxes`, `volumes`, and `snapshots` as readonly
 Contexts capture user and managed configuration during construction. Invalid files cause an error even when remote credentials are supplied explicitly. Construct a new context to load changed settings. Resource inspection remains live: await `info()`, `status()`, or `config()` to fetch current backend state.
 
 Local context builders are synchronous. They validate and capture configuration immediately; the local catalog opens and migrates on the first operation that requires it.
+
+## Remote endpoints
+
+Key-only construction uses the hosted endpoint, `https://api.microsandbox.dev`. To select another compatible provider, use the explicit-URL factory:
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.withUrl("https://sandbox.example.com", process.env.MSB_API_KEY!);
+```
+
+```rust Rust
+use microsandbox::RemoteContext;
+
+let remote = RemoteContext::with_url("https://sandbox.example.com", std::env::var("MSB_API_KEY")?)?;
+```
+
+```python Python
+import os
+from microsandbox import RemoteContext
+
+remote = RemoteContext.with_url("https://sandbox.example.com", os.environ["MSB_API_KEY"])
+```
+
+```go Go
+remote, err := microsandbox.NewRemoteContextWithURL("https://sandbox.example.com", os.Getenv("MSB_API_KEY"))
+if err != nil { return err }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.with_url("https://sandbox.example.com", ENV.fetch("MSB_API_KEY"))
+```
+</CodeGroup>
+
+An explicitly empty URL is an error. Rust and TypeScript also retain fluent builders for transport settings. TypeScript options and Python/Ruby keyword constructors continue to accept `url`; their explicit-URL factories share the same validation and timeout/user-agent options. Go's selected `NativeProvider` exposes the same `NewRemoteContext(apiKey)` and `NewRemoteContextWithURL(url, apiKey)` methods.
+
+Use `from_env` / `fromEnv` / `RemoteContextFromEnv` to read `MSB_API_KEY` and optional `MSB_API_URL`, or the corresponding named-profile constructor to load a profile. Key-only construction does not read `MSB_API_URL` to choose an endpoint. None of these constructors changes the default-local resource shortcuts.
 
 ## CLI profiles
 

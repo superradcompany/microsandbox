@@ -69,10 +69,12 @@ func create(ctx context.Context) (*msb.Sandbox, error) {
 }
 ```
 
-For remote operations, provision `--kind remote` and use `remote.NewContext(path, url, apiKey)`. Full and lean modules share public resource types. Each native object retains its allocating library for operations, cancellation and cleanup.
+For remote operations, provision `--kind remote` and use `remote.NewContextWithURL(path, url, apiKey)`. Full and lean modules share public resource types. Each native object retains its allocating library for operations, cancellation and cleanup.
 
 ## Verify the installation
 
 Use matching package and native versions. A missing provider should produce an installation error, and an incompatible provider should be rejected before resource operations. Removing one lean provider must leave the other usable. Full and lean providers may coexist without overwriting each other’s package files.
 
 A package download size differs from its installed size. Include the platform native package in npm totals, the selected wheel in Python totals, and the separately provisioned FFI in Go totals. Count the external local runtime separately. Build measurements are platform-specific and are not claims about a published registry payload.
+
+Use `remote.NewContext(path, apiKey)` for the hosted endpoint; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.

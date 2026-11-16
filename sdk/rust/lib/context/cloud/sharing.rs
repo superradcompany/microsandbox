@@ -9,8 +9,18 @@ mod tests {
     use super::super::*;
 
     #[test]
+    fn constructors_select_hosted_or_explicit_endpoint() {
+        let hosted = RemoteContext::new("test-key").unwrap();
+        assert_eq!(hosted.url(), DEFAULT_CLOUD_API_URL);
+        let custom = RemoteContext::with_url("https://provider.example/", "test-key").unwrap();
+        assert_eq!(custom.url(), "https://provider.example");
+        assert!(RemoteContext::new(" ").is_err());
+        assert!(RemoteContext::with_url(" ", "test-key").is_err());
+    }
+
+    #[test]
     fn retained_context_shares_transport_without_rebinding_other_resources() {
-        let context = RemoteContext::new("http://localhost:8123", "test-key").unwrap();
+        let context = RemoteContext::with_url("http://localhost:8123", "test-key").unwrap();
         let retained = context.clone_shared();
         assert!(Arc::ptr_eq(
             &context.inner,

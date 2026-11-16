@@ -42,6 +42,16 @@ func TestExplicitContextsNative(t *testing.T) {
 	if err := ffi.Load(library); err != nil {
 		t.Fatal(err)
 	}
+	hosted, err := NewRemoteContext("hosted-key")
+	if err != nil || hosted.Kind() != ContextRemote {
+		t.Fatalf("hosted constructor: %v", err)
+	}
+	if _, err := NewRemoteContext(""); err == nil {
+		t.Fatal("empty API key accepted")
+	}
+	if _, err := NewRemoteContextWithURL(" ", "key"); err == nil {
+		t.Fatal("empty explicit endpoint silently selected hosted service")
+	}
 	provider := func(id string) *RemoteContext {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "Bearer key-"+id {
@@ -61,7 +71,7 @@ func TestExplicitContextsNative(t *testing.T) {
 			}
 		}))
 		t.Cleanup(server.Close)
-		destination, err := NewRemoteContext(server.URL, "key-"+id)
+		destination, err := NewRemoteContextWithURL(server.URL, "key-"+id)
 		if err != nil {
 			t.Fatal(err)
 		}

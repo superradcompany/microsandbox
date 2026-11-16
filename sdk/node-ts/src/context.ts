@@ -48,6 +48,10 @@ export class RemoteContext extends Context {
     }
     super(new (binding("remote").Context)(JSON.stringify({ ...options, kind: "remote" })));
   }
+  /** Construct a destination with an explicit endpoint, retaining transport options. */
+  static withUrl(url: string, apiKey: string, options: Omit<RemoteContextOptions, "url" | "apiKey"> = {}): RemoteContext {
+    return new RemoteContext({ ...options, url, apiKey });
+  }
   static builder(): RemoteContextBuilder { return new RemoteContextBuilder(); }
   static fromProfile(profile: string): RemoteContext {
     return new RemoteContext({ profile });

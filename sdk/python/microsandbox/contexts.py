@@ -61,6 +61,23 @@ class RemoteContext(Context):
         pass
 
     @classmethod
+    def with_url(
+        cls,
+        url: str,
+        api_key: str,
+        *,
+        request_timeout_ms: int | None = None,
+        user_agent: str | None = None,
+    ) -> "RemoteContext":
+        """Select an explicit endpoint while retaining the normal option validation."""
+        return cls(
+            url=url,
+            api_key=api_key,
+            request_timeout_ms=request_timeout_ms,
+            user_agent=user_agent,
+        )
+
+    @classmethod
     def from_profile(cls, name: str) -> "RemoteContext":
         return cls(profile=name)
 

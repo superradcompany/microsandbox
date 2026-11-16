@@ -46,9 +46,21 @@ class ContextNativeTest < Test::Unit::TestCase
               socket.close
             end
           end
-          Microsandbox::RemoteContext.new(url: "http://127.0.0.1:#{server.addr[1]}", api_key: "key-#{id}")
+          Microsandbox::RemoteContext.with_url("http://127.0.0.1:#{server.addr[1]}", "key-#{id}")
         end
         begin
+          raise "wrong hosted type" unless Microsandbox::RemoteContext.new(api_key: "hosted-key").is_a?(Microsandbox::RemoteContext)
+          [-> { Microsandbox::RemoteContext.new(api_key: "") },
+           -> { Microsandbox::RemoteContext.with_url("", "key") },
+           -> { Microsandbox::RemoteContext.with_url("http://localhost", "key", request_timeout_ms: -1) }].each do |construct|
+            rejected = false
+            begin
+              construct.call
+            rescue StandardError
+              rejected = true
+            end
+            raise "invalid remote constructor accepted" unless rejected
+          end
           a, b = provider.call("a"), provider.call("b")
           raise "wrong concrete type" unless a.is_a?(Microsandbox::RemoteContext)
           raise "wrong local type" unless Microsandbox::LocalContext.new.is_a?(Microsandbox::LocalContext)

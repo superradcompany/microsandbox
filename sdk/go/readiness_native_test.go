@@ -80,7 +80,7 @@ func TestGetRunningSandboxNative(t *testing.T) {
 	if err := ffi.Load(library); err != nil {
 		t.Fatal(err)
 	}
-	remote, err := NewRemoteContext(server.URL, "test-key")
+	remote, err := NewRemoteContextWithURL(server.URL, "test-key")
 	if err != nil {
 		t.Fatal(err)
 	}

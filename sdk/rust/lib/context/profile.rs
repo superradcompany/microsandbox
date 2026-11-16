@@ -467,8 +467,8 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains(&user.display().to_string()));
         for result in [
-            RemoteContext::new("https://cloud.example", "test-key"),
-            RemoteContext::with_api_key("test-key"),
+            RemoteContext::with_url("https://cloud.example", "test-key"),
+            RemoteContext::new("test-key"),
             RemoteContext::from_env(),
         ] {
             assert!(

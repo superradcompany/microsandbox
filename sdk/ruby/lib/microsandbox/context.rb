@@ -19,6 +19,11 @@ module Microsandbox
                                requestTimeoutMs: request_timeout_ms, userAgent: user_agent))
     end
 
+    # Explicit endpoint selection shares the normal constructor's validation.
+    def self.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil)
+      new(url: url, api_key: api_key, request_timeout_ms: request_timeout_ms, user_agent: user_agent)
+    end
+
     def self.from_profile(name)
       new(profile: name)
     end

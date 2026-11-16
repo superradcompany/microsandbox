@@ -187,9 +187,21 @@ def provider(identity):
     server = HTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     servers.append(server)
-    return RemoteContext(url=f"http://127.0.0.1:{server.server_port}", api_key="key-" + identity)
+    return RemoteContext.with_url(f"http://127.0.0.1:{server.server_port}", "key-" + identity)
 
 async def check():
+    assert RemoteContext(api_key="hosted-key").kind == "remote"
+    for construct in (
+        lambda: RemoteContext(api_key=""),
+        lambda: RemoteContext.with_url("", "key"),
+        lambda: RemoteContext.with_url("http://localhost", "key", request_timeout_ms=-1),
+    ):
+        try:
+            construct()
+        except Exception:
+            pass
+        else:
+            raise AssertionError("invalid remote constructor accepted")
     a, b = provider("a"), provider("b")
     assert a.kind == "remote" and LocalContext().kind == "local"
     collection = a.sandboxes

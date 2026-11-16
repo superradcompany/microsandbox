@@ -44,7 +44,20 @@ func (p *NativeProvider) NewLocalContext(options LocalOptions) (*LocalContext, e
 	return &LocalContext{inner: inner}, nil
 }
 
-func (p *NativeProvider) NewRemoteContext(url, apiKey string) (*RemoteContext, error) {
+// NewRemoteContext selects the hosted endpoint using an explicit API key.
+func (p *NativeProvider) NewRemoteContext(apiKey string) (*RemoteContext, error) {
+	return p.newRemoteContext("", apiKey)
+}
+
+// NewRemoteContextWithURL selects an explicit compatible remote endpoint.
+func (p *NativeProvider) NewRemoteContextWithURL(url, apiKey string) (*RemoteContext, error) {
+	if err := validateRemoteContextURL(url); err != nil {
+		return nil, err
+	}
+	return p.newRemoteContext(url, apiKey)
+}
+
+func (p *NativeProvider) newRemoteContext(url, apiKey string) (*RemoteContext, error) {
 	if p == nil || p.library == nil || p.kind != "remote" {
 		return nil, fmt.Errorf("remote context requires a remote native provider")
 	}

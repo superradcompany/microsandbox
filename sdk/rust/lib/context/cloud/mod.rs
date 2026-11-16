@@ -5,12 +5,13 @@
 //! WebSocket route through the shared agent client (see the `DialAgent` impl).
 //!
 //! Construction requires an API key. Hosted-cloud callers use the default
-//! endpoint; `new`, environment configuration, and profiles can override it
+//! endpoint; `with_url`, environment configuration, and profiles can override it
 //! for development, self-hosted, and on-prem deployments.
 //! Auth is API-key-only — the same `msb_live_*` / `msb_test_*` tokens msb-cloud
 //! issues today. No OAuth or session credentials are honored here.
 
 mod agent;
+mod constructors;
 mod http;
 mod modify;
 pub(in crate::context) mod sandbox;
@@ -66,9 +67,8 @@ fn default_user_agent() -> String {
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
-/// - [`RemoteContext::new`] — primary; explicit URL + key. Works for hosted SaaS,
-///   self-hosted, and on-prem deployments identically.
-/// - [`RemoteContext::with_api_key`] — hosted SaaS with the default API URL.
+/// - [`RemoteContext::new`] — hosted service with the default API URL.
+/// - [`RemoteContext::with_url`] — explicit URL + key for any compatible provider.
 /// - [`RemoteContext::from_env`] — reads `MSB_API_KEY`; `MSB_API_URL` is optional.
 /// - [`RemoteContext::from_profile`] — reads a named profile from the SDK config.
 /// - [`RemoteContext::builder`] — tuned construction (custom client, timeout,
@@ -112,20 +112,6 @@ pub struct RemoteContextBuilder {
 //--------------------------------------------------------------------------------------------------
 
 impl RemoteContext {
-    /// Construct a `RemoteContext` with an explicit URL and API key.
-    ///
-    /// Primary constructor. Works identically for hosted msb-cloud, self-hosted
-    /// deployments, and on-prem installs — no constructor implies a specific
-    /// deployment shape.
-    pub fn new(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self> {
-        Self::builder().url(url).api_key(api_key).build()
-    }
-
-    /// Construct for hosted microsandbox using [`DEFAULT_CLOUD_API_URL`].
-    pub fn with_api_key(api_key: impl Into<String>) -> MicrosandboxResult<Self> {
-        Self::builder().api_key(api_key).build()
-    }
-
     /// Construct from `MSB_API_KEY` and an optional `MSB_API_URL` override.
     ///
     /// Returns `InvalidConfig` if `MSB_API_KEY` is missing or empty. A missing

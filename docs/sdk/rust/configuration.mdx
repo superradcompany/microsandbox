@@ -165,6 +165,15 @@ fn context(&self) -> &dyn Context;
 
 ## RemoteContext
 
+### new() / with_url()
+
+```rust
+fn new(api_key: impl Into<String>) -> MicrosandboxResult<Self>;
+fn with_url(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self>;
+```
+
+`new` uses the hosted endpoint. `with_url` selects an explicit compatible provider; an empty URL is invalid. Both validate configuration synchronously. Use `from_env()` to read endpoint settings from the environment or `from_profile(name)` to load a named profile. See [remote endpoints](/operations/backends#remote-endpoints) and the [constructor migration](/migrations/sdk-contexts#remote-context-construction).
+
 ### builder()
 
 ```rust

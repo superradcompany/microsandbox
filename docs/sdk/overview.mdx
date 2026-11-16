@@ -102,7 +102,7 @@ import (
 )
 
 // An empty path selects the verified install cache; a path selects a trusted offline library.
-destination, err := remote.NewContext("", "https://api.microsandbox.dev", os.Getenv("MSB_API_KEY"))
+destination, err := remote.NewContext("", os.Getenv("MSB_API_KEY"))
 if err != nil { return err }
 sb, err := destination.Sandboxes().Get(context.Background(), "worker")
 if err != nil { return err }

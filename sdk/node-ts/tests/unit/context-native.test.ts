@@ -31,9 +31,13 @@ it("retains independent destinations through collections, builders and resources
         const { RemoteContext, LocalContext } = await import(${JSON.stringify(moduleUrl)});
         const { Sandbox } = await import(${JSON.stringify(sandboxUrl)});
         let remote = RemoteContext.builder().url("http://127.0.0.1:" + a.address().port).apiKey("key-a").build();
+        assert.equal(new RemoteContext({apiKey:"hosted-key"}).kind, "remote");
+        assert.throws(() => new RemoteContext({apiKey:""}));
+        assert.throws(() => RemoteContext.withUrl("", "key"));
+        assert.throws(() => RemoteContext.withUrl("http://localhost", "key", {requestTimeoutMs:-1}), RangeError);
         const sandboxes = remote.sandboxes;
         const builder = sandboxes.builder("task").image("python");
-        remote = new RemoteContext({url:"http://127.0.0.1:" + b.address().port, apiKey:"key-b"});
+        remote = RemoteContext.withUrl("http://127.0.0.1:" + b.address().port, "key-b");
         const [first, second] = await Promise.all([sandboxes.get("task"), Sandbox.ctx(remote).get("task")]);
         assert.notEqual(first.id, second.id);
         assert.equal(first.context.kind, "remote");
