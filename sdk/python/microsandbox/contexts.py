@@ -60,6 +60,35 @@ class RemoteContext(Context):
     ):
         pass
 
+    def replace(
+        self,
+        *,
+        url: str | None = None,
+        api_key: str | None = None,
+        request_timeout_ms: int | None = None,
+        user_agent: str | None = None,
+    ) -> "RemoteContext":
+        """Return an independent context with overrides; None retains the captured value.
+
+        Profiles, environment and configuration files are not read again. Existing
+        resources and this context retain their destination and credentials.
+        """
+        if request_timeout_ms is not None and (
+            isinstance(request_timeout_ms, bool)
+            or not isinstance(request_timeout_ms, int)
+            or not 0 <= request_timeout_ms < 2**64
+        ):
+            raise ValueError("request_timeout_ms must be a non-negative 64-bit integer")
+        options = {
+            "url": url,
+            "apiKey": api_key,
+            "requestTimeoutMs": request_timeout_ms,
+            "userAgent": user_agent,
+        }
+        # Allocate the concrete wrapper around derived native state, without rerunning
+        # the public constructor or copying credentials into Python.
+        return Context.__new__(type(self), json.dumps(options), self)
+
     @classmethod
     def with_url(
         cls,

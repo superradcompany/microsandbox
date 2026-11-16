@@ -58,6 +58,18 @@ impl JsContext {
         })
     }
 
+    /// Derive inside the retained provider; credentials never cross back into JavaScript.
+    #[napi]
+    pub fn derive_remote(&self, options_json: String) -> Result<Self> {
+        Ok(Self {
+            inner: microsandbox::context::derive_remote_from_options_json(
+                self.inner.as_ref(),
+                &options_json,
+            )
+            .map_err(to_napi_error)?,
+        })
+    }
+
     #[napi(getter)]
     pub fn kind(&self) -> &'static str {
         match self.inner.kind() {

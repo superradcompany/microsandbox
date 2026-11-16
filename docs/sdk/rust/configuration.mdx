@@ -193,3 +193,17 @@ let context = RemoteContext::builder()
 let sandbox = context.sandboxes().builder("worker").image("python").create().await?;
 ```
 </Accordion>
+
+### to_builder()
+
+```rust
+fn to_builder(&self) -> RemoteContextBuilder;
+```
+
+Return a builder initialized from captured endpoint, credentials, transport options and configuration. Building creates an independent context without rereading profiles, environment or configuration files. Existing resources retain their original context. A supplied custom HTTP client keeps its transport settings; the context API key controls Authorization. See [derivation examples](/operations/backends#deriving-a-remote-context).
+
+<Accordion title="Example">
+```rust
+let other = remote.to_builder().api_key(other_key).build()?;
+```
+</Accordion>

@@ -37,7 +37,16 @@ it("retains independent destinations through collections, builders and resources
         assert.throws(() => RemoteContext.withUrl("http://localhost", "key", {requestTimeoutMs:-1}), RangeError);
         const sandboxes = remote.sandboxes;
         const builder = sandboxes.builder("task").image("python");
-        remote = RemoteContext.withUrl("http://127.0.0.1:" + b.address().port, "key-b");
+        const originalId = (await sandboxes.get("task")).id;
+        assert.equal((await remote.toBuilder().build().sandboxes.get("task")).id, originalId);
+        assert.throws(() => remote.toBuilder().apiKey("").build());
+        assert.throws(() => remote.toBuilder().url("").build());
+        assert.throws(() => remote.toBuilder().requestTimeoutMs(-1).build(), RangeError);
+        const derivedBuilder = remote.toBuilder().url("http://127.0.0.1:" + b.address().port).apiKey("key-b");
+        remote = derivedBuilder.build();
+        assert.ok(remote instanceof RemoteContext);
+        assert.equal((await derivedBuilder.build().sandboxes.get("task")).id, (await remote.sandboxes.get("task")).id);
+        remote = remote.toBuilder().userAgent("derived-agent").build();
         const [first, second] = await Promise.all([sandboxes.get("task"), Sandbox.ctx(remote).get("task")]);
         assert.notEqual(first.id, second.id);
         assert.equal(first.context.kind, "remote");

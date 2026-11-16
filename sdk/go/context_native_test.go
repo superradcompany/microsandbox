@@ -33,7 +33,7 @@ func TestExplicitContextsNative(t *testing.T) {
 				child.Env = append(child.Env, entry)
 			}
 		}
-		child.Env = append(child.Env, "MSB_READINESS_NATIVE_LIBRARY="+library, "MSB_CONTEXT_NATIVE_CHILD=1", "MSB_HOME="+t.TempDir())
+		child.Env = append(child.Env, "MSB_READINESS_NATIVE_LIBRARY="+library, "MSB_CONTEXT_NATIVE_CHILD=1", "MSB_HOME="+t.TempDir(), "MSB_GO_REMOTE_PROVIDER="+os.Getenv("MSB_GO_REMOTE_PROVIDER"))
 		if output, err := child.CombinedOutput(); err != nil {
 			t.Fatalf("native contexts: %v\n%s", err, output)
 		}
@@ -52,6 +52,7 @@ func TestExplicitContextsNative(t *testing.T) {
 	if _, err := NewRemoteContextWithURL(" ", "key"); err == nil {
 		t.Fatal("empty explicit endpoint silently selected hosted service")
 	}
+	urls := map[string]string{}
 	provider := func(id string) *RemoteContext {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Authorization") != "Bearer key-"+id {
@@ -71,6 +72,7 @@ func TestExplicitContextsNative(t *testing.T) {
 			}
 		}))
 		t.Cleanup(server.Close)
+		urls[id] = server.URL
 		destination, err := NewRemoteContextWithURL(server.URL, "key-"+id)
 		if err != nil {
 			t.Fatal(err)
@@ -79,6 +81,36 @@ func TestExplicitContextsNative(t *testing.T) {
 	}
 	a, b := provider("a"), provider("b")
 	collection := a.Sandboxes()
+	unchanged, err := a.WithOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := unchanged.Sandboxes().Get(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	expectedOriginal, err := collection.Get(context.Background(), "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer expectedOriginal.Close()
+	if original.ID() != expectedOriginal.ID() {
+		t.Fatal("unchanged derivation lost settings")
+	}
+	for _, option := range []RemoteContextOption{WithRemoteAPIKey(""), WithRemoteURL(""), WithRemoteRequestTimeout(-time.Second), nil} {
+		if _, err := a.WithOptions(option); err == nil {
+			t.Fatal("invalid override accepted")
+		}
+	}
+	b, err = a.WithOptions(WithRemoteURL(urls["b"]), WithRemoteAPIKey("key-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = b.WithOptions(WithRemoteUserAgent("derived-agent"), WithRemoteRequestTimeout(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	first, err := collection.Get(ctx, "task")
 	if err != nil {
@@ -119,8 +151,36 @@ func TestExplicitContextsNative(t *testing.T) {
 	if info.ID != first.ID() {
 		t.Fatal("listed resource lost identity")
 	}
+	if path := os.Getenv("MSB_GO_REMOTE_PROVIDER"); path != "" {
+		provider, err := LoadNativeProvider(path, ContextRemote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if provider.library == unchanged.inner.Library() {
+			t.Fatal("fixture requires independent native libraries")
+		}
+		derived, err := unchanged.WithOptions(WithRemoteUserAgent("original-provider"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if derived.inner.Library() != unchanged.inner.Library() {
+			t.Fatal("derivation reselected the provider")
+		}
+		fetched, err := derived.Sandboxes().Get(context.Background(), "task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fetched.Close()
+		if fetched.ID() != original.ID() {
+			t.Fatal("derived context lost its original registration")
+		}
+	}
+
 	exercisePersistentResources(t)
 	var nilRemote *RemoteContext
+	if _, err := nilRemote.WithOptions(); err == nil {
+		t.Fatal("nil context derivation accepted")
+	}
 	for _, selected := range []Context{nil, nilRemote, &RemoteContext{}} {
 		if _, err := SandboxCtx(selected).Get(context.Background(), "task"); err == nil {
 			t.Fatal("nil destination accepted")

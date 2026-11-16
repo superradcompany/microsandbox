@@ -44,10 +44,17 @@ pub struct PySnapshots {
 #[pymethods]
 impl PyContext {
     #[new]
-    fn new(options_json: &str) -> PyResult<Self> {
-        Ok(Self {
-            inner: microsandbox::context::from_options_json(options_json).map_err(to_py_err)?,
-        })
+    #[pyo3(signature = (options_json, base=None))]
+    fn new(options_json: &str, base: Option<PyRef<'_, Self>>) -> PyResult<Self> {
+        let inner = match base {
+            Some(base) => microsandbox::context::derive_remote_from_options_json(
+                base.inner.as_ref(),
+                options_json,
+            ),
+            None => microsandbox::context::from_options_json(options_json),
+        }
+        .map_err(to_py_err)?;
+        Ok(Self { inner })
     }
     #[getter]
     fn kind(&self) -> &'static str {

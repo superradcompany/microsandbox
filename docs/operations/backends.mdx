@@ -121,6 +121,72 @@ An explicitly empty URL is an error. Rust and TypeScript also retain fluent buil
 
 Use `from_env` / `fromEnv` / `RemoteContextFromEnv` to read `MSB_API_KEY` and optional `MSB_API_URL`, or the corresponding named-profile constructor to load a profile. Key-only construction does not read `MSB_API_URL` to choose an endpoint. None of these constructors changes the default-local resource shortcuts.
 
+## Deriving a remote context
+
+Derive a remote context when you need a different endpoint, API key or transport setting while keeping the original available. Omitted settings retain their captured values. Derivation does not reread environment variables, named profiles or configuration files, and it uses the same native provider. Existing collections, builders and resources retain their original context; changing a derived context does not rotate credentials on those objects.
+
+<CodeGroup>
+```typescript TypeScript
+import { RemoteContext } from "microsandbox";
+
+const remote = RemoteContext.fromEnv();
+const other = remote.toBuilder()
+  .url("https://other-provider.example")
+  .apiKey(process.env.OTHER_API_KEY!)
+  .build();
+```
+
+```rust Rust
+use microsandbox::RemoteContext;
+
+let remote = RemoteContext::from_env()?;
+let other = remote.to_builder()
+    .url("https://other-provider.example")
+    .api_key(std::env::var("OTHER_API_KEY")?)
+    .build()?;
+```
+
+```python Python
+import os
+from microsandbox import RemoteContext
+
+remote = RemoteContext.from_env()
+other = remote.replace(
+    url="https://other-provider.example",
+    api_key=os.environ["OTHER_API_KEY"],
+)
+```
+
+```go Go
+import (
+    "os"
+    m "github.com/superradcompany/microsandbox/sdk/go"
+)
+
+remote, err := m.RemoteContextFromEnv()
+if err != nil { return err }
+other, err := remote.WithOptions(
+    m.WithRemoteURL("https://other-provider.example"),
+    m.WithRemoteAPIKey(os.Getenv("OTHER_API_KEY")),
+)
+if err != nil { return err }
+```
+
+```ruby Ruby
+require "microsandbox"
+
+remote = Microsandbox::RemoteContext.from_env
+other = remote.with(
+  url: "https://other-provider.example",
+  api_key: ENV.fetch("OTHER_API_KEY")
+)
+```
+</CodeGroup>
+
+Rust and TypeScript use their existing fluent builders. Python and Ruby use keyword overrides; `None`/`nil` retain the captured value. Go uses functional options. Python/Ruby accept `request_timeout_ms` and `user_agent`; Go provides `WithRemoteRequestTimeout(time.Duration)` and `WithRemoteUserAgent(string)`. Go durations must be nonnegative and are rounded down to milliseconds. Explicit empty URLs or API keys are rejected. Rust/TypeScript validate on `build()`; the other SDKs validate when deriving. None of these operations contacts the remote service.
+
+In Rust, `clone()` remains a cheap shared clone. `to_builder().build()` constructs an independent context while sharing the existing HTTP transport and its captured proxy/TLS settings. Timeout and user-agent overrides apply to requests from the derived context. A supplied custom client retains its transport settings and connection pool; its timeout and user-agent settings still take precedence over those builder options. The context API key supplies Authorization on every HTTP request, including with a custom client, matching agent connections. A derived context has programmatic provenance and does not carry a resource-specific agent identity binding.
+
 ## CLI profiles
 
 Profiles are named backend configurations in `~/.microsandbox/config.json`. Use them when you switch regularly or want a shared default for an environment:

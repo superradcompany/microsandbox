@@ -87,6 +87,21 @@ struct CloudSandboxWaitQuery {
 //--------------------------------------------------------------------------------------------------
 
 impl RemoteContext {
+    /// Authentication belongs to the destination, not the shared connection pool. A derived
+    /// context can safely reuse a custom client without inheriting its default credentials.
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        let request = self.inner.http.request(method, url).header(
+            reqwest::header::AUTHORIZATION,
+            self.inner.authorization.clone(),
+        );
+        match &self.inner.user_agent_header {
+            Some(agent) => request
+                .header(reqwest::header::USER_AGENT, agent.clone())
+                .timeout(self.inner.request_timeout),
+            None => request,
+        }
+    }
+
     /// `POST /v1/sandboxes` (optionally create, start, and wait for readiness).
     ///
     /// Pass `start=true` to atomically create-and-start in a single round-trip
@@ -99,7 +114,7 @@ impl RemoteContext {
         start: bool,
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!("{}/v1/sandboxes", self.inner.url);
-        let mut request = self.inner.http.post(&url).json(req);
+        let mut request = self.request(reqwest::Method::POST, &url).json(req);
         if start {
             let query = CloudSandboxWaitQuery {
                 start: Some(true),
@@ -130,9 +145,7 @@ impl RemoteContext {
             labels,
         };
         let resp = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .query(&params)
             .send()
             .await
@@ -148,9 +161,7 @@ impl RemoteContext {
             urlencoding(name)
         );
         let resp = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("GET /v1/sandboxes/by-name/:name", e))?;
@@ -164,9 +175,7 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!("{}/v1/sandboxes/{}", self.inner.url, urlencoding(id));
         let resp = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("GET /v1/sandboxes/:id", e))?;
@@ -189,9 +198,7 @@ impl RemoteContext {
             wait_timeout: CLOUD_READY_WAIT_TIMEOUT_SECS,
         };
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(&serde_json::json!({}))
             .query(&query)
             .timeout(CLOUD_READY_HTTP_TIMEOUT)
@@ -213,9 +220,7 @@ impl RemoteContext {
             wait_timeout: CLOUD_READY_WAIT_TIMEOUT_SECS,
         };
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(&serde_json::json!({}))
             .query(&query)
             .timeout(CLOUD_READY_HTTP_TIMEOUT)
@@ -237,9 +242,7 @@ impl RemoteContext {
             urlencoding(id)
         );
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(req)
             .send()
             .await
@@ -258,9 +261,7 @@ impl RemoteContext {
         timeout: Duration,
     ) -> Result<Response, reqwest::Error> {
         let url = format!("{}/v1/sandboxes/{}", self.inner.url, urlencoding(id));
-        self.inner
-            .http
-            .put(&url)
+        self.request(reqwest::Method::PUT, &url)
             .json(req)
             .timeout(timeout)
             .send()
@@ -275,9 +276,7 @@ impl RemoteContext {
             urlencoding(name)
         );
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -292,9 +291,7 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudCreateSandboxResponse> {
         let url = format!("{}/v1/sandboxes/{}/stop", self.inner.url, urlencoding(id));
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -311,9 +308,7 @@ impl RemoteContext {
             urlencoding(name)
         );
         let resp = self
-            .inner
-            .http
-            .delete(&url)
+            .request(reqwest::Method::DELETE, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/by-name/:name", e))?;
@@ -327,9 +322,7 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudMessageResponse> {
         let url = format!("{}/v1/sandboxes/{}", self.inner.url, urlencoding(id));
         let resp = self
-            .inner
-            .http
-            .delete(&url)
+            .request(reqwest::Method::DELETE, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("DELETE /v1/sandboxes/:id", e))?;
@@ -388,9 +381,7 @@ impl RemoteContext {
         }
 
         let mut request = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if let LogStreamStart::From(cursor) = &opts.start {
             request = request.header(HeaderName::from_static("last-event-id"), cursor.to_string());
@@ -431,9 +422,7 @@ impl RemoteContext {
     pub(in crate::context) async fn list_volumes(&self) -> MicrosandboxResult<Vec<CloudVolume>> {
         let url = format!("{}/v1/volumes", self.inner.url);
         let resp = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("GET /v1/volumes", e))?;
@@ -444,9 +433,7 @@ impl RemoteContext {
     pub(in crate::context) async fn get_default_volume(&self) -> MicrosandboxResult<CloudVolume> {
         let url = format!("{}/v1/volumes/default", self.inner.url);
         let resp = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("GET /v1/volumes/default", e))?;
@@ -470,9 +457,7 @@ impl RemoteContext {
         }
         let url = format!("{}/v1/volumes", self.inner.url);
         let resp = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(&body)
             .send()
             .await
@@ -487,9 +472,7 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudMessageResponse> {
         let url = format!("{}/v1/volumes/{}", self.inner.url, urlencoding(id));
         let resp = self
-            .inner
-            .http
-            .delete(&url)
+            .request(reqwest::Method::DELETE, &url)
             .send()
             .await
             .map_err(|e| cloud_io_error("DELETE /v1/volumes/:id", e))?;
@@ -525,7 +508,7 @@ impl RemoteContext {
             urlencoding(id),
             suffix
         );
-        let mut request = self.inner.http.request(method, &url);
+        let mut request = self.request(method, &url);
         for (name, value) in headers {
             request = request.header(*name, value);
         }

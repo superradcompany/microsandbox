@@ -97,6 +97,7 @@ export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
 /** An explicit shared destination. Construction never changes global selection. */
 export declare class Context {
+  deriveRemote(optionsJson: string): Context
   /** Snapshot destination selection is captured before the restore builder escapes. */
   sandboxRestore(snapshot: string, kind?: string | undefined | null): JsRestoreBuilder
   constructor(optionsJson: string)

@@ -25,7 +25,7 @@ mod ws_io;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::HeaderValue;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio_tungstenite::Connector;
 
@@ -85,6 +85,11 @@ struct RemoteContextInner {
     url: String,
     api_key: String,
     http: reqwest::Client,
+    authorization: HeaderValue,
+    user_agent_header: Option<HeaderValue>,
+    request_timeout: Duration,
+    user_agent: Option<String>,
+    custom_client: Option<reqwest::Client>,
     config: Arc<BackendConfig>,
     selection_source: ContextSelectionSource,
     profile: Option<String>,
@@ -104,6 +109,7 @@ pub struct RemoteContextBuilder {
     request_timeout: Duration,
     user_agent: Option<String>,
     custom_client: Option<reqwest::Client>,
+    shared_client: Option<reqwest::Client>,
     config: Option<Arc<BackendConfig>>,
 }
 
@@ -271,7 +277,7 @@ impl RemoteContextBuilder {
 
     /// Provide a fully custom `reqwest::Client`. When set, `request_timeout`
     /// and `user_agent` builder options are ignored — the supplied client owns
-    /// its own configuration.
+    /// its own transport configuration. The context API key always supplies Authorization.
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.custom_client = Some(client);
         self
@@ -310,31 +316,29 @@ impl RemoteContextBuilder {
         let url = url.trim_end_matches('/').to_string();
         let api_key = api_key.to_string();
 
-        let http = if let Some(client) = self.custom_client {
-            client
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| MicrosandboxError::InvalidConfig("invalid API key header value".into()))?;
+        authorization.set_sensitive(true);
+        // Keep the existing transport when deriving, including its captured proxy/TLS
+        // configuration. Timeout and User-Agent overrides are applied per request for SDK
+        // clients; custom clients continue to own those two settings themselves.
+        let user_agent_header = if self.custom_client.is_none() {
+            let agent = self
+                .user_agent
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(default_user_agent);
+            Some(HeaderValue::from_str(&agent).map_err(|e| {
+                MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
+            })?)
         } else {
-            let mut headers = HeaderMap::new();
-            let bearer = format!("Bearer {api_key}");
-            let mut auth_value = HeaderValue::from_str(&bearer).map_err(|e| {
-                MicrosandboxError::InvalidConfig(format!("invalid API key header value: {e}"))
-            })?;
-            auth_value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, auth_value);
-            let ua = self.user_agent.unwrap_or_else(default_user_agent);
-            headers.insert(
-                USER_AGENT,
-                HeaderValue::from_str(&ua).map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("invalid user-agent value: {e}"))
-                })?,
-            );
-
-            reqwest::Client::builder()
-                .timeout(self.request_timeout)
-                .default_headers(headers)
-                .build()
-                .map_err(|e| {
-                    MicrosandboxError::InvalidConfig(format!("failed to build HTTP client: {e}"))
-                })?
+            None
+        };
+        let http = match self.custom_client.clone().or(self.shared_client) {
+            Some(client) => client,
+            None => reqwest::Client::builder().build().map_err(|e| {
+                MicrosandboxError::InvalidConfig(format!("failed to build HTTP client: {e}"))
+            })?,
         };
 
         Ok(RemoteContext {
@@ -342,6 +346,11 @@ impl RemoteContextBuilder {
                 url,
                 api_key,
                 http,
+                authorization,
+                user_agent_header,
+                request_timeout: self.request_timeout,
+                user_agent: self.user_agent,
+                custom_client: self.custom_client,
                 config,
                 selection_source: ContextSelectionSource::Programmatic,
                 profile: None,
@@ -363,6 +372,7 @@ impl Default for RemoteContextBuilder {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             user_agent: None,
             custom_client: None,
+            shared_client: None,
             config: None,
         }
     }

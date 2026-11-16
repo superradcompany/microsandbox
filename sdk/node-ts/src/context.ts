@@ -53,6 +53,13 @@ export class RemoteContext extends Context {
     return new RemoteContext({ ...options, url, apiKey });
   }
   static builder(): RemoteContextBuilder { return new RemoteContextBuilder(); }
+  /** Derive from captured native state without rereading profiles or environment. */
+  toBuilder(): RemoteContextBuilder { return new RemoteContextBuilder(this); }
+  /** @internal Wrap a retained destination in its concrete type without reconstruction. */
+  static override fromNative(native: NapiContext): RemoteContext {
+    if (native.kind !== "remote") throw new TypeError("expected a remote context");
+    return Object.setPrototypeOf(super.fromNative(native), RemoteContext.prototype) as RemoteContext;
+  }
   static fromProfile(profile: string): RemoteContext {
     return new RemoteContext({ profile });
   }
@@ -72,11 +79,20 @@ export class LocalContextBuilder {
 
 export class RemoteContextBuilder {
   private options: Partial<RemoteContextOptions> = {};
+  constructor(private readonly base?: RemoteContext) {}
   url(url: string): this { this.options = { ...this.options, url }; return this; }
   apiKey(apiKey: string): this { this.options = { ...this.options, apiKey }; return this; }
   requestTimeoutMs(requestTimeoutMs: number): this { this.options = { ...this.options, requestTimeoutMs }; return this; }
   userAgent(userAgent: string): this { this.options = { ...this.options, userAgent }; return this; }
   build(): RemoteContext {
+    const timeout = this.options.requestTimeoutMs;
+    if (timeout !== undefined && (!Number.isSafeInteger(timeout) || timeout < 0)) {
+      throw new RangeError("requestTimeoutMs must be a non-negative safe integer");
+    }
+    if (this.base) {
+      // Dispatch through the retained binding, even if provider registrations later change.
+      return RemoteContext.fromNative(this.base.native.deriveRemote(JSON.stringify(this.options)));
+    }
     const apiKey = this.options.apiKey;
     if (apiKey === undefined) throw new Error("remote context requires apiKey");
     return new RemoteContext({ ...this.options, apiKey });

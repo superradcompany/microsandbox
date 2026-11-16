@@ -27,6 +27,17 @@ struct ContextOptions {
     user_agent: Option<String>,
 }
 
+/// Only explicit overrides cross the binding boundary; captured credentials stay in Rust.
+#[derive(Deserialize)]
+#[cfg_attr(not(feature = "cloud"), allow(dead_code))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RemoteOverrides {
+    url: Option<String>,
+    api_key: Option<String>,
+    request_timeout_ms: Option<u64>,
+    user_agent: Option<String>,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -105,4 +116,39 @@ pub fn from_options_json(json: &str) -> MicrosandboxResult<Arc<dyn Context>> {
 
 fn invalid(message: &str) -> MicrosandboxError {
     MicrosandboxError::InvalidConfig(message.into())
+}
+
+/// Derive from retained native state without exporting credentials or reselecting a provider.
+#[doc(hidden)]
+pub fn derive_remote_from_options_json(
+    context: &dyn Context,
+    json: &str,
+) -> MicrosandboxResult<Arc<dyn Context>> {
+    let overrides: RemoteOverrides = serde_json::from_str(json)
+        .map_err(|error| MicrosandboxError::InvalidConfig(error.to_string()))?;
+    #[cfg(feature = "cloud")]
+    {
+        let remote = context
+            .as_cloud()
+            .ok_or_else(|| invalid("derivation requires a remote context"))?;
+        let mut builder = remote.to_builder();
+        if let Some(url) = overrides.url {
+            builder = builder.url(url);
+        }
+        if let Some(key) = overrides.api_key {
+            builder = builder.api_key(key);
+        }
+        if let Some(timeout) = overrides.request_timeout_ms {
+            builder = builder.request_timeout(Duration::from_millis(timeout));
+        }
+        if let Some(agent) = overrides.user_agent {
+            builder = builder.user_agent(agent);
+        }
+        Ok(builder.build()?.clone_shared())
+    }
+    #[cfg(not(feature = "cloud"))]
+    {
+        let _ = (context, overrides);
+        Err(invalid("this SDK distribution has no remote provider"))
+    }
 }

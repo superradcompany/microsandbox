@@ -140,10 +140,18 @@ class NativeObject(metaclass=NativeType):
     __slots__ = ("_inner", "_provider")
 
     def __new__(cls, *args, **kwargs):
-        kind = "local"
+        owner = None
         if cls._native_name == "Context":
-            kind = json.loads(args[0])["kind"]
-        owner = binding(kind) if cls._native_name == "Context" else default_binding()
+            base = args[1] if len(args) > 1 else kwargs.get("base")
+            if base is not None:
+                if not isinstance(base, NativeObject):
+                    raise TypeError("base must be a retained native context")
+                # Derive through its original provider even if registrations changed.
+                owner = base._provider
+            else:
+                owner = binding(json.loads(args[0])["kind"])
+        else:
+            owner = default_binding()
         result = object.__new__(cls)
         object.__setattr__(result, "_provider", owner)
         object.__setattr__(result, "_inner", getattr(owner, cls._native_name)(*_unwrap(args, owner), **_unwrap(kwargs, owner)))

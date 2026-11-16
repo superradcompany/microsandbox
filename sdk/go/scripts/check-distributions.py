@@ -47,6 +47,7 @@ def main():
         (app / "providers_test.go").write_text(f'''package providerconsumer
 import (
  "testing"
+ "time"
  core "{BASE}/core"
  "{BASE}/local"
  "{BASE}/remote"
@@ -61,6 +62,8 @@ func TestSharedTypesAndMissingProvider(t *testing.T) {{
  var coreHosted func(string) (*core.RemoteContext, error) = core.NewRemoteContext
  var coreExplicit func(string, string) (*core.RemoteContext, error) = core.NewRemoteContextWithURL
  _, _, _, _ = hosted, explicit, coreHosted, coreExplicit
+ var selected *core.RemoteContext
+ if _, err := selected.WithOptions(core.WithRemoteURL("https://example.com"), core.WithRemoteAPIKey("fixture"), core.WithRemoteRequestTimeout(time.Second), core.WithRemoteUserAgent("consumer")); err == nil {{ t.Fatal("nil derived context accepted") }}
  if _, err := core.InstalledNativeProvider(core.ContextRemote, t.TempDir()); err == nil {{ t.Fatal("missing provider unexpectedly loaded") }}
 }}
 ''')

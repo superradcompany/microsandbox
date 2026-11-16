@@ -125,3 +125,25 @@ def test_provider_version_rejected_before_resource_construction(wrappers):
     register("local", version="incompatible")
     with pytest.raises(ImportError, match="matching core and provider versions"):
         core.binding("local")
+
+
+def test_context_derivation_keeps_its_original_provider(wrappers, monkeypatch):
+    core, register = wrappers
+    native = register("remote")
+
+    class NativeContext:
+        def __init__(self, options, base=None):
+            self.options = json.loads(options)
+            self.base = base
+
+    native.Context = NativeContext
+    base = core.Context('{"kind":"remote","apiKey":"fixture"}')
+
+    def unexpected_selection(*_):
+        raise AssertionError("derivation must not select a provider again")
+
+    monkeypatch.setattr(core, "binding", unexpected_selection)
+    derived = core.Context('{"url":"https://derived.example"}', base)
+    assert derived._provider is native
+    assert derived._inner.base is base._inner
+    assert derived._inner.options == {"url": "https://derived.example"}

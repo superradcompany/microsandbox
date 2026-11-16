@@ -1,6 +1,7 @@
 """Opt-in checks against a rebuilt native binding, in an isolated SDK process."""
 
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -147,7 +148,8 @@ finally:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_explicit_contexts_retain_independent_destinations(tmp_path):
+@pytest.mark.parametrize("use_core", [False, True])
+def test_explicit_contexts_retain_independent_destinations(tmp_path, use_core):
     library = os.environ.get("MSB_LIFETIME_PYTHON_LIBRARY")
     if not library:
         pytest.skip("requires MSB_LIFETIME_PYTHON_LIBRARY")
@@ -205,6 +207,17 @@ async def check():
     a, b = provider("a"), provider("b")
     assert a.kind == "remote" and LocalContext().kind == "local"
     collection = a.sandboxes
+    assert (await a.replace().sandboxes.get("task")).id == (await collection.get("task")).id
+    for overrides in ({"api_key": ""}, {"url": ""}, {"request_timeout_ms": -1}):
+        try:
+            a.replace(**overrides)
+        except Exception:
+            pass
+        else:
+            raise AssertionError("invalid derived settings accepted")
+    b = a.replace(url=f"http://127.0.0.1:{servers[-1].server_port}", api_key="key-b")
+    b = b.replace(user_agent="derived-agent")
+    assert isinstance(b, RemoteContext)
     first, second = await asyncio.gather(collection.get("task"), Sandbox.ctx(b).get("task"))
     assert first.id != second.id
     del a, b
@@ -227,6 +240,21 @@ finally:
     for server in servers:
         server.shutdown()
 """
+    if use_core:
+        staging = runpy.run_path(str(Path(__file__).parents[1] / "scripts/stage_distributions.py"))
+        for name, data in staging["core_files"]().items():
+            destination = tmp_path / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        provider = tmp_path / "fixture_provider"
+        provider.mkdir()
+        (provider / "__init__.py").write_text("")
+        (provider / "_microsandbox.so").symlink_to(Path(library).resolve())
+        script = (
+            "from microsandbox_core._native import register_full_provider\n"
+            f"register_full_provider('fixture_provider._microsandbox', {staging['VERSION']!r})\n"
+            + script.replace("from microsandbox import", "from microsandbox_core import")
+        )
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=30
     )

@@ -29,6 +29,13 @@ struct Request {
     args: serde_json::Value,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Derivation {
+    base_handle: u64,
+    overrides: serde_json::Value,
+}
+
 //--------------------------------------------------------------------------------------------------
 // Functions
 //--------------------------------------------------------------------------------------------------
@@ -59,7 +66,20 @@ pub unsafe extern "C" fn msb_context_create(
     let published = Arc::new(AtomicU64::new(0));
     let publication = published.clone();
     let result = run_c(cancel_id, buf, len, || {
-        let context = microsandbox::context::from_options_json(&unsafe { cstr(options) }?)?;
+        let json = unsafe { cstr(options) }?;
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|e| FfiError::invalid_argument(e.to_string()))?;
+        let context = if value.get("baseHandle").is_some() {
+            let request: Derivation = serde_json::from_value(value)
+                .map_err(|e| FfiError::invalid_argument(e.to_string()))?;
+            let base = get(request.base_handle)?;
+            microsandbox::context::derive_remote_from_options_json(
+                base.as_ref(),
+                &request.overrides.to_string(),
+            )?
+        } else {
+            microsandbox::context::from_options_json(&json)?
+        };
         Ok(Box::pin(async move {
             let kind = match context.kind() {
                 microsandbox::ContextKind::Local => "local",

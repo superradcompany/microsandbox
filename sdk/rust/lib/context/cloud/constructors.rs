@@ -1,4 +1,4 @@
-use super::RemoteContext;
+use super::{RemoteContext, RemoteContextBuilder};
 use crate::MicrosandboxResult;
 
 //--------------------------------------------------------------------------------------------------
@@ -6,6 +6,21 @@ use crate::MicrosandboxResult;
 //--------------------------------------------------------------------------------------------------
 
 impl RemoteContext {
+    /// Derive an independent destination from captured settings, without reloading profiles,
+    /// environment variables or configuration files. Existing resources keep this context.
+    /// Custom clients retain their transport settings; the context API key controls auth.
+    pub fn to_builder(&self) -> RemoteContextBuilder {
+        RemoteContextBuilder {
+            url: Some(self.inner.url.clone()),
+            api_key: Some(self.inner.api_key.clone()),
+            request_timeout: self.inner.request_timeout,
+            user_agent: self.inner.user_agent.clone(),
+            custom_client: self.inner.custom_client.clone(),
+            shared_client: Some(self.inner.http.clone()),
+            config: Some(self.inner.config.clone()),
+        }
+    }
+
     /// Construct for the hosted service using the default API URL.
     ///
     /// This constructor does not select an endpoint from `MSB_API_URL`;

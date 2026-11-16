@@ -1414,6 +1414,7 @@ export interface NapiMemoryCacheReport {
 }
 
 export interface NapiContext {
+  deriveRemote(optionsJson: string): NapiContext;
   sandboxRestore(snapshot: string, kind?: "auto" | "id" | "path"): NapiRestoreBuilder;
   readonly kind: "local" | "remote";
   sandboxBuilder(name: string): NapiSandboxBuilder;

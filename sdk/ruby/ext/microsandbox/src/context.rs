@@ -54,6 +54,18 @@ impl RubyContext {
             class,
         ))
     }
+    fn derive_from_json(
+        ruby: &Ruby,
+        class: magnus::RClass,
+        base: &Self,
+        json: String,
+    ) -> Result<typed_data::Obj<Self>, Error> {
+        let inner =
+            microsandbox_core::context::derive_remote_from_options_json(base.inner.as_ref(), &json)
+                .map_err(|e| crate::core_error(ruby, e))?;
+        Ok(ruby.obj_wrap_as(Self { inner }, class))
+    }
+
     fn kind(&self) -> &'static str {
         match self.inner.kind() {
             microsandbox_core::ContextKind::Local => "local",
@@ -282,6 +294,10 @@ fn snapshot_ctx(context: &RubyContext) -> RubySnapshots {
 pub(crate) fn register(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let context = module.define_class("Context", ruby.class_object())?;
     context.define_singleton_method("__from_json", method!(RubyContext::from_json, 1))?;
+    context.define_singleton_method(
+        "__derive_from_json",
+        method!(RubyContext::derive_from_json, 2),
+    )?;
     context.define_singleton_method(
         "inherited",
         function!(magnus::RClass::undef_default_alloc_func, 1),

@@ -65,6 +65,19 @@ class ContextNativeTest < Test::Unit::TestCase
           raise "wrong concrete type" unless a.is_a?(Microsandbox::RemoteContext)
           raise "wrong local type" unless Microsandbox::LocalContext.new.is_a?(Microsandbox::LocalContext)
           collection = a.sandboxes
+          raise "unchanged derivation lost settings" unless a.with.sandboxes.get("task").id == collection.get("task").id
+          [{api_key: ""}, {url: ""}, {request_timeout_ms: -1}].each do |overrides|
+            rejected = false
+            begin
+              a.with(**overrides)
+            rescue StandardError
+              rejected = true
+            end
+            raise "invalid derived settings accepted" unless rejected
+          end
+          b = a.with(url: "http://127.0.0.1:#{servers.last.addr[1]}", api_key: "key-b")
+          b = b.with(user_agent: "derived-agent")
+          raise "derived wrapper lost type" unless b.is_a?(Microsandbox::RemoteContext)
           first = collection.get("task")
           second = Microsandbox::Sandbox.ctx(b).get("task")
           raise "destinations collapsed" if first.id == second.id

@@ -139,6 +139,14 @@ Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user
 
 Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses the hosted endpoint. Options use the same validation as `new`.
 
+#### with
+
+```ruby
+remote.with(url: nil, api_key: nil, request_timeout_ms: nil, user_agent: nil) # => RemoteContext
+```
+
+Return an independent context using keyword overrides. Nil retains the captured value. Profiles, environment and configuration files are not read again; existing resources keep their destination. Empty URLs/keys and invalid timeouts fail. See [derivation examples](/operations/backends#deriving-a-remote-context).
+
 #### from_env / from_profile
 
 ```ruby

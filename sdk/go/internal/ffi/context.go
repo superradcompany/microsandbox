@@ -31,6 +31,16 @@ type Context struct {
 
 func NewContext(options any) (*Context, error) { return defaultLibrary().NewContext(options) }
 
+// DeriveRemote registers with the original provider, never the currently selected library.
+func (c *Context) DeriveRemote(overrides any) (*Context, error) {
+	derived, err := c.lib().NewContext(struct {
+		BaseHandle uint64 `json:"baseHandle"`
+		Overrides  any    `json:"overrides"`
+	}{c.handle, overrides})
+	runtime.KeepAlive(c)
+	return derived, err
+}
+
 func (c *Context) Kind() string { return c.kind }
 func (c *Context) CreateSandbox(ctx context.Context, name string, options CreateOptions, connectOrCreate bool) (*Sandbox, error) {
 	options.ContextHandle = c.handle

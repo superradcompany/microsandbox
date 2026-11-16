@@ -19,6 +19,16 @@ module Microsandbox
                                requestTimeoutMs: request_timeout_ms, userAgent: user_agent))
     end
 
+    # Return an independent destination. Nil retains the captured value; profiles,
+    # environment and configuration files are never resolved again.
+    def with(url: nil, api_key: nil, request_timeout_ms: nil, user_agent: nil)
+      unless request_timeout_ms.nil? || (request_timeout_ms.is_a?(Integer) && request_timeout_ms.between?(0, (1 << 64) - 1))
+        raise ArgumentError, "request_timeout_ms must be a non-negative 64-bit integer"
+      end
+      self.class.__derive_from_json(self, JSON.generate(url: url, apiKey: api_key,
+                                                       requestTimeoutMs: request_timeout_ms, userAgent: user_agent))
+    end
+
     # Explicit endpoint selection shares the normal constructor's validation.
     def self.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil)
       new(url: url, api_key: api_key, request_timeout_ms: request_timeout_ms, user_agent: user_agent)

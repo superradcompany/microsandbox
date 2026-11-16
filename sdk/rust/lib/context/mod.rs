@@ -50,4 +50,4 @@ mod options;
 pub use default_local::default_local_context;
 pub use metadata::{ContextInfo, ContextKind, ContextSelectionSource};
 #[doc(hidden)]
-pub use options::from_options_json;
+pub use options::{derive_remote_from_options_json, from_options_json};
