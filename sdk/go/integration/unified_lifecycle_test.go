@@ -67,7 +67,9 @@ func TestUnifiedReceiverImplicitStartupAndOwnership(t *testing.T) {
 	}
 	stopped, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := observer.WaitForStatus(stopped, microsandbox.SandboxStatusStopped); err != nil {
+	// Final-owner cleanup uses the platform watchdog/job fallback. Windows may
+	// report a crashed terminal state rather than a graceful stopped state.
+	if _, err := observer.WaitUntilStopped(stopped); err != nil {
 		t.Fatal(err)
 	}
 }
