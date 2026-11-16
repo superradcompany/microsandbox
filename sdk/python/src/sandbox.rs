@@ -1542,7 +1542,10 @@ impl PySandbox {
                 .await?
                 .ensure_running()
                 .await
-                .map_err(to_py_err)
+                .map_err(to_py_err)?;
+            // PyO3 converts Rust unit to an empty tuple; this completion-only
+            // Python method explicitly promises None.
+            Ok(Python::attach(|py| py.None()))
         })
     }
 

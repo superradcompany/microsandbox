@@ -13,6 +13,27 @@ spec.loader.exec_module(report)
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_resolution_cannot_hide_a_failed_candidate(self):
+        with self.assertRaises(ValueError):
+            report.resolved_verdict(
+                {"verdict": "FIX VERIFIED", "reason": "explicit None conversion"},
+                {},
+                {"status": "FAIL"},
+            )
+
+    def test_fixture_resolution_requires_both_versions(self):
+        resolution = {
+            "verdict": "FIXTURE CORRECTED — both pass",
+            "reason": "explicit TCP-capable resolver",
+            "requires_old_pass": True,
+        }
+        with self.assertRaises(ValueError):
+            report.resolved_verdict(resolution, {}, {"status": "PASS"})
+        self.assertEqual(
+            report.resolved_verdict(resolution, {"status": "PASS"}, {"status": "PASS"}),
+            resolution["verdict"],
+        )
+
     def test_equal_failures_are_not_parity(self):
         self.assertEqual(
             report.verdict({"status": "FAIL"}, {"status": "FAIL"}), "FAIL BOTH"

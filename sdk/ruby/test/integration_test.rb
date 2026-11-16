@@ -36,6 +36,8 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
   def test_network_allowlist_allows_one_host_and_denies_another
     sandbox = create_sandbox(
       "net-allowlist",
+      # Strict hostname policy requires inspection of HTTPS authority.
+      intercept_tls: true,
       network: { allowed_hosts: ["example.com"], allowed_ports: [443] }
     )
 
@@ -53,6 +55,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
   def test_network_allowlist_reference_endpoint
     sandbox = create_sandbox(
       "net-reference",
+      intercept_tls: true,
       network: { allowed_hosts: ["httpbingo.org"], allowed_ports: [443] }
     )
     allowed = sandbox.shell("wget -O- --timeout=10 https://httpbingo.org/get")
@@ -60,6 +63,17 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
 
     assert_true allowed.success?, "allowed request failed: #{allowed.stderr}"
     assert_false denied.success?
+  ensure
+    sandbox&.stop
+  end
+
+  def test_strict_hostname_allowlist_rejects_opaque_https
+    sandbox = create_sandbox(
+      "net-strict-opaque",
+      network: { allowed_hosts: ["example.com"], allowed_ports: [443] }
+    )
+    output = sandbox.shell("wget -O- --timeout=10 https://example.com")
+    assert_false output.success?, "strict policy unexpectedly allowed uninspected HTTPS"
   ensure
     sandbox&.stop
   end

@@ -75,7 +75,19 @@ def read_attempts(evidence):
                             else "",
                         }
                     )
-        for suffix in ("", "-recovered", "-jobs", "-ssh", "-tls-retry"):
+        for suffix in (
+            "",
+            "-recovered",
+            "-jobs",
+            "-ssh",
+            "-tls-retry",
+            "-network-fixture-first",
+            "-network-corrected",
+            "-helpers",
+            "-full-progress",
+            "-full-lifecycle",
+            "-full-cancellation",
+        ):
             file = evidence / f"rust-{phase}{suffix}.jsonl"
             if not file.exists():
                 continue
@@ -103,7 +115,7 @@ def read_attempts(evidence):
                                 "failed": "FAIL",
                                 "ignored": "SKIP",
                             }[event["event"]],
-                            "corrected": False,
+                            "corrected": "corrected" in suffix,
                             "evidence": file.name,
                             "detail": event.get("stdout", "")[-4000:],
                         }
@@ -115,12 +127,12 @@ def read_attempts(evidence):
                         "phase": phase,
                         "case": name,
                         "status": "INCOMPLETE",
-                        "corrected": False,
+                        "corrected": "corrected" in suffix,
                         "evidence": file.name,
                         "detail": "Started without a terminal test event",
                     }
                 )
-        for suffix in ("", "-additional"):
+        for suffix in ("", "-additional", "-corrected"):
             file = evidence / f"ruby-{phase}{suffix}.log"
             if not file.exists():
                 continue
@@ -149,7 +161,7 @@ def read_attempts(evidence):
                         "phase": phase,
                         "case": match[1],
                         "status": status,
-                        "corrected": False,
+                        "corrected": "corrected" in suffix,
                         "evidence": file.name,
                         "detail": block[-4000:] if status != "PASS" else "",
                     }
@@ -239,6 +251,17 @@ def verdict(old, new, sdk="", case=""):
     return "MISSING / SKIPPED"
 
 
+def resolved_verdict(resolution, old, new):
+    """A reviewed fix cannot close a still-failing or unexecuted case."""
+    if new.get("status") != "PASS":
+        raise ValueError("resolution requires a passing candidate execution")
+    if resolution.get("requires_old_pass") and old.get("status") != "PASS":
+        raise ValueError("fixture correction requires a passing baseline execution")
+    if not resolution.get("reason"):
+        raise ValueError("resolution requires an explicit explanation")
+    return resolution["verdict"]
+
+
 def write_csv(file, rows, fields):
     with file.open("w") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
@@ -292,12 +315,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--followup-evidence", type=Path)
+    parser.add_argument("--resolutions", type=Path)
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--roadmap", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     attempts = read_attempts(args.evidence)
+    if args.followup_evidence:
+        for row in read_attempts(args.followup_evidence):
+            row["round"] = 1
+            row["evidence"] = "followup/" + row["evidence"]
+            attempts.append(row)
+    resolutions = json.loads(args.resolutions.read_text()) if args.resolutions else {}
     write_csv(
         args.out / "execution-attempts.csv",
         attempts,
@@ -307,7 +338,9 @@ def main():
         json.dumps(attempts, indent=2) + "\n"
     )
     paired = {}
-    for row in sorted(attempts, key=lambda row: row["corrected"]):
+    for row in sorted(
+        attempts, key=lambda row: (row.get("round", 0), row["corrected"])
+    ):
         paired.setdefault((row["sdk"], row["case"]), {})[row["phase"]] = row
     comparisons = []
     for (sdk, case), versions in sorted(paired.items()):
@@ -326,6 +359,9 @@ def main():
             and not new.get("corrected")
         ):
             result = "INTERMITTENT — new passed on retry"
+        resolution = resolutions.get(f"{sdk}/{case}")
+        if resolution:
+            result = resolved_verdict(resolution, old, new)
         comparisons.append(
             {
                 "sdk": sdk,
@@ -336,7 +372,9 @@ def main():
                 "evidence": "; ".join(
                     dict.fromkeys(row["evidence"] for row in history)
                 ),
-                "note": ACCEPTED_CHANGES.get((sdk, case), ""),
+                "note": resolution["reason"]
+                if resolution
+                else ACCEPTED_CHANGES.get((sdk, case), ""),
             }
         )
     write_csv(
@@ -449,15 +487,19 @@ def main():
         ["id", "behavior", "decision", "verdict", "evidence"],
     )
     manifest = []
-    for file in sorted(args.evidence.iterdir()):
-        if file.is_file():
-            manifest.append(
-                {
-                    "file": file.name,
-                    "bytes": file.stat().st_size,
-                    "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
-                }
-            )
+    roots = [("", args.evidence)]
+    if args.followup_evidence:
+        roots.append(("followup/", args.followup_evidence))
+    for prefix, root in roots:
+        for file in sorted(root.iterdir()):
+            if file.is_file():
+                manifest.append(
+                    {
+                        "file": prefix + file.name,
+                        "bytes": file.stat().st_size,
+                        "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                    }
+                )
     (args.out / "evidence-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
@@ -482,8 +524,8 @@ def main():
         "",
         "Each row is one executed named scenario, not every option combination or public method. `REPLICATED` means both versions passed the corresponding scenario after the documented API migration; it does not assert identical source signatures. Original and corrected-harness attempts are retained in `execution-attempts.csv`. Real remote-provider rows are blocked: no disposable test account.",
         "",
-        "| SDK | Scenario | Old | New | Verdict | Evidence |",
-        "|---|---|---|---|---|---|",
+        "| SDK | Scenario | Old | New | Verdict | Evidence | Note |",
+        "|---|---|---|---|---|---|---|",
     ]
     for row in comparisons:
         lines.append(

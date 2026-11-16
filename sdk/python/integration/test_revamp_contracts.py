@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 
 import pytest
 
-from microsandbox import ExecEventType, MicrosandboxError, Sandbox, SandboxStatus
+from microsandbox import (
+    ExecEventType,
+    ExecTimeoutError,
+    LocalContext,
+    MicrosandboxError,
+    Sandbox,
+    SandboxStatus,
+    Volume,
+)
 
 
 @pytest.mark.asyncio
@@ -99,3 +108,89 @@ async def test_owned_and_borrowed_scope_cleanup(sandbox_factory):
     observer = await Sandbox.get(original.name)
     assert observer.id == original.id
     assert await asyncio.wait_for(observer.wait_for_status(SandboxStatus.STOPPED), 20) is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_wait_does_not_finish_execution(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-cancel-wait")
+    execution = await sandbox.shell_stream("sleep 0.3; exit 7")
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(execution.wait(), 0.03)
+    assert await execution.wait() == (7, False)
+    assert await execution.wait() == (7, False)
+
+
+@pytest.mark.asyncio
+async def test_terminal_execution_failure_is_repeatable(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-terminal-failure")
+    execution = await sandbox.shell_stream("sleep 30", timeout=0.05)
+    failures = []
+    for _ in range(2):
+        with pytest.raises(ExecTimeoutError) as failure:
+            await execution.wait()
+        failures.append(str(failure.value))
+    assert failures[0] == failures[1]
+
+
+@pytest.mark.asyncio
+async def test_inspection_failure_never_returns_saved_state(sandbox_factory):
+    sandbox = await sandbox_factory("py-sdk-inspection-failure")
+    observer = await Sandbox.get(sandbox.name)
+    await observer.info()
+    await observer.config()
+    await sandbox.destroy()
+    for read in (observer.info, observer.config, observer.status, observer.last_failure_message):
+        with pytest.raises(MicrosandboxError):
+            await read()
+
+
+@pytest.mark.asyncio
+async def test_local_volume_contexts_retain_distinct_destinations(tmp_path):
+    first_context = LocalContext(home=(tmp_path / "first").resolve())
+    second_context = LocalContext(home=(tmp_path / "second").resolve())
+    first = await Volume.ctx(first_context).create("same-name")
+    second = await second_context.volumes.create("same-name")
+    del first_context, second_context
+    try:
+        # IDs are destination-scoped; two independent catalogs may both start at local:1.
+        assert first.path != second.path
+        await asyncio.gather(
+            first.fs.write("marker", b"first"), second.fs.write("marker", b"second")
+        )
+        assert await first.fs.read("marker") == b"first"
+        assert await second.fs.read("marker") == b"second"
+        fetched = await first.context.volumes.get("same-name")
+        assert fetched.id == first.id
+        await first.destroy()
+        with pytest.raises(MicrosandboxError):
+            await fetched.info()
+        assert await second.fs.read("marker") == b"second"
+    finally:
+        for volume in (first, second):
+            with suppress(MicrosandboxError):
+                await volume.destroy()
+
+
+@pytest.mark.asyncio
+async def test_paginated_results_are_usable_unified_resources(sandbox_factory, sandbox_name):
+    owner = sandbox_name("py-sdk-page-owner")
+    sandboxes = [
+        await sandbox_factory("py-sdk-page", labels={"parity_owner": owner}) for _ in range(3)
+    ]
+    seen = set()
+    cursor = None
+    # A bounded traversal fails if the provider repeats a cursor or never terminates.
+    for _ in range(4):
+        page = await Sandbox.list_with(limit=1, cursor=cursor, labels={"parity_owner": owner})
+        for item in page.sandboxes:
+            assert isinstance(item, Sandbox)
+            assert item.id not in seen
+            seen.add(item.id)
+            assert (await item.shell("printf listed")).stdout_text == "listed"
+        if page.next_cursor is None:
+            break
+        assert page.next_cursor != cursor
+        cursor = page.next_cursor
+    else:
+        pytest.fail("pagination did not terminate")
+    assert seen == {sandbox.id for sandbox in sandboxes}
