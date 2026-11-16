@@ -321,6 +321,11 @@ fn linux_errno_raw(errno: i32) -> i32 {
         libc::ENOSTR => LINUX_ENOSTR,
         libc::EPROTO => LINUX_EPROTO,
         libc::ETIME => LINUX_ETIME,
+        // macOS has two distinct codes here: ENOTSUP (45) and EOPNOTSUPP
+        // (102). Linux collapses both into EOPNOTSUPP (95). Without the
+        // first arm, ENOTSUP — which FSKit exFAT returns for `linkat` —
+        // falls through to the catch-all and reaches the guest as EIO.
+        libc::ENOTSUP => LINUX_EOPNOTSUPP,
         libc::EOPNOTSUPP => LINUX_EOPNOTSUPP,
         libc::ENOTRECOVERABLE => LINUX_ENOTRECOVERABLE,
         libc::EOWNERDEAD => LINUX_EOWNERDEAD,
@@ -513,6 +518,25 @@ pub(crate) fn readlink_fd(fd: RawFd) -> io::Result<Vec<u8>> {
             buf.len(),
         )
     };
+    if len < 0 {
+        Err(linux_error(io::Error::last_os_error()))
+    } else {
+        buf.truncate(len as usize);
+        Ok(buf)
+    }
+}
+
+/// Read the target of a symlink through a descriptor opened with `O_SYMLINK`
+/// (macOS only).
+///
+/// `freadlink(2)` reads the link the descriptor is on, so the answer cannot
+/// come from another entry that took the link's name in the meantime. The
+/// call exists since macOS 13. `msb_krun`'s macOS passthrough, which this
+/// crate links, reads links the same way.
+#[cfg(target_os = "macos")]
+pub(crate) fn readlink_fd(fd: RawFd) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let len = unsafe { libc::freadlink(fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if len < 0 {
         Err(linux_error(io::Error::last_os_error()))
     } else {

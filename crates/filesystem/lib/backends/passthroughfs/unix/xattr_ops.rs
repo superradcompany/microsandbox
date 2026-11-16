@@ -87,6 +87,9 @@ pub(crate) fn do_setxattr(
                 let err = io::Error::last_os_error();
                 return Err(platform::linux_error(err));
             }
+            // An extended attribute renumbers a file that holds no data on a
+            // share without volfs.
+            inode::refresh_unstable_identity_macos(fs, ino, fd);
         }
 
         Ok(())
@@ -318,6 +321,7 @@ pub(crate) fn do_removexattr(
                 let err = io::Error::last_os_error();
                 return Err(platform::linux_error(err));
             }
+            inode::refresh_unstable_identity_macos(fs, ino, fd);
         }
 
         Ok(())

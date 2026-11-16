@@ -18,6 +18,8 @@
 //! xattr mode (file-backed symlinks), because Linux `user.*` xattrs cannot be set on symlinks.
 //! On macOS, real symlinks are used with `XATTR_NOFOLLOW` for xattr operations.
 
+#[cfg(target_os = "macos")]
+use std::os::fd::OwnedFd;
 use std::{
     ffi::CStr,
     io,
@@ -26,7 +28,11 @@ use std::{
 };
 
 use super::host_mode::{OWNER_FLOOR_DIR, OWNER_FLOOR_FILE, fchmod_at_mirror, fchmod_mirror};
+#[cfg(target_os = "macos")]
+use super::metadata;
 use super::{PassthroughFs, inode};
+#[cfg(target_os = "macos")]
+use crate::backends::shared::inode_table::InodeAltKey;
 use crate::{
     Context, Entry, Extensions, OpenOptions,
     backends::shared::{handle_table::HandleData, name_validation, platform, stat_override},
@@ -437,7 +443,9 @@ pub(crate) fn do_symlink(
 /// Create a hard link.
 ///
 /// On Linux, uses `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` to link by fd reference.
-/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity.
+/// On macOS, uses `/.vol/dev/ino` to reference the source inode by identity when
+/// volfs is available; in anchor mode the source is resolved to a (dirfd, name)
+/// pair by anchor walk.
 pub(crate) fn do_link(
     fs: &PassthroughFs,
     _ctx: Context,
@@ -480,22 +488,70 @@ pub(crate) fn do_link(
 
     #[cfg(target_os = "macos")]
     {
-        let inodes = fs.inodes.read().unwrap();
-        let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
-        let src_path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        // Both `get_inode_fd` and `anchor_parent_and_name_macos` may take the
+        // inode-table write lock (the latter via `repair_anchor`), so neither
+        // may run while a read guard on `fs.inodes` is held.
         let newparent_fd = inode::get_inode_fd(fs, newparent)?;
+        if fs.anchor_mode() {
+            let expected = {
+                let inodes = fs.inodes.read().unwrap();
+                let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+                (data.dev, data.host_ino())
+            };
+            let (src_dir, src_name) = inode::anchor_parent_and_name_macos(fs, inode)?;
 
-        let ret = unsafe {
-            libc::linkat(
-                libc::AT_FDCWD,
-                src_path.as_ptr() as *const libc::c_char,
-                newparent_fd.raw(),
-                newname.as_ptr(),
-                0,
-            )
-        };
-        if ret < 0 {
-            return Err(platform::linux_error(io::Error::last_os_error()));
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
+            let ret = unsafe {
+                libc::linkat(
+                    src_dir.raw(),
+                    src_name.as_ptr(),
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                // Capture errno before `src_dir` drops: its Drop closes the
+                // fd, and close(2) can clobber errno.
+                let err = io::Error::last_os_error();
+                return Err(platform::linux_error(err));
+            }
+
+            // macOS has no fd-relative `linkat` — linking `/dev/fd/N` answers
+            // EPERM — so the source name is resolved twice: once by the anchor
+            // verification, once by the syscall. Checking what the new entry
+            // actually holds detects a source swapped between the two, and the
+            // guest gets ENOENT instead of an entry for the replacement.
+            //
+            // The link `linkat` created is deliberately left in place. It is
+            // the same on-disk outcome an unchecked `linkat` would have
+            // produced, and removing it by name would be a second name-based
+            // race that could delete an entry another writer had put there in
+            // the meantime. Permissions therefore behave exactly as a plain
+            // `linkat`: nothing here needs rights the caller did not already
+            // have.
+            let st = platform::fstatat_nofollow(newparent_fd.raw(), newname)?;
+            if platform::stat_ino(&st) != expected.1 || platform::stat_dev(&st) != expected.0 {
+                return Err(platform::enoent());
+            }
+        } else {
+            let inodes = fs.inodes.read().unwrap();
+            let data = inodes.get(&inode).ok_or_else(platform::ebadf)?;
+            let src_path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
+            let ret = unsafe {
+                libc::linkat(
+                    libc::AT_FDCWD,
+                    src_path.as_ptr() as *const libc::c_char,
+                    newparent_fd.raw(),
+                    newname.as_ptr(),
+                    0,
+                )
+            };
+            if ret < 0 {
+                return Err(platform::linux_error(io::Error::last_os_error()));
+            }
         }
     }
 
@@ -510,7 +566,9 @@ pub(crate) fn do_link(
 /// reading arbitrary file content via readlink on a regular file.
 ///
 /// On macOS, verifies the inode is actually a symlink via `stat_inode` (which applies
-/// xattr patching) before calling readlinkat.
+/// xattr patching) before calling readlinkat. A share without volfs opens the link
+/// with `O_SYMLINK`, checks the descriptor's identity, and reads the target from
+/// that descriptor.
 pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Result<Vec<u8>> {
     if fs.is_virtual_init_inode(ino) {
         return Err(platform::einval());
@@ -554,6 +612,32 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
     #[cfg(target_os = "macos")]
     {
+        if fs.anchor_mode() {
+            // The stat that verified the anchored name also says what the
+            // entry is. Anything but a symlink is refused here, before any
+            // open: `readlinkat` answered EINVAL for those, and opening a
+            // FIFO to find that out would be a rendezvous with its writer.
+            let (dir, name, st) = inode::anchor_parent_name_stat_macos(fs, ino)?;
+            if st.st_mode & libc::S_IFMT != libc::S_IFLNK {
+                return Err(platform::einval());
+            }
+
+            // Open the link itself and read the target from that descriptor.
+            // The open names the entry again, so the descriptor's identity is
+            // checked against the stat above; from there on nothing is
+            // resolved by name, and a host that swaps the entry afterwards
+            // cannot change what is read.
+            let expected = InodeAltKey::new(platform::stat_ino(&st), platform::stat_dev(&st));
+            let fd = metadata::open_verified_symlink_fd(dir.raw(), &name, expected)?;
+            // SAFETY: the helper returns a newly owned descriptor.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+
+            #[cfg(test)]
+            fs.run_name_bound_hook();
+
+            return platform::readlink_fd(fd.as_raw_fd());
+        }
+
         // On macOS we create real symlinks, so verify it's actually a symlink first.
         let st = inode::stat_inode(fs, ino)?;
         if platform::mode_file_type(st.st_mode) != platform::MODE_LNK {
@@ -562,7 +646,7 @@ pub(crate) fn do_readlink(fs: &PassthroughFs, _ctx: Context, ino: u64) -> io::Re
 
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&ino).ok_or_else(platform::ebadf)?;
-        let path = format!("/.vol/{}/{}\0", data.dev, data.ino);
+        let path = format!("/.vol/{}/{}\0", data.dev, data.host_ino());
 
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let ret = unsafe {

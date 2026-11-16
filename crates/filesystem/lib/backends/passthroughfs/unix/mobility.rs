@@ -4,7 +4,7 @@
 mod owned;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
     io::{self, Read},
     os::{
@@ -14,8 +14,6 @@ use std::{
     sync::{Arc, Mutex, RwLock, atomic::Ordering},
 };
 
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
 #[cfg(target_os = "macos")]
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "macos")]
@@ -229,7 +227,7 @@ pub(super) fn capture(fs: &PassthroughFs) -> io::Result<Vec<u8>> {
             let tracked = inodes
                 .get(&saved.inode)
                 .ok_or_else(|| invalid_state("captured inode disappeared"))?;
-            if (identity.device, identity.inode) != (tracked.dev, tracked.ino) {
+            if (identity.device, identity.inode) != (tracked.dev, tracked.host_ino()) {
                 return Err(invalid_state(
                     "external pathname no longer names the guest's captured object",
                 ));
@@ -561,6 +559,9 @@ fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Ve
 
 #[cfg(target_os = "macos")]
 fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Vec<InodeState>> {
+    if fs.anchor_mode() {
+        return capture_anchored_inodes(fs, excluded);
+    }
     let root_path = fd_path(fs.root_fd.as_raw_fd())?;
     let tracked = fs
         .inodes
@@ -588,6 +589,42 @@ fn capture_inodes(fs: &PassthroughFs, excluded: &BTreeSet<u64>) -> io::Result<Ve
         };
         states.push(InodeState {
             inode: inode_id,
+            components,
+            refcount: data.refcount.load(Ordering::Acquire),
+        });
+    }
+    Ok(states)
+}
+
+/// Capture a share without volfs from the anchors it already tracks.
+///
+/// The volfs capture asks the host for the current path of each inode through
+/// its `/.vol/` identity, which such a share cannot answer. Its anchors are
+/// the paths the backend itself reopens inodes by, so they are recorded as
+/// they are, the way the Linux capture does.
+#[cfg(target_os = "macos")]
+fn capture_anchored_inodes(
+    fs: &PassthroughFs,
+    excluded: &BTreeSet<u64>,
+) -> io::Result<Vec<InodeState>> {
+    let inodes = fs.inodes.read().unwrap();
+    let mut states = Vec::new();
+    for (inode_id, data) in inodes.iter() {
+        if excluded.contains(inode_id) {
+            continue;
+        }
+        if data.unlinked_fd.load(Ordering::Acquire) >= 0 {
+            return Err(invalid_state(
+                "open-unlinked passthrough objects are not checkpointable",
+            ));
+        }
+        let components = if *inode_id == 1 {
+            Vec::new()
+        } else {
+            inode::build_anchor_components_locked(&inodes, *inode_id, &mut HashSet::new())?
+        };
+        states.push(InodeState {
+            inode: *inode_id,
             components,
             refcount: data.refcount.load(Ordering::Acquire),
         });
@@ -883,23 +920,53 @@ fn inode_data_from_fd(
 
 #[cfg(target_os = "macos")]
 fn inode_data_from_fd(
-    _fs: &PassthroughFs,
+    fs: &PassthroughFs,
     _inodes: &MultikeyBTreeMap<u64, InodeAltKey, Arc<InodeData>>,
     saved: &InodeState,
-    _path_ids: &BTreeMap<Vec<Vec<u8>>, u64>,
+    path_ids: &BTreeMap<Vec<Vec<u8>>, u64>,
     fd: RawFd,
 ) -> io::Result<(InodeAltKey, Arc<InodeData>)> {
     let stat = platform::fstat(fd)?;
     let ino = platform::stat_ino(&stat);
     let dev = platform::stat_dev(&stat);
+    // A share without volfs reopens every inode by its anchor, so the restored
+    // table needs the anchors back, built from the saved paths as on Linux. A
+    // volfs share reopens by identity and keeps them empty.
+    let anchor_mode = fs.anchor_mode();
+    let (anchor_parent, anchor_name, aliases) = if !anchor_mode || saved.inode == 1 {
+        (0, Vec::new(), BTreeSet::new())
+    } else {
+        let mut parent_path = saved.components.clone();
+        let name = parent_path.pop().expect("non-root path validated above");
+        let parent = *path_ids
+            .get(&parent_path)
+            .ok_or_else(|| invalid_state("passthrough inode parent was not captured"))?;
+        let alias = crate::backends::shared::inode_table::NamespaceAlias::new(parent, &name);
+        (parent, name, BTreeSet::from([alias]))
+    };
+    let anchor_children = if anchor_mode {
+        path_ids
+            .keys()
+            .filter(|components| {
+                !components.is_empty() && components[..components.len() - 1] == saved.components[..]
+            })
+            .count() as u64
+    } else {
+        0
+    };
     Ok((
         InodeAltKey::new(ino, dev),
         Arc::new(InodeData {
             inode: saved.inode,
-            ino,
+            ino: ino.into(),
             dev,
             refcount: std::sync::atomic::AtomicU64::new(saved.refcount),
+            anchor_parent: std::sync::atomic::AtomicU64::new(anchor_parent),
+            anchor_name: RwLock::new(anchor_name),
+            aliases: RwLock::new(aliases),
+            anchor_children: std::sync::atomic::AtomicU64::new(anchor_children),
             unlinked_fd: std::sync::atomic::AtomicI64::new(-1),
+            ino_unstable: (anchor_mode && inode::has_unstable_ino_macos(&stat)).into(),
         }),
     ))
 }
@@ -1010,7 +1077,7 @@ fn open_macos_inode_for_path(fs: &PassthroughFs, inode_id: u64) -> io::Result<Ow
     let (dev, ino) = {
         let inodes = fs.inodes.read().unwrap();
         let data = inodes.get(&inode_id).ok_or_else(platform::ebadf)?;
-        (data.dev, data.ino)
+        (data.dev, data.host_ino())
     };
     let mut failures = Vec::new();
     for flags in [
@@ -1392,6 +1459,54 @@ mod tests {
             .read_to_end(&mut bytes)
             .unwrap();
         assert_eq!(bytes, b"mobility");
+    }
+
+    /// A share without volfs reopens inodes by anchor: capture records the
+    /// anchors (the `/.vol/` path query cannot run there), and restore brings
+    /// them back so inode-only operations resolve on the destination.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn anchor_mode_round_trip_restores_anchors() {
+        let source_root = tempfile::tempdir().unwrap();
+        let destination_root = tempfile::tempdir().unwrap();
+        for root in [source_root.path(), destination_root.path()] {
+            std::fs::create_dir(root.join("dir")).unwrap();
+            std::fs::write(root.join("dir/data"), b"mobility").unwrap();
+            std::os::unix::fs::symlink("data", root.join("dir/link")).unwrap();
+        }
+        let anchored = |root: &std::path::Path| {
+            let fs = backend(root);
+            fs.volfs_supported.store(false, Ordering::Release);
+            fs
+        };
+
+        let source = anchored(source_root.path());
+        source.init(FsOptions::empty()).unwrap();
+        let dir = source.lookup(context(), 1, c"dir").unwrap();
+        let data = source.lookup(context(), dir.inode, c"data").unwrap();
+        let link = source.lookup(context(), dir.inode, c"link").unwrap();
+        let encoded = capture(&source).unwrap();
+
+        let destination = anchored(destination_root.path());
+        restore(&destination, &encoded).unwrap();
+        assert_eq!(capture(&destination).unwrap(), encoded);
+
+        let (attr, _) = destination.getattr(context(), data.inode, None).unwrap();
+        assert_eq!(attr.st_size, 8);
+        assert_eq!(
+            destination.readlink(context(), link.inode).unwrap(),
+            b"data"
+        );
+        // The restored directory resolves by its anchor, and its child keeps
+        // the guest inode number it had on the source.
+        let again = destination.lookup(context(), dir.inode, c"data").unwrap();
+        assert_eq!(again.inode, data.inode);
+        // Dropping the last child reference releases the anchor it held on
+        // the forgotten directory, as it does for a share that never moved.
+        destination.forget(context(), dir.inode, 1);
+        destination.forget(context(), data.inode, 2);
+        destination.forget(context(), link.inode, 1);
+        assert!(destination.inodes.read().unwrap().get(&dir.inode).is_none());
     }
 
     #[test]

@@ -212,8 +212,9 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
             snapshot.materialize_object(&generation, detached.object, &path)?;
         }
         let pinned = fs::OpenOptions::new().read(true).write(true).open(&path)?;
-        // The shared constructor obtains destination-local inode identity. Detached Linux
-        // nodes immediately lose the synthetic anchor and keep only a retained descriptor.
+        // The shared constructor obtains destination-local inode identity. Detached nodes
+        // that track anchors (Linux, and macOS without volfs) immediately lose the synthetic
+        // anchor and keep only a retained descriptor.
         let saved = InodeState {
             inode: detached.inode,
             components: vec![b"detached".to_vec()],
@@ -231,12 +232,9 @@ pub(super) fn prepare(fs: &PassthroughFs, bytes: &[u8]) -> io::Result<PreparedSt
                 "multiple owned guest inodes resolve to one child object",
             ));
         }
-        #[cfg(target_os = "linux")]
-        {
-            data.anchor_parent.store(0, Ordering::Release);
-            data.anchor_name.write().unwrap().clear();
-            data.aliases.write().unwrap().clear();
-        }
+        data.anchor_parent.store(0, Ordering::Release);
+        data.anchor_name.write().unwrap().clear();
+        data.aliases.write().unwrap().clear();
         for handle in detached.handles {
             let cpath = CString::new(path.as_os_str().as_bytes())
                 .map_err(|error| invalid_state(error.to_string()))?;
