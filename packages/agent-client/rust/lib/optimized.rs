@@ -436,6 +436,15 @@ impl AgentClient {
         self.pending.lock().await.clear();
     }
 
+    /// Whether the transport has stopped carrying frames.
+    ///
+    /// True once the peer closed the connection, an I/O error ended either transport task, or
+    /// [`abort`](Self::abort) was called. A closed client never recovers, so an owner that keeps
+    /// one across operations should replace it.
+    pub fn is_closed(&self) -> bool {
+        self.reader_handle.is_finished() || self.writer_handle.is_finished()
+    }
+
     /// Close the connection. Drops the writer and aborts the reader task;
     /// any in-flight requests resolve with [`AgentClientError::Closed`].
     pub async fn close(self) {
