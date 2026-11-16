@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,7 +282,8 @@ func TestFsReadStreamCopyToContextCancellation(t *testing.T) {
 	outerCtx := integrationCtx(t)
 	fs := sb.FS()
 
-	// Big enough that draining won't finish before we cancel.
+	// Use multiple chunks and cancel from the first write, before EOF.
+	// A timed sleep races fast hosts that finish copying before cancellation.
 	if _, err := sb.Shell(outerCtx,
 		"dd if=/dev/urandom of=/tmp/cancel.bin bs=1M count=8 status=none",
 		microsandbox.WithExecTimeout(30*time.Second)); err != nil {
@@ -296,21 +296,12 @@ func TestFsReadStreamCopyToContextCancellation(t *testing.T) {
 	defer stream.Close()
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
-	errc := make(chan error, 1)
-	go func() {
-		_, err := stream.CopyTo(cancelCtx, io.Discard)
-		errc <- err
-	}()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	select {
-	case err := <-errc:
-		if err == nil {
-			t.Fatal("CopyTo: expected error after ctx cancel")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("CopyTo did not return after ctx cancel within 5s")
+	copied, err := stream.CopyTo(cancelCtx, cancelOnWrite{cancel: cancel})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CopyTo: expected context cancellation, got %v", err)
+	}
+	if copied <= 0 || copied >= 8*1024*1024 {
+		t.Fatalf("cancellation must occur after data but before EOF, copied %d", copied)
 	}
 }
 
@@ -427,3 +418,8 @@ func TestFsReadOnNonexistentReturnsTypedError(t *testing.T) {
 		t.Error("Error.Message: empty")
 	}
 }
+
+// cancelOnWrite makes the cancellation boundary independent of host throughput.
+type cancelOnWrite struct{ cancel context.CancelFunc }
+
+func (w cancelOnWrite) Write(data []byte) (int, error) { w.cancel(); return len(data), nil }

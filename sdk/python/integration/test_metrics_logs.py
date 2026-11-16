@@ -24,7 +24,10 @@ async def wait_for_metrics(sandbox):
         try:
             return await sandbox.metrics()
         except MicrosandboxError as error:
-            if "no live metrics slot" not in str(error):
+            if not any(
+                message in str(error)
+                for message in ("no live metrics slot", "no verified live metrics slot")
+            ):
                 raise
             last_error = error
             await asyncio.sleep(0.1)

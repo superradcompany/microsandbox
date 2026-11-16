@@ -17,7 +17,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
       begin
         handle = Microsandbox::Sandbox.get(name)
         handle.stop if handle.status == "running"
-        handle.remove
+        handle.destroy
       rescue Microsandbox::Error
         nil
       end
@@ -39,10 +39,26 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
       network: { allowed_hosts: ["example.com"], allowed_ports: [443] }
     )
 
-    allowed = sandbox.shell("wget -qO- --timeout=10 https://example.com >/dev/null 2>&1")
+    allowed = sandbox.shell("wget -O- --timeout=10 https://example.com")
     denied = sandbox.shell("wget -qO- --timeout=5 https://www.iana.org >/dev/null 2>&1")
 
-    assert_true allowed.success?
+    assert_true allowed.success?, "allowed request failed: #{allowed.stderr}"
+    assert_false denied.success?
+  ensure
+    sandbox&.stop
+  end
+
+  # A second independent upstream separates general allowlist behavior from
+  # the example.com TLS failure retained by the original scenario.
+  def test_network_allowlist_reference_endpoint
+    sandbox = create_sandbox(
+      "net-reference",
+      network: { allowed_hosts: ["httpbingo.org"], allowed_ports: [443] }
+    )
+    allowed = sandbox.shell("wget -O- --timeout=10 https://httpbingo.org/get")
+    denied = sandbox.shell("wget -qO- --timeout=5 https://www.iana.org >/dev/null 2>&1")
+
+    assert_true allowed.success?, "allowed request failed: #{allowed.stderr}"
     assert_false denied.success?
   ensure
     sandbox&.stop
@@ -76,7 +92,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
 
     GC.start(full_mark: true, immediate_sweep: true)
     assert_eventually("owned sandbox to stop after GC") do
-      Microsandbox::Sandbox.get(owned_name).refresh.status != "running"
+      Microsandbox::Sandbox.get(owned_name).status != "running"
     end
 
     detached_name = unique_name("gc-detached")
@@ -86,7 +102,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     detached = nil
     GC.start(full_mark: true, immediate_sweep: true)
 
-    assert_equal "running", Microsandbox::Sandbox.get(detached_name).refresh.status
+    assert_equal "running", Microsandbox::Sandbox.get(detached_name).status
   end
 
   def test_blocking_native_calls_release_the_gvl
@@ -155,7 +171,7 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
     sandbox = create_sandbox("remove-running")
     handle = Microsandbox::Sandbox.get(@names.last)
 
-    error = assert_raise(Microsandbox::SandboxStillRunningError) { handle.remove }
+    error = assert_raise(Microsandbox::SandboxStillRunningError) { Microsandbox::Sandbox.remove(handle.name) }
 
     assert_true Microsandbox::Error === error
     assert_equal "sandbox-still-running", error.code
@@ -187,12 +203,12 @@ class MicrosandboxIntegrationTest < Test::Unit::TestCase
       assert_true Microsandbox::Error === error
       assert_equal "stop-timeout", error.code
       assert_match(/timed out/, error.message)
-      assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+      assert_equal "running", Microsandbox::Sandbox.get(sandbox.name).status
     end
 
     # Omitted timeout uses the unbounded Rust stop, not a hidden default deadline.
     sandbox.stop
-    assert_equal "stopped", Microsandbox::Sandbox.get(sandbox.name).refresh.status
+    assert_equal "stopped", Microsandbox::Sandbox.get(sandbox.name).status
   ensure
     sandbox&.kill
   end
