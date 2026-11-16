@@ -9,6 +9,20 @@ use super::Sandbox;
 //--------------------------------------------------------------------------------------------------
 
 impl Sandbox {
+    /// Reap an exited retained child without acquiring lifecycle ownership or waiting on a live run.
+    #[cfg(feature = "local")]
+    pub(super) fn reap_exited_child(&self) -> MicrosandboxResult<()> {
+        if let Some(local) = self.local()
+            && let Some(handle) = &local.handle
+            && let Ok(mut process) = handle.try_lock()
+        {
+            // Detached restores retain a child handle but use status-based completion, which does
+            // not reap it. An active waiter holding this lock already assumes that responsibility.
+            process.try_wait()?;
+        }
+        Ok(())
+    }
+
     /// Binding implementation hook for ownership-aware, awaited scope cleanup.
     ///
     /// Unlike explicit resource-wide stop, this cannot stop a replacement run.

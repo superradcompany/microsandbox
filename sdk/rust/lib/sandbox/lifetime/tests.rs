@@ -107,6 +107,29 @@ pub(in crate::sandbox) async fn finish(sb: &Sandbox) {
 //--------------------------------------------------------------------------------------------------
 
 #[tokio::test]
+async fn reaping_preserves_a_live_run_and_does_not_wait_for_its_process_lock() {
+    let (sb, _peer, _stdin, _home) = fixture(None).await;
+    sb.reap_exited_child().unwrap();
+    assert!(sb.owns_lifecycle());
+
+    let local = sb.local().unwrap();
+    let mut process = local.handle.as_ref().unwrap().lock().await;
+    assert!(process.try_wait().unwrap().is_none());
+
+    // A concurrent process waiter may hold this lock until exit. Cleanup must
+    // neither block behind it nor terminate a live run to make it available.
+    sb.reap_exited_child().unwrap();
+    assert!(process.try_wait().unwrap().is_none());
+    assert!(sb.owns_lifecycle());
+    drop(process);
+
+    sb.detach().await.unwrap();
+    sb.reap_exited_child().unwrap();
+    assert!(!sb.owns_lifecycle());
+    finish(&sb).await;
+}
+
+#[tokio::test]
 async fn final_owner_drop_stops_the_child_but_one_clone_drop_does_not() {
     let (sb, _peer, _stdin, _home) = fixture(None).await;
     let clone = sb.clone();

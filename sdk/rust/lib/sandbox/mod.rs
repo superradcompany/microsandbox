@@ -991,6 +991,8 @@ impl Sandbox {
         match tokio::time::timeout(timeout, self.wait_until_stopped()).await {
             Ok(result) => {
                 result?;
+                #[cfg(feature = "local")]
+                self.reap_exited_child()?;
                 Ok(())
             }
             Err(_) => Err(crate::MicrosandboxError::Runtime(format!(

@@ -24,13 +24,10 @@ async fn create(name: &str) -> Sandbox {
 async fn await_stopped(observer: &Sandbox) {
     // Final-owner fallback preserves the platform's watchdog/job behavior. Windows job
     // termination can report Crashed; it must still complete and release the active run.
-    tokio::time::timeout(
-        Duration::from_secs(20),
-        observer.wait_until_stopped(),
-    )
-    .await
-    .expect("last helper did not release the run")
-    .expect("observe shutdown");
+    tokio::time::timeout(Duration::from_secs(20), observer.wait_until_stopped())
+        .await
+        .expect("last helper did not release the run")
+        .expect("observe shutdown");
     observer.destroy().await.expect("remove stopped fixture");
 }
 
