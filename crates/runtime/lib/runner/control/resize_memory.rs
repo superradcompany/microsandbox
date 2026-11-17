@@ -26,8 +26,8 @@ pub(super) struct MemoryDeviceEvidence {
 
 /// The caller fences the guest query against mutations and holds mutation authority
 /// while matching the host read.
-/// Plugged capacity remains the existing actual/enforced quantity; only the guest
-/// can establish whether that capacity is online and ready for this operation.
+/// The accepted device target is enforced while the plugged capacity may still
+/// be converging. Guest onlining establishes when the workload can use it.
 pub(super) fn observe_memory(
     status: &mut ResourceResizeStatus,
     accepted_mib: u64,
@@ -64,7 +64,7 @@ pub(super) fn observe_memory(
         return ResizeObservation::Unavailable;
     }
     status.actual = format!("{} MiB", current.unwrap() >> 20);
-    status.enforced = status.actual.clone();
+    status.enforced = format!("{accepted_mib} MiB");
     status.state = if guest.requested_size == host.requested_size
         && guest.plugged_size == host.plugged_size
         && host.plugged_size == host.requested_size
@@ -105,7 +105,7 @@ mod tests {
             resource: ResourceKind::Memory,
             requested: "512 MiB".into(),
             actual: "256 MiB".into(),
-            enforced: "256 MiB".into(),
+            enforced: "512 MiB".into(),
             state: ResourceConvergenceState::Accepted,
         };
         (status, host, guest)
@@ -146,7 +146,11 @@ mod tests {
                     ResourceConvergenceState::Converging
                 }
             );
-            assert_eq!(status.actual, status.enforced);
+            assert_eq!(
+                status.actual,
+                format!("{} MiB", (host.boot_size + host.plugged_size) >> 20)
+            );
+            assert_eq!(status.enforced, "512 MiB");
             assert_eq!(status.requested, "512 MiB");
         }
     }

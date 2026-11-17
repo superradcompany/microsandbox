@@ -780,7 +780,7 @@ impl RuntimeControlExecutor {
                             resource: ResourceKind::Memory,
                             requested: format!("{total_mib} MiB"),
                             actual: format!("{} MiB", observed.current_mib),
-                            enforced: format!("{} MiB", observed.current_mib),
+                            enforced: format!("{} MiB", observed.target_mib),
                             state: ResourceConvergenceState::Accepted,
                         },
                     )
