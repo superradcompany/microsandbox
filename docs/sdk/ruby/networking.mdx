@@ -84,7 +84,7 @@ Accepts an `OutboundProxy`. The same object can be passed to `builder.proxy(prox
 Microsandbox::OutboundProxy.http_connect(address) # => OutboundProxy
 ```
 
-Configure an HTTP CONNECT proxy. `address` must be an IP address and port, such as `127.0.0.1:3128`. Supports TCP without proxy authentication; UDP is unsupported. Requires a runtime with HTTP CONNECT support. See [HTTP CONNECT](/networking/outbound-proxy#http-connect).
+Configure an HTTP CONNECT proxy. `address` must be an IP address and port, such as `127.0.0.1:3128`. Supports TCP and optional HTTP Basic authentication; UDP is unsupported. Requires a runtime with HTTP CONNECT support. See [HTTP CONNECT](/networking/outbound-proxy#http-connect).
 
 <Accordion title="Example">
 
@@ -155,7 +155,7 @@ Configure a SOCKS5 proxy.
 proxy.user_id(value) # => OutboundProxy
 ```
 
-Set the SOCKS4 user ID. Raises ArgumentError for a SOCKS5 proxy.
+Set the SOCKS4 user ID. Raises ArgumentError for a SOCKS5 or HTTP CONNECT proxy.
 
 <p className="msb-label">Parameters</p>
 
@@ -189,9 +189,17 @@ proxy = Microsandbox::OutboundProxy.socks5("127.0.0.1:1080")
 sandbox = Microsandbox::Sandbox.create("worker", image: "alpine", proxy: proxy)
 ```
 
+```ruby
+proxy = Microsandbox::OutboundProxy.http_connect("127.0.0.1:3128")
+  .credentials("worker", Microsandbox::SecretSource.env("HTTP_CONNECT_PASSWORD"))
+sandbox = Microsandbox::Sandbox.create("proxied", image: "alpine", proxy: proxy)
+```
+
 </Accordion>
 
-Set SOCKS5 credentials. Raises ArgumentError for a SOCKS4 proxy.
+Set SOCKS5 or HTTP CONNECT credentials. Raises ArgumentError for a SOCKS4 proxy.
+
+HTTP CONNECT accepts an empty username for token-only authentication. A non-empty username must not contain `:` or control characters.
 
 <p className="msb-label">Parameters</p>
 

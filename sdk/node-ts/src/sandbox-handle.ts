@@ -1,8 +1,7 @@
-import { napi } from "./internal/napi.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
 import { mapNapiError, withMappedErrors } from "./internal/error-mapping.js";
-import { validateStopTimeout } from "./internal/stop.js";
+import { validateTimeoutMs } from "./internal/stop.js";
 import { forkMountBuilders } from "./internal/fork-volumes.js";
 import {
   compactionResultFromJson,
@@ -12,6 +11,7 @@ import {
 import {
   modificationPlanFromJson,
   modifyOptionsToNapi,
+  requireModifyCapabilities,
   type ModifyOptions,
   type SandboxModificationPlan,
 } from "./modify.js";
@@ -133,9 +133,7 @@ export class SandboxHandle {
    * computed without applying anything.
    */
   async modify(opts?: ModifyOptions): Promise<SandboxModificationPlan> {
-    if ((opts?.ports?.length || opts?.portsRemove?.length) && !napi.supportsPortModification?.()) {
-      throw new Error("published-port modification requires an updated native library");
-    }
+    requireModifyCapabilities(opts);
     const raw = await withMappedErrors(() =>
       this.inner.modify(modifyOptionsToNapi(opts)),
     );
@@ -173,10 +171,11 @@ export class SandboxHandle {
   }
 
   /**
-   * Connect with an explicit timeout in milliseconds. Returns an error
-   * if the sandbox doesn't respond in this window.
+   * Connect with an integer timeout from 0 to 4294967295 milliseconds.
+   * Returns an error if the sandbox doesn't respond in this window.
    */
   async connectWithTimeout(timeoutMs: number): Promise<Sandbox> {
+    validateTimeoutMs(timeoutMs, "connect");
     const raw = await withMappedErrors(() =>
       this.inner.connectWithTimeout(timeoutMs),
     );
@@ -257,7 +256,7 @@ export class SandboxHandle {
    * without killing. Zero expires before dispatch; a delivered request may finish later.
    */
   async stopWithTimeout(timeoutMs: number): Promise<void> {
-    validateStopTimeout(timeoutMs);
+    validateTimeoutMs(timeoutMs, "stop");
     await withMappedErrors(() => this.inner.stopWithTimeout(timeoutMs));
   }
 
@@ -269,7 +268,9 @@ export class SandboxHandle {
     await withMappedErrors(() => this.inner.requestKill());
   }
 
+  /** Force-kill with an integer observation timeout from 0 to 4294967295 milliseconds. */
   async killWithTimeout(timeoutMs: number): Promise<void> {
+    validateTimeoutMs(timeoutMs, "kill");
     await withMappedErrors(() => this.inner.killWithTimeout(timeoutMs));
   }
 

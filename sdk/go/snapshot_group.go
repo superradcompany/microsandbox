@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
 )
@@ -224,6 +227,36 @@ func (snapshotFactory) Load(ctx context.Context, group string, files []string, o
 	}
 	return &SnapshotImportResult{OperationID: wire.OperationID, Snapshot: history, Checkpoints: checkpoints,
 		Added: wire.Added, Reused: wire.Reused, HeadUpdate: snapshotHeadUpdateFromInfo(wire.HeadUpdate), Warnings: wire.Warnings}, nil
+}
+
+// Open reopens an explicit local history directory without default-store lookup.
+func (snapshotFactory) Open(ctx context.Context, path string) (*SnapshotGroup, error) {
+	if path == "" {
+		return nil, fmt.Errorf("snapshot group path cannot be empty")
+	}
+	// Do not filepath.Clean/Abs: collapsing .. across a symlink changes its target.
+	if filepath.Separator == '\\' {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		path = absolute
+	} else if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+		path = strings.TrimRight(cwd, string(os.PathSeparator)) + string(os.PathSeparator) + path
+	}
+	var wire snapshotGroupWire
+	data, err := ffi.SnapshotGroupOpen(ctx, path)
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, fmt.Errorf("parse snapshot group: %w", err)
+	}
+	return snapshotGroupFromWire(&wire)
 }
 
 func (snapshotFactory) Get(ctx context.Context, name string) (*SnapshotGroup, error) {

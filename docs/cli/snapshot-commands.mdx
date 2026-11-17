@@ -14,6 +14,11 @@ Group management takes a group name. Inspect, export, verify and remove select a
 
 <span id="msb-snapshot-create" />
 
+## External group directories
+
+Group management accepts either a bare default-store group name or an explicit local directory path, such as `msb snapshot inspect ./exports/history`. The same selector works with `list`, `checkpoint`, `verify`, `export`, `remove`, `head`, and `modify`. Prefix a relative directory with `./` or include a path separator; a bare `history` always means the group in the default store, even if the working directory contains another `history`. Missing paths fail without falling back to a named group. Cloud names retain their existing interpretation.
+
+
 ## msb snap create
 
 Create a new group bound to a source sandbox and capture its first checkpoint, or capture directly to an archive with `--output`. Add `--full` to include memory and running processes. Use `checkpoint` to append to an existing group.

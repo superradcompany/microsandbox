@@ -313,6 +313,7 @@ impl UdpRelay {
             return;
         };
         self.sessions.remove(&oldest_key);
+        self.shared.record_outbound_udp_eviction();
     }
 
     /// Create a new relay session: bind a host UDP socket and spawn a task.
@@ -1571,6 +1572,7 @@ mod tests {
         for src in &sources[..2] {
             assert!(relay.ensure_session((*src, dst), *src, dst, dst));
         }
+        assert_eq!(relay.shared.outbound_udp_evicted(), 0);
         relay
             .sessions
             .get_mut(&(sources[0], dst))
@@ -1578,10 +1580,22 @@ mod tests {
             .last_active = Instant::now() - Duration::from_secs(1);
         assert!(relay.ensure_session((sources[2], dst), sources[2], dst, dst));
         assert_eq!(relay.sessions.len(), 2);
+        assert_eq!(relay.shared.outbound_udp_evicted(), 1);
         assert!(!relay.sessions.contains_key(&(sources[0], dst)));
         relay.set_max_sessions(None);
         assert!(relay.ensure_session((sources[3], dst), sources[3], dst, dst));
         assert_eq!(relay.sessions.len(), 3);
+        assert_eq!(relay.shared.outbound_udp_evicted(), 1);
+        relay.set_max_sessions(NonZeroUsize::new(1));
+        assert_eq!(relay.sessions.len(), 1);
+        assert_eq!(relay.shared.outbound_udp_evicted(), 3);
+
+        // Expiration replaces the same session without a cap eviction.
+        let key = *relay.sessions.keys().next().unwrap();
+        relay.sessions.get_mut(&key).unwrap().last_active =
+            Instant::now() - SESSION_TIMEOUT - Duration::from_secs(1);
+        assert!(relay.ensure_session(key, key.0, key.1, key.1));
+        assert_eq!(relay.shared.outbound_udp_evicted(), 3);
     }
 
     #[test]

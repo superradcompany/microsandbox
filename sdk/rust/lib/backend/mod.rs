@@ -24,6 +24,10 @@
 mod cloud;
 mod dispatch;
 #[cfg(feature = "local")]
+mod inspection;
+#[cfg(feature = "local")]
+pub(crate) use inspection::initialized_backend_config;
+#[cfg(feature = "local")]
 pub(crate) mod local;
 
 #[cfg(feature = "local")]
@@ -31,6 +35,7 @@ pub(crate) use local::ControlSession;
 mod misconfigured;
 mod profile;
 pub(crate) mod sandbox;
+pub(crate) mod service;
 pub(crate) mod snapshot;
 pub(crate) mod volume;
 
@@ -46,8 +51,10 @@ pub use local::snapshot_downgrade as local_snapshot_downgrade;
 #[cfg(feature = "local")]
 pub use local::{LocalBackend, LocalBackendBuilder};
 pub use microsandbox_types::{
-    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
-    CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
+    CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudCreateServiceRequest,
+    CloudErrorBody, CloudErrorDetails, CloudMessageResponse, CloudPaginated, CloudSandboxStatus,
+    CloudSandboxStatusReason, CloudService, CloudServiceStatus, CloudServiceTarget,
+    CloudUpdateServiceRequest,
 };
 pub use profile::{Profile, ProfileBackend, resolve_default_backend};
 pub use sandbox::{
@@ -55,6 +62,7 @@ pub use sandbox::{
     SandboxIdentity, SandboxInner,
 };
 pub use sandbox::{SandboxHandleLocalState, SandboxLocalState};
+pub use service::ServiceBackend;
 pub use snapshot::SnapshotBackend;
 pub use volume::{
     CloudVolumeKind, CloudVolumeStatus, VolumeBackend, VolumeCloudState, VolumeHandleCloudState,
@@ -309,6 +317,10 @@ mod tests {
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
             }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
+            }
         }
         let fake: Arc<dyn Backend> = Arc::new(Fake(BackendKind::Cloud));
         let observed = with_backend(fake, async { default_backend().kind() }).await;
@@ -339,6 +351,10 @@ mod tests {
 
             fn snapshots(&self) -> &dyn SnapshotBackend {
                 unimplemented!("fake backend only tests kind routing")
+            }
+
+            fn services(&self) -> &dyn ServiceBackend {
+                unreachable!("fake backend only tests kind routing")
             }
         }
 

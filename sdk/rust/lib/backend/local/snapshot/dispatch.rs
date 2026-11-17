@@ -9,9 +9,7 @@ use microsandbox_image::snapshot::SnapshotRootDisk;
 
 use super::{archive, artifact, copy, create, group, store, verify};
 use crate::backend::{Backend, LocalBackend, SnapshotBackend};
-use crate::sandbox::config::SnapshotRestoreMode;
-use crate::sandbox::restore_resources::PreparedArchive;
-use crate::sandbox::{RootfsSource, SandboxConfig};
+use crate::sandbox::SandboxConfig;
 use crate::snapshot::{
     Checkpoint as Snapshot, HeadUpdate, LoadOpts, Manifest, SaveOpts, SnapshotArchive,
     SnapshotConfig, SnapshotHandle, SnapshotReference, SnapshotVerifyReport,
@@ -23,6 +21,49 @@ use crate::{MicrosandboxError, MicrosandboxResult, Operation};
 //--------------------------------------------------------------------------------------------------
 
 impl LocalBackend {
+    pub(crate) async fn export_encrypted(
+        &self,
+        reference: SnapshotReference,
+        expected: &str,
+        out: &Path,
+        mut opts: SaveOpts,
+        recipients: &[String],
+    ) -> MicrosandboxResult<()> {
+        let out = std::path::absolute(out)?;
+        opts.since = opts.since.map(anchor_archive_selector).transpose()?;
+        let selector = local_selector(self, reference).await?;
+        archive::save_archive(
+            self,
+            &selector,
+            &out,
+            opts,
+            Some(expected),
+            Some(recipients),
+        )
+        .await
+    }
+
+    pub(crate) async fn import_encrypted(
+        &self,
+        backend: Arc<dyn Backend>,
+        name: &str,
+        paths: &[PathBuf],
+        mut opts: LoadOpts,
+        identity: &Path,
+    ) -> MicrosandboxResult<crate::SnapshotImportResult> {
+        group::validate_group_name(name)?;
+        opts.group = Some(name.to_owned());
+        let identity = std::path::absolute(identity)?;
+        let paths = paths
+            .iter()
+            .map(std::path::absolute)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        opts.dest = opts.dest.map(std::path::absolute).transpose()?;
+        opts.base = opts.base.map(anchor_archive_selector).transpose()?;
+        let imported = archive::load_encrypted(self, &paths, opts, &identity).await?;
+        Ok(import_result(backend, name, imported))
+    }
+
     /// Inspect a restore source; caller options remain separate from resolved settings.
     pub(crate) async fn prepare_local_restore(
         &self,
@@ -72,99 +113,54 @@ impl LocalBackend {
         self.prepare_archive_restore(config).await
     }
 
-    /// Decode an archive once before resolving settings; retain its private files until creation.
+    /// Read captured settings without extracting payloads or retaining temporary storage.
     pub(crate) async fn prepare_archive_restore(
         &self,
         config: &mut SandboxConfig,
     ) -> MicrosandboxResult<()> {
-        if self.reuse_prepared_archive(config)? {
-            return Ok(());
-        }
         let Some(archive) = config.snapshot_archive_source.clone() else {
             return Ok(());
         };
 
-        tokio::fs::create_dir_all(self.sandboxes_dir()).await?;
-        let stage = tempfile::Builder::new()
-            .prefix(".archive-restore-")
-            .tempdir_in(self.sandboxes_dir())?;
-        let disk_only = config.snapshot_restore_mode == SnapshotRestoreMode::DiskOnly;
-        // Archive decoding has a large async state machine. Keep it off the containing
-        // create future so native SDK debug builds fit ordinary Tokio worker stacks.
-        let materialized = Box::pin(crate::snapshot::materialize_archive_for_child(
-            self,
-            &archive,
-            stage.path(),
-            disk_only,
-            config.snapshot_base.as_deref(),
-            &config.restore_resources,
-            config.restore_boot_overrides,
-        ))
-        .await?;
-        let cache_operation =
-            self.apply_materialized_archive(config, stage.path(), materialized)?;
-        // Do not let a disk archive turn an explicit CoW restore into a fresh boot, and
-        // reject it before replacement can remove the existing sandbox.
-        if config.forked && config.checkpoint_restore.is_none() {
-            return Err(crate::MicrosandboxError::InvalidConfig(
-                "copy-on-write memory requires a full snapshot restore".into(),
-            ));
+        let previous = config.restore_resources.archive_manifest.clone();
+
+        config.clear_prepared_restore();
+        config.apply_archive_metadata(&archive).await?;
+
+        if let Some(previous) = previous {
+            let admitted = config
+                .restore_resources
+                .archive_manifest
+                .as_ref()
+                .ok_or_else(|| {
+                    MicrosandboxError::SnapshotIntegrity("archive metadata was not admitted".into())
+                })?;
+
+            if previous.digest()? != admitted.digest()? {
+                return Err(MicrosandboxError::SnapshotIntegrity(
+                    "snapshot archive changed after configuration was built".into(),
+                ));
+            }
         }
 
-        config.restore_resources.archive = Some(Arc::new(PreparedArchive {
-            stage,
-            mode: config.snapshot_restore_mode,
-            source: archive,
-            cache_operation,
-        }));
         Ok(())
     }
 
-    /// Reuse retained archive staging when it still matches this restore;
-    /// otherwise discard every piece of the stale prepared state.
-    fn reuse_prepared_archive(&self, config: &mut SandboxConfig) -> MicrosandboxResult<bool> {
-        let Some(prepared) = &config.restore_resources.archive else {
-            return Ok(false);
-        };
-        if prepared.mode == config.snapshot_restore_mode
-            && config.snapshot_archive_source.as_ref() == Some(&prepared.source)
-            && prepared.stage.path().parent() == Some(self.sandboxes_dir().as_path())
-        {
-            config.restore_boot_overrides.validate_scope(
-                if config.restore_resources.geometry.is_some() {
-                    crate::snapshot::SnapshotScope::Full
-                } else {
-                    crate::snapshot::SnapshotScope::Disk
-                },
-                config.snapshot_restore_mode,
-            )?;
-            return Ok(true);
-        }
-
-        config.clear_prepared_restore();
-        Ok(false)
-    }
-
     /// Apply the decoded manifest, checkpoint, and disk state to the config.
-    /// Returns the cache leases the retained staging must keep alive.
-    fn apply_materialized_archive(
+    /// Returns the cache lease to retain through sandbox creation and publication.
+    pub(crate) fn apply_materialized_archive(
         &self,
         config: &mut SandboxConfig,
         stage_path: &Path,
         materialized: super::archive::ArchiveChildMaterialization,
     ) -> MicrosandboxResult<microsandbox_image::GlobalCache> {
-        config.spec.image = RootfsSource::oci(materialized.manifest.image.reference.clone());
-        if config.spec.runtime.user.is_none() {
-            config.spec.runtime.user = materialized.manifest.restore_defaults()?.user;
-        }
-
-        crate::sandbox::apply_snapshot_guest_clock(config, &materialized.manifest)?;
         crate::sandbox::require_recorded_mounts(config, &materialized.manifest)?;
         crate::sandbox::require_guest_mounts(config, materialized.required_bind_paths)?;
+
         config.snapshot_parent = Some(materialized.manifest.snapshot_id.to_string());
         crate::snapshot::apply_additional_disks(config, materialized.disk_mounts);
         config.manifest_digest = Some(materialized.manifest.image.manifest_digest.clone());
-        crate::sandbox::apply_snapshot_root_layout(config, &materialized.manifest.root_disk)?;
+
         let cache_operation = materialized.cache_operation;
         if let Some(restore) = materialized.checkpoint_restore {
             let state = match &materialized.manifest.state {
@@ -175,6 +171,7 @@ impl LocalBackend {
                     ));
                 }
             };
+
             let expected = microsandbox_image::checkpoint::ObjectId::new(&restore.checkpoint_root)
                 .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
             let closure = microsandbox_image::checkpoint::CheckpointClosure::open(
@@ -183,6 +180,7 @@ impl LocalBackend {
                 self.config().fs_state_limit(),
             )
             .map_err(|error| crate::MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
+
             crate::sandbox::apply_checkpoint_restore_constraints(
                 config,
                 state,
@@ -207,6 +205,7 @@ impl LocalBackend {
                     }
                 }));
         }
+
         Ok(cache_operation)
     }
 }
@@ -280,6 +279,35 @@ impl SnapshotBackend for LocalBackend {
                 backend,
                 name: name.into(),
                 reference: SnapshotReference::Path(directory.to_string_lossy().into_owned()),
+            })
+        })
+    }
+
+    fn open_group<'a>(
+        &'a self,
+        backend: Arc<dyn Backend>,
+        directory: &'a Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::Snapshot>> {
+        Box::pin(async move {
+            group::validate_directory(directory).await?;
+            // Canonicalization is only for the display name; retain the admitted path
+            // so symlink/parent semantics are not rewritten before later operations.
+            let resolved = directory.canonicalize()?;
+            let name = resolved
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    MicrosandboxError::InvalidConfig(
+                        "snapshot group directory has no UTF-8 name".into(),
+                    )
+                })?;
+            let path = directory.to_str().ok_or_else(|| {
+                MicrosandboxError::InvalidConfig("snapshot group path must be UTF-8".into())
+            })?;
+            Ok(crate::Snapshot {
+                backend,
+                name: name.into(),
+                reference: SnapshotReference::Path(path.into()),
             })
         })
     }
@@ -641,7 +669,15 @@ pub(crate) async fn load_group_admitted(
     }
     opts.group = Some(name.into());
     let imported = archive::load_group(local, paths, opts).await?;
-    Ok(crate::SnapshotImportResult {
+    Ok(import_result(backend, name, imported))
+}
+
+fn import_result(
+    backend: Arc<dyn Backend>,
+    name: &str,
+    imported: archive::ImportedBatch,
+) -> crate::SnapshotImportResult {
+    crate::SnapshotImportResult {
         operation_id: imported.operation_id,
         snapshot: crate::Snapshot {
             backend: backend.clone(),
@@ -657,7 +693,7 @@ pub(crate) async fn load_group_admitted(
         reused: imported.reused,
         head_update: imported.head_update,
         warnings: imported.warnings,
-    })
+    }
 }
 
 pub(crate) async fn load_many_admitted(

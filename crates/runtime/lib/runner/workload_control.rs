@@ -5,13 +5,16 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use microsandbox_protocol::codec;
+#[cfg(test)]
+use microsandbox_protocol::core::Ready;
 use microsandbox_protocol::core::{
-    CoreError, Ready, WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
+    CoreError, WORKLOAD_TRANSPORT_BARRIER_VERSION, WORKLOAD_TRANSPORT_BULK_BYTES,
     WORKLOAD_TRANSPORT_BULK_FRAMES, WORKLOAD_TRANSPORT_CONTROL_BYTES,
     WORKLOAD_TRANSPORT_CONTROL_FRAMES, WorkloadFrozen, WorkloadThawed, WorkloadTransportCredit,
     WorkloadTransportPosition,
 };
 use microsandbox_protocol::message::{Message, MessageType};
+use microsandbox_protocol::restore_transport::GuestReady;
 use tokio::sync::{Notify, mpsc, oneshot};
 
 //--------------------------------------------------------------------------------------------------
@@ -36,7 +39,7 @@ struct PendingReply {
 }
 
 struct State {
-    ready: Option<(u8, Ready)>,
+    ready: Option<(u8, GuestReady)>,
     active: bool,
     closed: bool,
     gates: usize,
@@ -96,9 +99,11 @@ impl WorkloadControl {
         })
     }
 
-    pub(crate) fn install_ready(&self, version: u8, ready: Ready, dual_port: bool) {
+    pub(crate) fn install_ready(&self, version: u8, ready: impl Into<GuestReady>, dual_port: bool) {
+        let ready = ready.into();
         let mut state = self.state.lock().unwrap();
-        if ready.workload_transport_barrier_version == Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
+        if ready.public.workload_transport_barrier_version
+            == Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
             && state.ready.is_none()
         {
             state.credit = WorkloadTransportCredit {
@@ -145,13 +150,15 @@ impl WorkloadControl {
             .ok_or_else(|| "ready workload transport writer is unavailable".into())
     }
 
-    pub(crate) fn ready(&self) -> Result<(u8, Ready), String> {
+    pub(crate) fn ready(&self) -> Result<(u8, GuestReady), String> {
         let state = self.state.lock().unwrap();
         if !state.active || state.closed {
             return Err("workload control transport is not running".into());
         }
         let (version, ready) = state.ready.clone().ok_or("guest readiness unavailable")?;
-        if ready.workload_transport_barrier_version != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) {
+        if ready.public.workload_transport_barrier_version
+            != Some(WORKLOAD_TRANSPORT_BARRIER_VERSION)
+        {
             return Err(format!(
                 "guest lacks workload transport barrier version {WORKLOAD_TRANSPORT_BARRIER_VERSION}"
             ));
@@ -232,7 +239,7 @@ impl WorkloadControl {
         match state
             .ready
             .as_ref()
-            .and_then(|(_, ready)| ready.workload_transport_barrier_version)
+            .and_then(|(_, ready)| ready.public.workload_transport_barrier_version)
         {
             None => return Ok(true),
             Some(WORKLOAD_TRANSPORT_BARRIER_VERSION) => {}

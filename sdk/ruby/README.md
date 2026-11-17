@@ -43,7 +43,7 @@ mismatch `-linux` gems against glibc hosts. Run `gem update --system` first if
 
 musl (Alpine), Windows on ARM, and any other platform or Ruby version fall
 back to the source gem automatically. The source gem compiles the extension
-during install and therefore needs a Rust toolchain (1.85 or newer).
+during install and therefore needs a Rust toolchain (1.89 or newer).
 
 To compile from source even where a platform gem exists:
 

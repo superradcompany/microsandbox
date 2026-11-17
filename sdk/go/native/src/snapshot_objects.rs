@@ -34,6 +34,9 @@ enum Request {
     Get {
         name: String,
     },
+    OpenGroup {
+        directory: std::path::PathBuf,
+    },
     List,
     LookupSource {
         name: String,
@@ -207,6 +210,23 @@ impl Drop for PendingObjects {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Raw native callers need the same admission guarantee as the Go wrapper.
+/// Resolve before either FFI entry point starts polling its operation future.
+fn prepare_request(json: &str) -> Result<Request, FfiError> {
+    let mut request = serde_json::from_str::<Request>(json)
+        .map_err(|e| FfiError::invalid_argument(format!("invalid snapshot operation: {e}")))?;
+    if let Request::OpenGroup { directory } = &mut request {
+        if directory.as_os_str().is_empty() {
+            return Err(FfiError::invalid_argument(
+                "snapshot group path cannot be empty",
+            ));
+        }
+        *directory = std::path::absolute(&*directory)
+            .map_err(|e| FfiError::invalid_argument(format!("resolve snapshot group path: {e}")))?;
+    }
+    Ok(request)
+}
+
 fn objects() -> &'static RwLock<HashMap<u64, Object>> {
     static OBJECTS: OnceLock<RwLock<HashMap<u64, Object>>> = OnceLock::new();
     OBJECTS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -326,6 +346,9 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
             .map(|checkpoint| pending.insert(Object::Checkpoint(Box::new(checkpoint))))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
+        Request::OpenGroup { directory } => {
+            pending.insert(Object::Group(Snapshot::open(directory).await?))
+        }
         Request::Get { name } => pending.insert(Object::Group(Snapshot::get(name).await?)),
         Request::List => Snapshot::list()
             .await?
@@ -455,6 +478,10 @@ async fn dispatch(id: u64, request: Request, pending: &PendingObjects) -> Result
 #[unsafe(no_mangle)]
 pub extern "C" fn msb_supports_snapshot_artifact_receivers() {}
 
+/// Advertise explicit group-directory lookup separately from older group receivers.
+#[unsafe(no_mangle)]
+pub extern "C" fn msb_supports_snapshot_group_paths() {}
+
 /// Execute only the explicitly tagged operation against a retained receiver.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn msb_snapshot_object(
@@ -467,8 +494,7 @@ pub unsafe extern "C" fn msb_snapshot_object(
     let pending = Arc::new(PendingObjects::default());
     let operation_pending = pending.clone();
     let result = run_c(cancel_id, buf, buf_len, || {
-        let request = serde_json::from_str::<Request>(&unsafe { cstr(request) }?)
-            .map_err(|e| FfiError::invalid_argument(format!("invalid snapshot operation: {e}")))?;
+        let request = prepare_request(&unsafe { cstr(request) }?)?;
         Ok(Box::pin(async move {
             Ok(dispatch(handle, request, &operation_pending)
                 .await?
@@ -497,8 +523,7 @@ pub unsafe extern "C" fn msb_snapshot_object_owned(
     let pending = Arc::new(PendingObjects::default());
     let operation_pending = pending.clone();
     run_owned(cancel_id, out_ptr, out_len, pending, || {
-        let request = serde_json::from_str::<Request>(&unsafe { cstr(request) }?)
-            .map_err(|e| FfiError::invalid_argument(format!("invalid snapshot operation: {e}")))?;
+        let request = prepare_request(&unsafe { cstr(request) }?)?;
         Ok(async move {
             Ok(dispatch(handle, request, &operation_pending)
                 .await?
@@ -555,6 +580,27 @@ pub extern "C" fn msb_snapshot_object_close(handle: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_path_is_anchored_during_native_request_admission() {
+        let Request::OpenGroup { directory } =
+            prepare_request(r#"{"op":"open_group","directory":"link/../history"}"#)
+                .unwrap_or_else(|error| panic!("{}", error.message))
+        else {
+            panic!("wrong request kind")
+        };
+        assert!(directory.is_absolute());
+        assert_eq!(directory, std::path::absolute("link/../history").unwrap());
+        #[cfg(unix)]
+        assert!(directory.to_str().unwrap().ends_with("/link/../history"));
+        assert!(prepare_request(r#"{"op":"open_group","directory":""}"#).is_err());
+        let Request::Get { name } = prepare_request(r#"{"op":"get","name":"history"}"#)
+            .unwrap_or_else(|error| panic!("{}", error.message))
+        else {
+            panic!("wrong request kind")
+        };
+        assert_eq!(name, "history");
+    }
 
     async fn empty_group(home: &std::path::Path) -> microsandbox::backend::LocalBackend {
         let local = microsandbox::backend::LocalBackend::builder()

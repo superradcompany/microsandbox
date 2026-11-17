@@ -91,6 +91,19 @@ pub trait SnapshotBackend: Send + Sync {
         })
     }
 
+    /// Open an explicit local group directory; remote backends refuse this selector.
+    fn open_group<'a>(
+        &'a self,
+        _backend: Arc<dyn Backend>,
+        _directory: &'a std::path::Path,
+    ) -> BoxFuture<'a, MicrosandboxResult<crate::Snapshot>> {
+        Box::pin(async {
+            Err(crate::MicrosandboxError::local_only(
+                crate::Operation::SnapshotOps,
+            ))
+        })
+    }
+
     /// Group-oriented list groups; unsupported backends refuse explicitly.
     fn list_groups<'a>(
         &'a self,

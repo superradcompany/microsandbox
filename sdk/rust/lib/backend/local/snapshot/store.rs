@@ -1553,6 +1553,7 @@ mod tests {
             std::slice::from_ref(&child.snapshot_id),
             false,
             super::super::group::IndexedPublication {
+                verified_signers: Default::default(),
                 operation: "00000000000000000000000000000001".into(),
                 outcome: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
             },
@@ -2009,6 +2010,13 @@ mod tests {
             .await
             .unwrap();
         let parent = local.snapshots_dir();
+        #[cfg(unix)]
+        let parent = {
+            std::fs::create_dir_all(&parent).unwrap();
+            let alias = home.path().join("snapshot-alias");
+            std::os::unix::fs::symlink(&parent, &alias).unwrap();
+            alias
+        };
         let artifact = parent.join("flat");
         let snapshot = manifest(78, None);
         std::fs::create_dir_all(&artifact).unwrap();
@@ -2017,12 +2025,26 @@ mod tests {
             snapshot.to_canonical_bytes().unwrap(),
         )
         .unwrap();
+        let indexed_artifact_path = artifact.canonicalize().unwrap();
         let opened = open_snapshot(&local, artifact.to_str().unwrap())
             .await
             .unwrap();
         index_upsert(&local, &artifact, opened.digest(), opened.manifest())
             .await
             .unwrap();
+        #[cfg(unix)]
+        {
+            let row = indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut legacy: snapshot_entity::ActiveModel = row.into();
+            legacy.artifact_path = Set(artifact.display().to_string());
+            snapshot_entity::Entity::insert(legacy)
+                .exec(local.db().await.unwrap().write())
+                .await
+                .unwrap();
+        }
         let lease = StorageLease::try_exclusive(&artifact).unwrap().unwrap();
         super::super::deletion::quarantine(&artifact).unwrap();
         drop(lease);
@@ -2030,6 +2052,12 @@ mod tests {
         super::super::deletion::recover_parent(&local, &parent)
             .await
             .unwrap();
+        assert!(
+            indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(indexed_path(&local, &artifact).await.unwrap().is_none());
 
         std::fs::create_dir(&artifact).unwrap();
@@ -2052,7 +2080,12 @@ mod tests {
         super::super::deletion::recover_parent(&local, &parent)
             .await
             .unwrap();
-        assert!(indexed_path(&local, &artifact).await.unwrap().is_some());
+        assert!(
+            indexed_path(&local, &indexed_artifact_path)
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(artifact.join(DESCRIPTOR_FILENAME).exists());
     }
 
@@ -2103,6 +2136,8 @@ mod tests {
 
     #[tokio::test]
     async fn distinct_child_counts_and_parent_fallback_survive_reindex() {
+        // This checks indexed ancestry, not transient descriptor inheritance from sibling
+        // fork tests. The shared helper retries only an uncommitted busy-reader refusal.
         let home = tempfile::tempdir().unwrap();
         let local = crate::test_support::local_backend_builder(home.path())
             .build()
@@ -2124,13 +2159,15 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.child_count == 1));
         assert!(
-            remove_snapshot(&local, "first:base", false)
+            after_reader_release(|| remove_snapshot(&local, "first:base", false))
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("indexed child")
         );
-        remove_snapshot(&local, "first:child", false).await.unwrap();
+        after_reader_release(|| remove_snapshot(&local, "first:child", false))
+            .await
+            .unwrap();
         assert_eq!(
             get_handle(&local, "first").await.unwrap().id(),
             parent.snapshot_id.as_str()
@@ -2142,13 +2179,13 @@ mod tests {
         // A second installed copy of the same child still protects the parent;
         // removing one copy must not reset the distinct-child count to zero.
         assert!(
-            remove_snapshot(&local, "first:base", false)
+            after_reader_release(|| remove_snapshot(&local, "first:base", false))
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("indexed child")
         );
-        remove_snapshot(&local, "second:child", false)
+        after_reader_release(|| remove_snapshot(&local, "second:child", false))
             .await
             .unwrap();
         let rows = snapshot_entity::Entity::find()
@@ -2157,7 +2194,9 @@ mod tests {
             .await
             .unwrap();
         assert!(rows.iter().all(|row| row.child_count == 0));
-        remove_snapshot(&local, "first:base", false).await.unwrap();
+        after_reader_release(|| remove_snapshot(&local, "first:base", false))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

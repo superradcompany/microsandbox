@@ -338,6 +338,10 @@ pub struct SandboxDefaults {
     /// Default guest transparent huge-page policy.
     pub thp: TransparentHugePagePolicy,
 
+    /// Explicit default nested virtualization policy. Omission uses the runtime default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested_virt: Option<bool>,
+
     /// Default OCI rootfs settings.
     #[config_patch(nested)]
     pub oci: OciSandboxDefaults,
@@ -678,6 +682,7 @@ impl Default for SandboxDefaults {
             cpu_placement: CpuPlacement::Inherit,
             placement_profile: None,
             thp: TransparentHugePagePolicy::Madvise,
+            nested_virt: None,
             oci: OciSandboxDefaults::default(),
             shell: "/bin/sh".into(),
             workdir: None,
@@ -806,6 +811,9 @@ pub use registry::{
     RegistryCredentialStore, RegistryEntry, RegistryEntryPatch, RegistryOptions,
     delete_registry_keyring_auth, get_registry_keyring_auth, set_registry_keyring_auth,
 };
+
+pub(crate) use runtime_paths::sdk_packaged_msb_path;
+pub use runtime_paths::set_sdk_packaged_msb_path;
 
 //--------------------------------------------------------------------------------------------------
 // Tests
@@ -1469,10 +1477,3 @@ mod tests {
         assert!(result.unwrap().is_empty());
     }
 }
-
-//--------------------------------------------------------------------------------------------------
-// Re-Exports
-//--------------------------------------------------------------------------------------------------
-
-pub(crate) use runtime_paths::sdk_packaged_msb_path;
-pub use runtime_paths::set_sdk_packaged_msb_path;

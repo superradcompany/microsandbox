@@ -4,7 +4,7 @@ import { napi } from "../../dist/internal/napi.js";
 import { SnapshotVerificationError } from "../../dist/errors.js";
 
 vi.mock("../../dist/internal/napi.js", () => ({
-  napi: { SnapshotGroup: { get: vi.fn(), list: vi.fn(), load: vi.fn() }, Snapshot: { groupHead: vi.fn() } },
+  napi: { SnapshotGroup: { open: vi.fn(), get: vi.fn(), list: vi.fn(), load: vi.fn() }, Snapshot: { groupHead: vi.fn() } },
 }));
 vi.mock("../../dist/sandbox.js", () => ({ Sandbox: class {} }));
 
@@ -101,4 +101,21 @@ it("preserves committed import facts and callback options without rereading head
   expect(result.operationId).toBe("attempt");
   expect(result.headUpdate.head).toBeNull();
   expect(native.head).not.toHaveBeenCalled();
+});
+
+it("opens explicit directories without name lookup", async () => {
+  vi.mocked(napi.SnapshotGroup.open!).mockResolvedValue(group() as never);
+  const opened = await Snapshot.open("./exports/history");
+  expect(opened.name).toBe("history");
+  expect(napi.SnapshotGroup.open).toHaveBeenCalledWith("./exports/history");
+});
+
+it("refuses group paths on older native libraries without name fallback", async () => {
+  const open = napi.SnapshotGroup.open;
+  const calls = vi.mocked(napi.SnapshotGroup.get).mock.calls.length;
+  try {
+    delete napi.SnapshotGroup.open;
+    await expect(Snapshot.open("./history")).rejects.toThrow("updated native library");
+    expect(napi.SnapshotGroup.get).toHaveBeenCalledTimes(calls);
+  } finally { napi.SnapshotGroup.open = open; }
 });

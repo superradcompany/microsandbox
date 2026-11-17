@@ -22,7 +22,7 @@ use smoltcp::wire::{
     Ipv6Repr, TcpPacket, UdpPacket,
 };
 
-use crate::config::{ConnectionLimit, DnsConfig, PublishedPort, TcpAcceptQueueSize};
+use crate::config::{ConnectionLimit, DnsConfig};
 use crate::engine::dns::common::ports::DnsPortType;
 use crate::engine::dns::{
     interceptor::DnsInterceptor,
@@ -31,7 +31,7 @@ use crate::engine::dns::{
 use crate::engine::tls::{proxy::TlsProxy, state::TlsState};
 use crate::icmp::relay::IcmpRelay;
 use crate::policy::{EgressEvaluation, HostnameSource, NetworkPolicy, Protocol};
-use crate::ports::PortPublisher;
+use crate::ports::{BoundPublishedPorts, PortPublisher};
 use crate::proxy::ResolvedOutboundProxy;
 use crate::secrets::handle::SecretsHandle;
 use crate::tcp::{
@@ -226,12 +226,11 @@ pub fn create_interface(device: &mut SmoltcpDevice, config: &PollLoopConfig) -> 
 /// * `dns_config` - DNS interception settings (block lists, upstreams, timeout).
 /// * `tls_state` - Optional TLS MITM state; drives interception of intercepted ports and DoT
 ///   when present.
-/// * `published_ports` - Host → guest port publishes; the publisher accepts inbound
-///   connections on the host-bind address and forwards into the guest.
+/// * `published_ports` - Host sockets for host → guest port publishes; the publisher accepts
+///   inbound connections on them and forwards into the guest.
 /// * `max_tcp_connections` - Optional cap on concurrent guest connections tracked by
 ///   [`TcpConnectionTracker`]; `None` uses the default.
 /// * `max_udp_connections` - Optional cap on concurrent UDP relay sessions.
-/// * `tcp_accept_queue_size` - Accept-queue depth requested for each published TCP port listener.
 /// * `tokio_handle` - Runtime handle used for proxy tasks, DNS forwarding, port publishing,
 ///   and ICMP relays.
 #[allow(clippy::too_many_arguments)]
@@ -242,11 +241,10 @@ pub fn smoltcp_poll_loop(
     platform_policy: Option<NetworkPolicy>,
     dns_config: DnsConfig,
     tls_state: Option<Arc<TlsState>>,
-    published_ports: Vec<PublishedPort>,
+    published_ports: BoundPublishedPorts,
     strict: bool,
     max_tcp_connections: Option<NonZeroUsize>,
     max_udp_connections: Option<ConnectionLimit>,
-    tcp_accept_queue_size: TcpAcceptQueueSize,
     max_inbound_tcp_connections: Option<ConnectionLimit>,
     tokio_handle: tokio::runtime::Handle,
     secrets: SecretsHandle,
@@ -290,13 +288,10 @@ pub fn smoltcp_poll_loop(
         config.guest_mac,
     );
     let mut port_publisher = PortPublisher::new(
-        &published_ports,
-        tcp_accept_queue_size,
+        published_ports,
         max_inbound_tcp_connections,
         config.guest_ipv4,
         config.guest_ipv6,
-        config.gateway.ipv4,
-        config.gateway.ipv6,
         config.gateway_mac,
         config.guest_mac,
         network_policy.clone(),
@@ -456,6 +451,7 @@ pub fn smoltcp_poll_loop(
                     conn_tracker.cleanup_closed(&mut sockets);
                     if !conn_tracker.has_socket_for(&src, &dst) {
                         conn_tracker.create_tcp_socket(src, dst, &mut sockets, accept_mode);
+                        shared.set_outbound_tcp_rejected(conn_tracker.rejected_connections());
                     }
 
                     // smoltcp validates the packet before any host-side dial.
@@ -615,6 +611,7 @@ pub fn smoltcp_poll_loop(
                     strict,
                     conn.proxy_connect,
                     connection_outbound_proxy,
+                    dns_forwarder_handle.clone(),
                 );
                 tokio_handle.spawn(proxy.run());
                 continue;
@@ -691,6 +688,7 @@ pub fn smoltcp_poll_loop(
                 strict,
                 conn.proxy_connect,
                 connection_outbound_proxy,
+                dns_forwarder_handle.clone(),
             );
             tokio_handle.spawn(proxy.run());
         }
@@ -731,7 +729,7 @@ pub fn smoltcp_poll_loop(
         let timeout_ms = poll_timeout_ms(
             stack_delay,
             conn_tracker.deferred_close_delay(),
-            port_publisher.deferred_close_delay(),
+            port_publisher.next_deadline_delay(),
             CLEANUP_INTERVAL.saturating_sub(last_cleanup.elapsed()),
         );
 
@@ -2063,11 +2061,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2212,11 +2209,10 @@ mod tests {
                 None,
                 DnsConfig::default(),
                 None,
-                vec![],
+                BoundPublishedPorts::default(),
                 false,
                 None,
                 None,
-                TcpAcceptQueueSize::DEFAULT,
                 None,
                 handle,
                 SecretsHandle::new(Default::default()),
@@ -2440,6 +2436,96 @@ mod tests {
         );
 
         (server_isn, guest_seq, new_conns)
+    }
+
+    /// A restored guest may retransmit ciphertext from a captured connection. The new
+    /// proxy must reject that old stream, never treat its bytes as a new request. This
+    /// only covers active traffic: an idle guest read needs separate restore fencing.
+    #[test]
+    fn restored_tcp_payload_is_reset_without_replaying_it() {
+        let source = Arc::new(SharedState::new(64));
+        let config = leak_poll_config();
+        let mut source_device = SmoltcpDevice::new(source.clone(), config.mtu);
+        let mut source_iface = create_interface(&mut source_device, &config);
+        let mut source_sockets = SocketSet::new(vec![]);
+        let mut source_tracker = TcpConnectionTracker::new(None);
+        let now = smoltcp_now();
+        let (server_isn, guest_seq, _source_connections) = establish(
+            &mut source_tracker,
+            &mut source_device,
+            &mut source_iface,
+            &mut source_sockets,
+            &source,
+            now,
+            54321,
+        );
+
+        // Full restore builds a fresh host stack while retaining the guest's
+        // sequence numbers. No source socket or proxy task crosses this boundary.
+        let destination = Arc::new(SharedState::new(64));
+        let mut device = SmoltcpDevice::new(destination.clone(), config.mtu);
+        let mut iface = create_interface(&mut device, &config);
+        let mut sockets = SocketSet::new(vec![]);
+        let mut tracker = TcpConnectionTracker::new(None);
+        ingress(
+            build_arp_request_frame(GUEST_MAC, GUEST_IP, GATEWAY_IP),
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+        );
+        let _ = last_tcp_reply(&destination);
+        let captured_data = build_tcp_frame(
+            54321,
+            443,
+            TcpControl::None,
+            guest_seq,
+            Some(server_isn + 1),
+            b"captured encrypted application record",
+        );
+        assert!(matches!(
+            classify_frame(&captured_data),
+            FrameAction::Passthrough
+        ));
+        ingress(
+            captured_data,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+        );
+        let (seq, _, syn, fin, rst) =
+            last_tcp_reply(&destination).expect("stale guest stream must receive a TCP reset");
+        assert!(rst && !syn && !fin);
+        assert_eq!(
+            seq,
+            server_isn + 1,
+            "reset must match the guest receive sequence"
+        );
+        assert!(tracker.take_new_connections(&mut sockets).is_empty());
+        assert!(only_tcp_state(&sockets).is_none());
+        assert_eq!(
+            only_tcp_state(&source_sockets),
+            Some(tcp::State::Established)
+        );
+
+        // Recovery is an application-owned new handshake, including when the OS
+        // reuses the same tuple. Rejected bytes are never given to the new proxy.
+        let (_, _, mut connections) = establish(
+            &mut tracker,
+            &mut device,
+            &mut iface,
+            &mut sockets,
+            &destination,
+            now,
+            54321,
+        );
+        assert!(matches!(
+            connections[0].from_smoltcp.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -2728,10 +2814,17 @@ mod tests {
         );
         let src = SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40001);
         let dst = SocketAddr::new(Ipv4Addr::from(SERVER_IP).into(), 443);
+        assert!(!tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::Reject));
+        assert_eq!(
+            tracker.rejected_connections(),
+            0,
+            "policy denials are not cap rejections"
+        );
         assert!(
             !tracker.create_tcp_socket(src, dst, &mut sockets, TcpAcceptMode::AcceptImmediately),
             "the pending reset still owns its socket budget"
         );
+        assert_eq!(tracker.rejected_connections(), 1);
         loop {
             if matches!(
                 iface.poll_egress(now, &mut device, &mut sockets),
@@ -2749,6 +2842,11 @@ mod tests {
             &mut sockets,
             TcpAcceptMode::AcceptImmediately
         ));
+        assert_eq!(
+            tracker.rejected_connections(),
+            1,
+            "admitted retries do not increment it"
+        );
         assert!(!tracker.has_socket_for(
             &SocketAddr::new(Ipv4Addr::from(GUEST_IP).into(), 40000),
             &dst

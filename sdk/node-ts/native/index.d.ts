@@ -245,7 +245,8 @@ export type JsHttpBuilder = HttpBuilder
 
 /** Builds an HTTP CONNECT outbound proxy. */
 export declare class HttpConnectProxyBuilder {
-
+  /** Set username authentication and a host-side password source. */
+  credentials(username: string, password: SecretSourceInput): this
 }
 export type JsHttpConnectProxyBuilder = HttpConnectProxyBuilder
 
@@ -1129,6 +1130,8 @@ export declare class Sandbox {
    * Sandbox names are limited to 128 UTF-8 bytes.
    */
   static get(name: string): Promise<JsSandboxHandle>
+  /** Import or recover stopped storage without starting a VM. */
+  static recoverStorage(name: string, optionsJson: string): Promise<string>
   /** List the first page of sandboxes. */
   static list(): Promise<JsSandboxPage>
   /** List a configured page of sandboxes. */
@@ -1338,6 +1341,8 @@ export declare class SandboxBuilder {
   memory(mib: number): this
   /** Boot-time maximum hotpluggable guest memory in MiB. */
   maxMemory(mib: number): this
+  /** Enable or disable nested virtualization for local sandboxes. */
+  nestedVirt(enabled: boolean): this
   /** Guest transparent huge-page policy selected at boot. */
   thp(policy: 'always' | 'madvise' | 'never'): this
   /** Override log verbosity: `"trace" | "debug" | "info" | "warn" | "error"`. */
@@ -1746,6 +1751,32 @@ export declare class SecretBuilder {
 }
 export type JsSecretBuilder = SecretBuilder
 
+/** A public URL for one sandbox port. */
+export declare class Service {
+  /** Create a Service. Without a target, the SDK refuses before any request. */
+  static create(slug: string, target?: ServiceTarget | undefined | null): Promise<Service>
+  static get(slug: string): Promise<Service>
+  static list(): Promise<ServicePage>
+  static listWith(options: ServiceListOptions): Promise<ServicePage>
+  get slug(): string
+  get url(): string
+  get status(): string
+  /** The target, or `null` when the Service is detached. */
+  get target(): ServiceTarget | null
+  get createdAt(): number
+  get updatedAt(): number
+  /** Change the target. */
+  update(options: ServiceUpdateOptions): Promise<Service>
+  /** Enable the Service. */
+  enable(): Promise<Service>
+  /** Disable the Service while retaining its target. */
+  disable(): Promise<Service>
+  /** Remove the Service and release its slug. */
+  remove(): Promise<void>
+  refresh(): Promise<Service>
+}
+export type JsService = Service
+
 /** High-level SFTP client session. */
 export declare class SftpClient {
   /** Read a file into memory. */
@@ -1933,6 +1964,8 @@ export declare class SnapshotGroup {
    * The destination builder is consumed before suspension and must not be reused.
    */
   spawnSandboxWithProgressBuilder(builder: RestoreBuilder): Promise<PullProgressCreate>
+  /** Open a local directory, anchoring it before scheduling native work. */
+  static open(path: string): Promise<SnapshotGroup>
   static get(name: string): Promise<SnapshotGroup>
   static list(): Promise<Array<SnapshotGroup>>
   get name(): string
@@ -2162,6 +2195,9 @@ export declare function defaultBackendInfo(): JsBackendInfo
 
 /** Return the active default backend kind (`"local"` or `"cloud"`). */
 export declare function defaultBackendKind(): string
+
+/** Inspect explicitly selected storage without initializing the normal backend. */
+export declare function diagnoseStorage(configJson: string, selectionJson: string): Promise<string>
 
 /** DNS interception configuration produced by `DnsBuilder.build()`. */
 export interface DnsConfig {
@@ -2796,6 +2832,9 @@ export interface SecretEntry {
  * secret name. `env` / `value` / `store` are mutually exclusive ways to
  * provide the secret material; setting more than one is rejected at the
  * boundary. Only `value` may carry raw secret material.
+ *
+ * Omitted policy fields keep the stored setting; a supplied `substitution`
+ * replaces the whole rule.
  */
 export interface SecretModifySpec {
   env?: string
@@ -2803,6 +2842,21 @@ export interface SecretModifySpec {
   store?: string
   placeholder?: string
   allowedHosts?: Array<string>
+  substitution?: SecretModifySubstitution
+  violationAction?: string
+  requireTlsIdentity?: boolean
+  allowPlaceholderFor?: Array<string>
+}
+
+/**
+ * Substitution locations in `SecretModifySpec.substitution`. Omitted fields
+ * take the create defaults.
+ */
+export interface SecretModifySubstitution {
+  headers?: boolean
+  headerFields?: Array<string>
+  query?: boolean
+  body?: boolean
 }
 
 /** Host-side source for secret material. */
@@ -2820,6 +2874,30 @@ export interface SecretSubstitution {
   headerFields: Array<string>
   query: boolean
   body: boolean
+}
+
+/** Options for one `Service.listWith()` page. */
+export interface ServiceListOptions {
+  sandbox?: string
+  cursor?: string
+  limit?: number
+}
+
+/** One page returned by `Service.list` / `Service.listWith`. */
+export interface ServicePage {
+  services: Array<Service>
+  nextCursor?: string
+}
+
+/** The sandbox and port a Service routes to. */
+export interface ServiceTarget {
+  sandbox: string
+  port: number
+}
+
+/** Fields for one `Service.update()` call. */
+export interface ServiceUpdateOptions {
+  target: ServiceTarget
 }
 
 /**
@@ -3045,6 +3123,9 @@ export interface StreamOpenResult {
 
 /** Whether this native library understands published-port modification. */
 export declare function supportsPortModification(): boolean
+
+/** Whether this native library applies secret policy fields in modify specs. */
+export declare function supportsSecretPolicyModification(): boolean
 
 /** TLS interception configuration produced by `TlsBuilder.build()`. */
 export interface TlsConfig {

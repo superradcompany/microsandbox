@@ -158,6 +158,7 @@ impl PreviousLaunch {
             .map(|network| network.into_current(self.deployment_profile))
             .transpose()?;
         let mut launch = LaunchConfig {
+            protected_guest_state: false,
             execution: ExecutionIntent::Boot,
             bootstrap,
             cpu_lease_dir,
@@ -176,6 +177,7 @@ impl PreviousLaunch {
             agent_sock: self.agent_sock,
             libkrunfw_path: self.libkrunfw_path,
             thp: self.thp,
+            nested_virt: None,
             // Previous launch formats had no clock policy; they always synchronized.
             guest_clock: Default::default(),
             fs_state_limit_bytes: None,

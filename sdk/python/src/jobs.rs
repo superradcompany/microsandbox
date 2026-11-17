@@ -302,8 +302,8 @@ impl PyJobLogStream {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
-pub(crate) fn decode(kind: &str, value: serde_json::Value) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
+pub(crate) fn decode(kind: &str, value: serde_json::Value) -> PyResult<Py<PyAny>> {
+    Python::attach(|py| {
         let value = crate::sandbox_handle::json_value_to_py(py, value)?;
         Ok(py
             .import("microsandbox.jobs")?
@@ -318,7 +318,7 @@ pub(crate) fn job_error(error: JobError) -> PyErr {
         JobError::LaunchUnconfirmed { id, .. } => Some(id.to_string()),
         _ => None,
     };
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         match py
             .import("microsandbox.errors")
             .and_then(|m| m.getattr("JobError"))

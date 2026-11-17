@@ -42,6 +42,8 @@ from microsandbox.types import (
     SecretEntry,
     SecretModifySpec,
     SecurityProfile,
+    ServiceStatus,
+    ServiceTarget,
     SnapshotFormat,
     SnapshotGroupInfo,
     SnapshotScope,
@@ -98,6 +100,14 @@ class SandboxPage:
     @property
     def next_cursor(self) -> str | None: ...
 
+class StorageRecovery:
+    @property
+    def name(self) -> str: ...
+    @property
+    def ready(self) -> bool: ...
+    @property
+    def originals_retained(self) -> bool: ...
+
 class Sandbox:
     async def snapshot(
         self,
@@ -114,6 +124,13 @@ class Sandbox:
 
     Sandbox names are limited to 128 UTF-8 bytes.
     """
+
+    @staticmethod
+    async def recover_storage(
+        name: str, *, selections: Mapping[str, str] | None = None,
+        accept_selected_view: bool = False,
+        legacy_writers_stopped: bool = False,
+    ) -> StorageRecovery: ...
 
     async def get_job(self, id: str) -> Job: ...
     async def list_jobs(
@@ -218,6 +235,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -258,6 +276,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -313,6 +332,7 @@ class Sandbox:
         cpus: int | None = None,
         max_memory: int | None = None,
         max_cpus: int | None = None,
+        nested_virt: bool | None = None,
         workdir: str | None = None,
         shell: str | None = None,
         security: SecurityProfile | None = None,
@@ -344,8 +364,10 @@ class Sandbox:
         secret_violation_action: ViolationAction | None = None,
         detached: bool = False,
     ) -> PullSession: ...
-    async def name(self) -> str: ...
-    async def id(self) -> str: ...
+    @property
+    def name(self) -> Awaitable[str]: ...
+    @property
+    def id(self) -> Awaitable[str]: ...
     @property
     def owns_lifecycle(self) -> Awaitable[bool]: ...
     @property
@@ -993,6 +1015,48 @@ class VolumeHandle:
     def fs(self) -> VolumeFs: ...
     async def remove(self) -> None: ...
 
+class Service:
+    @staticmethod
+    async def create(slug: str, *, target: ServiceTarget) -> Service: ...
+    @staticmethod
+    async def get(slug: str) -> Service: ...
+    @staticmethod
+    async def list() -> ServicePage: ...
+    @staticmethod
+    async def list_with(
+        *,
+        sandbox: str | None = None,
+        cursor: str | None = None,
+        limit: int | None = None,
+    ) -> ServicePage: ...
+    @property
+    def slug(self) -> str: ...
+    @property
+    def url(self) -> str: ...
+    @property
+    def status(self) -> ServiceStatus: ...
+    @property
+    def target(self) -> ServiceTarget | None: ...
+    @property
+    def created_at(self) -> float: ...
+    @property
+    def updated_at(self) -> float: ...
+    async def update(
+        self,
+        *,
+        target: ServiceTarget,
+    ) -> Service: ...
+    async def enable(self) -> Service: ...
+    async def disable(self) -> Service: ...
+    async def remove(self) -> None: ...
+    async def refresh(self) -> Service: ...
+
+class ServicePage:
+    @property
+    def services(self) -> list[Service]: ...
+    @property
+    def next_cursor(self) -> str | None: ...
+
 class VolumeFs:
     async def read(self, path: str) -> bytes: ...
     async def read_text(self, path: str) -> str: ...
@@ -1563,6 +1627,8 @@ class SnapshotGroup:
     @staticmethod
     async def get(name: str) -> SnapshotGroup: ...
     @staticmethod
+    async def open(path: str | os.PathLike[str]) -> SnapshotGroup: ...
+    @staticmethod
     async def list() -> list[SnapshotGroup]: ...
     @property
     def name(self) -> str: ...
@@ -1630,3 +1696,5 @@ class SnapshotRemoveResult:
     def head_update(self) -> dict[str, Any]: ...
     @property
     def warnings(self) -> list[str]: ...
+
+async def diagnose_storage(config_json: str, selection_json: str) -> str: ...

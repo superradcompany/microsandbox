@@ -18,6 +18,14 @@ use super::{
 /// always the core error's `Display` rendering, except for `Unsupported`,
 /// which names the Ruby API instead of the Rust path.
 pub(super) fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
+    core_error_with_change(ruby, error, None)
+}
+
+pub(super) fn core_error_with_change(
+    ruby: &Ruby,
+    error: MicrosandboxError,
+    changed: Option<&str>,
+) -> Error {
     if let MicrosandboxError::SnapshotRemovalRecovery { result, source } = &error {
         let class = exception_class(ruby, "SnapshotRemovalRecoveryError");
         let message = error.to_string();
@@ -76,7 +84,7 @@ pub(super) fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
         return Error::from(exception);
     }
     if let MicrosandboxError::Unsupported { op, reason } = &error {
-        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason));
+        return unsupported_error(ruby, &ruby_api_name(*op), &ruby_hint(reason), changed);
     }
     if let MicrosandboxError::SnapshotImport(details) = &error {
         let class = exception_class(ruby, "SnapshotImportError");
@@ -114,9 +122,17 @@ pub(super) fn core_error(ruby: &Ruby, error: MicrosandboxError) -> Error {
     if let MicrosandboxError::SnapshotSourceRecovery(recovery) = &error {
         return snapshot_source_recovery_error(ruby, error.to_string(), recovery);
     }
-    Error::new(
+    if let MicrosandboxError::Service {
+        slug,
+        error: reason,
+    } = &error
+    {
+        return super::service_error(ruby, error.to_string(), slug, reason);
+    }
+    super::structured_error(
         exception_class(ruby, core_error_class_name(&error)),
         error.to_string(),
+        changed,
     )
 }
 

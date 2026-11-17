@@ -97,6 +97,12 @@ export class Snapshot {
       added: [...result.added], reused: [...result.reused], headUpdate: headOutcome(result.headUpdate), warnings: [...result.warnings] };
   }
 
+  /** Open a local history directory; relative paths are anchored at this call. */
+  static async open(path: string): Promise<Snapshot> {
+    if (!napi.SnapshotGroup.open) throw new UnsupportedError("Opening group paths requires an updated native library");
+    return new Snapshot(await withMappedErrors(() => napi.SnapshotGroup.open!(path)));
+  }
+
   static async get(name: string): Promise<Snapshot> {
     return new Snapshot(await withMappedErrors(() => napi.SnapshotGroup.get(name)));
   }

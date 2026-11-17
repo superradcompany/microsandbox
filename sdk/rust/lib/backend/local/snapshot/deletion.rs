@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use microsandbox_image::storage_lease::StorageLease;
 use microsandbox_utils::process_lock;
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
 use crate::backend::LocalBackend;
@@ -219,11 +219,14 @@ async fn recover_parent_owned(
                 if let Some(container) = parent.parent() {
                     sync_dir(container)?;
                 }
-                snapshot::Entity::delete_by_id(
-                    super::store::canonical_path(&source).display().to_string(),
-                )
-                .exec(local.db().await?.write())
-                .await?;
+                // Current rows use the resolved address; older catalogs can retain
+                // the original spelling through a symlinked parent.
+                let canonical_key = StorageLease::key(&source)?.display().to_string();
+                let original_key = source.display().to_string();
+                snapshot::Entity::delete_many()
+                    .filter(snapshot::Column::ArtifactPath.is_in([canonical_key, original_key]))
+                    .exec(local.db().await?.write())
+                    .await?;
                 super::store::recompute_children(local.db().await?.write()).await?;
             }
             Err(error) => return Err(error.into()),

@@ -427,31 +427,77 @@ mod tests {
         assert!(!directory.join("history").exists());
     }
 
-    #[tokio::test]
-    async fn published_checkpoint_survives_reservation_error_cleanup() {
-        let root = tempfile::tempdir().unwrap();
-        let source = source(&root.path().join("home")).await;
-        let reservation = claim(root.path(), "history", source).unwrap();
-        let directory = reservation.directory().to_path_buf();
-        let staged = stage(root.path(), &[descriptor(1, None)]);
-        let update = super::super::publish_admitted(
-            &directory,
-            staged.path(),
-            &BTreeMap::new(),
-            &id(1),
-            reservation.writer(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(update.head, Some(id(1).to_string()));
-        // Same drop path runs when publication succeeded but source recovery failed.
-        drop(reservation);
-        assert!(directory.join(id(1).as_str()).is_dir());
-        assert_eq!(
-            super::super::read_group(&directory).unwrap().head,
-            Some(id(1).to_string())
+    #[test]
+    fn published_checkpoint_survives_reservation_error_cleanup() {
+        // Unrelated tests can fork while publication holds the group lock. The child
+        // inherits that lock until exec, so immediate marker cleanup is not guaranteed
+        // in the parallel parent harness. Isolate the no-contention assertion and test
+        // deliberately deferred cleanup separately inside the worker.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "backend::local::snapshot::group::capture::tests::published_reservation_cleanup_worker",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!directory.join(OWNER_FILENAME).exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess-only reservation cleanup assertions"]
+    async fn published_reservation_cleanup_worker() {
+        for busy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let source = source(&root.path().join("home")).await;
+            let reservation = claim(root.path(), "history", source).unwrap();
+            let directory = reservation.directory().to_path_buf();
+            let token = reservation.inner.token.clone();
+            let staged = stage(root.path(), &[descriptor(1, None)]);
+            let update = super::super::publish_admitted(
+                &directory,
+                staged.path(),
+                &BTreeMap::new(),
+                &id(1),
+                reservation.writer(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(update.head, Some(id(1).to_string()));
+            let reader = if busy {
+                let lock =
+                    process_lock::open_existing_lock_file(&directory.join(".group.lock")).unwrap();
+                process_lock::lock_shared(&lock).unwrap();
+                Some(lock)
+            } else {
+                None
+            };
+            // Same drop path runs when publication succeeded but source recovery failed.
+            drop(reservation);
+            assert!(directory.join(id(1).as_str()).is_dir());
+            assert_eq!(
+                super::super::read_group(&directory).unwrap().head,
+                Some(id(1).to_string())
+            );
+            assert_eq!(directory.join(OWNER_FILENAME).exists(), busy);
+            drop(reader);
+            if busy {
+                // Deferred cleanup must remain retryable without undoing published state.
+                retire_empty(&directory, &token).unwrap();
+                assert!(!directory.join(OWNER_FILENAME).exists());
+                assert!(directory.join(id(1).as_str()).is_dir());
+                assert_eq!(
+                    super::super::read_group(&directory).unwrap().head,
+                    Some(id(1).to_string())
+                );
+            }
+        }
     }
 
     #[tokio::test]

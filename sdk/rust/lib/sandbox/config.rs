@@ -29,7 +29,7 @@ use crate::config::{
 };
 
 use super::types::{MountOptions, RootDisk, RootfsSource, VolumeMount};
-use crate::snapshot::SnapshotReference;
+use crate::snapshot::{SnapshotReference, SnapshotScope};
 
 //--------------------------------------------------------------------------------------------------
 // Constants
@@ -128,7 +128,12 @@ pub(crate) enum SnapshotRestoreMode {
 /// local SDK/runtime operation state beside that shared contract, such as
 /// registry credentials, replacement flags, and resolved snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, ConfigPatch)]
+#[config_patch(serde_lossless)]
 pub struct SandboxConfig {
+    /// Process-local mode used only when creating a private, fixed recovery reader VM.
+    #[cfg(feature = "local")]
+    #[serde(skip)]
+    pub(crate) storage_reader: Option<bool>,
     /// Protect the installed source while a local restore builder materializes child-owned files.
     #[cfg(feature = "local")]
     #[serde(skip)]
@@ -313,8 +318,11 @@ pub struct SandboxConfig {
     #[cfg(feature = "local")]
     pub(crate) snapshot_upper_layers: Vec<RootfsUpperLayerConfig>,
 
-    /// Destination boot settings that require scope admission before snapshot materialization.
-    /// Captured execution does not rerun guest bootstrap; explicit choices cannot be ignored.
+    /// Settings explicitly supplied by the caller, before defaults and managed policy are applied.
+    #[serde(skip)]
+    pub(crate) caller_config_overrides: Option<Box<SandboxConfigPatch>>,
+
+    /// Operation-local full-resume admission. Capture metadata never inherits destination commands.
     #[serde(skip)]
     pub(crate) restore_boot_overrides: super::restore_builder::RestoreBootOverrides,
 
@@ -368,6 +376,7 @@ impl SandboxConfigPatch {
             cpu_placement,
             placement_profile,
             thp,
+            nested_virt,
             shell,
             workdir,
             outbound_proxy,
@@ -392,6 +401,10 @@ impl SandboxConfigPatch {
         }
         if let Some(thp) = thp {
             resources.thp_mut(*thp);
+        }
+
+        if let Some(enabled) = nested_virt {
+            resources.set_nested_virt_mut(*enabled);
         }
 
         let mut runtime = SandboxRuntimeOptionsPatch::new();
@@ -535,16 +548,21 @@ impl OciSandboxDefaultsPatch {
 }
 
 impl SandboxConfig {
-    /// Discard materialized restore paths before releasing their archive staging owner.
-    pub(crate) fn clear_prepared_restore(&mut self) {
-        #[cfg(feature = "local")]
-        if let Some(prepared) = &self.restore_resources.archive {
-            let old_stage = prepared.stage.path();
-            self.spec.mounts.retain(|mount| {
-                !matches!(mount,
-                    microsandbox_types::VolumeMount::DiskImage { host, .. } if host.starts_with(old_stage))
-            });
+    /// Validate only caller-supplied boot choices, never resolved defaults.
+    pub(crate) fn validate_restore_options(
+        &self,
+        scope: SnapshotScope,
+        mode: SnapshotRestoreMode,
+    ) -> MicrosandboxResult<()> {
+        self.restore_boot_overrides.validate_scope(scope, mode)?;
+        if let Some(options) = &self.caller_config_overrides {
+            options.validate_for_restore(scope, mode)?;
         }
+        Ok(())
+    }
+
+    /// Discard captured metadata and source paths before selecting another restore source.
+    pub(crate) fn clear_prepared_restore(&mut self) {
         #[cfg(feature = "local")]
         {
             self.checkpoint_restore = None;
@@ -562,7 +580,25 @@ impl SandboxConfig {
         mut options: SandboxConfigPatch,
         image_defaults: Option<SandboxConfigPatch>,
     ) -> MicrosandboxResult<()> {
-        // Explicit requests must match captured snapshot state: caller options and
+        #[cfg(feature = "local")]
+        let pending_capture = options.branch_source.is_some();
+        #[cfg(not(feature = "local"))]
+        let pending_capture = false;
+        if options.resumed_from_full_snapshot == Some(true) && !pending_capture {
+            let nested = options
+                .spec
+                .resources
+                .nested_virt
+                .flatten()
+                .unwrap_or(false);
+            options
+                .restore_resources
+                .get_or_insert_with(Default::default)
+                .nested_virt
+                .get_or_insert(nested);
+        }
+
+        // Explicit requests must match captured snapshot state: caller overrides and
         // managed overrides each error on conflict. Global defaults are exempt; they
         // yield silently when captured geometry is applied in the merge below.
         if let Some(restore) = &options.restore_resources {
@@ -607,6 +643,14 @@ impl SandboxConfig {
             patch.spec.resources.max_cpus = Some(geometry.max_vcpus);
             patch.spec.resources.memory_mib = Some(geometry.memory_mib);
             patch.spec.resources.max_memory_mib = Some(geometry.max_memory_mib);
+        }
+
+        if let Some(nested) = patch
+            .restore_resources
+            .as_ref()
+            .and_then(|state| state.nested_virt)
+        {
+            patch.spec.resources.nested_virt = Some(Some(nested));
         }
 
         let max_cpus = patch.spec.resources.max_cpus;
@@ -680,6 +724,7 @@ impl SandboxConfig {
         {
             config.snapshot_upper_layers.clear();
         }
+        // Caller overrides are persisted separately from the resolved configuration.
         config.restore_boot_overrides = Default::default();
         config.launch_intent = LaunchIntent::None;
         config.launch_cmd_before_override = None;
@@ -1162,6 +1207,7 @@ impl Default for SandboxConfig {
                     cpu_placement: Default::default(),
                     placement_profile: None,
                     thp: TransparentHugePagePolicy::Madvise,
+                    nested_virt: None,
                 },
                 runtime: SandboxRuntimeOptions {
                     log_level: default_log_level(),
@@ -1173,6 +1219,8 @@ impl Default for SandboxConfig {
                 ..Default::default()
             },
             registry_auth: None,
+            #[cfg(feature = "local")]
+            storage_reader: None,
             #[cfg(feature = "local")]
             creation_progress: None,
             #[cfg(feature = "local")]
@@ -1212,6 +1260,7 @@ impl Default for SandboxConfig {
             resumed_from_full_snapshot: false,
             #[cfg(feature = "local")]
             snapshot_upper_layers: Vec::new(),
+            caller_config_overrides: None,
             restore_boot_overrides: Default::default(),
             launch_intent: LaunchIntent::None,
             launch_cmd_before_override: None,
@@ -2002,6 +2051,7 @@ mod tests {
                 cpu_placement: Default::default(),
                 placement_profile: None,
                 thp: TransparentHugePagePolicy::Madvise,
+                nested_virt: None,
             },
             runtime: SandboxRuntimeOptions {
                 workdir: Some("/app".into()),
@@ -2788,6 +2838,56 @@ mod layering_tests {
     }
 
     #[test]
+    fn nested_virt_obeys_config_precedence_and_serializes_false() {
+        use serde_json::json;
+
+        let default = serde_json::to_value(crate::SandboxConfig::default()).unwrap();
+        assert!(
+            default["resources"]
+                .as_object()
+                .unwrap()
+                .get("nested_virt")
+                .is_none()
+        );
+
+        for (user, requested, managed, expected) in [
+            (None, None, None, None),
+            (None, Some(false), None, Some(false)),
+            (Some(true), None, None, Some(true)),
+            (Some(true), Some(false), None, Some(false)),
+            (Some(false), Some(true), Some(false), Some(false)),
+        ] {
+            let layers = BackendConfig::new(
+                user.map(|enabled| {
+                    serde_json::from_value(json!({"sandbox_defaults": {"nested_virt": enabled}}))
+                        .unwrap()
+                })
+                .unwrap_or_default(),
+                managed
+                    .map(|enabled| {
+                        serde_json::from_value(
+                            json!({"sandbox_defaults": {"nested_virt": enabled}}),
+                        )
+                        .unwrap()
+                    })
+                    .unwrap_or_default(),
+            );
+            let mut options = SandboxConfigPatch::new();
+            options.spec.resources.nested_virt = requested.map(Some);
+            let config = layers
+                .sandbox_layers()
+                .base(Default::default())
+                .options(options)
+                .build()
+                .into_config();
+            assert_eq!(config.spec.resources.nested_virt, expected);
+            let restored: crate::SandboxConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(restored.spec.resources.nested_virt, expected);
+        }
+    }
+
+    #[test]
     fn sandbox_source_field_matrix() {
         use serde_json::{Value, json};
 
@@ -2834,6 +2934,12 @@ mod layering_tests {
                 "sandbox_defaults.placement_profile",
                 "spec.resources.placement_profile",
                 json!("latency"),
+                true,
+            ),
+            (
+                "sandbox_defaults.nested_virt",
+                "spec.resources.nested_virt",
+                json!(false),
                 true,
             ),
             (
@@ -3043,6 +3149,7 @@ mod layering_tests {
             "spec.resources.cpu_placement" => value(&patch.spec.resources.cpu_placement),
             "spec.resources.placement_profile" => value(&patch.spec.resources.placement_profile),
             "spec.resources.thp" => value(&patch.spec.resources.thp),
+            "spec.resources.nested_virt" => value(&patch.spec.resources.nested_virt),
             "spec.runtime.shell" => value(&patch.spec.runtime.shell),
             "spec.runtime.workdir" => value(&patch.spec.runtime.workdir),
             "spec.runtime.metrics_sample_interval_ms" => {

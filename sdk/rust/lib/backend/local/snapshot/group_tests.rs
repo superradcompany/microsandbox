@@ -166,6 +166,7 @@ async fn indexed_publication_distinguishes_preflight_rejection_from_committed() 
     let old_descriptor = fs::read(group.join(id(1).as_str()).join(DESCRIPTOR_FILENAME)).unwrap();
     let state = Arc::new(AtomicU8::new(SnapshotImportOutcome::NotCommitted as u8));
     let publish = || IndexedPublication {
+        verified_signers: Default::default(),
         operation: "00000000000000000000000000000001".into(),
         outcome: state.clone(),
     };
@@ -1592,4 +1593,119 @@ async fn live_snapshot_root_growth_preserves_managed_policy_and_running_destinat
                 .to_string_lossy()
                 .starts_with(".snapshot-grow-"))
     );
+}
+
+#[tokio::test]
+async fn explicit_group_open_never_selects_same_named_default_history() {
+    let home = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let local = crate::test_support::local_backend_builder(home.path())
+        .build()
+        .await
+        .unwrap();
+    let default = ensure(&local.snapshots_dir(), Some("history"))
+        .await
+        .unwrap();
+    let directory = ensure(external.path(), Some("history")).await.unwrap();
+    add(&default, 1, None).await;
+    add(&directory, 2, None).await;
+    crate::with_backend(local, async {
+        let child = directory.join(".child");
+        fs::create_dir(&child).unwrap();
+        let via_parent = crate::Snapshot::open(child.join("..")).await.unwrap();
+        // An imported group has no source. Reaching that admission check proves
+        // capture addressed history itself rather than .child/history.
+        let err = via_parent.checkpoint().await.unwrap_err();
+        assert!(err.to_string().contains("unbound"), "{err}");
+        assert!(!child.join("history").exists());
+        fs::remove_dir(child).unwrap();
+        let group = crate::Snapshot::open(&directory).await.unwrap();
+        assert_eq!(group.name(), "history");
+        assert_eq!(group.head().await.unwrap().unwrap().id(), &id(2));
+        assert_eq!(group.checkpoints().await.unwrap().len(), 1);
+        assert_eq!(
+            group.inspect().await.unwrap().path,
+            directory.canonicalize().unwrap()
+        );
+        group.clear_head().await.unwrap();
+        assert!(
+            crate::Snapshot::open(&directory)
+                .await
+                .unwrap()
+                .head()
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let named = crate::Snapshot::get("history").await.unwrap();
+        assert_eq!(named.head().await.unwrap().unwrap().id(), &id(1));
+        assert!(
+            crate::Snapshot::open(external.path().join("missing"))
+                .await
+                .is_err()
+        );
+        assert!(!external.path().join("missing").exists());
+        assert!(crate::Snapshot::open("").await.is_err());
+        assert!(
+            crate::Snapshot::get(directory.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        group.remove().await.unwrap();
+        assert!(!directory.exists());
+        assert_eq!(named.head().await.unwrap().unwrap().id(), &id(1));
+    })
+    .await;
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_group_open_anchors_before_poll_in_subprocess() {
+    const CHILD: &str = "MSB_GROUP_OPEN_CWD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "backend::local::snapshot::group::tests::explicit_group_open_anchors_before_poll_in_subprocess", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("GROUP_OPEN_CWD_OK"));
+        return;
+    }
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let target = temp.path().join("target");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(target.join("child")).unwrap();
+        std::os::unix::fs::symlink(target.join("child"), first.join("link")).unwrap();
+        let directory = ensure(&target, Some("history")).await.unwrap();
+        add(&directory, 2, None).await;
+        let local = crate::test_support::local_backend_builder(&temp.path().join("home"))
+            .build()
+            .await
+            .unwrap();
+        crate::with_backend(local, async {
+            std::env::set_current_dir(&first).unwrap();
+            let pending = crate::Snapshot::open("link/../history");
+            std::env::set_current_dir(&second).unwrap();
+            let group = pending.await.unwrap();
+            assert_eq!(group.head().await.unwrap().unwrap().id(), &id(2));
+            assert_eq!(
+                group.inspect().await.unwrap().path,
+                directory.canonicalize().unwrap()
+            );
+            assert!(!first.join("history").exists());
+            assert!(!second.join("history").exists());
+        })
+        .await;
+        std::env::set_current_dir("/").unwrap();
+    });
+    println!("GROUP_OPEN_CWD_OK");
 }

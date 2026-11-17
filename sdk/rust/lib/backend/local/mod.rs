@@ -19,11 +19,13 @@
 mod config_paths;
 pub(crate) mod control;
 mod control_lookup;
+pub(crate) mod creation;
 mod database;
 pub(crate) mod host_paths;
 mod metrics_lookup;
 mod sandbox;
 pub(crate) mod snapshot;
+pub(crate) mod volume;
 
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -54,7 +56,7 @@ use self::control::identity::DatabaseIdentity;
 use super::{
     Backend, BackendInfo, BackendKind, BackendSelectionSource, SandboxBackend, VolumeBackend,
 };
-use crate::backend::SnapshotBackend;
+use crate::backend::{ServiceBackend, SnapshotBackend};
 use crate::config::{
     DatabaseConfig, GlobalConfig, GlobalConfigPatch, RegistryConfig, RegistryEntry,
     RegistryOptions, RegistrySettingsPatch, layers::BackendConfig,
@@ -542,6 +544,10 @@ impl Backend for LocalBackend {
         self
     }
 
+    fn services(&self) -> &dyn ServiceBackend {
+        self
+    }
+
     fn as_local(&self) -> Option<&LocalBackend> {
         Some(self)
     }
@@ -554,7 +560,7 @@ impl Backend for LocalBackend {
         Box::pin(async move {
             let mut last_error = None;
 
-            for sock_path in crate::runtime::sandbox_agent_socket_path_candidates_for(self, name) {
+            for sock_path in self.agent_socket_paths(name) {
                 if !agent_endpoint_may_exist(&sock_path) {
                     continue;
                 }
@@ -619,7 +625,7 @@ async fn connect_catalog(
     database: &DatabaseConfig,
     snapshots_dir: &Path,
 ) -> MicrosandboxResult<DbPools> {
-    tokio::fs::create_dir_all(db_dir).await?;
+    microsandbox_db::pool::ensure_private_database_directory(db_dir)?;
     let _migration_lock = acquire_migration_lock(db_dir).await?;
     refuse_incomplete_self_downgrade(db_dir)?;
 
@@ -754,8 +760,8 @@ async fn refuse_schema_ahead(conn: &DatabaseConnection) -> MicrosandboxResult<()
             .or_else(|| applied.first())
             .map(String::as_str)
             .unwrap_or("<missing migration>");
-        return Err(MicrosandboxError::Runtime(format!(
-            "database schema is newer than this msb binary; applied migration {version:?} is not in this binary's migration prefix"
+        return Err(database::newer_schema_error(&format!(
+            "applied migration {version:?} is not recognized by this version"
         )));
     }
 
@@ -1057,6 +1063,23 @@ mod tests {
 
         // DB file should exist on disk.
         assert!(db_dir.join(microsandbox_utils::DB_FILENAME).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(&db_dir).unwrap().permissions().mode() & 0o777,
+                microsandbox_db::pool::PRIVATE_DATABASE_DIRECTORY_MODE
+            );
+            assert_eq!(
+                std::fs::metadata(db_dir.join(microsandbox_utils::DB_FILENAME))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                microsandbox_db::pool::PRIVATE_DATABASE_FILE_MODE
+            );
+        }
 
         // All migrated tables should be present.
         let rows = conn
@@ -1082,6 +1105,7 @@ mod tests {
             "manifest",
             "manifest_layer",
             "memory_allocation_node",
+            "protected_sandbox_state",
             "run",
             "sandbox",
             "sandbox_labels",
@@ -1233,7 +1257,10 @@ mod tests {
         let err = connect_and_migrate(&db_dir, &database, &tmp.path().join("snapshots"))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("database schema is newer"));
+        assert!(
+            err.to_string()
+                .contains("newer or unrecognized database schema")
+        );
     }
 
     #[tokio::test]
@@ -1874,6 +1901,7 @@ mod tests {
                 cpu_placement: microsandbox_types::CpuPlacement::Spread,
                 placement_profile: None,
                 thp: microsandbox_types::TransparentHugePagePolicy::Always,
+                nested_virt: None,
                 oci: crate::config::OciSandboxDefaults::default(),
                 shell: "/bin/zsh".into(),
                 workdir: Some("/work".into()),

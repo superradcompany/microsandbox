@@ -36,6 +36,9 @@ use microsandbox_runtime::{
 /// `--config-file` for manual invocation). See issue #997.
 #[derive(Debug, Args)]
 pub struct MachineArgs {
+    /// Verify the selected guest reader before attaching detached recovery data.
+    #[arg(long, hide = true)]
+    pub require_storage_reader: bool,
     /// Set by legacy command routing, never inferred from a missing execution field.
     #[arg(skip)]
     pub legacy_launch: bool,
@@ -218,6 +221,7 @@ pub fn run(args: MachineArgs) -> ! {
                 eprintln!("failed to acquire sandbox lifecycle ownership: {err}");
                 std::process::exit(2);
             });
+    let nested_virt = launch.resolve_nested_virt();
     let is_vmdk = launch.rootfs.disk_format.as_deref() == Some("vmdk");
     let disks = match parse_disk_args(&launch.disks) {
         Ok(disks) => disks,
@@ -321,6 +325,7 @@ pub fn run(args: MachineArgs) -> ! {
     let vm_config = VmConfig {
         libkrunfw_path: launch.libkrunfw_path,
         thp: launch.thp,
+        nested_virt,
         guest_clock: launch.guest_clock,
         memory_cache_dir: launch.memory_cache_dir,
         vcpus: args.vcpus,
@@ -358,7 +363,6 @@ pub fn run(args: MachineArgs) -> ! {
         file_mounts: launch.file_mounts,
         disks,
         vsock: launch.vsock,
-        #[cfg(unix)]
         backends: vec![],
         init_path: launch.init_path,
         bootstrap: launch.bootstrap,
@@ -464,6 +468,9 @@ fn load_launch_config(args: &MachineArgs) -> Result<LaunchConfig, String> {
     } else {
         LaunchConfig::decode(&bytes)?
     };
+    if !config.protected_guest_state {
+        return Err("upgrade required: this runtime requires a patched SDK or CLI that prepares protected sandbox state; update the launching application and retry".into());
+    }
     if args.restore != (config.execution == microsandbox_runtime::launch::ExecutionIntent::Restore)
     {
         return Err("--restore and launch execution intent disagree".into());
@@ -799,6 +806,7 @@ mod tests {
         let _ = config_fd;
 
         MachineArgs {
+            require_storage_reader: false,
             legacy_launch: false,
             restore: false,
             agent_transport: AgentTransportProfile::Auto,
@@ -894,6 +902,7 @@ mod tests {
         use std::io::Write;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             db_path: PathBuf::from("/tmp/x.db"),
             bootstrap: GuestBootstrap {
                 default_env: vec![BootstrapEnvVar {
@@ -934,6 +943,24 @@ mod tests {
     }
 
     #[test]
+    fn patched_runtime_refuses_unprotected_modern_launch() {
+        for omitted in [false, true] {
+            let mut value = serde_json::to_value(LaunchConfig::default()).unwrap();
+            if omitted {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("protected_guest_state");
+            }
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+            let error =
+                load_launch_config(&args_with(None, Some(file.path().to_path_buf()))).unwrap_err();
+            assert!(error.contains("upgrade required") && error.contains("SDK or CLI"));
+        }
+    }
+
+    #[test]
     fn legacy_launch_decoding_is_explicit_and_cannot_restore() {
         let file = tempfile::NamedTempFile::new().unwrap();
         let bytes = include_bytes!("../../runtime/tests/fixtures/launch-v0.6.18.json");
@@ -941,12 +968,16 @@ mod tests {
         let mut args = args_with(None, Some(file.path().to_path_buf()));
         assert!(load_launch_config(&args).is_err());
         args.legacy_launch = true;
-        assert!(load_launch_config(&args).is_ok());
+        assert!(
+            load_launch_config(&args)
+                .unwrap_err()
+                .contains("upgrade required")
+        );
         args.restore = true;
         assert!(
             load_launch_config(&args)
                 .unwrap_err()
-                .contains("intent disagree")
+                .contains("upgrade required")
         );
     }
 
@@ -954,8 +985,14 @@ mod tests {
     fn restore_argument_cannot_select_a_fresh_boot() {
         use std::io::Write;
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        file.write_all(&serde_json::to_vec(&LaunchConfig::default()).unwrap())
-            .unwrap();
+        file.write_all(
+            &serde_json::to_vec(&LaunchConfig {
+                protected_guest_state: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let mut args = args_with(None, Some(file.path().to_path_buf()));
         args.restore = true;
         assert!(
@@ -970,6 +1007,7 @@ mod tests {
         use std::io::Write;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
             agent_sock: PathBuf::from("/tmp/msb/run/agent/legacy.sock"),
             ..Default::default()
@@ -990,6 +1028,7 @@ mod tests {
     #[test]
     fn test_old_fallback_launch_config_infers_run_dir_from_sandbox_root() {
         let launch = LaunchConfig {
+            protected_guest_state: true,
             sandboxes_dir: PathBuf::from("/tmp/msb/sandboxes"),
             agent_sock: PathBuf::from("/tmp/msb/sandboxes/demo/runtime/agent.sock"),
             ..Default::default()
@@ -1005,6 +1044,7 @@ mod tests {
         use std::os::fd::IntoRawFd;
 
         let launch = LaunchConfig {
+            protected_guest_state: true,
             bootstrap: microsandbox_protocol::bootstrap::GuestBootstrap {
                 default_cwd: Some("/srv".to_string()),
                 ..Default::default()

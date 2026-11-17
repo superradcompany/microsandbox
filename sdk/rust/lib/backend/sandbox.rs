@@ -113,6 +113,9 @@ pub struct SandboxHandleLocalState {
     pub status: SandboxStatus,
     /// Serialized `SandboxConfig` as stored in the database.
     pub config_json: String,
+    /// JSON containing the caller's explicit settings and a fingerprint of `config_json`.
+    /// May be absent on older records or when no caller overrides were saved.
+    pub caller_config_overrides_json: Option<String>,
     /// Serialized `SandboxConfig` used by the active VM, when known.
     pub active_config_json: Option<String>,
     /// When this sandbox was first created, if recorded.

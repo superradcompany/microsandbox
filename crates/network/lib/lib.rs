@@ -16,6 +16,9 @@
 
 #[cfg(feature = "engine")]
 mod engine;
+#[cfg(feature = "intercept-identity")]
+#[doc(hidden)]
+pub mod identity;
 mod model;
 pub mod proxy;
 
@@ -43,9 +46,9 @@ pub(crate) const HOST_ALIAS: &str = "host.microsandbox.internal";
 #[doc(hidden)]
 pub use config::ResolvedNetworkConfig;
 pub use proxy::{
-    HttpConnectProxyBuilder, OutboundProxy, OutboundProxyBuildError, OutboundProxyBuilder,
-    OutboundProxyConfig, OutboundProxyParseError, OutboundProxyProtocol, Socks4ProxyBuilder,
-    Socks5Credentials, Socks5ProxyBuilder,
+    HttpConnectCredentials, HttpConnectProxyBuilder, OutboundProxy, OutboundProxyBuildError,
+    OutboundProxyBuilder, OutboundProxyConfig, OutboundProxyParseError, OutboundProxyProtocol,
+    Socks4ProxyBuilder, Socks5Credentials, Socks5ProxyBuilder,
 };
 
 pub use config::builder;

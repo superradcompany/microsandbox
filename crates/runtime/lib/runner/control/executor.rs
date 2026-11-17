@@ -1,16 +1,17 @@
 //! Runtime-owned serialization and fencing for host control mutations.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rand::Rng as _;
 use sha2::{Digest as _, Sha256};
 
 use crate::checkpoint::{CheckpointCoordinator, CheckpointResult, UserPause};
 use crate::control::*;
+use crate::relay::RelayIdleState;
+use crate::runner::jobs::JobManager;
 use crate::vm::VmConfig;
 use microsandbox_protocol::bootstrap::GuestBootstrap;
 
@@ -30,7 +31,7 @@ const RUNTIME_BOOT_ID_FILE: &str = "runtime-boot-id";
 pub struct RuntimeControlExecutor {
     signal_runtime: tokio::runtime::Handle,
     signal_workload: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
-    jobs: std::sync::Arc<crate::runner::jobs::JobManager>,
+    jobs: Arc<JobManager>,
     pause_observation: std::sync::RwLock<ControlResponse>,
     resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     vm: msb_krun::VmControl,
@@ -60,6 +61,10 @@ struct DedupEntry {
 //--------------------------------------------------------------------------------------------------
 
 impl RuntimeControlExecutor {
+    pub(crate) fn jobs(&self) -> Arc<JobManager> {
+        Arc::clone(&self.jobs)
+    }
+
     /// Construct an executor and atomically publish a fresh runtime boot identity.
     // Construction binds the VM, guest channel, and host lifecycle resources once.
     #[allow(clippy::too_many_arguments)]
@@ -73,13 +78,11 @@ impl RuntimeControlExecutor {
         guest_bootstrap: &GuestBootstrap,
         runtime: tokio::runtime::Handle,
         agent_sock: &Path,
+        relay_idle: Arc<RelayIdleState>,
         workload_control: std::sync::Arc<crate::runner::workload_control::WorkloadControl>,
         resident_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
         inherited_memory: Option<crate::checkpoint::LocalMemoryPin>,
-        owned_directory_checkpoints: BTreeMap<
-            String,
-            microsandbox_filesystem::OwnedDirectoryCheckpoint,
-        >,
+        device_bindings: crate::checkpoint::CheckpointDeviceBindings,
     ) -> Result<Self, String> {
         let runtime_boot_id = new_runtime_boot_id();
         let jobs = crate::runner::jobs::JobManager::open(
@@ -89,6 +92,7 @@ impl RuntimeControlExecutor {
                 .ok_or("runtime directory has no sandbox parent")?,
             agent_sock,
             runtime.clone(),
+            relay_idle,
         )?;
         persist_runtime_boot_id(runtime_dir, &runtime_boot_id)
             .map_err(|error| error.to_string())?;
@@ -99,7 +103,7 @@ impl RuntimeControlExecutor {
             runtime.clone(),
             agent_sock,
             workload_control.clone(),
-            owned_directory_checkpoints,
+            device_bindings,
         )?;
         checkpoint.inherit_local_memory(inherited_memory);
         Ok(Self {
@@ -844,13 +848,10 @@ fn checkpoint_response(
 }
 
 fn persist_runtime_boot_id(runtime_dir: &Path, boot_id: &str) -> std::io::Result<()> {
-    std::fs::create_dir_all(runtime_dir)?;
+    microsandbox_utils::private_file::create_private_dir_all(runtime_dir)?;
     let target = runtime_dir.join(RUNTIME_BOOT_ID_FILE);
     let temporary = unique_temporary_path(runtime_dir, RUNTIME_BOOT_ID_FILE);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)?;
+    let mut file = microsandbox_utils::private_file::create_new(&temporary)?;
     file.write_all(boot_id.as_bytes())?;
     file.write_all(b"\n")?;
     // This file is diagnostic/live discovery, not a restart journal. Fencing uses the new
