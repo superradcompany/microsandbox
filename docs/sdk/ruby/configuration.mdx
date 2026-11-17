@@ -137,7 +137,7 @@ Capture a remote API destination using explicit credentials or a named profile. 
 Microsandbox::RemoteContext.with_url(url, api_key, request_timeout_ms: nil, user_agent: nil, compute_type: nil) # => RemoteContext
 ```
 
-Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses the hosted endpoint. Options use the same validation as `new`.
+Select an explicit compatible remote endpoint. An empty URL is invalid. Key-only `new(api_key: ...)` uses `MSB_API_URL` or the hosted endpoint.
 
 #### with
 

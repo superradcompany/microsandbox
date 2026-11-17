@@ -1,6 +1,12 @@
 package microsandbox
 
-import "time"
+import (
+	"os"
+	"strings"
+	"time"
+
+	"github.com/superradcompany/microsandbox/sdk/go/internal/ffi"
+)
 
 // ComputeType selects the machine type for newly created remote sandboxes.
 type ComputeType string
@@ -10,8 +16,7 @@ const (
 	ComputeShared   ComputeType = "shared"
 )
 
-// RemoteContextOption overrides one captured setting when deriving a remote context.
-// Omitted options preserve their values; no profile or environment is resolved again.
+// RemoteContextOption selects one setting for a new or derived remote context.
 type RemoteContextOption func(*remoteContextOverrides)
 
 type remoteContextOverrides struct {
@@ -64,19 +69,56 @@ func (c *RemoteContext) WithOptions(options ...RemoteContextOption) (*RemoteCont
 	if err != nil {
 		return nil, err
 	}
-	overrides := remoteContextOverrides{}
-	for _, option := range options {
-		if option == nil {
-			return nil, &Error{Kind: ErrInvalidConfig, Message: "remote context option must not be nil"}
-		}
-		option(&overrides)
-	}
-	if overrides.err != nil {
-		return nil, overrides.err
+	overrides, err := remoteOptions(options)
+	if err != nil {
+		return nil, err
 	}
 	derived, err := inner.DeriveRemote(overrides)
 	if err != nil {
 		return nil, wrapFFI(err)
 	}
 	return &RemoteContext{inner: derived}, nil
+}
+
+func remoteOptions(options []RemoteContextOption) (remoteContextOverrides, error) {
+	overrides := remoteContextOverrides{}
+	for _, option := range options {
+		if option == nil {
+			return overrides, &Error{Kind: ErrInvalidConfig, Message: "remote context option must not be nil"}
+		}
+		option(&overrides)
+	}
+	if overrides.err != nil {
+		return overrides, overrides.err
+	}
+	return overrides, nil
+}
+
+// NewRemoteContextWithOptions captures explicit settings and environment defaults.
+func NewRemoteContextWithOptions(options ...RemoteContextOption) (*RemoteContext, error) {
+	return buildRemoteContext(ffi.SelectedProvider("remote"), options)
+}
+
+func buildRemoteContext(library *ffi.Library, options []RemoteContextOption) (*RemoteContext, error) {
+	overrides, err := remoteOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	if overrides.APIKey == nil {
+		key := os.Getenv("MSB_API_KEY")
+		overrides.APIKey = &key
+	}
+	if overrides.URL == nil {
+		if url := strings.TrimSpace(os.Getenv("MSB_API_URL")); url != "" {
+			overrides.URL = &url
+		}
+	}
+	inner, err := library.NewContext(struct {
+		Kind string `json:"kind"`
+		remoteContextOverrides
+	}{"remote", overrides})
+	if err != nil {
+		return nil, wrapFFI(err)
+	}
+	return &RemoteContext{inner: inner}, nil
 }

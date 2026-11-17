@@ -128,4 +128,4 @@ class RemoteContext(Context):
 
     @classmethod
     def from_env(cls) -> "RemoteContext":
-        return cls(url=os.environ.get("MSB_API_URL"), api_key=os.environ.get("MSB_API_KEY"))
+        return cls()

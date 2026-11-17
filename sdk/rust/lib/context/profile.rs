@@ -85,11 +85,10 @@ impl Profile {
         })?;
 
         let api_key = resolve_api_key_ref(name, key_ref)?;
-        let mut builder = RemoteContext::builder().api_key(api_key);
-        if let Some(url) = &self.url {
-            builder = builder.url(url);
-        }
-        Ok(builder)
+        // A named profile's credentials belong to its own endpoint.
+        Ok(RemoteContext::builder()
+            .api_key(api_key)
+            .url(self.url.as_deref().unwrap_or(super::DEFAULT_CLOUD_API_URL)))
     }
 }
 

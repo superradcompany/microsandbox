@@ -64,6 +64,8 @@ func TestSharedTypesAndMissingProvider(t *testing.T) {{
  var explicit func(string, string, string) (*core.RemoteContext, error) = remote.NewContextWithURL
  var coreHosted func(string) (*core.RemoteContext, error) = core.NewRemoteContext
  var coreExplicit func(string, string) (*core.RemoteContext, error) = core.NewRemoteContextWithURL
+ var _ func(string, ...core.RemoteContextOption) (*core.RemoteContext, error) = remote.NewContextWithOptions
+ var _ func(...core.RemoteContextOption) (*core.RemoteContext, error) = core.NewRemoteContextWithOptions
  _, _, _, _ = hosted, explicit, coreHosted, coreExplicit
  var selected *core.RemoteContext
  if _, err := selected.WithOptions(core.WithRemoteURL("https://example.com"), core.WithRemoteAPIKey("fixture"), core.WithRemoteRequestTimeout(time.Second), core.WithRemoteUserAgent("consumer")); err == nil {{ t.Fatal("nil derived context accepted") }}

@@ -172,7 +172,7 @@ fn new(api_key: impl Into<String>) -> MicrosandboxResult<Self>;
 fn with_url(url: impl Into<String>, api_key: impl Into<String>) -> MicrosandboxResult<Self>;
 ```
 
-`new` uses the hosted endpoint. `with_url` selects an explicit compatible provider; an empty URL is invalid. Both validate configuration synchronously. Use `from_env()` to read endpoint settings from the environment or `from_profile(name)` to load a named profile. See [remote endpoints](/cloud/connect#remote-endpoints) and the [constructor migration](/migrations/sdk-contexts#remote-context-construction).
+`new(api_key)` uses `MSB_API_URL` or the hosted endpoint. Use `with_url(url, api_key)` to specify both.
 
 ### builder()
 
@@ -223,7 +223,6 @@ Choose `Standard` or `Shared` for new sandboxes and snapshot restores. Omission 
 use microsandbox::{ComputeType, RemoteContext};
 
 let remote = RemoteContext::builder()
-    .api_key(std::env::var("MSB_API_KEY")?)
     .compute_type(ComputeType::Shared)
     .build()?;
 ```

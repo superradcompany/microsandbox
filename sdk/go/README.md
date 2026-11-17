@@ -494,4 +494,4 @@ MSB_STORAGE_NATIVE_LIBRARY="$PWD/../../target/debug/libmicrosandbox_go_ffi.dylib
 
 Apache-2.0
 
-Use `remote.NewContext(path, apiKey)` for the hosted endpoint; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.
+Use `remote.NewContext(path, apiKey)` with `MSB_API_URL` or the hosted default; `remote.NewContextWithURL(path, url, apiKey)` selects an explicit endpoint. The path selects the native library, not the remote service.

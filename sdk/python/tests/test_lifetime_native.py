@@ -235,6 +235,13 @@ async def check():
         MSB_API_URL=f"http://127.0.0.1:{servers[0].server_port}",
         MSB_API_KEY="key-a", MSB_BACKEND="local",
     )
+    url_a = os.environ["MSB_API_URL"]
+    assert (await RemoteContext(compute_type="shared").sandboxes.get("task")).id == "cloud:a"
+    os.environ["MSB_API_KEY"] = "wrong"
+    assert (await RemoteContext(api_key="key-a").sandboxes.get("task")).id == "cloud:a"
+    os.environ.update(MSB_API_KEY="key-a", MSB_API_URL=f"http://127.0.0.1:{servers[1].server_port}")
+    assert (await RemoteContext(url=url_a).sandboxes.get("task")).id == "cloud:a"
+    os.environ["MSB_API_URL"] = url_a
     collection = Sandbox.remote()
     for resource in (Sandbox, Volume, Snapshot):
         assert resource.remote().context.kind == "remote"

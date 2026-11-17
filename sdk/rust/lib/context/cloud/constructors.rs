@@ -22,10 +22,7 @@ impl RemoteContext {
         }
     }
 
-    /// Construct for the hosted service using the default API URL.
-    ///
-    /// This constructor does not select an endpoint from `MSB_API_URL`;
-    /// use `from_env` when environment-based selection is intended.
+    /// Use an explicit API key and the environment or hosted endpoint.
     pub fn new(api_key: impl Into<String>) -> MicrosandboxResult<Self> {
         Self::builder().api_key(api_key).build()
     }

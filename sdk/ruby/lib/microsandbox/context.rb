@@ -42,7 +42,7 @@ module Microsandbox
     end
 
     def self.from_env
-      new(url: ENV["MSB_API_URL"], api_key: ENV["MSB_API_KEY"])
+      new
     end
   end
 end

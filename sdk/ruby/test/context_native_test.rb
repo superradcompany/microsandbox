@@ -95,6 +95,15 @@ class ContextNativeTest < Test::Unit::TestCase
           ENV["MSB_API_URL"] = "http://127.0.0.1:#{servers.first.addr[1]}"
           ENV["MSB_API_KEY"] = "key-a"
           ENV["MSB_BACKEND"] = "local"
+          remote = Microsandbox::RemoteContext
+          url_a = ENV.fetch("MSB_API_URL")
+          raise "missing env defaults" unless remote.new(compute_type: "shared").sandboxes.get("task").id == "cloud:a"
+          ENV["MSB_API_KEY"] = "wrong"
+          raise "explicit key lost" unless remote.new(api_key: "key-a").sandboxes.get("task").id == "cloud:a"
+          ENV["MSB_API_KEY"] = "key-a"
+          ENV["MSB_API_URL"] = "http://127.0.0.1:#{servers.last.addr[1]}"
+          raise "explicit URL lost" unless remote.new(url: url_a).sandboxes.get("task").id == "cloud:a"
+          ENV["MSB_API_URL"] = url_a
           collection = Microsandbox::Sandbox.remote
           [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
             raise "remote selector ignored" unless resource.remote.context.kind == "remote"

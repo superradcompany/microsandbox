@@ -12,7 +12,7 @@ export interface LocalContextOptions {
 
 export interface RemoteContextOptions {
   readonly url?: string;
-  readonly apiKey: string;
+  readonly apiKey?: string;
   readonly requestTimeoutMs?: number;
   readonly userAgent?: string;
   readonly computeType?: "standard" | "shared";
@@ -43,9 +43,15 @@ export class LocalContext extends Context {
 }
 
 export class RemoteContext extends Context {
-  constructor(options: RemoteContextOptions | { readonly profile: string }) {
+  constructor(options: RemoteContextOptions | { readonly profile: string } = {}) {
     if ("requestTimeoutMs" in options && options.requestTimeoutMs !== undefined && (!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs < 0)) {
       throw new RangeError("requestTimeoutMs must be a non-negative safe integer");
+    }
+    if (!("profile" in options)) {
+      // Workers have their own process.env. Capture both fields before entering native code.
+      const apiKey = options.apiKey ?? process.env.MSB_API_KEY;
+      if (apiKey === undefined) throw new Error("RemoteContext requires apiKey or MSB_API_KEY");
+      options = { ...options, apiKey, url: options.url ?? (process.env.MSB_API_URL?.trim() || "https://api.microsandbox.dev") };
     }
     super(new (binding("remote").Context)(JSON.stringify({ ...options, kind: "remote" })));
   }
@@ -65,9 +71,7 @@ export class RemoteContext extends Context {
     return new RemoteContext({ profile });
   }
   static fromEnv(): RemoteContext {
-    const apiKey = process.env.MSB_API_KEY;
-    if (!apiKey) throw new Error("MSB_API_KEY is required for RemoteContext.fromEnv()");
-    return new RemoteContext({ apiKey, url: process.env.MSB_API_URL });
+    return new RemoteContext();
   }
 }
 
@@ -95,9 +99,7 @@ export class RemoteContextBuilder {
       // Dispatch through the retained binding, even if provider registrations later change.
       return RemoteContext.fromNative(this.base.native.deriveRemote(JSON.stringify(this.options)));
     }
-    const apiKey = this.options.apiKey;
-    if (apiKey === undefined) throw new Error("remote context requires apiKey");
-    return new RemoteContext({ ...this.options, apiKey });
+    return new RemoteContext(this.options);
   }
 }
 

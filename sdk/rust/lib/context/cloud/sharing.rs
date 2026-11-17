@@ -10,13 +10,61 @@ mod tests {
     use reqwest::header::HeaderMap;
 
     #[test]
-    fn constructors_select_hosted_or_explicit_endpoint() {
-        let hosted = RemoteContext::new("test-key").unwrap();
-        assert_eq!(hosted.url(), DEFAULT_CLOUD_API_URL);
-        let custom = RemoteContext::with_url("https://provider.example/", "test-key").unwrap();
-        assert_eq!(custom.url(), "https://provider.example");
+    fn remote_constructor_env_precedence() {
+        // Process isolation also exercises omission when the developer has real credentials set.
+        const CASE: &str = "MSB_TEST_REMOTE_ENV_CASE";
+        let Ok(case) = std::env::var(CASE) else {
+            for case in ["empty", "configured"] {
+                let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+                child
+                    .arg("remote_constructor_env_precedence")
+                    .env(CASE, case)
+                    .env_remove("MSB_API_KEY")
+                    .env_remove("MSB_API_URL");
+                if case == "configured" {
+                    child
+                        .env("MSB_API_KEY", "env-key")
+                        .env("MSB_API_URL", "https://env.example/");
+                }
+                assert!(child.status().unwrap().success());
+            }
+            return;
+        };
+        if case == "empty" {
+            assert_eq!(
+                RemoteContext::new("key").unwrap().url(),
+                DEFAULT_CLOUD_API_URL
+            );
+            assert!(RemoteContext::builder().build().is_err());
+            return;
+        }
+
+        let shared = RemoteContext::builder()
+            .compute_type(ComputeType::Shared)
+            .build()
+            .unwrap();
+        assert_eq!(shared.url(), "https://env.example");
+        assert_eq!(shared.inner.api_key, "env-key");
+        assert_eq!(shared.inner.compute_type, Some(ComputeType::Shared));
+        let key_only = RemoteContext::new("explicit").unwrap();
+        assert_eq!(key_only.url(), shared.url());
+        assert_eq!(key_only.inner.api_key, "explicit");
+        let url_only = RemoteContext::builder()
+            .url("https://provider.example")
+            .build()
+            .unwrap();
+        assert_eq!(url_only.url(), "https://provider.example");
+        assert_eq!(url_only.inner.api_key, "env-key");
+        // A saved profile with no URL keeps its key on the hosted endpoint.
+        let profile: crate::context::profile::Profile =
+            serde_json::from_str(r#"{"kind":"remote","api_key_ref":"inline:profile-key"}"#)
+                .unwrap();
+        let profiled = profile.cloud_builder("test").unwrap().build().unwrap();
+        assert_eq!(profiled.url(), DEFAULT_CLOUD_API_URL);
+        assert_eq!(profiled.inner.api_key, "profile-key");
+
         assert!(RemoteContext::new(" ").is_err());
-        assert!(RemoteContext::with_url(" ", "test-key").is_err());
+        assert!(RemoteContext::with_url(" ", "key").is_err());
     }
 
     #[test]

@@ -67,7 +67,7 @@ fn default_user_agent() -> String {
 /// key, so there is no per-call org argument.
 ///
 /// Constructors:
-/// - [`RemoteContext::new`] — hosted service with the default API URL.
+/// - [`RemoteContext::new`] — explicit API key with the configured API URL.
 /// - [`RemoteContext::with_url`] — explicit URL + key for any compatible provider.
 /// - [`RemoteContext::from_env`] — reads `MSB_API_KEY`; `MSB_API_URL` is optional.
 /// - [`RemoteContext::from_profile`] — reads a named profile from the SDK config.
@@ -236,15 +236,16 @@ impl RemoteContextBuilder {
             )
         })?;
 
-        let mut builder = Self::default().api_key(api_key.trim());
-        if let Some(url) = std::env::var("MSB_API_URL")
+        Ok(Self::default()
+            .api_key(api_key)
+            .url(Self::environment_url()))
+    }
+
+    fn environment_url() -> String {
+        std::env::var("MSB_API_URL")
             .ok()
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty())
-        {
-            builder = builder.url(url);
-        }
-        Ok(builder)
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_CLOUD_API_URL.to_owned())
     }
 
     /// Reuse sources already read by backend selection, or explicit sources in tests.
@@ -291,10 +292,8 @@ impl RemoteContextBuilder {
         self
     }
 
-    /// Build the `RemoteContext`. Uses [`DEFAULT_CLOUD_API_URL`] when `.url(...)`
-    /// was not called. Errors when the API key is missing or invalid, an
-    /// explicitly supplied URL is empty, the HTTP client fails to construct,
-    /// or user or managed configuration cannot be loaded.
+    /// Omitted credentials and endpoint use `MSB_API_KEY` and `MSB_API_URL`.
+    /// A missing or blank environment URL uses [`DEFAULT_CLOUD_API_URL`].
     pub fn build(self) -> MicrosandboxResult<RemoteContext> {
         let config = match self.config {
             Some(config) => config,
@@ -302,18 +301,22 @@ impl RemoteContextBuilder {
         };
 
         config.require_backend(super::ContextKind::Remote, None)?;
-        let url = self.url.as_deref().unwrap_or(DEFAULT_CLOUD_API_URL);
+        let url = self.url.unwrap_or_else(Self::environment_url);
         let url = url.trim();
         if url.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
                 "RemoteContext URL must not be empty".into(),
             ));
         }
-        let api_key = self.api_key.ok_or_else(|| {
-            MicrosandboxError::InvalidConfig(
-                "RemoteContext requires an API key (call .api_key(...))".into(),
-            )
-        })?;
+        let api_key = self
+            .api_key
+            .or_else(|| std::env::var("MSB_API_KEY").ok())
+            .ok_or_else(|| {
+                MicrosandboxError::InvalidConfig(
+                    "RemoteContext requires an API key (set MSB_API_KEY or call .api_key(...))"
+                        .into(),
+                )
+            })?;
         let api_key = api_key.trim();
         if api_key.is_empty() {
             return Err(MicrosandboxError::InvalidConfig(
@@ -696,26 +699,6 @@ mod tests {
         }
         assert!(matches!(missing, Err(MicrosandboxError::InvalidConfig(_))));
         assert!(matches!(blank, Err(MicrosandboxError::InvalidConfig(_))));
-    }
-
-    #[test]
-    fn builder_uses_default_cloud_url() {
-        let b = RemoteContextBuilder::default()
-            .config_sources(BackendConfig::new(Default::default(), Default::default()))
-            .api_key("k")
-            .build()
-            .unwrap();
-        assert_eq!(b.url(), DEFAULT_CLOUD_API_URL);
-    }
-
-    #[test]
-    fn builder_rejects_missing_key() {
-        assert!(
-            RemoteContextBuilder::default()
-                .url("https://x")
-                .build()
-                .is_err()
-        );
     }
 
     #[test]

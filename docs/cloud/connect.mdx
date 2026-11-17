@@ -325,7 +325,7 @@ remote = Microsandbox::RemoteContext.with_url("https://sandbox.example.com", api
 </CodeGroup>
 </Accordion>
 
-Environment-based constructors read `MSB_API_KEY` and optional `MSB_API_URL`.
+Explicit remote context options take precedence over `MSB_API_KEY` and `MSB_API_URL` independently. A key is required. The URL defaults to `https://api.microsandbox.dev`.
 
 <span id="remote-endpoints" />
 

@@ -92,6 +92,30 @@ func TestExplicitContextsNative(t *testing.T) {
 	t.Setenv("MSB_API_URL", urls["a"])
 	t.Setenv("MSB_API_KEY", "key-a")
 	t.Setenv("MSB_BACKEND", "local")
+	for _, tc := range []struct {
+		envURL, envKey string
+		options        []RemoteContextOption
+	}{
+		{urls["a"], "key-a", []RemoteContextOption{WithRemoteComputeType(ComputeShared)}},
+		{urls["a"], "wrong", []RemoteContextOption{WithRemoteAPIKey("key-a")}},
+		{urls["b"], "key-a", []RemoteContextOption{WithRemoteURL(urls["a"])}},
+	} {
+		t.Setenv("MSB_API_URL", tc.envURL)
+		t.Setenv("MSB_API_KEY", tc.envKey)
+		remote, err := NewRemoteContextWithOptions(tc.options...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := remote.Sandboxes().Get(context.Background(), "task")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if task.ID() != "cloud:a" {
+			t.Errorf("unexpected destination: %s", task.ID())
+		}
+		task.Close()
+	}
+	t.Setenv("MSB_API_URL", urls["a"])
 	collection, err := SandboxRemote()
 	if err != nil {
 		t.Fatal(err)

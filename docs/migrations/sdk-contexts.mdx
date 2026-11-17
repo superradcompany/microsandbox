@@ -90,9 +90,7 @@ Rust `sandbox.launch_info()` returns optional `SandboxLaunchInfo` for the receiv
 
 ## Remote context construction
 
-Rust's hosted constructor is now `RemoteContext::new(api_key)?`. Replace the former `RemoteContext::new(url, api_key)?` with `RemoteContext::with_url(url, api_key)?`, and replace `RemoteContext::with_api_key(api_key)?` with `RemoteContext::new(api_key)?`; the redundant `with_api_key` entry point is removed.
-
-Go follows the same distinction: `NewRemoteContext(apiKey)` for the hosted endpoint and `NewRemoteContextWithURL(url, apiKey)` for an explicit endpoint, including methods on `NativeProvider`. Replace the former two-argument `NewRemoteContext` calls accordingly. Passing an empty URL to the explicit factory now fails; use the key-only constructor for the hosted default.
+Key-only constructors now honor `MSB_API_URL`. To pin an endpoint, pass its URL explicitly. In Rust, replace `new(url, key)` with `with_url(url, key)` and `with_api_key(key)` with `new(key)`. In Go, use `NewRemoteContextWithURL(url, key)` for the two-argument form.
 
 TypeScript keeps `new RemoteContext({ apiKey })` and adds `RemoteContext.withUrl(url, apiKey, options?)`. Python keeps `RemoteContext(api_key=...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Ruby keeps `RemoteContext.new(api_key: ...)` and adds `RemoteContext.with_url(url, api_key, ...)`. Existing URL options/keywords remain supported. Builders, explicit environment loading and named profiles retain their roles. See [remote endpoints](/cloud/connect#another-endpoint).
 
