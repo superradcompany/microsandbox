@@ -43,8 +43,8 @@ pub use context::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
     CloudVolumeKind, CloudVolumeStatus, Context, ContextInfo, ContextKind, ContextSelectionSource,
-    Profile, ProfileKind, SandboxCloudState, SandboxInner, SandboxOps, SandboxRecordCloudState,
-    SandboxRecordInner, Sandboxes, Snapshots, VolumeCloudState, VolumeInner, VolumeOps, Volumes,
+    Profile, ProfileKind, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,
+    SandboxRemoteState, Sandboxes, Snapshots, VolumeInner, VolumeOps, VolumeRemoteState, Volumes,
     default_local_context, resolve_default_backend,
 };
 #[cfg(feature = "cloud")]

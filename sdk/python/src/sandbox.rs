@@ -243,6 +243,22 @@ impl PySandboxTouchResult {
 
 #[pymethods]
 impl PySandbox {
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PySandboxes {
+        crate::context::PySandboxes {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PySandboxes> {
+        Ok(crate::context::PySandboxes {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
     #[staticmethod]
     fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PySandboxes {
         crate::context::PySandboxes {

@@ -210,9 +210,9 @@ impl BackendSelection {
         };
         match value.trim().to_ascii_lowercase().as_str() {
             "local" => Ok(Some(ProfileKind::Local)),
-            "cloud" => Ok(Some(ProfileKind::Remote)),
+            "remote" | "cloud" => Ok(Some(ProfileKind::Remote)),
             other => Err(MicrosandboxError::InvalidConfig(format!(
-                "MSB_BACKEND must be 'local' or 'cloud', got {other:?}"
+                "MSB_BACKEND must be 'local', 'remote' or legacy 'cloud', got {other:?}"
             ))),
         }
     }

@@ -1847,3 +1847,12 @@ Stop observing logs. This does not stop the job.
 ```ruby
 sandbox = Microsandbox::Sandbox.create("nested", image: "alpine", nested_virt: true)
 ```
+
+## Sandbox.local / Sandbox.remote
+
+```ruby
+Microsandbox::Sandbox.local  # => Sandboxes
+Microsandbox::Sandbox.remote # => Sandboxes
+```
+
+Select before creation/lookup/listing; the collection retains its destination. Remote selection captures environment credentials and raises on invalid configuration. Neither selector changes an existing resource or global default. See [selector examples](/operations/backends#resource-selectors).

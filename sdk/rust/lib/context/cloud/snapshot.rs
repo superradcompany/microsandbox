@@ -275,9 +275,7 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudSnapshotOperation> {
         let url = format!("{}/v1/snapshots", self.inner.url);
         let response = self
-            .inner
-            .http
-            .post(&url)
+            .request(reqwest::Method::POST, &url)
             .json(request)
             .send()
             .await
@@ -292,9 +290,7 @@ impl RemoteContext {
             urlencoding(id)
         );
         let response = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|error| cloud_io_error("GET /v1/snapshot-operations/:id", error))?;
@@ -377,9 +373,7 @@ impl RemoteContext {
     async fn find_snapshot_at(&self, route: &str) -> MicrosandboxResult<CloudSnapshot> {
         let url = format!("{}{}", self.inner.url, route);
         let response = self
-            .inner
-            .http
-            .get(&url)
+            .request(reqwest::Method::GET, &url)
             .send()
             .await
             .map_err(|error| cloud_io_error("GET /v1/snapshots/:identifier", error))?;
@@ -397,9 +391,7 @@ impl RemoteContext {
                 cursor: cursor.as_deref(),
             };
             let response = self
-                .inner
-                .http
-                .get(&url)
+                .request(reqwest::Method::GET, &url)
                 .query(&query)
                 .send()
                 .await
@@ -438,9 +430,7 @@ impl RemoteContext {
     async fn delete_snapshot_at(&self, route: &str) -> MicrosandboxResult<()> {
         let url = format!("{}{}", self.inner.url, route);
         let response = self
-            .inner
-            .http
-            .delete(&url)
+            .request(reqwest::Method::DELETE, &url)
             .send()
             .await
             .map_err(|error| cloud_io_error("DELETE /v1/snapshots/:identifier", error))?;
@@ -616,6 +606,88 @@ mod tests {
     use microsandbox_types::CloudSnapshotKind;
 
     use super::*;
+
+    #[tokio::test]
+    async fn snapshot_routes_use_derived_auth_even_with_custom_client() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut routes = Vec::new();
+            for _ in 0..5 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut route = String::new();
+                stream.read_line(&mut route).await.unwrap();
+                routes.push(route);
+                let mut auth = false;
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    stream.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if lower.starts_with("authorization:") {
+                        assert_eq!(lower.trim(), "authorization: bearer derived-key");
+                        auth = true;
+                    }
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+                assert!(auth, "snapshot request omitted context authentication");
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                stream.get_mut().write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+            }
+            routes
+        });
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_static("Bearer wrong-client-key"),
+        );
+        let original = RemoteContext::builder()
+            .url(url)
+            .api_key("original-key")
+            .client(
+                reqwest::Client::builder()
+                    .default_headers(headers)
+                    .build()
+                    .unwrap(),
+            )
+            .config_sources(crate::config::layers::BackendConfig::new(
+                Default::default(),
+                Default::default(),
+            ))
+            .build()
+            .unwrap();
+        let derived = original
+            .to_builder()
+            .api_key("derived-key")
+            .build()
+            .unwrap();
+        assert!(
+            derived
+                .create_snapshot(&cloud_snapshot_request(
+                    "source-id".into(),
+                    snapshot_config()
+                ))
+                .await
+                .is_err()
+        );
+        assert!(derived.get_snapshot_operation("op").await.is_err());
+        assert!(derived.find_snapshot_by_id("id").await.is_err());
+        assert!(derived.list_all_snapshots().await.is_err());
+        assert!(derived.delete_snapshot_by_id("id").await.is_err());
+        let routes = tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(routes.len(), 5);
+    }
 
     fn assert_unsupported(result: MicrosandboxResult<impl Sized>) {
         assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use super::RemoteContext;
 use crate::context::{
     Context,
-    volume::{CloudVolumeKind, CloudVolumeStatus, VolumeCloudState, VolumeOps},
+    volume::{CloudVolumeKind, CloudVolumeStatus, VolumeOps, VolumeRemoteState},
 };
 use crate::error::{Operation, UnsupportedReason};
 use crate::sandbox::fs::{FsEntry, FsEntryKind, FsMetadata};
@@ -520,7 +520,7 @@ impl VolumeOps for RemoteContext {
     }
 }
 
-impl From<CloudVolume> for VolumeCloudState {
+impl From<CloudVolume> for VolumeRemoteState {
     fn from(cloud: CloudVolume) -> Self {
         Self {
             id: cloud.id,

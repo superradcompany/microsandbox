@@ -9,6 +9,22 @@ See [Volumes](/sandboxes/volumes) for usage examples.
 
 ## Volume
 
+#### <span className="msb-recv">Volume::</span><span className="msb-hn">local()</span>
+
+```rust
+fn local() -> Volumes
+```
+
+Select the default-local destination. Requires the local feature. Does not consult remote selection variables. See [selector examples](/operations/backends#resource-selectors).
+
+#### <span className="msb-recv">Volume::</span><span className="msb-hn">remote()</span>
+
+```rust
+fn remote() -> MicrosandboxResult<Volumes>
+```
+
+Capture remote environment credentials and endpoint without network I/O. Requires the cloud feature. Missing credentials fail; existing resources keep their destination. See [selector examples](/operations/backends#resource-selectors).
+
 Creation, lookup and list items return the same `Volume` type. Each resource retains its context and stable identity; dropping it does not delete its storage.
 
 #### <span className="msb-recv">vol.</span><span className="msb-hn">id()</span>
@@ -409,12 +425,12 @@ Which backend variant this volume is bound to: `Local` or `Remote`.
   </div>
 </div>
 
-#### <span className="msb-recv">vol.</span><span className="msb-hn">local()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">local_state()</span>
 
 <Tooltip tip="Returns state only for local-backed volumes; None on microsandbox cloud."><span className="msb-badge-local">Local-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
-fn local(&self) -> Option<&VolumeLocalState>
+fn local_state(&self) -> Option<&VolumeLocalState>
 ```
 
 Returns `Some` for local-backed volumes and `None` otherwise.
@@ -428,12 +444,12 @@ Returns `Some` for local-backed volumes and `None` otherwise.
   </div>
 </div>
 
-#### <span className="msb-recv">vol.</span><span className="msb-hn">cloud()</span>
+#### <span className="msb-recv">vol.</span><span className="msb-hn">remote_state()</span>
 
 <Tooltip tip="Returns state only for cloud-backed volumes; None on the local backend."><span className="msb-badge-cloud">Cloud-only <Icon icon="circle-info" size={11} /></span></Tooltip>
 
 ```rust
-fn cloud(&self) -> Option<&VolumeCloudState>
+fn remote_state(&self) -> Option<&VolumeRemoteState>
 ```
 
 Returns `Some` for cloud-backed volumes and `None` otherwise.
@@ -442,7 +458,7 @@ Returns `Some` for cloud-backed volumes and `None` otherwise.
 
 <div className="msb-params">
   <div className="msb-param">
-    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;VolumeCloudState&gt;</span></div>
+    <div className="msb-param-key"><span className="msb-type">Option&lt;&amp;VolumeRemoteState&gt;</span></div>
     <div className="msb-param-desc">Cloud state, or <code>None</code>.</div>
   </div>
 </div>

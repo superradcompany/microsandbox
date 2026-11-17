@@ -152,3 +152,16 @@ pub fn derive_remote_from_options_json(
         Err(invalid("this SDK distribution has no remote provider"))
     }
 }
+
+/// Capture the explicit remote selector for a native binding, never ambient backend routing.
+#[doc(hidden)]
+pub fn remote_from_env() -> MicrosandboxResult<Arc<dyn Context>> {
+    #[cfg(feature = "cloud")]
+    {
+        Ok(super::RemoteContext::from_env()?.clone_shared())
+    }
+    #[cfg(not(feature = "cloud"))]
+    {
+        Err(invalid("this SDK distribution has no remote provider"))
+    }
+}

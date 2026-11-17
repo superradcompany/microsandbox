@@ -45,6 +45,22 @@ pub struct PySnapshotCopyBuilder {
 
 #[pymethods]
 impl PySnapshot {
+    /// Capture a local destination without consulting remote selection variables.
+    #[staticmethod]
+    fn local() -> crate::context::PySnapshots {
+        crate::context::PySnapshots {
+            inner: microsandbox::context::default_local_context(),
+        }
+    }
+
+    /// Capture remote environment settings before any deferred operation.
+    #[staticmethod]
+    fn remote() -> PyResult<crate::context::PySnapshots> {
+        Ok(crate::context::PySnapshots {
+            inner: microsandbox::context::remote_from_env().map_err(to_py_err)?,
+        })
+    }
+
     #[staticmethod]
     fn ctx(context: PyRef<'_, crate::context::PyContext>) -> crate::context::PySnapshots {
         crate::context::PySnapshots {

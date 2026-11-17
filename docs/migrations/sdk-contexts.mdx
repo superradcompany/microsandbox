@@ -103,3 +103,11 @@ This is a public source API change. Runtime protocols, stored configuration, res
 Use Rust `to_builder()` or TypeScript `toBuilder()` to derive through the existing fluent builder. Python uses `replace(...)`, Ruby uses `with(...)`, and Go uses `WithOptions(...)`; these SDKs do not gain context builders. Derivation preserves captured configuration and native-provider ownership. Existing resources keep their original credentials and endpoint. See [the language examples](/operations/backends#deriving-a-remote-context).
 
 Rust custom HTTP clients now use the context's API key for Authorization, consistently with agent connections. A different default Authorization header on a supplied `reqwest::Client` no longer overrides that key. Pass the intended credential to `RemoteContext` or its derived builder. Custom transport, timeout and user-agent settings retain their existing precedence. Runtime protocols and persisted configuration formats are unchanged.
+
+## Resource selectors and state accessors
+
+Explicit resource-type `local()` / `remote()` selectors return the existing plural collections before builder/create/get/list. Go uses `SandboxLocal()` / `SandboxRemote()` and corresponding Volume/Snapshot functions. Remote selection reads environment credentials; direct resource entry points remain default-local. See [usage and feature availability](/operations/backends#resource-selectors).
+
+Rust's previous instance `.local()` and `.cloud()` state accessors are now `.local_state()` and `.remote_state()`. Public `SandboxCloudState` and `VolumeCloudState` become `SandboxRemoteState` and `VolumeRemoteState`. This source-breaking rename frees the resource-type selector names. State access remains synchronous and does not replace live inspection. Runtime protocols and persisted field spellings are unchanged.
+
+CLI `--local` / `--remote` override ordinary and managed active-profile selection but still enforce `allowed_backends`. Remote flags use environment credentials; omit them for named-profile credential resolution. `MSB_BACKEND=remote` is accepted alongside legacy `cloud`. Existing diagnostic JSON still uses `cloud` for the remote kind. Explicit flag-selected contexts use the existing `programmatic` source value. See [CLI precedence](/operations/backends#precedence).

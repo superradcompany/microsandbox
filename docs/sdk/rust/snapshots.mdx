@@ -21,6 +21,22 @@ A paused disk capture needs a matching prior flush; cloud rejects non-Auto polic
 
 ## Static methods
 
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">local()</span>
+
+```rust
+fn local() -> Snapshots
+```
+
+Select the default-local destination. Requires the local feature. Does not consult remote selection variables. See [selector examples](/operations/backends#resource-selectors).
+
+#### <span className="msb-recv">Snapshot::</span><span className="msb-hn">remote()</span>
+
+```rust
+fn remote() -> MicrosandboxResult<Snapshots>
+```
+
+Capture remote environment credentials and endpoint without network I/O. Requires the cloud feature. Missing credentials fail; existing resources keep their destination. See [selector examples](/operations/backends#resource-selectors).
+
 #### <span className="msb-recv">Snapshot::</span><span className="msb-hn">builder()</span>
 
 ```rust

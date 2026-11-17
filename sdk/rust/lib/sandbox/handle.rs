@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 #[cfg(feature = "cloud")]
-use crate::context::{CloudCreateSandboxResponse, SandboxCloudState};
+use crate::context::{CloudCreateSandboxResponse, SandboxRemoteState};
 #[cfg(feature = "local")]
 use crate::db::entity::sandbox as sandbox_entity;
 use crate::{
@@ -204,7 +204,7 @@ impl SandboxRecord {
     }
 
     /// Local-only handle state. Returns `Some` for local-backed handles.
-    pub fn local(&self) -> Option<&SandboxRecordLocalState> {
+    pub fn local_state(&self) -> Option<&SandboxRecordLocalState> {
         match &self.inner {
             SandboxRecordInner::Local(s) => Some(s),
             SandboxRecordInner::Cloud(_) => None,
@@ -212,7 +212,7 @@ impl SandboxRecord {
     }
 
     /// Cloud-only handle state. Returns `Some` for cloud-backed handles.
-    pub fn cloud(&self) -> Option<&SandboxRecordCloudState> {
+    pub fn remote_state(&self) -> Option<&SandboxRecordCloudState> {
         match &self.inner {
             SandboxRecordInner::Cloud(s) => Some(s),
             SandboxRecordInner::Local(_) => None,
@@ -419,7 +419,7 @@ impl SandboxRecord {
     #[cfg(feature = "local")]
     pub async fn metrics(&self) -> MicrosandboxResult<super::SandboxMetrics> {
         let local = self
-            .local()
+            .local_state()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxMetrics))?;
 
         if !matches!(
@@ -665,7 +665,7 @@ impl SandboxRecord {
 
                     Ok(Sandbox::from_cloud_state(
                         self.backend.clone(),
-                        SandboxCloudState {
+                        SandboxRemoteState {
                             id: cloud.id.clone(),
                             org_id: cloud.org_id.clone(),
                             created_at,
@@ -930,7 +930,7 @@ impl SandboxRecord {
             SandboxRecordInner::Local(_) => {
                 let refreshed = self.refresh().await?;
                 let local = refreshed
-                    .local()
+                    .local_state()
                     .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxDestroy))?;
                 if matches!(
                     local.status,
@@ -1171,7 +1171,7 @@ mod tests {
 
         assert_eq!(sandbox.name(), "cloud-connect-test");
         assert_eq!(sandbox.context_kind(), ContextKind::Remote);
-        assert_eq!(sandbox.cloud().unwrap().id, "sandbox-id");
+        assert_eq!(sandbox.remote_state().unwrap().id, "sandbox-id");
         assert_eq!(
             sandbox.prepared_runtime().unwrap().config.spec.name,
             "cloud-connect-test"

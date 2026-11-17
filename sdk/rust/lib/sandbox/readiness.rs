@@ -42,7 +42,7 @@ impl Sandbox {
 
     pub(crate) fn from_record(record: SandboxRecord) -> Self {
         let mut backend = record.backend.clone();
-        if let Some(remote) = record.cloud() {
+        if let Some(remote) = record.remote_state() {
             backend = backend
                 .with_agent_identity(record.name(), &remote.id)
                 .unwrap_or(backend);

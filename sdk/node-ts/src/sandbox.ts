@@ -1,7 +1,7 @@
 import { bindingFor } from "./internal/provider.js";
 import { Snapshot } from "./snapshot.js";
 import { storageUsageFromHandle, type StorageItemUsage } from "./storage.js";
-import { Context, Sandboxes } from "./context.js";
+import { Context, LocalContext, RemoteContext, Sandboxes } from "./context.js";
 import { recoverStorage, type StorageRecovery, type StorageRecoveryOptions } from "./storage-recovery.js";
 import { Job, JobListBuilder, jobCall, jobPageFromJson, type JobPage } from "./jobs.js";
 import { remapKeysToCamel } from "./internal/config.js";
@@ -326,11 +326,15 @@ export class Sandbox implements AsyncDisposable {
 
   // -- statics ------------------------------------------------------------
 
-  /** Begin building a new sandbox. Names are limited to 128 UTF-8 bytes. */
+  /** Capture a local destination; never changes ambient routing. */
+  static local(): Sandboxes { return new LocalContext().sandboxes; }
+  /** Capture remote environment credentials now, before creating or looking up a resource. */
+  static remote(): Sandboxes { return RemoteContext.fromEnv().sandboxes; }
   static ctx(context: Context): Sandboxes { return context.sandboxes; }
 
   get context(): Context { return Context.fromNative(this.inner.context()); }
 
+  /** Begin building a default-local sandbox. Names are limited to 128 UTF-8 bytes. */
   static builder(name: string): SandboxBuilder {
     return Sandbox.fromNativeBuilder(name, new napi.SandboxBuilder(name));
   }

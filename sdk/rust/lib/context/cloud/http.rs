@@ -89,7 +89,7 @@ struct CloudSandboxWaitQuery {
 impl RemoteContext {
     /// Authentication belongs to the destination, not the shared connection pool. A derived
     /// context can safely reuse a custom client without inheriting its default credentials.
-    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    pub(super) fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         let request = self.inner.http.request(method, url).header(
             reqwest::header::AUTHORIZATION,
             self.inner.authorization.clone(),

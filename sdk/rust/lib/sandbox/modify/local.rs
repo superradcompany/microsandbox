@@ -358,7 +358,7 @@ pub(super) async fn dry_run(
         builder.policy,
     );
     if ports::requested(&builder.patch) && plan.conflicts.is_empty() {
-        if handle.local().is_none() {
+        if handle.local_state().is_none() {
             return Err(MicrosandboxError::local_only(Operation::SandboxModify));
         }
         if let Err(error) = ports::preflight(&config, active.as_ref(), &builder.patch, status) {
@@ -383,7 +383,7 @@ pub(super) async fn apply(
         .await?;
 
     #[cfg(feature = "local")]
-    if let (Some(local), Some(state)) = (builder.backend.as_local(), handle.local()) {
+    if let (Some(local), Some(state)) = (builder.backend.as_local(), handle.local_state()) {
         creation::require_complete(local.db().await?.read(), state.db_id, &builder.name).await?;
     }
 
@@ -414,7 +414,7 @@ pub(super) async fn apply(
 
     validate_apply_supported(&plan)?;
     if ports::requested(&builder.patch) {
-        if handle.local().is_none() {
+        if handle.local_state().is_none() {
             return Err(MicrosandboxError::local_only(Operation::SandboxModify));
         }
         ports::preflight(&config, active.as_ref(), &builder.patch, status)?;
@@ -430,7 +430,7 @@ pub(super) async fn apply(
         crate::runtime::protected_state::require_running(local, &builder.name)?;
     }
 
-    if handle.local().is_some() {
+    if handle.local_state().is_some() {
         // Validate configuration serialization before stopping a VM,
         // growing a disk, or issuing any live control mutation.
         let mut prospective = config.clone();
@@ -577,7 +577,7 @@ pub(super) async fn apply(
             &builder.backend,
             &builder.name,
             handle
-                .local()
+                .local_state()
                 .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxModify))?
                 .db_id,
             &config,
@@ -1225,7 +1225,7 @@ async fn persist_config(
     active_labels: Option<ActiveLabelsUpdate>,
 ) -> MicrosandboxResult<()> {
     let local = handle
-        .local()
+        .local_state()
         .ok_or_else(|| crate::MicrosandboxError::local_only(Operation::SandboxModify))?;
     let local_backend = backend
         .as_local()

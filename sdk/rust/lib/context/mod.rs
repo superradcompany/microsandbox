@@ -34,15 +34,15 @@ pub use microsandbox_types::{
     CloudCreateSandboxRequest, CloudCreateSandboxResponse, CloudErrorBody, CloudErrorDetails,
     CloudMessageResponse, CloudPaginated, CloudSandboxStatus, CloudSandboxStatusReason,
 };
-pub use profile::{Profile, ProfileKind, resolve_default_backend};
+pub use profile::{Profile, ProfileKind, resolve_cli_context, resolve_default_backend};
 pub use sandbox::{
-    SandboxCloudState, SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState,
-    SandboxRecordInner,
+    SandboxIdentity, SandboxInner, SandboxOps, SandboxRecordCloudState, SandboxRecordInner,
+    SandboxRemoteState,
 };
 pub use sandbox::{SandboxLocalState, SandboxRecordLocalState};
 pub use snapshot::SnapshotOps;
 pub use volume::VolumeLocalState;
-pub use volume::{CloudVolumeKind, CloudVolumeStatus, VolumeCloudState, VolumeInner, VolumeOps};
+pub use volume::{CloudVolumeKind, CloudVolumeStatus, VolumeInner, VolumeOps, VolumeRemoteState};
 
 mod default_local;
 mod metadata;
@@ -50,4 +50,4 @@ mod options;
 pub use default_local::default_local_context;
 pub use metadata::{ContextInfo, ContextKind, ContextSelectionSource};
 #[doc(hidden)]
-pub use options::{derive_remote_from_options_json, from_options_json};
+pub use options::{derive_remote_from_options_json, from_options_json, remote_from_env};

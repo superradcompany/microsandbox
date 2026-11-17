@@ -46,7 +46,7 @@ impl SandboxRecord {
             .as_local()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxTerminalExit))?;
         let identity = self
-            .local()
+            .local_state()
             .ok_or_else(|| MicrosandboxError::local_only(Operation::SandboxTerminalExit))?;
 
         // Serialize with SDK start/remove so a new execution cannot race the

@@ -17,7 +17,7 @@ use crate::{
 
 async fn persist_owner(sb: &Sandbox) {
     let local = sb.backend.as_local().unwrap();
-    let state = sb.local().unwrap();
+    let state = sb.local_state().unwrap();
     let pid = state.handle.as_ref().unwrap().lock().await.pid();
     let db = local.db().await.unwrap();
     let mut config = SandboxConfig::default();
@@ -67,7 +67,7 @@ async fn repeated_preparation_preserves_local_owner_and_connection() {
     assert!(sb.owns_lifecycle() && clone.owns_lifecycle());
     assert!(Arc::ptr_eq(
         &sb.client().await.unwrap(),
-        &sb.local().unwrap().client
+        &sb.local_state().unwrap().client
     ));
     // Lookup starts unprepared and cannot inherit this group's cleanup authority.
     let independent = Sandbox::ctx(sb.context()).get("task").await.unwrap();
@@ -589,7 +589,7 @@ async fn live_config_does_not_erase_launch_outcomes() {
     owner
         .binding
         .publish(Arc::new(crate::sandbox::state::RuntimeSession {
-            inner: crate::context::SandboxInner::Local(owner.local().unwrap()),
+            inner: crate::context::SandboxInner::Local(owner.local_state().unwrap()),
             config,
         }));
     let clone = owner.clone();

@@ -3,7 +3,8 @@
 //! Managed `active_profile` overrides the ambient selection below; managed profile entries
 //! replace matching user entries during resolution. Explicit backend objects retain their identity.
 //!
-//! CLI precedence: managed selection, MSB_BACKEND, MSB_PROFILE, active_profile, local.
+//! CLI precedence: explicit flags, managed selection, MSB_BACKEND, MSB_PROFILE, active_profile, local.
+//! Explicit flags still enforce allowed_backends.
 //! SDK resource shortcuts do not call this resolver; they use the immutable local default.
 //! Explicit RemoteContext::from_profile loads its named profile independently.
 //!
@@ -114,6 +115,42 @@ impl From<ProfileKind> for ContextKind {
 #[doc(hidden)]
 pub fn resolve_default_backend() -> MicrosandboxResult<Arc<dyn Context>> {
     resolve_default_backend_from(&crate::config::config_path(), None)
+}
+
+/// Resolve an explicit CLI destination ahead of all ambient profile selection.
+/// Managed operation settings and allowed_backends are still enforced by construction.
+#[doc(hidden)]
+pub fn resolve_cli_context(kind: Option<ContextKind>) -> MicrosandboxResult<Arc<dyn Context>> {
+    match kind {
+        None => resolve_default_backend(),
+        Some(kind) => resolve_explicit_context(kind, crate::config::layers::BackendConfig::load()?),
+    }
+}
+
+fn resolve_explicit_context(
+    kind: ContextKind,
+    config: crate::config::layers::BackendConfig,
+) -> MicrosandboxResult<Arc<dyn Context>> {
+    let source = super::ContextSelectionSource::Programmatic;
+    config.require_backend(kind, Some(source))?;
+    match kind {
+        #[cfg(feature = "local")]
+        ContextKind::Local => Ok(Arc::new(LocalContext::from_backend_config(
+            config.prepare_for_local_backend(Default::default())?,
+            source,
+            None,
+        ))),
+        #[cfg(not(feature = "local"))]
+        ContextKind::Local => Err(crate::config::backend::feature_disabled("local")),
+        #[cfg(feature = "cloud")]
+        ContextKind::Remote => Ok(Arc::new(
+            RemoteContextBuilder::from_env()?
+                .config_sources(config)
+                .build()?,
+        )),
+        #[cfg(not(feature = "cloud"))]
+        ContextKind::Remote => Err(crate::config::backend::feature_disabled("cloud")),
+    }
 }
 
 fn resolve_default_backend_from(
@@ -244,6 +281,55 @@ fn resolve_api_key_ref(profile: &str, key_ref: &str) -> MicrosandboxResult<Strin
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(all(feature = "local", feature = "cloud"))]
+    #[test]
+    fn explicit_selection_overrides_managed_profile_but_enforces_policy() {
+        let _guard = crate::test_support::lock_env();
+        let directory = tempfile::tempdir().unwrap();
+        let user = directory.path().join("config.json");
+        let managed = directory.path().join("managed.json");
+        std::fs::write(&user, "{}").unwrap();
+        let previous = std::env::var_os("MSB_API_KEY");
+        unsafe {
+            std::env::set_var("MSB_API_KEY", "fixture-key");
+        }
+        for (profile_kind, selected) in [
+            ("local", super::ContextKind::Remote),
+            ("remote", super::ContextKind::Local),
+        ] {
+            std::fs::write(
+                &managed,
+                serde_json::json!({"overrides":{
+                    "active_profile":"forced", "profiles":{"forced":{"kind":profile_kind}},
+                    "allowed_backends":["local", "cloud"]
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let config =
+                crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).unwrap();
+            assert_eq!(
+                super::resolve_explicit_context(selected, config)
+                    .unwrap()
+                    .kind(),
+                selected
+            );
+            std::fs::write(&managed, serde_json::json!({"overrides":{
+                "active_profile":"forced", "profiles":{"forced":{"kind":profile_kind}},
+                "allowed_backends":[if selected == super::ContextKind::Remote {"local"} else {"cloud"}]
+            }}).to_string()).unwrap();
+            let config =
+                crate::config::layers::BackendConfig::load_from(&user, Some(&managed)).unwrap();
+            assert!(super::resolve_explicit_context(selected, config).is_err());
+        }
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MSB_API_KEY", value),
+                None => std::env::remove_var("MSB_API_KEY"),
+            }
+        }
+    }
     use super::*;
     use crate::config::{GlobalConfig, GlobalConfigPatch};
 

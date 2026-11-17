@@ -35,7 +35,19 @@ it("retains independent destinations through collections, builders and resources
         assert.throws(() => new RemoteContext({apiKey:""}));
         assert.throws(() => RemoteContext.withUrl("", "key"));
         assert.throws(() => RemoteContext.withUrl("http://localhost", "key", {requestTimeoutMs:-1}), RangeError);
-        const sandboxes = remote.sandboxes;
+        const { Volume } = await import(new URL("./volume.js", ${JSON.stringify(sandboxUrl)}));
+        const { Snapshot } = await import(new URL("./snapshot.js", ${JSON.stringify(sandboxUrl)}));
+        for (const resource of [Sandbox, Volume, Snapshot]) assert.throws(() => resource.remote());
+        process.env.MSB_API_URL = "http://127.0.0.1:" + a.address().port;
+        process.env.MSB_API_KEY = "key-a";
+        process.env.MSB_BACKEND = "local";
+        for (const resource of [Sandbox, Volume, Snapshot]) assert.equal(resource.remote().context.kind, "remote");
+        const sandboxes = Sandbox.remote();
+        process.env.MSB_BACKEND = "remote";
+        for (const resource of [Sandbox, Volume, Snapshot]) assert.equal(resource.local().context.kind, "local");
+        // Subsequent environment changes cannot retarget an existing collection or builder.
+        process.env.MSB_API_URL = "http://127.0.0.1:" + b.address().port;
+        process.env.MSB_API_KEY = "key-b";
         const builder = sandboxes.builder("task").image("python");
         const originalId = (await sandboxes.get("task")).id;
         assert.equal((await remote.toBuilder().build().sandboxes.get("task")).id, originalId);

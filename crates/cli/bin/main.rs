@@ -66,6 +66,14 @@ const TOP_LEVEL_COMMAND_GROUPS: &[CommandGroup] = &[
     styles = microsandbox_cli::styles::styles()
 )]
 struct Cli {
+    /// Select remote for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "local")]
+    remote: bool,
+
+    /// Select local for sandbox, volume, snapshot or context inspection commands.
+    #[arg(long, global = true, conflicts_with = "remote")]
+    local: bool,
+
     #[command(flatten)]
     tree: microsandbox_cli::tree::TreeArgs,
 
@@ -262,6 +270,24 @@ impl HelpStyles {
 // Functions
 //--------------------------------------------------------------------------------------------------
 
+/// Clap validates conflicts at one command level; inherited flags can occur on
+/// different levels, so check the final propagated values before dispatch too.
+fn selected_destination(cli: &Cli) -> Result<Option<microsandbox::ContextKind>, clap::Error> {
+    if cli.local && cli.remote {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--local and --remote cannot be used together",
+        ));
+    }
+    Ok(if cli.remote {
+        Some(microsandbox::ContextKind::Remote)
+    } else if cli.local {
+        Some(microsandbox::ContextKind::Local)
+    } else {
+        None
+    })
+}
+
 fn main() {
     // Ensure terminal echo is restored even if a panic aborts the process
     // (release profile sets `panic = "abort"`, so Drop impls don't run).
@@ -293,7 +319,17 @@ fn main() {
     let cli = Cli::parse_from(argv);
     let log_level = cli.logs.selected_level();
 
-    let exit_code = match cli.command.into_canonical() {
+    let selected = match selected_destination(&cli) {
+        Ok(selected) => selected,
+        Err(error) => error.exit(),
+    };
+    let command = cli.command.into_canonical();
+    // Reject selectors on maintenance/internal commands before any side effects.
+    if selected.is_some() && !supports_destination_selector(&command) {
+        Cli::command().error(clap::error::ErrorKind::ArgumentConflict,
+            "--local/--remote apply only to sandbox, volume, snapshot and context inspection commands").exit();
+    }
+    let exit_code = match command {
         Commands::LaunchProtocol => {
             println!(
                 "{}",
@@ -360,7 +396,7 @@ fn main() {
             // built-in detection.
             let ansi = std::io::stderr().is_terminal() && console::colors_enabled_stderr();
             log_args::init_tracing(log_level, ansi);
-            match run_async_command_anyhow(command, log_level) {
+            match run_async_command_anyhow(command, log_level, selected) {
                 Ok(()) => 0,
                 Err(e) => render_anyhow_error(&e),
             }
@@ -659,6 +695,7 @@ fn extract_quoted_token_str(s: &str) -> Option<String> {
 fn run_async_command_anyhow(
     command: Commands,
     log_level: Option<microsandbox::LogLevel>,
+    selected: Option<microsandbox::ContextKind>,
 ) -> anyhow::Result<()> {
     // Internal maintenance commands do not execute sandbox operations and
     // must remain usable while diagnosing an invalid backend configuration.
@@ -694,7 +731,7 @@ fn run_async_command_anyhow(
             // Resolve once, fallibly, before backend-dependent dispatch. Unlike
             // default-local SDK shortcuts, the CLI must not run a
             // sandbox operation locally after an invalid explicit cloud selection.
-            let backend = microsandbox::resolve_default_backend()?;
+            let backend = microsandbox::context::resolve_cli_context(selected)?;
             if requires_current_catalog(&command)
                 && let Some(local) = backend.as_local()
             {
@@ -785,6 +822,18 @@ fn requires_current_catalog(command: &Commands) -> bool {
     }
 }
 
+/// Limit explicit selection to commands that operate through retained resource contexts.
+fn supports_destination_selector(command: &Commands) -> bool {
+    match command {
+        Commands::Sandbox(_)
+        | Commands::Volume(_)
+        | Commands::Snapshot(_)
+        | Commands::Snapshots(_) => true,
+        Commands::Context(args) => args.command.is_none(),
+        _ => false,
+    }
+}
+
 /// Return whether a command can run without constructing the selected backend.
 ///
 /// These commands are deliberately available even when backend configuration is
@@ -807,6 +856,27 @@ fn is_backend_independent_command(command: &Commands) -> bool {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn destination_flags_parse_on_resource_commands_and_do_not_consume_guest_flags() {
+        for arguments in [
+            vec!["msb", "run", "--remote", "python", "--", "echo", "ok"],
+            vec!["msb", "create", "python", "--name", "worker", "--remote"],
+            vec!["msb", "exec", "--remote", "worker", "--", "echo", "ok"],
+            vec!["msb", "sandbox", "list", "--local"],
+            vec!["msb", "volume", "list", "--remote"],
+            vec!["msb", "snapshot", "list", "--local"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(cli.local || cli.remote);
+            assert!(supports_destination_selector(&cli.command.into_canonical()));
+        }
+        let cli = Cli::try_parse_from(["msb", "exec", "worker", "--", "echo", "--remote"]).unwrap();
+        assert!(!cli.remote);
+        assert!(!cli.local);
+        let conflicting = Cli::try_parse_from(["msb", "--local", "list", "--remote"]).unwrap();
+        assert!(selected_destination(&conflicting).is_err());
+    }
 
     #[test]
     fn storage_reader_capability_matches_the_actual_embedded_protocol() {

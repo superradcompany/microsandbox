@@ -2392,7 +2392,7 @@ mod tests {
         let (sb, mut peer, _stdin, _home) = crate::sandbox::lifetime::tests::fixture(None).await;
         let runtime = sb.prepared_runtime().unwrap();
         let generation = Arc::downgrade(&runtime);
-        let client = sb.local().unwrap().client.clone();
+        let client = sb.local_state().unwrap().client.clone();
         let offer = BulkOffer::filesystem_write();
         let mut bulk = BulkSendState::new(
             BulkKind::Filesystem,

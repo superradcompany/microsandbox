@@ -12,7 +12,7 @@ impl Sandbox {
     /// Reap an exited retained child without acquiring lifecycle ownership or waiting on a live run.
     #[cfg(feature = "local")]
     pub(super) fn reap_exited_child(&self) -> MicrosandboxResult<()> {
-        if let Some(local) = self.local()
+        if let Some(local) = self.local_state()
             && let Some(handle) = &local.handle
             && let Ok(mut process) = handle.try_lock()
         {
@@ -31,7 +31,7 @@ impl Sandbox {
     pub async fn shutdown_owned(&self) -> MicrosandboxResult<()> {
         #[cfg(feature = "local")]
         if self.owns_lifecycle()
-            && let Some(local) = self.local()
+            && let Some(local) = self.local_state()
             && let Some(run) = local.owned_run_id
             && let Some(backend) = self.backend.as_local()
         {
@@ -53,7 +53,7 @@ impl Sandbox {
     pub fn owns_lifecycle(&self) -> bool {
         #[cfg(feature = "local")]
         {
-            self.local().is_some_and(|local| {
+            self.local_state().is_some_and(|local| {
                 local
                     .cleanup
                     .as_ref()
@@ -73,7 +73,7 @@ impl Sandbox {
     /// If disarming fails, the error is returned and cleanup remains armed.
     pub async fn detach(&self) -> MicrosandboxResult<()> {
         #[cfg(feature = "local")]
-        if let Some(local) = self.local()
+        if let Some(local) = self.local_state()
             && let Some(cleanup) = &local.cleanup
         {
             // Reap an already exited child when immediately available. A live

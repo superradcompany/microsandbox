@@ -16,7 +16,7 @@ impl Sandbox {
         cloud: crate::context::CloudCreateSandboxResponse,
         config: SandboxConfig,
     ) -> Self {
-        let state = crate::context::SandboxCloudState {
+        let state = crate::context::SandboxRemoteState {
             id: cloud.id,
             org_id: cloud.org_id,
             created_at: cloud.created_at,
@@ -30,7 +30,7 @@ impl Sandbox {
     /// an eager agent client.
     pub(crate) fn from_cloud_state(
         backend: Arc<dyn crate::context::Context>,
-        state: crate::context::SandboxCloudState,
+        state: crate::context::SandboxRemoteState,
         name: String,
         config: SandboxConfig,
     ) -> Self {

@@ -64,7 +64,28 @@ class ContextNativeTest < Test::Unit::TestCase
           a, b = provider.call("a"), provider.call("b")
           raise "wrong concrete type" unless a.is_a?(Microsandbox::RemoteContext)
           raise "wrong local type" unless Microsandbox::LocalContext.new.is_a?(Microsandbox::LocalContext)
-          collection = a.sandboxes
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+            rejected = false
+            begin
+              resource.remote
+            rescue StandardError
+              rejected = true
+            end
+            raise "missing credentials accepted" unless rejected
+          end
+          ENV["MSB_API_URL"] = "http://127.0.0.1:#{servers.first.addr[1]}"
+          ENV["MSB_API_KEY"] = "key-a"
+          ENV["MSB_BACKEND"] = "local"
+          collection = Microsandbox::Sandbox.remote
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+            raise "remote selector ignored" unless resource.remote.context.kind == "remote"
+          end
+          ENV["MSB_BACKEND"] = "remote"
+          [Microsandbox::Sandbox, Microsandbox::Volume, Microsandbox::Snapshot].each do |resource|
+            raise "local selector ignored" unless resource.local.context.kind == "local"
+          end
+          ENV["MSB_API_URL"] = "http://127.0.0.1:#{servers.last.addr[1]}"
+          ENV["MSB_API_KEY"] = "key-b"
           raise "unchanged derivation lost settings" unless a.with.sandboxes.get("task").id == collection.get("task").id
           [{api_key: ""}, {url: ""}, {request_timeout_ms: -1}].each do |overrides|
             rejected = false
