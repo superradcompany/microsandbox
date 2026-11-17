@@ -67,7 +67,6 @@ pub(super) async fn copy_snapshot_archive(
 mod tests {
     use crate::SaveOpts;
     use crate::context::LocalContext;
-    use crate::snapshot::LoadOptions;
 
     #[tokio::test]
     async fn previous_descriptor_exports_and_copies_without_changing_the_source() {
@@ -112,11 +111,7 @@ mod tests {
                 .save_to(&archive, SaveOpts::default())
                 .await
                 .unwrap();
-            let imported = destination
-                .snapshots()
-                .load(&archive, LoadOptions::default())
-                .await
-                .unwrap();
+            let imported = destination.snapshots().load(&archive, None).await.unwrap();
             let copy = temp.path().join("copy.tar.zst");
             let manifest = imported
                 .copy_to(&copy)
@@ -124,11 +119,7 @@ mod tests {
                 .save()
                 .await
                 .unwrap();
-            let copied = destination
-                .snapshots()
-                .load(&copy, LoadOptions::default())
-                .await
-                .unwrap();
+            let copied = destination.snapshots().load(&copy, None).await.unwrap();
             assert_eq!(copied.manifest().await.unwrap(), manifest);
             assert!(copied.verify().await.is_ok());
             let manifest = copied.manifest().await.unwrap();

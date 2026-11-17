@@ -235,7 +235,7 @@ async fn unpack(path: &Path, stage: &Path) -> ArchiveInventory {
     let cache = stage.join("cache");
     tokio::fs::create_dir_all(&cache).await.unwrap();
     // Tests use plain tar to inspect exactly which payloads were physically transported.
-    unpack_archive(file, stage, &cache, None)
+    unpack_archive(file, stage, &cache)
         .await
         .unwrap()
         .inventory
@@ -1569,7 +1569,7 @@ async fn unordered_batch_resolves_disk_and_ram_from_all_supplied_archives() {
         let loaded = load_snapshots(
             &local,
             &archives,
-            LoadOptions {
+            LoadOpts {
                 group: Some("received".into()),
                 ..Default::default()
             },
@@ -1626,7 +1626,7 @@ async fn automatic_group_sources_fill_ram_and_disks_without_base_flag() {
         )
         .await
         .unwrap();
-        let opts = LoadOptions {
+        let opts = LoadOpts {
             group: Some("received".into()),
             ..Default::default()
         };
@@ -1634,7 +1634,7 @@ async fn automatic_group_sources_fill_ram_and_disks_without_base_flag() {
             .await
             .unwrap();
         // The same dependent archive cannot search a different, unnamed group implicitly.
-        let error = load_snapshot_with_options(&local, &delta, LoadOptions::default())
+        let error = load_snapshot_with_options(&local, &delta, LoadOpts::default())
             .await
             .unwrap_err();
         assert!(
@@ -1681,7 +1681,7 @@ async fn missing_or_corrupt_borrowed_ram_never_publishes_target() {
     )
     .await
     .unwrap();
-    let opts = LoadOptions {
+    let opts = LoadOpts {
         group: Some("received".into()),
         ..Default::default()
     };
@@ -1960,11 +1960,7 @@ async fn standalone_base_archive_resolves_ram_but_dependent_base_archive_is_refu
     )
     .await
     .unwrap();
-    assert!(
-        open_base(&local, delta.to_str().unwrap(), None)
-            .await
-            .is_err()
-    );
+    assert!(open_base(&local, delta.to_str().unwrap()).await.is_err());
     let loaded =
         load_snapshot_with_base(&local, &delta, None, Some(base_archive.to_str().unwrap()))
             .await

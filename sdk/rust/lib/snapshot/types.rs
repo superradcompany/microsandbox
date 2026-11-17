@@ -1,12 +1,7 @@
 //! Context-neutral snapshot result and operation types.
 
-use std::path::PathBuf;
-
 use serde::Serialize;
-
-//--------------------------------------------------------------------------------------------------
-// Types
-//--------------------------------------------------------------------------------------------------
+use std::path::PathBuf;
 
 /// Result of explicit snapshot verification.
 #[derive(Debug, Clone)]
@@ -44,8 +39,7 @@ pub enum UpperVerifyStatus {
 
 /// Options for installing an archive in a local snapshot group.
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct LoadOptions {
+pub struct LoadOpts {
     /// Group-store root; defaults to the configured snapshots directory.
     pub dest: Option<PathBuf>,
     /// Explicit base selector for omitted disk layers and RAM objects.
@@ -54,9 +48,6 @@ pub struct LoadOptions {
     pub group: Option<String>,
     /// Select the imported target even when it is not a fast-forward.
     pub set_head: bool,
-    /// Maximum aggregate logical payload bytes and declared file-disk capacity.
-    /// Sparse holes count toward the limit. None leaves existing imports unlimited.
-    pub maximum_disk_bytes: Option<u64>,
 }
 
 /// Options for [`super::Snapshot::save`].
@@ -111,40 +102,4 @@ pub enum HeadUpdateReason {
     UnknownAncestry,
     /// Supplied archive heads have multiple tips that known ancestry cannot order.
     AmbiguousCandidates,
-}
-
-//--------------------------------------------------------------------------------------------------
-// Methods
-//--------------------------------------------------------------------------------------------------
-
-impl LoadOptions {
-    /// Import into this directory instead of the default snapshot store.
-    pub fn destination(mut self, path: impl Into<PathBuf>) -> Self {
-        self.dest = Some(path.into());
-        self
-    }
-
-    /// Resolve omitted payloads from this snapshot or standalone archive.
-    pub fn base(mut self, reference: impl Into<String>) -> Self {
-        self.base = Some(reference.into());
-        self
-    }
-
-    /// Install imported members in this group.
-    pub fn group(mut self, name: impl Into<String>) -> Self {
-        self.group = Some(name.into());
-        self
-    }
-
-    /// Allow the imported tip to replace a divergent group head.
-    pub fn set_head(mut self, enabled: bool) -> Self {
-        self.set_head = enabled;
-        self
-    }
-
-    /// Reject payload expansion or a declared file disk larger than this many bytes.
-    pub fn maximum_disk_bytes(mut self, bytes: u64) -> Self {
-        self.maximum_disk_bytes = Some(bytes);
-        self
-    }
 }

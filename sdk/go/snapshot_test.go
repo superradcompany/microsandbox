@@ -107,9 +107,8 @@ func TestFFIWireShape_SnapshotGroupWithGeneratedName(t *testing.T) {
 }
 
 func TestFFIWireShape_SnapshotLoadGroupOptions(t *testing.T) {
-	maximum := uint64(4096)
 	payload, err := json.Marshal(ffi.SnapshotLoadOptions{
-		Dest: "/snapshots", Base: "work:baseline", Group: "work", SetHead: true, MaximumDiskBytes: &maximum,
+		Dest: "/snapshots", Base: "work:baseline", Group: "work", SetHead: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -120,9 +119,6 @@ func TestFFIWireShape_SnapshotLoadGroupOptions(t *testing.T) {
 	}
 	if got["dest"] != "/snapshots" || got["base"] != "work:baseline" || got["group"] != "work" || got["set_head"] != true {
 		t.Fatalf("unexpected load options: %s", payload)
-	}
-	if got["maximum_disk_bytes"] != float64(maximum) {
-		t.Fatalf("maximum_disk_bytes = %v, want %d", got["maximum_disk_bytes"], maximum)
 	}
 }
 

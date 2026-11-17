@@ -584,43 +584,6 @@ The runtime dispatcher selects the current reader when `execution` is present, `
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
 
-## Disk-only restore footprint and bounded local imports
-
-Installed and direct-archive file snapshots now restore into one private raw
-writable disk. Restoring a layered raw/qcow2 archive resolves its complete disk
-contents into that file; it does not keep sealed source copies beside another
-writable overlay. Archive descriptors, saved layer identities, incremental
-exports, checkpoint/full-memory restores and local branch handoffs keep their
-existing formats. The child uses the existing single-raw launch path, so this
-change adds no runtime/guest protocol requirement or catalog migration. Older
-SDKs keep their previous restore footprint; updating only the runtime binary
-does not change that SDK behavior. Snapshot source files remain immutable.
-
-For v0.8, snapshot imports use `Snapshot::load(path, LoadOptions)` and the
-matching context collection method. `LoadOptions` is non-exhaustive and offers
-builder methods; `maximum_disk_bytes` is optional and omitted by default.
-The SDK passes a size budget explicitly through extraction, including archive
-bases and sparse logical sizes. Cloud format restrictions and workspace
-reservations remain caller responsibilities; no public trait is required.
-
-The v0.8 source API change replaces `LoadOpts`, positional destinations,
-`load_with_base`, `load_with_options`, `load_bounded`, `load_with_limits`, and
-`bounded_import_peak_bytes`. Other SDK signatures remain unchanged; their existing options or keyword
-arguments gain the optional size limit. TypeScript checks for size-limit native
-entry points before forwarding the option; older Python bindings reject the
-unknown keyword. Native C entry points
-retain their ABI. Size-limited Go requests use a distinct operation so an old
-native library rejects them rather than silently ignoring the limit.
-
-This source break is explicitly authorized for the v0.8 release. Snapshot
-archives, stored state, guest/control protocols and SDK/runtime launch contracts
-are unchanged. Historical compatibility requirements for those boundaries
-remain in force. See `docs/migrations/v0.8.mdx` for call-site changes.
-
-The SDK snapshot suite exercises ordinary imports, current and legacy archives,
-delta exports/restores and private child disks. Real older-runtime launch
-validation and full-disk rewrite qualification remain separate release checks.
-
 ## Remote context compute selection
 
 The SDK exposes `ComputeType`; `CloudComputeType` remains a deprecated SDK

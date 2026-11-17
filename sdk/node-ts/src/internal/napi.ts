@@ -607,13 +607,10 @@ export interface NapiSnapshotStatic {
   load(archive: string, dest?: string, base?: string): Promise<NapiSnapshot>;
   loadWithOptions(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshot>;
   loadMany(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshot[]>;
-  loadWithSizeLimit?(archive: string, opts?: NapiLoadOpts): Promise<NapiSnapshot>;
-  loadManyWithSizeLimit?(archives: string[], opts?: NapiLoadOpts): Promise<NapiSnapshot[]>;
   groupHead(selector: string): Promise<NapiHeadUpdate>;
 }
 
 export interface NapiLoadOpts {
-  maximumDiskBytes?: number;
   dest?: string;
   base?: string;
   group?: string;

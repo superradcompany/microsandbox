@@ -11,7 +11,6 @@ use microsandbox_types::{
     CloudCreateSnapshotRequest, CloudPaginated, CloudSnapshot, CloudSnapshotDetails,
     CloudSnapshotLocation, CloudSnapshotOperation, CloudSnapshotOperationStatus, CloudSnapshotSpec,
 };
-use reqwest::Method;
 use serde::Serialize;
 
 use super::RemoteContext;
@@ -254,6 +253,15 @@ impl SnapshotOps for RemoteContext {
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
         Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
     }
+
+    fn load<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _archive: &'a Path,
+        _dest: Option<&'a Path>,
+    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
+        Box::pin(async move { Err(MicrosandboxError::local_only(Operation::SnapshotOps)) })
+    }
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -267,7 +275,9 @@ impl RemoteContext {
     ) -> MicrosandboxResult<CloudSnapshotOperation> {
         let url = format!("{}/v1/snapshots", self.inner.url);
         let response = self
-            .request(Method::POST, &url)
+            .inner
+            .http
+            .post(&url)
             .json(request)
             .send()
             .await
@@ -282,7 +292,9 @@ impl RemoteContext {
             urlencoding(id)
         );
         let response = self
-            .request(Method::GET, &url)
+            .inner
+            .http
+            .get(&url)
             .send()
             .await
             .map_err(|error| cloud_io_error("GET /v1/snapshot-operations/:id", error))?;
@@ -365,7 +377,9 @@ impl RemoteContext {
     async fn find_snapshot_at(&self, route: &str) -> MicrosandboxResult<CloudSnapshot> {
         let url = format!("{}{}", self.inner.url, route);
         let response = self
-            .request(Method::GET, &url)
+            .inner
+            .http
+            .get(&url)
             .send()
             .await
             .map_err(|error| cloud_io_error("GET /v1/snapshots/:identifier", error))?;
@@ -383,7 +397,9 @@ impl RemoteContext {
                 cursor: cursor.as_deref(),
             };
             let response = self
-                .request(Method::GET, &url)
+                .inner
+                .http
+                .get(&url)
                 .query(&query)
                 .send()
                 .await
@@ -422,7 +438,9 @@ impl RemoteContext {
     async fn delete_snapshot_at(&self, route: &str) -> MicrosandboxResult<()> {
         let url = format!("{}{}", self.inner.url, route);
         let response = self
-            .request(Method::DELETE, &url)
+            .inner
+            .http
+            .delete(&url)
             .send()
             .await
             .map_err(|error| cloud_io_error("DELETE /v1/snapshots/:identifier", error))?;
@@ -598,7 +616,6 @@ mod tests {
     use microsandbox_types::CloudSnapshotKind;
 
     use super::*;
-    use crate::snapshot::LoadOptions;
 
     fn assert_unsupported(result: MicrosandboxResult<impl Sized>) {
         assert!(matches!(result, Err(MicrosandboxError::Unsupported { .. })));
@@ -813,71 +830,8 @@ mod tests {
             .await,
         );
         assert_unsupported(
-            SnapshotOps::load_many(
-                &cloud,
-                backend,
-                &[PathBuf::from("snapshot.tar.zst")],
-                LoadOptions::default(),
-            )
-            .await,
+            SnapshotOps::load(&cloud, backend, Path::new("snapshot.tar.zst"), None).await,
         );
-    }
-
-    #[tokio::test]
-    async fn snapshot_requests_use_the_derived_context_api_key() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let source = crate::test_support::cloud_backend(
-            format!("http://{}", listener.local_addr().unwrap()),
-            "source-key",
-        )
-        .unwrap();
-        let derived = source.to_builder().api_key("snapshot-key").build().unwrap();
-        let server =
-            tokio::spawn(async move {
-                let mut requests = Vec::new();
-                for _ in 0..5 {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let mut stream = BufReader::new(stream);
-                    let mut request = String::new();
-                    loop {
-                        let mut line = String::new();
-                        stream.read_line(&mut line).await.unwrap();
-                        if line == "\r\n" || line.is_empty() {
-                            break;
-                        }
-                        request.push_str(&line.to_ascii_lowercase());
-                    }
-                    requests.push(request);
-                    stream.get_mut().write_all(
-                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                ).await.unwrap();
-                }
-                requests
-            });
-
-        assert!(
-            derived
-                .create_snapshot(&cloud_snapshot_request(
-                    "source-id".into(),
-                    snapshot_config()
-                ))
-                .await
-                .is_err()
-        );
-        assert!(derived.get_snapshot_operation("operation").await.is_err());
-        assert!(derived.find_snapshot_by_id("snapshot").await.is_err());
-        assert!(derived.list_all_snapshots().await.is_err());
-        assert!(derived.delete_snapshot_by_id("snapshot").await.is_err());
-
-        for request in server.await.unwrap() {
-            assert!(
-                request.contains("authorization: bearer snapshot-key\r\n"),
-                "{request}"
-            );
-            assert!(!request.contains("source-key"));
-        }
     }
 
     #[tokio::test]

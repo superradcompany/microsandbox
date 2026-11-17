@@ -107,8 +107,8 @@ pub use sandbox::{
     all_sandbox_metrics_reports_local, sandbox_metrics_report_local,
 };
 pub use snapshot::{
-    CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOptions,
-    SaveOpts, Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
+    CheckpointSnapshotState, FileSnapshotState, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts,
+    Snapshot, SnapshotArchive, SnapshotBuilder, SnapshotConfig, SnapshotCopyBuilder,
     SnapshotDescriptor, SnapshotFormat, SnapshotReference, SnapshotRootDisk, SnapshotScope,
     SnapshotSpec, SnapshotState, SnapshotVerifyReport, UpperIntegrity, UpperVerifyStatus,
 };

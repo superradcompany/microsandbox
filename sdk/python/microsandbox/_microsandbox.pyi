@@ -1161,7 +1161,6 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
-        maximum_disk_bytes: int | None = None,
     ) -> Snapshot: ...
     @staticmethod
     async def load_many(
@@ -1171,7 +1170,6 @@ class Snapshot:
         base: str | None = None,
         group: str | None = None,
         set_head: bool = False,
-        maximum_disk_bytes: int | None = None,
     ) -> list[Snapshot]: ...
     @staticmethod
     async def group_head(selector: str) -> dict[str, str | bool | None]: ...

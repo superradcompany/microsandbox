@@ -77,8 +77,6 @@ export interface LoadOpts {
   group?: string;
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean;
-  /** Maximum expanded payload bytes and declared disk capacity. */
-  maximumDiskBytes?: number;
 }
 
 /** Outcome of reading or selecting a snapshot group's head. */
@@ -249,26 +247,12 @@ export class Snapshot {
 
   /** Import into a selected or generated group, with optional head selection. */
   static async loadWithOptions(archive: string, opts: LoadOpts = {}): Promise<Snapshot> {
-    if (opts.maximumDiskBytes != null) {
-      if (!napi.Snapshot.loadWithSizeLimit) {
-        throw new UnsupportedError("Snapshot size limits require an updated native SDK binding.");
-      }
-      const raw = await withMappedErrors(() => napi.Snapshot.loadWithSizeLimit!(archive, opts));
-      return new Snapshot(raw);
-    }
     const raw = await withMappedErrors(() => napi.Snapshot.loadWithOptions(archive, opts));
     return new Snapshot(raw);
   }
 
   /** Import archives together into one group, resolving dependencies regardless of input order. */
   static async loadMany(archives: string[], opts: LoadOpts = {}): Promise<Snapshot[]> {
-    if (opts.maximumDiskBytes != null) {
-      if (!napi.Snapshot.loadManyWithSizeLimit) {
-        throw new UnsupportedError("Snapshot size limits require an updated native SDK binding.");
-      }
-      const raw = await withMappedErrors(() => napi.Snapshot.loadManyWithSizeLimit!(archives, opts));
-      return raw.map((handle) => new Snapshot(handle));
-    }
     const raw = await withMappedErrors(() => napi.Snapshot.loadMany(archives, opts));
     return raw.map((handle) => new Snapshot(handle));
   }

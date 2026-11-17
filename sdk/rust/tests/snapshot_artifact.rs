@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use microsandbox::context::{Context, LocalContext};
-use microsandbox::{LoadOptions, MicrosandboxResult, SaveOpts, Snapshot, SnapshotReference};
+use microsandbox::{MicrosandboxResult, SaveOpts, Snapshot, SnapshotReference};
 use microsandbox_types::snapshot::{
     CheckpointSnapshotState, DEFAULT_UPPER_FILE, DESCRIPTOR_FILENAME, DiskLayer, DiskLayerId,
     FileSnapshotState, ImageRef, LayerFileKind, LayerPayload, Manifest, SCHEMA, SnapshotCapture,
@@ -564,8 +564,11 @@ async fn save_batch_fixtures(parent: &Path, artifacts: &[PathBuf]) -> Vec<PathBu
     archives
 }
 
-fn batch_group_options(group: &str) -> LoadOptions {
-    LoadOptions::default().group(group)
+fn batch_group_options(group: &str) -> microsandbox::snapshot::LoadOpts {
+    microsandbox::snapshot::LoadOpts {
+        group: Some(group.into()),
+        ..Default::default()
+    }
 }
 
 /// A failed batch may leave an empty group/staging directory, but no immutable member
@@ -660,11 +663,13 @@ async fn indexed_handle_can_remove_a_missing_local_artifact() {
 
                 destination
                     .snapshots()
-                    .load(
+                    .load_with_options(
                         &archive,
-                        LoadOptions::default()
-                            .destination(snapshots.clone())
-                            .group("external"),
+                        microsandbox::snapshot::LoadOpts {
+                            dest: Some(snapshots.clone()),
+                            group: Some("external".into()),
+                            ..Default::default()
+                        },
                     )
                     .await
                     .unwrap();
@@ -792,11 +797,7 @@ async fn labels_only_copy_preserves_identity_and_every_layer() {
             .await
             .unwrap();
         assert_eq!(copied, manifest);
-        let imported = destination
-            .snapshots()
-            .load(&out, LoadOptions::default())
-            .await
-            .unwrap();
+        let imported = destination.snapshots().load(&out, None).await.unwrap();
         assert_eq!(imported.id(), source.id());
         assert_eq!(imported.labels().await.unwrap(), labels);
         for layer in &manifest.state.as_file().unwrap().layers {
@@ -818,7 +819,7 @@ async fn labels_only_copy_preserves_identity_and_every_layer() {
         );
         destination
             .snapshots()
-            .load(&integrity_out, LoadOptions::default())
+            .load(&integrity_out, None)
             .await
             .unwrap()
             .verify()
@@ -1109,9 +1110,7 @@ async fn save_then_load_round_trips_via_zstd() {
     assert!(std::fs::metadata(&archive).unwrap().len() > 0);
 
     let dest = tmp.path().join("imported");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
 
     let handle_archive = tmp.path().join("bundle-from-handle.tar.zst");
@@ -1165,10 +1164,7 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
 
         let snapshot = destination
             .snapshots()
-            .load(
-                &source_archive,
-                LoadOptions::default().destination(&work_dir),
-            )
+            .load(&source_archive, Some(&work_dir))
             .await?;
         let imported_manifest = snapshot.manifest().await.unwrap().clone();
         let imported_descriptor =
@@ -1214,10 +1210,7 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
 
         destination
             .snapshots()
-            .load(
-                &output_archive,
-                LoadOptions::default().destination(tmp.path().join("copied")),
-            )
+            .load(&output_archive, Some(&tmp.path().join("copied")))
             .await
     }
     .await
@@ -1242,7 +1235,7 @@ async fn copy_to_applies_labels_and_records_integrity_without_changing_the_sourc
             .snapshots()
             .load(
                 &output_archive,
-                LoadOptions::default().destination(tmp.path().join("copy-without-integrity-work")),
+                Some(&tmp.path().join("copy-without-integrity-work")),
             )
             .await?;
         snapshot
@@ -1280,10 +1273,7 @@ async fn copy_to_translates_a_legacy_checkpoint() {
 
         let snapshot = destination
             .snapshots()
-            .load(
-                &source_archive,
-                LoadOptions::default().destination(tmp.path().join("legacy-copy-work")),
-            )
+            .load(&source_archive, Some(&tmp.path().join("legacy-copy-work")))
             .await?;
         snapshot
             .copy_to(&output_archive)
@@ -1311,10 +1301,7 @@ async fn copy_to_translates_a_legacy_checkpoint() {
 
         destination
             .snapshots()
-            .load(
-                &output_archive,
-                LoadOptions::default().destination(tmp.path().join("legacy-copied")),
-            )
+            .load(&output_archive, Some(&tmp.path().join("legacy-copied")))
             .await
     }
     .await
@@ -1370,9 +1357,7 @@ async fn save_then_load_round_trips_via_plain_tar() {
     .unwrap();
 
     let dest = tmp.path().join("imported-plain");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
 }
 
@@ -1398,10 +1383,13 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
             )
             .await
             .unwrap();
-        let options = LoadOptions::default().group("work");
+        let options = microsandbox::snapshot::LoadOpts {
+            group: Some("work".into()),
+            ..Default::default()
+        };
         let first = destination
             .snapshots()
-            .load(&archive, options.clone())
+            .load_with_options(&archive, options.clone())
             .await
             .unwrap();
         assert_eq!(first.group(), Some("work"));
@@ -1418,7 +1406,7 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         // Reimporting the same identity into the same group is idempotent.
         let repeated = destination
             .snapshots()
-            .load(&archive, options)
+            .load_with_options(&archive, options)
             .await
             .unwrap();
         assert_eq!(repeated.path().unwrap(), first.path().unwrap());
@@ -1452,16 +1440,8 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
         );
 
         // A default import always gets its own local namespace, even for identical bytes.
-        let fresh = destination
-            .snapshots()
-            .load(&archive, LoadOptions::default())
-            .await
-            .unwrap();
-        let another = destination
-            .snapshots()
-            .load(&archive, LoadOptions::default())
-            .await
-            .unwrap();
+        let fresh = destination.snapshots().load(&archive, None).await.unwrap();
+        let another = destination.snapshots().load(&archive, None).await.unwrap();
         assert_ne!(fresh.group(), another.group());
         assert_ne!(fresh.group(), Some("work"));
         assert_eq!(fresh.id(), first.id());
@@ -1479,7 +1459,13 @@ async fn repeated_loads_preserve_ids_and_resolve_local_group_names() {
             .unwrap();
         let renamed = destination
             .snapshots()
-            .load(&reexport, LoadOptions::default().group("renamed"))
+            .load_with_options(
+                &reexport,
+                microsandbox::snapshot::LoadOpts {
+                    group: Some("renamed".into()),
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         assert_eq!(renamed.name(), Some("clean"));
@@ -1558,15 +1544,18 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
             .await
             .unwrap();
 
-        let options = LoadOptions::default().group("work");
+        let options = microsandbox::snapshot::LoadOpts {
+            group: Some("work".into()),
+            ..Default::default()
+        };
         let installed = destination
             .snapshots()
-            .load(&archive, options.clone())
+            .load_with_options(&archive, options.clone())
             .await
             .unwrap();
         let error = destination
             .snapshots()
-            .load(&competing, options.clone())
+            .load_with_options(&competing, options.clone())
             .await
             .unwrap_err();
         assert!(
@@ -1605,7 +1594,7 @@ async fn group_alias_collision_keeps_the_installed_snapshot_and_head() {
                 .unwrap();
         let error = destination
             .snapshots()
-            .load(&renamed_archive, options)
+            .load_with_options(&renamed_archive, options)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1757,7 +1746,7 @@ async fn load_many_sibling_batch_preserves_existing_head_and_leaves_new_group_he
         let archives = save_batch_fixtures(tmp.path(), &[base, left, right]).await;
         destination
             .snapshots()
-            .load(&archives[0], batch_group_options("existing"))
+            .load_with_options(&archives[0], batch_group_options("existing"))
             .await
             .unwrap();
         let siblings = [archives[2].clone(), archives[1].clone()];
@@ -2025,7 +2014,7 @@ async fn load_many_single_legacy_archive_preserves_single_load_compatibility() {
             .unwrap();
         let single = destination
             .snapshots()
-            .load(&archive, batch_group_options("single"))
+            .load_with_options(&archive, batch_group_options("single"))
             .await
             .unwrap();
         assert_eq!(batch.len(), 1);
@@ -2068,9 +2057,7 @@ async fn save_sparse_upper_round_trips_and_preserves_holes() {
     // Load verifies the recorded sha256 over the unpacked upper's
     // logical content; compare the bytes explicitly as well.
     let dest = tmp.path().join("imported-sparse");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
     let imported_upper = artifact_payload_path(handle.path().unwrap());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
@@ -2169,9 +2156,7 @@ async fn sparse_save_many_extents_round_trips() {
     .unwrap();
 
     let dest = tmp.path().join("imported-many");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
     let imported_upper = artifact_payload_path(handle.path().unwrap());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
@@ -2198,9 +2183,7 @@ async fn sparse_save_all_hole_upper_round_trips() {
     .unwrap();
 
     let dest = tmp.path().join("imported-hole");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
     let imported_upper = artifact_payload_path(handle.path().unwrap());
     assert_eq!(std::fs::read(&imported_upper).unwrap(), logical);
@@ -2259,13 +2242,10 @@ async fn load_rejects_long_name_entries() {
     let archive = tmp.path().join("longname.tar");
     std::fs::write(&archive, &bytes).unwrap();
 
-    let err = Snapshot::load(
-        &archive,
-        LoadOptions::default().destination(tmp.path().join("dest")),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
+    let err = Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("unsupported path"), "unexpected error: {err}");
 }
 
@@ -2294,13 +2274,10 @@ async fn load_rejects_corrupt_header_checksum() {
     let corrupt = tmp.path().join("corrupt.tar");
     std::fs::write(&corrupt, &bytes).unwrap();
 
-    let err = Snapshot::load(
-        &corrupt,
-        LoadOptions::default().destination(tmp.path().join("dest")),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
+    let err = Snapshot::load(&corrupt, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("checksum mismatch"),
         "expected checksum rejection, got: {err}"
@@ -2326,13 +2303,10 @@ async fn load_rejects_payload_corruption_without_recorded_snapshot_integrity() {
     .unwrap();
 
     corrupt_dense_tar_member(&archive, ".raw");
-    let err = Snapshot::load(
-        &archive,
-        LoadOptions::default().destination(tmp.path().join("dest")),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
+    let err = Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("transport integrity mismatch"),
         "expected transport rejection, got: {err}"
@@ -2376,13 +2350,10 @@ async fn load_rejects_overlapping_sparse_map() {
     let archive = tmp.path().join("overlap.tar");
     std::fs::write(&archive, &bytes).unwrap();
 
-    let err = Snapshot::load(
-        &archive,
-        LoadOptions::default().destination(tmp.path().join("dest")),
-    )
-    .await
-    .unwrap_err()
-    .to_string();
+    let err = Snapshot::load(&archive, Some(&tmp.path().join("dest")))
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("out of order or overlapping"),
         "expected sparse-map rejection, got: {err}"
@@ -2471,7 +2442,7 @@ async fn load_rejects_symlink_entries_without_writing_outside_dest() {
 
     write_symlink_traversal_archive(&archive, &escape_dir);
 
-    let err = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
+    let err = Snapshot::load(&archive, Some(&dest))
         .await
         .expect_err("expected import to reject symlink archive entry");
 
@@ -2503,7 +2474,7 @@ async fn load_does_not_follow_preexisting_symlink_parent() {
     std::os::unix::fs::symlink(&escape_dir, dest.join("snap")).unwrap();
     write_regular_file_archive(&archive, "snap/pwned.txt", b"should not escape\n");
 
-    let err = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
+    let err = Snapshot::load(&archive, Some(&dest))
         .await
         .expect_err("expected import without a manifest to fail");
 
@@ -2546,9 +2517,7 @@ async fn archive_round_trip_preserves_integrity_without_implicitly_executing_it(
     .unwrap();
 
     let dest = tmp.path().join("imported");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     let imported_path = reference_path(handle.reference());
     let imported = Snapshot::open(imported_path.to_string_lossy().as_ref())
         .await
@@ -2572,9 +2541,7 @@ async fn load_detects_zstd_by_magic_bytes() {
     .unwrap();
 
     let dest = tmp.path().join("imported-magic");
-    let handle = Snapshot::load(&archive, LoadOptions::default().destination(&dest))
-        .await
-        .unwrap();
+    let handle = Snapshot::load(&archive, Some(&dest)).await.unwrap();
     assert_eq!(handle.digest(), original_digest);
 }
 
@@ -2604,7 +2571,7 @@ async fn load_translates_v066_plain_and_zstd_archives() {
 
             destination
                 .snapshots()
-                .load(archive, LoadOptions::default().destination(&dest))
+                .load(archive, Some(&dest))
                 .await
                 .unwrap()
         }
@@ -2636,11 +2603,7 @@ async fn load_translates_released_flat_inventory_archive() {
     async {
         let destination: std::sync::Arc<dyn microsandbox::Context> = backend;
 
-        let handle = destination
-            .snapshots()
-            .load(&archive, LoadOptions::default())
-            .await
-            .unwrap();
+        let handle = destination.snapshots().load(&archive, None).await.unwrap();
         let snapshot = handle.clone();
         assert_eq!(
             std::fs::read(artifact_payload_path(snapshot.path().unwrap())).unwrap(),
@@ -2691,7 +2654,7 @@ async fn load_selects_child_head_when_parents_are_present() {
                 .unwrap();
             destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .unwrap()
         })
@@ -2731,7 +2694,7 @@ async fn failed_load_does_not_install_staged_cache_entries() {
 
         let err = destination
             .snapshots()
-            .load(&archive, LoadOptions::default().destination(&dest))
+            .load(&archive, Some(&dest))
             .await
             .expect_err("expected cache-only import to fail");
         assert!(
@@ -2799,7 +2762,7 @@ async fn failed_load_with_conflicting_cache_target_does_not_install_cache_entrie
         Box::pin(async {
             let err = destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .expect_err("expected conflicting cache target to fail import");
             assert!(
@@ -2927,7 +2890,7 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
         Box::pin(async {
             destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .unwrap()
         })
@@ -2951,7 +2914,7 @@ async fn load_accepts_cached_image_metadata_with_reordered_labels() {
         Box::pin(async {
             let err = destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .expect_err("expected differing metadata to conflict");
             assert!(
@@ -3011,7 +2974,7 @@ async fn load_rebuilds_image_vmdk_for_destination_cache() {
         Box::pin(async {
             destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .unwrap();
         })
@@ -3030,7 +2993,7 @@ async fn load_rebuilds_image_vmdk_for_destination_cache() {
         Box::pin(async {
             destination
                 .snapshots()
-                .load(&archive, LoadOptions::default().destination(&dest))
+                .load(&archive, Some(&dest))
                 .await
                 .unwrap();
         })
@@ -3085,10 +3048,7 @@ async fn load_streams_large_archive_without_buffering() {
 
         destination
             .snapshots()
-            .load(
-                &archive,
-                LoadOptions::default().destination(tmp.path().join("dest")),
-            )
+            .load(&archive, Some(&tmp.path().join("dest")))
             .await
             .expect_err("expected import of sparse archive to fail")
     }

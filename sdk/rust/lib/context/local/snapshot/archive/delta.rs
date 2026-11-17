@@ -488,7 +488,6 @@ pub(super) async fn resolve_sources(
     snapshots_dir: &Path,
     cache_dir: &Path,
     sources: &Sources,
-    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<()> {
     let Some(dependencies) = validate(inventory)? else {
         return Ok(());
@@ -497,7 +496,7 @@ pub(super) async fn resolve_sources(
     for layer in &dependencies.disks {
         let source = &sources.disks[&serde_json::to_string(&layer.identity)?];
         let target = inventory_entry_target(&layer.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target, budget.as_deref_mut()).await?;
+        copy_dependency(source, &target).await?;
         if let LayerIdentity::File(layer) = &layer.identity {
             super::super::verify::verify_file_payload(&target, layer.payload.integrity.as_ref())
                 .await?;
@@ -509,7 +508,7 @@ pub(super) async fn resolve_sources(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&sources.memory[id], &target, budget.as_deref_mut()).await?;
+        copy_dependency(&sources.memory[id], &target).await?;
         let actual = format!(
             "sha256:{}",
             hex::encode(Box::pin(file_sha256(&target)).await?)
@@ -523,7 +522,7 @@ pub(super) async fn resolve_sources(
     for payload in &dependencies.owned {
         let source = &sources.owned[&serde_json::to_string(&payload.identity)?];
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target, budget.as_deref_mut()).await?;
+        copy_dependency(source, &target).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
     validate_resolved(local, inventory, snapshots_dir, cache_dir, &dependencies).await
@@ -553,7 +552,7 @@ pub(super) async fn selection(
     let required = if let Some(base) = &opts.since {
         // Base archives carry buffered decoder/verification futures; keep them off the caller's
         // stack, including when this planner is nested inside a direct restore or SDK call.
-        let base = Box::pin(open_base(local, base, None)).await?;
+        let base = Box::pin(open_base(local, base)).await?;
         let baseline = physical_layers(
             base.snapshot.manifest(),
             base.snapshot.path(),
@@ -773,7 +772,7 @@ pub(super) async fn resolve(
         )
     })?;
     let fs_state_limit = local.config().fs_state_limit();
-    let base = Box::pin(open_base(local, base, None)).await?;
+    let base = Box::pin(open_base(local, base)).await?;
     let required_disks = dependencies
         .owned
         .iter()
@@ -837,7 +836,7 @@ pub(super) async fn resolve(
     // must not inherit a writable hardlink into the base; deleting the base must be harmless.
     for (source, required) in available.iter().zip(&dependencies.disks) {
         let target = inventory_entry_target(&required.path, snapshots_dir, cache_dir)?;
-        copy_dependency(&source.source, &target, None).await?;
+        copy_dependency(&source.source, &target).await?;
     }
     for id in &dependencies.memory {
         let source = checkpoint_object_path(&base.snapshot.path().join(CHECKPOINT_DIRECTORY), id);
@@ -846,7 +845,7 @@ pub(super) async fn resolve(
             snapshots_dir,
             cache_dir,
         )?;
-        copy_dependency(&source, &target, None).await?;
+        copy_dependency(&source, &target).await?;
         // Verify only the objects actually borrowed, in the destination-owned copy. Export
         // selection is metadata-only for RAM; it must not scan the base's entire guest memory.
         // This reader owns a 64 KiB buffer; boxing prevents every enclosing archive/SDK
@@ -873,7 +872,7 @@ pub(super) async fn resolve(
                 source_error(format!("base is missing owned payload {}", payload.path))
             })?;
         let target = inventory_entry_target(&payload.path, snapshots_dir, cache_dir)?;
-        copy_dependency(source, &target, None).await?;
+        copy_dependency(source, &target).await?;
         verify_owned_payload(&target, &payload.identity).await?;
     }
 
@@ -985,18 +984,11 @@ async fn validate_resolved(
     Ok(())
 }
 
-async fn copy_dependency(
-    source: &Path,
-    target: &Path,
-    budget: Option<&mut ImportBudget>,
-) -> MicrosandboxResult<()> {
+async fn copy_dependency(source: &Path, target: &Path) -> MicrosandboxResult<()> {
     if tokio::fs::symlink_metadata(target).await.is_ok() {
         return Err(MicrosandboxError::SnapshotIntegrity(
             "dependency collides with an extracted member".into(),
         ));
-    }
-    if let Some(budget) = budget {
-        budget.charge_payload(tokio::fs::metadata(source).await?.len())?;
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1142,16 +1134,12 @@ fn physical_layers(
 pub(super) async fn open_base(
     local: &LocalContext,
     input: &str,
-    mut budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<BaseSnapshot> {
     let path = Path::new(input);
     // Admission has already anchored archive filenames. A remaining bare selector
     // belongs to the snapshot store and must not be reclassified after a cwd change.
     if !store::looks_like_path(input) || !path.is_file() {
         let snapshot = store::open_snapshot_leased(local, input).await?;
-        if let Some(budget) = &budget {
-            budget.validate_manifest(snapshot.manifest())?;
-        }
         if matches!(snapshot.manifest().state, SnapshotState::File(_)) {
             Box::pin(snapshot.verify(local.config().fs_state_limit())).await?;
         }
@@ -1175,28 +1163,11 @@ pub(super) async fn open_base(
             ZstdDecoder::new(reader),
             &snapshots_dir,
             &cache_dir,
-            budget.as_deref_mut(),
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(
-            reader,
-            &snapshots_dir,
-            &cache_dir,
-            budget.as_deref_mut(),
-        ))
-        .await?
+        Box::pin(unpack_archive(reader, &snapshots_dir, &cache_dir)).await?
     };
-    if let Some(budget) = &budget
-        && unpacked.inventory.is_some()
-    {
-        for directory in &unpacked.manifest_dirs {
-            let manifest =
-                Manifest::from_bytes(&tokio::fs::read(directory.join(DESCRIPTOR_FILENAME)).await?)
-                    .map_err(|error| MicrosandboxError::SnapshotIntegrity(error.to_string()))?;
-            budget.validate_manifest(&manifest)?;
-        }
-    }
     if let Some(inventory) = &unpacked.inventory {
         if validate(inventory)?.is_some() {
             return Err(MicrosandboxError::InvalidConfig("the supplied base archive must be standalone; load dependent bases explicitly first".into()));
@@ -1207,12 +1178,6 @@ pub(super) async fn open_base(
             .await?;
     }
     let imported = verify_imported_snapshots(local, &unpacked.manifest_dirs).await?;
-    if let Some(budget) = &budget {
-        for snapshot in &imported {
-            budget.validate_manifest(snapshot.manifest())?;
-        }
-    }
-
     let head = match unpacked.head {
         Some(head) => imported
             .iter()
@@ -1327,7 +1292,7 @@ mod tests {
                 super::super::load_snapshot_with_options(
                     &local,
                     &archive,
-                    LoadOptions {
+                    LoadOpts {
                         group: Some("group".into()),
                         ..Default::default()
                     },
@@ -1343,7 +1308,7 @@ mod tests {
                 assert_eq!(group_selector, "group");
                 std::env::set_current_dir(&second).unwrap();
                 for selector in [&archive_selector, &group_selector] {
-                    let base = open_base(&local, selector, None).await.unwrap();
+                    let base = open_base(&local, selector).await.unwrap();
                     assert_eq!(base.snapshot.id(), &manifest.snapshot_id);
                 }
                 assert_eq!(
@@ -1459,7 +1424,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let options = || LoadOptions {
+        let options = || LoadOpts {
             group: Some("corrupt-source".into()),
             ..Default::default()
         };
@@ -1593,41 +1558,6 @@ mod tests {
         .await
         .unwrap();
         assert!(load_snapshot(&local, &archive, None).await.is_err());
-        // The omitted base consumes the same budget as payloads in the archive.
-        let top_bytes = std::fs::metadata(head_dir.join(microsandbox_image::snapshot::layer_path(
-            &top.layer_id,
-            top.format,
-        )))
-        .unwrap()
-        .len();
-        let error = load_snapshot_with_options(
-            &local,
-            &archive,
-            LoadOptions::default()
-                .group("over-budget")
-                .base(base_name)
-                .maximum_disk_bytes(top_bytes.max(65536)),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("maximum disk size"), "{error}");
-        assert!(!local.snapshots_dir().join("over-budget").exists());
-
-        let limited = load_snapshot_with_options(
-            &local,
-            &archive,
-            LoadOptions::default()
-                .group("within-budget")
-                .base(base_name)
-                .maximum_disk_bytes(top_bytes + 65536),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            std::fs::read(limited.path().join(&base_path)).unwrap(),
-            vec![91u8; 65536],
-        );
-
         // Loading now resolves exact payload identities from a source pool. A complete newer
         // snapshot can supply the required prefix even when it contains additional layers.
         let supplied_by_newer = load_snapshot_with_base(&local, &archive, None, Some(head_name))
@@ -1649,12 +1579,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.upper_layers.len(), 1);
-        assert_eq!(result.upper_layers[0].format, "raw");
-        assert_eq!(
-            std::fs::read(&result.upper_layers[0].path).unwrap(),
-            vec![91; 65536]
-        );
+        assert_eq!(result.upper_layers.len(), 3);
         let base_archive = temp.path().join("base.tar");
         save_snapshot(
             &local,
@@ -1698,7 +1623,7 @@ mod tests {
             let batch = load_snapshots(
                 &local,
                 &inputs,
-                LoadOptions {
+                LoadOpts {
                     group: Some(group.into()),
                     ..Default::default()
                 },

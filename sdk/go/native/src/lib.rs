@@ -66,8 +66,8 @@ use base64::Engine;
 #[cfg(feature = "local")]
 use microsandbox::sandbox::all_sandbox_metrics_local;
 use microsandbox::{
-    AgentBridge, LoadOptions, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot,
-    SnapshotReference, UpperVerifyStatus, default_local_context,
+    AgentBridge, LogLevel, MicrosandboxError, RegistryAuth, Sandbox, Snapshot, SnapshotReference,
+    UpperVerifyStatus, default_local_context,
     logs::{LogOptions, LogSource},
     sandbox::{
         DeploymentProfile, FsEntryKind, PullPolicy, SecurityProfile,
@@ -1287,7 +1287,6 @@ struct SnapshotSaveOptsJson {
 
 #[derive(serde::Deserialize, Default)]
 struct SnapshotLoadOptsJson {
-    maximum_disk_bytes: Option<u64>,
     dest: Option<PathBuf>,
     base: Option<String>,
     group: Option<String>,
@@ -7169,13 +7168,9 @@ pub unsafe extern "C" fn msb_snapshot_import(
             Some(PathBuf::from(dest))
         };
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&PathBuf::from(archive), {
-                let mut options = LoadOptions::default();
-                options.dest = dest;
-                options
-            })
-            .await
-            .map_err(FfiError::from)?;
+            let h = Snapshot::load(&PathBuf::from(archive), dest.as_deref())
+                .await
+                .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
         }))
     })
@@ -7201,13 +7196,9 @@ pub unsafe extern "C" fn msb_snapshot_import_with_base(
             Some(PathBuf::from(dest))
         };
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&archive, {
-                let mut options = LoadOptions::default().base(base);
-                options.dest = dest;
-                options
-            })
-            .await
-            .map_err(FfiError::from)?;
+            let h = Snapshot::load_with_base(&archive, dest.as_deref(), &base)
+                .await
+                .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
         }))
     })
@@ -7228,15 +7219,15 @@ pub unsafe extern "C" fn msb_snapshot_import_with_options(
         let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
         Ok(Box::pin(async move {
-            let h = Snapshot::load(&archive, {
-                let mut options = LoadOptions::default();
-                options.dest = opts.dest;
-                options.base = opts.base;
-                options.group = opts.group;
-                options.set_head = opts.set_head;
-                options.maximum_disk_bytes = opts.maximum_disk_bytes;
-                options
-            })
+            let h = Snapshot::load_with_options(
+                &archive,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                },
+            )
             .await
             .map_err(FfiError::from)?;
             Ok(snapshot_handle_json(&h).to_string())
@@ -7261,15 +7252,15 @@ pub unsafe extern "C" fn msb_snapshot_import_many(
         let opts: SnapshotLoadOptsJson = serde_json::from_str(&opts_raw)
             .map_err(|error| FfiError::invalid_argument(error.to_string()))?;
         Ok(Box::pin(async move {
-            let handles = Snapshot::load_many(&archives, {
-                let mut options = LoadOptions::default();
-                options.dest = opts.dest;
-                options.base = opts.base;
-                options.group = opts.group;
-                options.set_head = opts.set_head;
-                options.maximum_disk_bytes = opts.maximum_disk_bytes;
-                options
-            })
+            let handles = Snapshot::load_many(
+                &archives,
+                microsandbox::snapshot::LoadOpts {
+                    dest: opts.dest,
+                    base: opts.base,
+                    group: opts.group,
+                    set_head: opts.set_head,
+                },
+            )
             .await
             .map_err(FfiError::from)?;
             let values = handles.iter().map(snapshot_handle_json).collect::<Vec<_>>();
