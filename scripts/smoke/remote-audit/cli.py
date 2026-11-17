@@ -193,7 +193,7 @@ finally:
             and re.search(r"404|not found", r.stderr, re.IGNORECASE)
         ):
             rows[-1]["verdict"] = "ABSENT"
-        verified = check(
+        check(
             "cleanup_verified" + (suffix or "-sandbox"),
             ["inspect", name + suffix],
             "not_found",

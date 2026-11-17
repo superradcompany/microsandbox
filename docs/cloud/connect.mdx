@@ -423,6 +423,8 @@ CLI selection uses this order:
 
 Explicit flags override a managed active profile but still enforce `allowed_backends`.
 
+`--remote` uses `MSB_API_KEY` and optional `MSB_API_URL` (otherwise the hosted default), not the credentials or URL of the saved profile. Missing environment credentials are an error. `--local` selects the local context. These flags apply to the current command and do not save a new profile preference.
+
 Environment and managed settings can override `msb context use`; the command warns when they do. `reset` clears only the saved preference. Missing credentials or a blocked connection cause an error. The command will not run locally instead.
 
 A managed `active_profile` of `null` or `""` clears saved and environment-selected profiles, while preserving `MSB_BACKEND`. To enforce local execution, choose a named managed local profile. Managed profile entries replace same-named user entries.
