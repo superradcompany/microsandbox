@@ -56,7 +56,9 @@ with tempfile.TemporaryDirectory(prefix='msb-group-open-cli-') as temp:
         run('replace', 'snapshot', 'modify', './exports/history', '--set-head', head)
         refused = run('unbound-checkpoint', 'snapshot', 'checkpoint', './exports/history', ok=False)
         assert 'unbound' in refused.stderr
-        missing = run('missing-inspect', 'snapshot', 'inspect', './missing/history', ok=False)
+        wrong_source = run('explicit-path-source-check', 'snapshot', 'checkpoint', './exports/history', '--sandbox', 'missing-source', ok=False)
+        assert 'missing-source' in wrong_source.stderr, wrong_source.stderr
+        run('missing-inspect', 'snapshot', 'inspect', './missing/history', ok=False)
         assert not (root / 'missing').exists()
         run('remove', 'snapshot', 'remove', './exports/history', '--all')
         assert not external.exists()

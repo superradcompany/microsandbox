@@ -228,7 +228,25 @@ impl Snapshot {
         let options = configure(SnapshotCaptureOptions::default());
         // Keep a non-default store attached to the receiver across later cwd changes.
         let destination = match &self.reference {
-            SnapshotReference::Path(path) => std::path::Path::new(path).parent().map(PathBuf::from),
+            SnapshotReference::Path(path) => {
+                let directory = Path::new(path);
+                // Capture takes (store root, group name). A path ending in ".."
+                // has no lexical filename; its lexical parent is inside the group.
+                // Resolve that spelling through the filesystem before splitting it.
+                let resolved;
+                let directory = if directory.file_name().is_none() {
+                    resolved = tokio::fs::canonicalize(directory).await?;
+                    resolved.as_path()
+                } else {
+                    directory
+                };
+                if directory.file_name() != Some(self.name.as_ref()) {
+                    return Err(MicrosandboxError::InvalidConfig(
+                        "capture path no longer resolves to the opened group name".into(),
+                    ));
+                }
+                directory.parent().map(PathBuf::from)
+            }
             _ => None,
         };
         if options.destination.is_some() {

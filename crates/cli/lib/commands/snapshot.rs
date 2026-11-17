@@ -411,7 +411,7 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
     } else {
         ui::Spinner::start("Checkpointing", selector)
     };
-    let config = microsandbox::SnapshotConfig {
+    let mut config = microsandbox::SnapshotConfig {
         name: args.name.unwrap_or_default(),
         group: args.group,
         source_sandbox: args.sandbox.unwrap_or_default(),
@@ -423,35 +423,39 @@ async fn checkpoint(args: SnapshotCheckpointArgs) -> anyhow::Result<()> {
         guest_flush: args.guest_flush,
     };
     let backend = microsandbox::backend::default_backend();
-    let outcome = if backend.as_local().is_some()
-        && config.group.as_deref().is_some_and(explicit_group_path)
+    if backend.as_local().is_some()
+        && let Some(path) = config
+            .group
+            .as_deref()
+            .filter(|path| explicit_group_path(path))
     {
-        let group = select_group(config.group.as_deref().unwrap()).await?;
-        group
-            .checkpoint_with(|mut options| {
-                options = options.name(config.name).guest_flush(config.guest_flush);
-                if let Some(destination) = config.dest_dir {
-                    options = options.dest_dir(destination);
-                }
-                if config.full {
-                    options = options.full();
-                }
-                if config.record_integrity {
-                    options = options.record_integrity();
-                }
-                for (key, value) in config.labels {
-                    options = options.label(key, value);
-                }
-                options
-            })
-            .await
-            .map(|result| result.checkpoint)
-    } else {
-        backend
-            .snapshots()
-            .checkpoint(backend.clone(), config)
-            .await
-    };
+        anyhow::ensure!(
+            config.dest_dir.is_none(),
+            "an explicit group path already selects its destination directory"
+        );
+        let path = std::path::absolute(path)?;
+        let group = SnapshotGroup::open(&path).await?;
+        // Resolve the original, anchored spelling through the filesystem. Group
+        // inspection would enumerate every member just to find the store root.
+        let directory = tokio::fs::canonicalize(path).await?;
+        anyhow::ensure!(
+            directory.file_name() == Some(group.name().as_ref()),
+            "capture path no longer resolves to the opened group name"
+        );
+        config.dest_dir = Some(
+            directory
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("snapshot group has no parent directory"))?
+                .to_path_buf(),
+        );
+        config.group = Some(group.name().to_owned());
+    }
+    // Keep the optional sandbox selector through bound-source validation, just
+    // as for a named group. It must never silently select another source.
+    let outcome = backend
+        .snapshots()
+        .checkpoint(backend.clone(), config)
+        .await;
     match outcome {
         Ok(checkpoint) => {
             spinner.finish_success("Checkpointed");

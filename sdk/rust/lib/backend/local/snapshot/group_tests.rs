@@ -1497,6 +1497,15 @@ async fn explicit_group_open_never_selects_same_named_default_history() {
     add(&default, 1, None).await;
     add(&directory, 2, None).await;
     crate::with_backend(local, async {
+        let child = directory.join(".child");
+        fs::create_dir(&child).unwrap();
+        let via_parent = crate::Snapshot::open(child.join("..")).await.unwrap();
+        // An imported group has no source. Reaching that admission check proves
+        // capture addressed history itself rather than .child/history.
+        let err = via_parent.checkpoint().await.unwrap_err();
+        assert!(err.to_string().contains("unbound"), "{err}");
+        assert!(!child.join("history").exists());
+        fs::remove_dir(child).unwrap();
         let group = crate::Snapshot::open(&directory).await.unwrap();
         assert_eq!(group.name(), "history");
         assert_eq!(group.head().await.unwrap().unwrap().id(), &id(2));
