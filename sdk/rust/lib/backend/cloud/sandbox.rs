@@ -174,7 +174,7 @@ impl SandboxBackend for CloudBackend {
         config: SandboxConfig,
     ) -> BoxFuture<'a, MicrosandboxResult<Sandbox>> {
         // Cloud has no notion of "detached" — the sandbox lifecycle is owned
-        // by msb-cloud, not by this process. Reuse the eager-start path.
+        // by the cloud API, not by this process. Reuse the eager-start path.
         self.create(backend, config, true)
     }
 
