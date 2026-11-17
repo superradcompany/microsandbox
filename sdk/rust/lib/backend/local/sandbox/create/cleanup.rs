@@ -144,6 +144,8 @@ impl CleanupState {
             .await?;
 
         if retained.is_none() {
+            #[cfg(unix)]
+            crate::sandbox::failed_boot::require_untracked(local, &self.name)?;
             // The guard was armed only after this create reserved a previously absent
             // name. Remove its root disk/staging too, or the directory alone would
             // prevent an immediate retry. External bind/named storage is not beneath it.

@@ -72,6 +72,8 @@ pub use microsandbox_types::SandboxLogLevel as LogLevel;
 pub use microsandbox_utils::size;
 #[cfg(feature = "local")]
 pub use progress::{CreationProgress, CreationProgressHandle, StartupPhase, StartupProgress};
+#[cfg(all(feature = "local", unix))]
+pub use sandbox::FailedBootCleanupReceipt;
 pub use sandbox::exec::{ExecControl, ExecEvent, ExecHandle};
 pub use sandbox::jobs;
 pub use sandbox::jobs::{Job, JobAttachment, JobError, JobId, JobInfo, JobResult};

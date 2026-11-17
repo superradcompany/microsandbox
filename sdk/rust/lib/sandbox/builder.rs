@@ -162,6 +162,21 @@ impl SandboxBuilder {
         Ok(Self::from(SandboxConfig::from(spec)))
     }
 
+    /// Identify a new local Unix initial boot for authoritative failure cleanup.
+    ///
+    /// Persist a unique caller token before create. Reuse it only to request
+    /// `Sandbox::cleanup_failed_initial_boot`; each new create needs a fresh token.
+    /// Supports new managed or flat OCI roots and sandbox-owned volumes only.
+    #[cfg(all(feature = "local", unix))]
+    pub fn initial_boot_attempt(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        if let Err(error) = super::failed_boot::validate_token(&token) {
+            self.build_error = Some(error);
+            return self;
+        }
+        self.label(super::failed_boot::TOKEN_LABEL, token)
+    }
+
     /// Set the root filesystem image source.
     ///
     /// - **`&str` / `String`**: Paths starting with `/`, `./`, or `../` are treated as local

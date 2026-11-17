@@ -1693,6 +1693,15 @@ fn lock_disk_mounts(
 ) -> MicrosandboxResult<Vec<File>> {
     let mut locks = Vec::new();
     let mut requests = Vec::new();
+    #[cfg(unix)]
+    if crate::sandbox::failed_boot::token(config).is_some() {
+        requests.push(DiskLockRequest {
+            path: crate::sandbox::failed_boot::byte_lock_path(sandbox_dir)?,
+            readonly: false,
+            label: "initial boot owned bytes".into(),
+            volume_name: None,
+        });
+    }
 
     if let RootfsSource::DiskImage { path, .. } = &config.spec.image {
         requests.push(DiskLockRequest {

@@ -152,6 +152,8 @@ pub use config::{SandboxConfig, SandboxConfigPatch};
 pub use exec::{ExecOptionsBuilder, ExecOutput, Rlimit, RlimitResource};
 #[cfg(feature = "local")]
 pub use exit::{SandboxRunExit, SandboxTerminationReason};
+#[cfg(all(feature = "local", unix))]
+pub use failed_boot::FailedBootCleanupReceipt;
 pub use fs::{
     FsEntry, FsEntryKind, FsHandle, FsMetadata, FsOpenOptions, FsReadStream, FsSetAttrs,
     FsWriteSink, SandboxFsOps,
@@ -208,6 +210,8 @@ pub use storage_recovery::{StorageRecovery, StorageRecoveryOptions, StorageRecov
 
 #[cfg(feature = "local")]
 mod external_mounts;
+#[cfg(all(feature = "local", unix))]
+pub(crate) mod failed_boot;
 mod restore_warnings;
 mod stop;
 #[cfg(feature = "local")]
@@ -1755,6 +1759,8 @@ pub(super) async fn remove_local_persisted_sandbox(
             .await?;
     let _lineage_guard =
         crate::snapshot::lineage::lock_source(&local_backend.config().run_dir(), name).await?;
+    #[cfg(unix)]
+    failed_boot::require_untracked(local_backend, name)?;
 
     // Re-read after acquiring transition ownership. A stale `Sandbox` object must never delete a
     // newer sandbox that reused the same deterministic name, and an active identity must not be

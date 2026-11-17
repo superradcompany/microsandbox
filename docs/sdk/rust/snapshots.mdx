@@ -840,6 +840,27 @@ Remove this installed snapshot copy by its stored artifact path. Other groups co
 </div>
 
 
+## Failed initial-boot cleanup (local Unix)
+
+When an orchestrator owns a fresh local create, mark it before starting the VM and retain the same token until the outcome is known:
+
+```rust
+use microsandbox::Sandbox;
+
+let token = "execution-42";
+let result = Sandbox::builder("worker")
+    .image_with(|image| image.oci("alpine").root_disk(256u32))
+    .initial_boot_attempt(token)
+    .create_detached()
+    .await;
+if result.is_err() {
+    let receipt = Sandbox::cleanup_failed_initial_boot("worker", token).await?;
+    println!("cleaned {}", receipt.name);
+}
+```
+
+The token must be unique for the attempted execution and must not be reused for a later create. Cleanup refuses live, published, newer, unidentified, external-disk, and active create ownership. Interrupted initial creates remain recoverable once their creation workers release ownership. Cleanup acquires disk-byte fences before unlinking and returns only after the child storage and catalog ownership are durably absent.
+
 ## SnapshotBuilder
 
 Builder for a [`SnapshotConfig`](#snapshotconfig). Obtained via [`Snapshot::builder(name)`](#snapshotbuilder). A source sandbox is required ([`from_sandbox`](#from_sandbox)); the other setters are optional. Every setter returns `Self`, so calls chain.

@@ -692,6 +692,10 @@ fn reject_dropped_cloud_create_fields(config: &SandboxConfig) -> MicrosandboxRes
         return Err(unsupported("mount owner"));
     }
 
+    #[cfg(all(feature = "local", unix))]
+    if crate::sandbox::failed_boot::token(config).is_some() {
+        return Err(unsupported("initial_boot_attempt"));
+    }
     if config.snapshot_upper_source.is_some() || config.snapshot_archive_source.is_some() {
         return Err(unsupported("from_snapshot"));
     }

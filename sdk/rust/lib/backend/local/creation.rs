@@ -120,6 +120,8 @@ impl LocalBackend {
         name: &str,
         mode: RemovalMode,
     ) -> MicrosandboxResult<()> {
+        #[cfg(unix)]
+        crate::sandbox::failed_boot::require_untracked(self, name)?;
         let pools = self.db().await?;
         let preparation = CreationStorage::acquire(self, name)?;
 

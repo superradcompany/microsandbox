@@ -127,6 +127,20 @@ impl LocalBackend {
         progress: Option<PullProgressSender>,
     ) -> MicrosandboxResult<Sandbox> {
         let mut builder = input.into();
+        #[cfg(unix)]
+        if let Some(token) = builder
+            .config
+            .spec
+            .get_labels()
+            .and_then(|labels| labels.get(crate::sandbox::failed_boot::TOKEN_LABEL))
+        {
+            crate::sandbox::failed_boot::prepare(
+                self,
+                builder.config.spec.name.as_deref().unwrap_or_default(),
+                token,
+            )
+            .await?;
+        }
         let options = builder.prepare(backend.clone()).await?;
         tracing::Span::current().record(
             "sandbox_name",
@@ -305,6 +319,8 @@ impl LocalBackend {
             Self::acquire_sandbox_transition_guard(&self.config().run_dir(), &config.spec.name),
         )
         .await?;
+        #[cfg(unix)]
+        crate::sandbox::failed_boot::authorize(self, &config)?;
         if config.replace_existing {
             self.remove_interrupted_create_for_replacement(db, &config)
                 .await?;
@@ -334,10 +350,18 @@ impl LocalBackend {
         )
         .await?;
 
+        #[cfg(unix)]
+        crate::sandbox::failed_boot::bind(self, &config, sandbox_id)?;
+
         // Preparation errors are handled only after awaited filesystem work has finished.
         let prepared = {
             let preparation = &preparation;
             Box::pin(async {
+                #[cfg(unix)]
+                if crate::sandbox::failed_boot::token(&config).is_some() {
+                    std::fs::create_dir(&sandbox_dir)?;
+                    crate::sandbox::failed_boot::bind(self, &config, sandbox_id)?;
+                }
                 if let Some(stage) = archive_stage {
                     relocate_archive_config(&mut config, stage.path(), &sandbox_dir);
                     let destination = sandbox_dir.clone();
@@ -1072,6 +1096,10 @@ impl LocalBackend {
         if matches!(mode, SpawnMode::Detached) {
             sandbox.finish_detached_creation().await?;
         }
+        // Publish the conservative success barrier before making ephemeral cleanup eligible.
+        // A crash here must never be mistaken for a proven failed boot.
+        #[cfg(unix)]
+        crate::sandbox::failed_boot::published(self, sandbox.config())?;
         creation_cleanup.begin_publication();
         if let Err(error) = creation::complete(write_db, sandbox_id, SandboxStatus::Running).await {
             return Err(creation_cleanup.finish_failure(error).await);
@@ -1132,6 +1160,23 @@ impl LocalBackend {
             .filter(run_entity::Column::Status.eq(run_entity::RunStatus::Running))
             .exec(write_db)
             .await?;
+        #[cfg(unix)]
+        if let Some(row) = sandbox_entity::Entity::find_by_id(sandbox_id)
+            .one(write_db)
+            .await?
+        {
+            let config: SandboxConfig = serde_json::from_str(&row.config)?;
+            if crate::sandbox::failed_boot::token(&config).is_some() {
+                Self::compare_and_set_sandbox_status(
+                    write_db,
+                    sandbox_id,
+                    &[SandboxStatus::Starting, SandboxStatus::Running],
+                    SandboxStatus::Stopped,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
         if creation::pending(write_db, sandbox_id).await? {
             if creation::can_retain(write_db, sandbox_id).await? {
                 creation::complete(write_db, sandbox_id, SandboxStatus::Stopped).await?;
