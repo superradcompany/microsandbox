@@ -59,17 +59,28 @@ jobs:
         if: inputs.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools libcap-ng-dev strace python3-dev
 
-      - name: Configure Python linking (Linux)
-        if: inputs.os == 'linux'
+      - name: Set up Python (macOS)
+        if: inputs.os == 'darwin'
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.13"
+          enable-cache: false
+
+      - name: Configure Python linking
         id: python
         run: |
-          # Rust tests embed Python, so select the interpreter whose headers and
-          # shared library were installed together by apt, not a toolcache Python.
-          echo 'PYO3_PYTHON=/usr/bin/python3' >> "$GITHUB_ENV"
-          # PyO3 caches its linker configuration. Include the system Python
-          # configuration so runner image upgrades cannot restore stale libpython paths.
-          python_config=$(/usr/bin/python3 -m sysconfig | sha256sum | cut -d ' ' -f 1)
-          echo "cache-key=system-python-${python_config}" >> "$GITHUB_OUTPUT"
+          # Rust tests embed Python. Use apt's matching library on Linux and
+          # the managed interpreter on macOS instead of cached runner-image paths.
+          if [ "${{ inputs.os }}" = linux ]; then
+            python_executable=/usr/bin/python3
+          else
+            python_executable=$(uv python find 3.13)
+          fi
+          echo "PYO3_PYTHON=$python_executable" >> "$GITHUB_ENV"
+          # PyO3 caches its linker configuration. Invalidate it when the selected
+          # interpreter or its library paths change.
+          python_config=$("$python_executable" -c 'import hashlib, sysconfig; print(hashlib.sha256(repr(sorted(sysconfig.get_config_vars().items())).encode()).hexdigest())')
+          echo "cache-key=embedding-python-${python_config}" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:

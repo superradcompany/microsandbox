@@ -20,7 +20,7 @@ def check(name, args, backend="local", expected="success", key=True):
     message = result.stderr.lower()
     ok = result.returncode == 0
     if expected == "remote":
-        ok = ok and json.loads(result.stdout)["kind"] == "cloud"
+        ok = ok and json.loads(result.stdout)["kind"] == "remote"
     elif expected == "local":
         ok = ok and json.loads(result.stdout)["kind"] == "local"
     elif expected == "conflict":
