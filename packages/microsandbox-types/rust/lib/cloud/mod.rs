@@ -292,7 +292,9 @@ pub enum CloudSandboxStatus {
     Running,
     /// Stop request has been submitted.
     Stopping,
-    /// Sandbox is stopped.
+    /// The VM has exited but its checkpoint is not yet durably saved.
+    SavingState,
+    /// Sandbox is stopped and any required state save is complete.
     Stopped,
     /// Sandbox failed.
     Failed,

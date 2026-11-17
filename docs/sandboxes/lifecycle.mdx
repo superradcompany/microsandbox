@@ -721,6 +721,10 @@ New connections are accepted again once input starts flowing.
 You can set request timeouts in your application. A timeout does not necessarily
 mean the request failed to run.
 
+### Remote checkpoint saving
+
+A remote provider can report `saving_state` after the VM exits while its checkpoint is still being saved. SDK status inspection reports this as `draining`. Stop and destroy wait for the provider's terminal state; an exited VM alone is not permission to delete persisted state. A later stop call observes an existing save without resubmitting the stop request.
+
 ### Logs and diagnostics
 
 Use [`msb logs`](/cli/sandbox-commands#msb-logs) or the SDK `logs()` method to read sandbox output, even after it stops or crashes. See [Logs](/sandboxes/logs) for troubleshooting startup and other failures.

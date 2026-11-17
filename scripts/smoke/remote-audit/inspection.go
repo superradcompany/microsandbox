@@ -114,6 +114,19 @@ func main() {
 		check(k+"_default_command", func() error { o, e := s.ExecDefault(ctx); return output(o, e, "configured-default") })
 		check(k+"_workdir", func() error { o, e := s.Exec(ctx, "pwd", nil); return output(o, e, "/tmp") })
 	}
+	if os.Getenv("MSB_INSPECTION_DESTROY") == "1" {
+		check("destroy", func() error { return sb.Destroy(ctx) })
+		check("destroy_absent", func() error {
+			found, err := remote.Sandboxes().Get(ctx, fixture.Name)
+			if found != nil {
+				found.Close()
+			}
+			if msb.IsKind(err, msb.ErrSandboxNotFound) {
+				return nil
+			}
+			return fmt.Errorf("expected not-found after destroy, got %v", err)
+		})
+	}
 	for _, r := range rows {
 		if r["verdict"] == "FAIL" {
 			os.Exit(1)

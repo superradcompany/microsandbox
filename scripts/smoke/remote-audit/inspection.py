@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from microsandbox import Sandbox
+from microsandbox import Sandbox, SandboxNotFoundError
 
 assert os.environ.get("MSB_REMOTE_AUDIT") == "1"
 fixture = json.loads(Path(os.environ["MSB_INSPECTION_FIXTURE"]).read_text())
@@ -40,6 +40,16 @@ async def main():
             assert (await resource.exec("pwd", [])).stdout_text.strip() == "/tmp"
         for label, fn in [("config",config),("shell",shell),("default_command",command),("workdir",workdir)]:
             await check(kind+"_"+label, fn)
+
+    if os.environ.get("MSB_INSPECTION_DESTROY") == "1":
+        await check("destroy", sb.destroy)
+        async def absent():
+            try:
+                await Sandbox.remote().get(fixture["name"])
+            except SandboxNotFoundError:
+                return
+            raise AssertionError("destroyed fixture still exists")
+        await check("destroy_absent", absent)
 
 asyncio.run(main())
 raise SystemExit(any(r["verdict"] == "FAIL" for r in rows))

@@ -813,6 +813,7 @@ export type CloudSandboxStatus =
   | "starting"
   | "running"
   | "stopping"
+  | "saving_state"
   | "stopped"
   | "failed";
 

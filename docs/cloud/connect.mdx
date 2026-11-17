@@ -499,3 +499,7 @@ local = Microsandbox::Sandbox.local
 Remote selectors capture `MSB_API_KEY` and optional `MSB_API_URL` at the call, ignoring ambient backend/profile selection. Construction performs no remote lookup; validation or missing-provider errors happen before a usable remote collection is returned. Existing collections, deferred builders and resources keep captured credentials after environment changes. Go's local selectors also return an error because context/provider construction can fail. Rust selectors are gated by the corresponding local/cloud feature. Bindings require the corresponding installed provider and never fall back to the other destination.
 
 Use `Resource.ctx(context)` or context collections when selecting a named profile, a different account or custom local configuration. Instance resources remain bound to their original destination. Rust `local_state()` / `remote_state()` expose retained backend-specific state; they do not perform live inspection.
+
+### Agent connection timeouts
+
+Agent connection timeout errors identify the phase that exhausted the connection deadline: `identity` is the sandbox lookup, `websocket` covers connection establishment and upgrade, and `handshake` is the guest-agent protocol handshake. The deadline covers the whole attempt. A timeout does not retry the command or change TLS verification; retain the phase when reporting an intermittent connection failure.

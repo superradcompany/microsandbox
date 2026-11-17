@@ -28,4 +28,20 @@ raise 'fixture missing' unless listed
     end
   end
 end
+if ENV['MSB_INSPECTION_DESTROY'] == '1'
+  begin
+    sb.destroy
+    rows << {feature: 'destroy', verdict: 'PASS'}
+    begin
+      Microsandbox::Sandbox.remote.get(f.fetch('name'))
+      raise 'destroyed fixture still exists'
+    rescue Microsandbox::SandboxNotFoundError
+      rows << {feature: 'destroy_absent', verdict: 'PASS'}
+    end
+  rescue StandardError => error
+    rows << {feature: 'destroy_or_absence', verdict: 'FAIL', reason: error.message.gsub(ENV.fetch('MSB_API_KEY'), '[redacted]')}
+  ensure
+    File.write(ENV.fetch('MSB_AUDIT_REPORT'), JSON.pretty_generate(sdk: 'ruby', rows: rows) + "\n")
+  end
+end
 exit(rows.any?{|r|r[:verdict]=='FAIL'} ? 1 : 0)

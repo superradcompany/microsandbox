@@ -550,3 +550,35 @@ async fn remote_inspection_live() -> MicrosandboxResult<()> {
     .unwrap();
     Ok(())
 }
+
+/// Destructive qualification is separate from the shared, read/execute probe.
+/// Only the explicitly recorded fixture may be removed.
+#[tokio::test]
+#[ignore = "requires staging opt-in and exclusive ownership of the recorded fixture"]
+async fn remote_cleanup_live() -> MicrosandboxResult<()> {
+    assert_eq!(std::env::var("MSB_REMOTE_AUDIT").as_deref(), Ok("1"));
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("MSB_INSPECTION_FIXTURE").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let name = fixture["name"].as_str().unwrap();
+    let context = RemoteContext::from_env()?;
+    let sandbox = context.sandboxes().get(name).await?;
+    assert_eq!(sandbox.id().as_str(), fixture["id"].as_str().unwrap());
+    sandbox.shell("printf ready").await?;
+    sandbox.destroy().await?;
+    assert!(matches!(
+        context.sandboxes().get(name).await,
+        Err(MicrosandboxError::SandboxNotFound(_))
+    ));
+    std::fs::write(
+        std::env::var("MSB_AUDIT_REPORT").unwrap(),
+        serde_json::to_vec_pretty(&json!({"sdk":"rust","rows":[
+            {"feature":"destroy","verdict":"PASS"},
+            {"feature":"destroy_absent","verdict":"PASS"}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    Ok(())
+}

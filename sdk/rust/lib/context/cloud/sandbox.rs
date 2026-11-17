@@ -100,7 +100,12 @@ impl RemoteContext {
         ) {
             return Ok(());
         }
-        self.stop_sandbox_by_id(id).await?;
+        // SavingState means teardown already completed; issuing another stop
+        // could conflict with the provider's checkpoint-save gate. Observe it
+        // until terminal rather than treating an exited VM as safe to delete.
+        if current.status != CloudSandboxStatus::SavingState {
+            self.stop_sandbox_by_id(id).await?;
+        }
         loop {
             match self.get_sandbox_by_id(id).await {
                 Ok(observed)
@@ -770,7 +775,7 @@ fn cloud_tls_config_is_harmless(
 
 /// Map [`CloudSandboxStatus`] to the SDK's [`SandboxStatus`] enum.
 ///
-/// `Stopping` collapses to `Draining` (microsandbox uses `Draining` for
+/// `Stopping` and `SavingState` collapse to `Draining` (microsandbox uses `Draining` for
 /// the graceful-stop state); `Failed` collapses to `Crashed`. All other
 /// variants map 1:1.
 pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxStatus {
@@ -778,7 +783,7 @@ pub(crate) fn cloud_status_to_sandbox_status(s: CloudSandboxStatus) -> SandboxSt
         CloudSandboxStatus::Created => SandboxStatus::Created,
         CloudSandboxStatus::Starting => SandboxStatus::Starting,
         CloudSandboxStatus::Running => SandboxStatus::Running,
-        CloudSandboxStatus::Stopping => SandboxStatus::Draining,
+        CloudSandboxStatus::Stopping | CloudSandboxStatus::SavingState => SandboxStatus::Draining,
         CloudSandboxStatus::Stopped => SandboxStatus::Stopped,
         CloudSandboxStatus::Failed => SandboxStatus::Crashed,
     }
@@ -2133,6 +2138,10 @@ mod tests {
             SandboxStatus::Draining,
         );
         assert_eq!(
+            cloud_status_to_sandbox_status(CloudSandboxStatus::SavingState),
+            SandboxStatus::Draining,
+        );
+        assert_eq!(
             cloud_status_to_sandbox_status(CloudSandboxStatus::Stopped),
             SandboxStatus::Stopped,
         );
@@ -2150,6 +2159,7 @@ mod tests {
             CloudSandboxStatus::Created,
             CloudSandboxStatus::Starting,
             CloudSandboxStatus::Stopping,
+            CloudSandboxStatus::SavingState,
             CloudSandboxStatus::Stopped,
             CloudSandboxStatus::Failed,
         ] {

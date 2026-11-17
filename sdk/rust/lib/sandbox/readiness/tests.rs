@@ -597,3 +597,102 @@ async fn config_returns_fresh_typed_remote_observations_without_preparation() {
     assert!(resource.binding.current().is_none());
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn remote_stop_waits_through_checkpoint_save() {
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "running"),
+        ),
+        (
+            "POST",
+            "/v1/sandboxes/original/stop",
+            200,
+            sandbox("original", "stopping"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "stopped"),
+        ),
+    ])
+    .await;
+    // An exited VM with a checkpoint still saving is not stop completion.
+    context
+        .as_cloud()
+        .unwrap()
+        .stop_complete("original")
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_stop_observes_existing_save_without_resubmitting_stop() {
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "stopped"),
+        ),
+    ])
+    .await;
+    context
+        .as_cloud()
+        .unwrap()
+        .stop_complete("original")
+        .await
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn remote_save_failure_propagates_without_inventing_completion() {
+    let (context, server) = provider(vec![
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            200,
+            sandbox("original", "saving_state"),
+        ),
+        (
+            "GET",
+            "/v1/sandboxes/original",
+            503,
+            json!({"message":"unavailable"}),
+        ),
+    ])
+    .await;
+    assert!(
+        context
+            .as_cloud()
+            .unwrap()
+            .stop_complete("original")
+            .await
+            .is_err()
+    );
+    server.await.unwrap();
+}
