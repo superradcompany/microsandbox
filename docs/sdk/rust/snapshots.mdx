@@ -1122,6 +1122,8 @@ Growth updates the new sandbox's private writable disk and ext4 filesystem befor
 <Accordion title="Example">
 
 ```rust
+use microsandbox::Sandbox;
+
 let child = Sandbox::restore("api:baseline")
     .name("api-larger")
     .disk_only()
