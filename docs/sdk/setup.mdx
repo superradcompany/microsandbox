@@ -454,3 +454,21 @@ Install and ensure now return the selected runtime paths. Rust's four helper nam
 Use storage diagnostics when an older sandbox cannot start because its storage needs repair. Select the sandbox names or the whole home explicitly. Diagnostics report problems and space requirements without migrating data; results for running sandboxes are provisional.
 
 Recovery never starts or stops a VM. macOS legacy recovery requires explicit confirmation that legacy writers are stopped, under the maintenance conditions in the migration guide. Empty selections import or resume the validated current view; explicit candidate selection requires acknowledgement that it may omit later writes. See [sandbox storage migration](/migrations/sandbox-storage) for the CLI workflow and recovery limits.
+
+<CodeGroup>
+```typescript TypeScript
+diagnoseStorage(selection, config?)
+```
+```python Python
+diagnose_storage(names, *, all_sandboxes=False, config=None)
+```
+```go Go
+DiagnoseStorage(ctx, config, selection)
+```
+```rust Rust
+setup::diagnose_storage(config, selection)
+```
+```ruby Ruby
+Microsandbox.diagnose_storage(names:, all_sandboxes:, home:)
+```
+</CodeGroup>

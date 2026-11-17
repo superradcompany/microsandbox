@@ -367,6 +367,46 @@ See [Runtime setup](/sdk/setup#resolve-check-install-and-ensure) for runtime ins
 
 `Info(ctx)` returns identity, status, optional failure message, and creation/update timestamps. `Name()` and `ID()` require no I/O; mutable state is fetched on each inspection call. Execution starts stopped sandboxes as needed. Call `Close()` when finished. See [lifecycle](/sandboxes/lifecycle).
 
+#### <span className="msb-recv">sb.</span><span className="msb-hn">EnsureRunning()</span>
+
+```go
+func (s *Sandbox) EnsureRunning(ctx context.Context) error
+```
+
+Start the sandbox if needed. This never creates a missing sandbox or switches to a replacement with the same name.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Info()</span>
+
+```go
+func (s *Sandbox) Info(ctx context.Context) (*SandboxInfo, error)
+```
+
+Fetch the current identity, status, failure message, and timestamps without starting the sandbox.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Status()</span>
+
+```go
+func (s *Sandbox) Status(ctx context.Context) (SandboxStatus, error)
+```
+
+Fetch the current lifecycle status without starting the sandbox.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">LastFailureMessage()</span>
+
+```go
+func (s *Sandbox) LastFailureMessage(ctx context.Context) (*string, error)
+```
+
+Fetch the latest failure message, or `nil` when none is available.
+
+#### <span className="msb-recv">sb.</span><span className="msb-hn">Config()</span>
+
+```go
+func (s *Sandbox) Config(ctx context.Context) (*SandboxConfig, error)
+```
+
+Fetch the saved configuration. Some settings require a restart to take effect.
+
 #### <span className="msb-recv">sb.</span><span className="msb-hn">Name()</span>
 
 ```go
