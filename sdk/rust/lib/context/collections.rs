@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::Context;
 use crate::sandbox::SandboxBuilder;
+use crate::snapshot::LoadOptions;
 use crate::volume::VolumeBuilder;
 use crate::{
     MicrosandboxError, MicrosandboxResult, Sandbox, SandboxListBuilder, SandboxPage, Snapshot,
@@ -242,23 +243,11 @@ impl Snapshots {
             .await
     }
 
-    /// Import one archive into this destination.
+    /// Import one archive with destination, dependency and size options.
     pub async fn load(
         &self,
         path: &std::path::Path,
-        dest: Option<&std::path::Path>,
-    ) -> MicrosandboxResult<Snapshot> {
-        self.context
-            .snapshot_ops()
-            .load(self.context.clone(), path, dest)
-            .await
-    }
-
-    /// Import with an explicit dependency base and publication policy.
-    pub async fn load_with_options(
-        &self,
-        path: &std::path::Path,
-        opts: crate::snapshot::LoadOpts,
+        opts: LoadOptions,
     ) -> MicrosandboxResult<Snapshot> {
         let mut snapshots = self.load_many(&[path.to_path_buf()], opts).await?;
         snapshots.pop().ok_or_else(|| {
@@ -270,7 +259,7 @@ impl Snapshots {
     pub async fn load_many(
         &self,
         paths: &[std::path::PathBuf],
-        opts: crate::snapshot::LoadOpts,
+        opts: LoadOptions,
     ) -> MicrosandboxResult<Vec<Snapshot>> {
         self.context
             .snapshot_ops()

@@ -1,7 +1,8 @@
 //! Local backend: One-pass archive staging and dependency resolution for a local group import.
 
-use super::*;
 use microsandbox_image::snapshot::{Manifest, SnapshotId};
+
+use super::*;
 
 //--------------------------------------------------------------------------------------------------
 // Types
@@ -21,13 +22,14 @@ struct StagedArchive {
 pub(super) async fn load(
     local: &LocalContext,
     archives: &[PathBuf],
-    opts: LoadOpts,
+    opts: LoadOptions,
 ) -> MicrosandboxResult<Vec<SnapshotHandle>> {
     if archives.is_empty() {
         return Err(MicrosandboxError::InvalidConfig(
             "snapshot load requires at least one archive".into(),
         ));
     }
+    let mut budget = opts.maximum_disk_bytes.map(ImportBudget::new).transpose()?;
     let started = Instant::now();
     let snapshots_dir = opts.dest.clone().unwrap_or_else(|| local.snapshots_dir());
     // Validate the requested namespace before doing expensive I/O. This read does not create a
@@ -43,7 +45,7 @@ pub(super) async fn load(
 
     let mut staged = Vec::with_capacity(archives.len());
     for archive in archives {
-        staged.push(unpack(archive, &snapshots_dir, &cache_tmp).await?);
+        staged.push(unpack(archive, &snapshots_dir, &cache_tmp, budget.as_mut()).await?);
     }
     let unpack_us = started.elapsed().as_micros();
     let has_dependencies = staged.iter().try_fold(false, |found, item| {
@@ -67,8 +69,18 @@ pub(super) async fn load(
             )
             .await?;
             for snapshot in verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await? {
+                if let Some(budget) = &budget {
+                    budget.validate_manifest(snapshot.manifest())?;
+                }
                 super::super::metadata::write(snapshot.path(), snapshot.labels()).await?;
                 normalize_imported_descriptor(&snapshot).await?;
+            }
+        }
+        if let Some(budget) = &budget
+            && item.unpacked.inventory.is_some()
+        {
+            for directory in &item.unpacked.manifest_dirs {
+                budget.validate_manifest(&read_manifest(directory).await?)?;
             }
         }
         if has_dependencies {
@@ -117,7 +129,7 @@ pub(super) async fn load(
         }
         match opts.base.as_deref().filter(|_| !complete(&sources)) {
             Some(base) => {
-                let opened = Box::pin(delta::open_base(local, base)).await?;
+                let opened = Box::pin(delta::open_base(local, base, budget.as_mut())).await?;
                 sources
                     .add(opened.snapshot.manifest(), opened.snapshot.path(), None)
                     .await?;
@@ -146,6 +158,7 @@ pub(super) async fn load(
                 item.snapshots.path(),
                 item.cache.path(),
                 &sources,
+                budget.as_mut(),
             )
             .await
             .map_err(|error| archive_error(&item.source, error))?;
@@ -162,6 +175,11 @@ pub(super) async fn load(
             materialize_inventory_layers(inventory, item.snapshots.path()).await?;
         }
         let snapshots = verify_imported_snapshots(local, &item.unpacked.manifest_dirs).await?;
+        if let Some(budget) = &budget {
+            for snapshot in &snapshots {
+                budget.validate_manifest(snapshot.manifest())?;
+            }
+        }
         if let Some(inventory) = &item.unpacked.inventory {
             validate_inventory_snapshot_bindings(
                 inventory,
@@ -310,6 +328,7 @@ async fn unpack(
     archive: &Path,
     root: &Path,
     cache_tmp: &Path,
+    budget: Option<&mut ImportBudget>,
 ) -> MicrosandboxResult<StagedArchive> {
     let snapshots = tempfile::Builder::new()
         .prefix(".msb-snapshot-import-")
@@ -328,10 +347,17 @@ async fn unpack(
             ZstdDecoder::new(reader),
             snapshots.path(),
             cache.path(),
+            budget,
         ))
         .await?
     } else {
-        Box::pin(unpack_archive(reader, snapshots.path(), cache.path())).await?
+        Box::pin(unpack_archive(
+            reader,
+            snapshots.path(),
+            cache.path(),
+            budget,
+        ))
+        .await?
     };
     Ok(StagedArchive {
         source: archive.to_path_buf(),

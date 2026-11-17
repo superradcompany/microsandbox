@@ -14,7 +14,8 @@ use crate::logs::{BootError, LogEntry, LogOptions, LogStreamOptions};
 use crate::sandbox::metrics::SandboxMetrics;
 use crate::sandbox::{Sandbox, SandboxConfig, SandboxListBuilder, SandboxRecord};
 use crate::snapshot::{
-    Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotReference, SnapshotVerifyReport,
+    LoadOptions, Manifest, SaveOpts, Snapshot, SnapshotConfig, SnapshotReference,
+    SnapshotVerifyReport,
 };
 use crate::volume::{Volume, VolumeConfig, VolumeFsReadStream, VolumeFsWriteSink};
 use crate::{MicrosandboxError, MicrosandboxResult};
@@ -267,6 +268,15 @@ impl SnapshotOps for ConfigurationErrorBackend {
         self.fail()
     }
 
+    fn load_many<'a>(
+        &'a self,
+        _backend: Arc<dyn Context>,
+        _archives: &'a [PathBuf],
+        _opts: LoadOptions,
+    ) -> BoxFuture<'a, MicrosandboxResult<Vec<Snapshot>>> {
+        self.fail()
+    }
+
     fn remove<'a>(
         &'a self,
         _backend: Arc<dyn Context>,
@@ -334,15 +344,6 @@ impl SnapshotOps for ConfigurationErrorBackend {
         _out: &'a Path,
         _opts: SaveOpts,
     ) -> BoxFuture<'a, MicrosandboxResult<()>> {
-        self.fail()
-    }
-
-    fn load<'a>(
-        &'a self,
-        _backend: Arc<dyn Context>,
-        _archive: &'a Path,
-        _dest: Option<&'a Path>,
-    ) -> BoxFuture<'a, MicrosandboxResult<Snapshot>> {
         self.fail()
     }
 }
@@ -501,7 +502,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn sandbox_and_volume_calls_preserve_configuration_error() {
+    async fn sandbox_volume_and_snapshot_calls_preserve_configuration_error() {
         let backend: Arc<dyn Context> = Arc::new(ConfigurationErrorBackend::new(
             MicrosandboxError::InvalidConfig("MSB_BACKEND=cloud requires a key".into()),
         ));
@@ -524,6 +525,22 @@ mod tests {
             .get_default(backend.clone())
             .await
             .unwrap_err();
+        let snapshots = Snapshot::ctx(backend.as_ref());
+        for result in [
+            snapshots
+                .load(Path::new("missing.msb"), LoadOptions::default())
+                .await
+                .map(|_| ()),
+            snapshots
+                .load_many(&[PathBuf::from("missing.msb")], LoadOptions::default())
+                .await
+                .map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(MicrosandboxError::InvalidConfig(message)) if message == "MSB_BACKEND=cloud requires a key"
+            ));
+        }
 
         assert!(sandbox_error.to_string().contains("MSB_BACKEND=cloud"));
         assert!(volume_error.to_string().contains("MSB_BACKEND=cloud"));

@@ -6,6 +6,8 @@
 
 mod api;
 mod copy;
+#[cfg(feature = "local")]
+pub(crate) mod import_budget;
 mod metadata;
 mod types;
 
@@ -23,8 +25,8 @@ pub use microsandbox_types::snapshot::{
 };
 pub use microsandbox_types::{GuestFlush, SnapshotSpec, SnapshotSpec as SnapshotConfig};
 pub use types::{
-    CheckpointVerifyStatus, HeadUpdate, HeadUpdateReason, LoadOpts, SaveOpts, SnapshotVerifyReport,
-    UpperVerifyStatus,
+    CheckpointVerifyStatus, HeadUpdate, HeadUpdateReason, LoadOptions, SaveOpts,
+    SnapshotVerifyReport, UpperVerifyStatus,
 };
 
 #[cfg(feature = "local")]

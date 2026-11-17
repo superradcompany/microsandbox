@@ -1,0 +1,31 @@
+---
+title: "v0.8"
+description: "Update snapshot imports to use extensible options."
+---
+
+Snapshot imports now take an options value. Archive formats and existing snapshots stay compatible.
+
+## Rust
+
+Replace positional destinations and the separate import helpers with `load`. Use builder methods instead of struct literals so new options can be added without changing your code.
+
+```rust
+use std::path::Path;
+
+use microsandbox::{LoadOptions, Snapshot};
+
+let options = LoadOptions::default()
+    .destination("./snapshots")
+    .group("work")
+    .maximum_disk_bytes(64 * 1024 * 1024 * 1024);
+
+let snapshot = Snapshot::load(Path::new("snapshot.msb"), options).await?;
+```
+
+`LoadOptions` replaces `LoadOpts`. `load` replaces `load_with_base` and `load_with_options`. Set `base(...)` for dependencies and `set_head(true)` to replace a divergent head. Context-bound imports and `load_many` use the same options type.
+
+The size limit is optional. It counts logical payload bytes, including sparse holes, across the complete import. Reserve temporary space separately.
+
+## Other SDKs
+
+Existing import calls remain valid. The optional size limit is available through `maximumDiskBytes` in TypeScript's `loadWithOptions` and `loadMany`, `maximum_disk_bytes` in Python's keyword arguments, and `MaximumDiskBytes` in Go's `SnapshotLoadOptions`.

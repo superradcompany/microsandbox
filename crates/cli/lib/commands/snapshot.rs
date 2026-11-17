@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use microsandbox::SnapshotReference;
+use microsandbox::{LoadOptions, SnapshotReference};
 use microsandbox_utils::format::format_bytes;
 
 use crate::{
@@ -644,15 +644,14 @@ async fn save(args: SnapshotSaveArgs) -> anyhow::Result<()> {
 async fn load(args: SnapshotLoadArgs) -> anyhow::Result<()> {
     let handles = crate::commands::common::selected_context()?
         .snapshots()
-        .load_many(
-            &args.archives,
-            microsandbox::snapshot::LoadOpts {
-                dest: args.dest,
-                base: args.base,
-                group: args.group,
-                set_head: args.set_head,
-            },
-        )
+        .load_many(&args.archives, {
+            let mut options = LoadOptions::default();
+            options.dest = args.dest;
+            options.base = args.base;
+            options.group = args.group;
+            options.set_head = args.set_head;
+            options
+        })
         .await?;
     // Every imported member belongs to one batch; report its single head decision once.
     if let Some(update) = handles.iter().find_map(|handle| handle.head_update()) {

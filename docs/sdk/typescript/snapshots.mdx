@@ -394,12 +394,25 @@ Read a group’s head, or select an exact member with `group:member`. Returns th
 
 Options for `LoadOpts`.
 
-| Option | Purpose |
-| --- | --- |
-| `dest` | Parent directory containing groups. Defaults to the local snapshot store. |
-| `base` | External snapshot or standalone archive for missing dependencies. |
-| `group` | Destination group. Omit to create one group for the import. |
-| `setHead` | Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip. |
+#### `dest`
+
+`string`. Parent directory containing groups. Defaults to the local snapshot store.
+
+#### `base`
+
+`string`. External snapshot or standalone archive for missing dependencies.
+
+#### `group`
+
+`string`. Destination group. Omit to create one group for the import.
+
+#### `setHead`
+
+`boolean`. Select the imported tip, even with divergent ancestry. Defaults to false; requires a unique tip.
+
+#### `maximumDiskBytes`
+
+`number`. Optional maximum logical payload bytes across the import, including sparse holes. Omit for no size limit. Temporary workspace is reserved separately.
 
 With divergent tips, the existing head stays selected; a new group has no head. Select a member explicitly. Identical members may be reused; conflicting identities fail. See [archive imports](/sandboxes/snapshots#import-archives).
 

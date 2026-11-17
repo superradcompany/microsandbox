@@ -583,3 +583,30 @@ Incoming unversioned launch/cloud requests retain detection of previous formats.
 The runtime dispatcher selects the current reader when `execution` is present, `v0_6_10/launch.rs` when `bootstrap` is present, and `v0_5_9/launch.rs` otherwise. `client/launch.rs` contains both `LaunchConfig` and the `LaunchCapabilities` probe response. The launch type remains in the runtime crate to avoid a dependency cycle. SDK tests exercise its encoder against the runtime decoder; runtime tests also consume independently captured release payloads.
 
 Launch and cloud requests reject duplicate recognized fields and conflicting previous/current spellings. Previous saved-format decoding and the duplicate-key JSON fixture reader in the SDK are test-only.
+
+
+## Bounded snapshot imports
+
+For v0.8, snapshot imports use `Snapshot::load(path, LoadOptions)` and the
+matching context collection method. `LoadOptions` is non-exhaustive and offers
+builder methods; `maximum_disk_bytes` is optional and omitted by default.
+The SDK passes a size budget explicitly through extraction, including archive
+bases and sparse logical sizes. Cloud format restrictions and workspace
+reservations remain caller responsibilities; no public trait is required.
+
+The v0.8 source API change replaces `LoadOpts`, positional destinations,
+`load_with_base` and `load_with_options`. Other SDK signatures remain unchanged; their existing options or keyword
+arguments gain the optional size limit. TypeScript checks for size-limit native
+entry points before forwarding the option; older Python bindings reject the
+unknown keyword. Native C entry points
+retain their ABI. Size-limited Go requests use a distinct operation so an old
+native library rejects them rather than silently ignoring the limit.
+
+This source break is explicitly authorized for the v0.8 release. Snapshot
+archives, stored state, guest/control protocols and SDK/runtime launch contracts
+are unchanged. Historical compatibility requirements for those boundaries
+remain in force. See `docs/migrations/v0.8.mdx` for call-site changes.
+
+The SDK snapshot suite exercises ordinary imports, current and legacy archives,
+delta exports/restores and private child disks. Real older-runtime launch
+validation and full-disk rewrite qualification remain separate release checks.

@@ -97,10 +97,11 @@ export type JsAttachOptionsBuilder = AttachOptionsBuilder
 
 /** An explicit shared destination. Construction never changes global selection. */
 export declare class Context {
-  deriveRemote(optionsJson: string): Context
   /** Snapshot destination selection is captured before the restore builder escapes. */
   sandboxRestore(snapshot: string, kind?: string | undefined | null): JsRestoreBuilder
   constructor(optionsJson: string)
+  /** Derive inside the retained provider; credentials never cross back into JavaScript. */
+  deriveRemote(optionsJson: string): Context
   get kind(): string
   sandboxBuilder(name: string): JsSandboxBuilder
   sandboxGet(name: string): Promise<Sandbox>
@@ -1682,6 +1683,9 @@ export declare class Snapshot {
   static loadWithOptions(archive: string, opts?: LoadOpts | undefined | null): Promise<Snapshot>
   /** Import archives together, resolving dependencies within the batch and destination group. */
   static loadMany(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<Snapshot>>
+  /** Separate entry points let older addons reject an unsupported size limit. */
+  static loadWithSizeLimit(archive: string, opts?: LoadOpts | undefined | null): Promise<Snapshot>
+  static loadManyWithSizeLimit(archives: Array<string>, opts?: LoadOpts | undefined | null): Promise<Array<Snapshot>>
   /** Read a group's head, or select `group:member` as its head. */
   static groupHead(selector: string): Promise<HeadUpdate>
   /** Deprecated: use `reference`. Throws when no local filesystem path exists. */
@@ -1896,7 +1900,7 @@ export declare class Volume {
   get diskFormat(): string | null
   get diskFstype(): string | null
   get createdAt(): number | null
-  /** One fresh backend observation. */
+  /** Return one fresh provider observation without cached fallback. */
   info(): Promise<string>
   destroy(): Promise<void>
   get name(): string
@@ -2191,6 +2195,8 @@ export interface LoadOpts {
   group?: string
   /** Select the unique imported tip even when it is not a fast-forward. */
   setHead?: boolean
+  /** Maximum expanded payload bytes and declared disk capacity. */
+  maximumDiskBytes?: number
 }
 
 /** One captured log entry from `exec.log`. */

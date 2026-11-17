@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use microsandbox::snapshot::{LoadOpts as RustLoadOpts, SaveOpts as RustSaveOpts};
+use microsandbox::snapshot::{LoadOptions as RustLoadOptions, SaveOpts as RustSaveOpts};
 use microsandbox::{
     Snapshot as RustSnapshot, SnapshotArchive as RustSnapshotArchive,
     SnapshotFormat as RustSnapshotFormat, SnapshotScope as RustSnapshotScope,
@@ -291,7 +291,7 @@ impl PySnapshot {
     /// snapshots directory, preserving recorded integrity for explicit
     /// verification.
     #[staticmethod]
-    #[pyo3(signature = (archive, *, dest = None, base = None, group = None, set_head = false))]
+    #[pyo3(signature = (archive, *, dest = None, base = None, group = None, set_head = false, maximum_disk_bytes = None))]
     fn load<'py>(
         py: Python<'py>,
         archive: PathBuf,
@@ -299,17 +299,18 @@ impl PySnapshot {
         base: Option<String>,
         group: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let h = RustSnapshot::load_with_options(
-                &archive,
-                RustLoadOpts {
-                    dest,
-                    base,
-                    group,
-                    set_head,
-                },
-            )
+            let h = RustSnapshot::load(&archive, {
+                let mut options = RustLoadOptions::default();
+                options.dest = dest;
+                options.base = base;
+                options.group = group;
+                options.set_head = set_head;
+                options.maximum_disk_bytes = maximum_disk_bytes;
+                options
+            })
             .await
             .map_err(to_py_err)?;
             Ok(PySnapshot::from_rust(h))
@@ -318,7 +319,7 @@ impl PySnapshot {
 
     /// Import archives together, resolving dependencies within the batch and destination group.
     #[staticmethod]
-    #[pyo3(signature = (archives, *, dest = None, base = None, group = None, set_head = false))]
+    #[pyo3(signature = (archives, *, dest = None, base = None, group = None, set_head = false, maximum_disk_bytes = None))]
     fn load_many<'py>(
         py: Python<'py>,
         archives: Vec<PathBuf>,
@@ -326,17 +327,18 @@ impl PySnapshot {
         base: Option<String>,
         group: Option<String>,
         set_head: bool,
+        maximum_disk_bytes: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let handles = RustSnapshot::load_many(
-                &archives,
-                RustLoadOpts {
-                    dest,
-                    base,
-                    group,
-                    set_head,
-                },
-            )
+            let handles = RustSnapshot::load_many(&archives, {
+                let mut options = RustLoadOptions::default();
+                options.dest = dest;
+                options.base = base;
+                options.group = group;
+                options.set_head = set_head;
+                options.maximum_disk_bytes = maximum_disk_bytes;
+                options
+            })
             .await
             .map_err(to_py_err)?;
             Ok(handles

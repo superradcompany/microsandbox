@@ -43,6 +43,8 @@ type SnapshotSaveOptions struct {
 
 // SnapshotLoadOptions configures importing one or more archives into a snapshot group.
 type SnapshotLoadOptions struct {
+	// Maximum expanded payload bytes; nil leaves size unlimited.
+	MaximumDiskBytes *uint64
 	// Parent directory containing snapshot groups; empty selects the default.
 	Dest string
 	// External snapshot or standalone archive for dependencies absent from the batch/group.
@@ -341,7 +343,11 @@ func (s *Snapshots) LoadWithOptions(ctx context.Context, archive string, opts Sn
 	return oneSnapshot(s.LoadMany(ctx, []string{archive}, opts))
 }
 func (s *Snapshots) LoadMany(ctx context.Context, archives []string, opts SnapshotLoadOptions) ([]*Snapshot, error) {
-	return s.operation(ctx, "snapshot_load", "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead}})
+	operation := "snapshot_load"
+	if opts.MaximumDiskBytes != nil {
+		operation = "snapshot_load_with_size_limit"
+	}
+	return s.operation(ctx, operation, "", map[string]any{"archives": archives, "options": ffi.SnapshotLoadOptions{Dest: opts.Dest, Base: opts.Base, Group: opts.Group, SetHead: opts.SetHead, MaximumDiskBytes: opts.MaximumDiskBytes}})
 }
 func (s *Snapshots) GroupHead(ctx context.Context, selector string) (*SnapshotHeadUpdate, error) {
 	var result ffi.SnapshotHeadUpdate

@@ -20,7 +20,7 @@ def test_batch_load_preserves_single_load_options_and_returns_resources() -> Non
     assert ast.unparse(batch.args.args[0].annotation) == "Sequence[str | os.PathLike[str]]"
     assert [arg.arg for arg in batch.args.kwonlyargs] == [
         arg.arg for arg in single.args.kwonlyargs
-    ] == ["dest", "base", "group", "set_head"]
+    ] == ["dest", "base", "group", "set_head", "maximum_disk_bytes"]
     assert [ast.dump(value) for value in batch.args.kw_defaults] == [
         ast.dump(value) for value in single.args.kw_defaults
     ]
