@@ -143,28 +143,28 @@ def main():
             python = str(venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python"))
             install = ["uv", "pip", "install", "--offline", "--python", python]
             run([*install, wheels["core"]])
-            run(
+            core_probe = "\n".join(
                 [
-                    python,
-                    "-c",
-                    "import sys, microsandbox_core; assert not any("
-                    "name.startswith('microsandbox_local') or "
-                    "name.startswith('microsandbox_remote') for name in sys.modules)",
+                    "import sys, microsandbox_core",
+                    "assert not any(",
+                    "    name.startswith(('microsandbox_local', 'microsandbox_remote'))",
+                    "    for name in sys.modules",
+                    ")",
                 ]
             )
+            run([python, "-c", core_probe])
             run([*install, wheels[first]])
             run([*install, wheels[second]])
             run([python, "-c", PROBE])
             run(["uv", "pip", "uninstall", "--python", python, f"microsandbox-{first}"])
             constructor = "LocalContext()" if second == "local" else "RemoteContext(api_key='key')"
-            run(
+            provider_probe = "\n".join(
                 [
-                    python,
-                    "-c",
-                    f"import microsandbox_{second} as sdk; "
+                    f"import microsandbox_{second} as sdk",
                     f"assert sdk.{constructor}.kind == {second!r}",
                 ]
             )
+            run([python, "-c", provider_probe])
         if args.full:
             full = list(args.wheels.glob("microsandbox-[0-9]*.whl"))
             if len(full) != 1:
